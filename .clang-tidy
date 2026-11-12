@@ -13,4 +13,4 @@ WarningsAsErrors: >
   bugprone-dangling-handle,
   bugprone-undefined-memory-manipulation,
   bugprone-use-after-move
-HeaderFilterRegex: '(^|/)src/[^/]+\.h$'
+HeaderFilterRegex: '(^|/)(src|tests/support)/.+\.h$'

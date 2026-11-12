@@ -1,5 +1,5 @@
-#include "analysis.h"
-#include "input.h"
+#include "analysis/analysis.h"
+#include "pe/input.h"
 
 #include <charconv>
 #include <string_view>

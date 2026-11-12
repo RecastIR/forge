@@ -1,6 +1,6 @@
 #pragma once
 
-#include "forge.h"
+#include "pe/forge.h"
 
 namespace llvm::object {
 class ObjectFile;

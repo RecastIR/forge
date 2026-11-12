@@ -118,4 +118,8 @@ Fix issues found during self-review, rerun affected checks, and disclose remaini
 
 ## Repository-specific instructions
 
+- Follow the [repository layout](README.md#repository-layout) when adding production code, test support, and suites. Keep one root CMake project and register tests in `tests/CMakeLists.txt`.
+- From the root, use `make` to build and `make test CONFIG=Debug` to build and run CTest. Use `make format-check`, `make lint`, and `make sanitize` for the other CI checks. Keep moved C++ sources and headers covered by the quality tools.
+- Preserve the function-level Unicorn test under its existing CTest name, `differential`. Follow the [whole-executable test design](tests/differential/README.md) when adding Windows reference cases.
+
 More specific `AGENTS.md` files in subdirectories may refine these rules for a component but must not silently weaken correctness, testing, documentation, or self-review requirements. The repository's actual build scripts and CI configuration are authoritative for command names and supported environments.

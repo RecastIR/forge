@@ -12,9 +12,16 @@ if(APPLE AND NOT LLVM_DIR AND NOT DEFINED ENV{LLVM_DIR})
 endif()
 find_package(LLVM REQUIRED CONFIG HINTS ${brew_llvm_prefix})
 message(STATUS "Using LLVM ${LLVM_PACKAGE_VERSION}")
-add_executable(forge src/main.cpp src/pe.cpp src/dependencies.cpp src/report.cpp
-  src/input.cpp src/analysis.cpp src/lift.cpp)
+add_executable(forge
+  src/cli/main.cpp
+  src/cli/report.cpp
+  src/pe/input.cpp
+  src/pe/pe.cpp
+  src/pe/dependencies.cpp
+  src/analysis/analysis.cpp
+  src/lift/lift.cpp)
 set_target_properties(forge PROPERTIES LINK_LIBRARIES_STRATEGY REORDER_FREELY)
+target_include_directories(forge PRIVATE src)
 target_include_directories(forge SYSTEM PRIVATE ${LLVM_INCLUDE_DIRS})
 target_link_libraries(forge PRIVATE LLVMTransformUtils LLVMDebugInfoDWARF LLVMObject LLVMCore
   LLVMX86Disassembler LLVMX86Desc LLVMX86Info)
@@ -52,58 +59,5 @@ configure_forge_cxx(forge)
 
 include(CTest)
 if(BUILD_TESTING OR CMAKE_EXPORT_COMPILE_COMMANDS)
-  add_library(forge_native_harness OBJECT tests/native_harness.cpp)
-  configure_forge_cxx(forge_native_harness)
-  if(APPLE)
-    set_target_properties(forge_native_harness PROPERTIES OSX_ARCHITECTURES arm64)
-  endif()
-  if(NOT BUILD_TESTING)
-    set_target_properties(forge_native_harness PROPERTIES EXCLUDE_FROM_ALL ON)
-  endif()
-endif()
-if(BUILD_TESTING)
-  find_package(Python3 3.9 REQUIRED COMPONENTS Interpreter)
-  foreach(tool llvm-mc lld-link llvm-dlltool llvm-readobj clang opt llc)
-    if(EXISTS "${CMAKE_CURRENT_BINARY_DIR}/CMakeCache.txt" AND NOT FORGE_FIXTURE_LLVM_DIR STREQUAL LLVM_DIR)
-      unset(${tool} CACHE)
-    endif()
-    find_program(${tool} NAMES ${tool} HINTS "${LLVM_TOOLS_BINARY_DIR}" REQUIRED)
-  endforeach()
-  set(FORGE_FIXTURE_LLVM_DIR "${LLVM_DIR}" CACHE INTERNAL "LLVM package used for fixture tools")
-  add_test(NAME build_config COMMAND "${Python3_EXECUTABLE}"
-    "${CMAKE_CURRENT_SOURCE_DIR}/tests/test_build.py" "${CMAKE_COMMAND}" "${LLVM_DIR}")
-  set(fixtures "${CMAKE_CURRENT_BINARY_DIR}/fixtures")
-  add_test(NAME fixtures COMMAND "${Python3_EXECUTABLE}"
-    "${CMAKE_CURRENT_SOURCE_DIR}/tests/fixtures/generate.py" "${fixtures}"
-    --mc "${llvm-mc}" --link "${lld-link}" --dlltool "${llvm-dlltool}" --clang "${clang}")
-  set_tests_properties(fixtures PROPERTIES FIXTURES_SETUP pe_images)
-  foreach(suite metadata dependencies malformed cli discovery lift)
-    set(script test_inspect.py)
-    if(suite MATCHES "^(discovery|lift)$")
-      set(script test_functions.py)
-    endif()
-    add_test(NAME ${suite} COMMAND "${Python3_EXECUTABLE}"
-      "${CMAKE_CURRENT_SOURCE_DIR}/tests/${script}" ${suite}
-      "$<TARGET_FILE:forge>" "${fixtures}" "${llvm-readobj}")
-    set_tests_properties(${suite} PROPERTIES FIXTURES_REQUIRED pe_images TIMEOUT 90)
-  endforeach()
-  set(harness_linker "${CMAKE_CXX_COMPILER}" ${sanitizer_link_flags})
-  if(APPLE)
-    set(sdk "${CMAKE_OSX_SYSROOT}")
-    if(NOT sdk)
-      set(sdk macosx)
-    endif()
-    # Xcode's compiler needs an SDK even when it is invoked directly by CTest.
-    list(PREPEND harness_linker xcrun --sdk "${sdk}")
-    list(APPEND harness_linker -arch arm64)
-    if(CMAKE_OSX_DEPLOYMENT_TARGET)
-      list(APPEND harness_linker "-mmacosx-version-min=${CMAKE_OSX_DEPLOYMENT_TARGET}")
-    endif()
-  endif()
-  foreach(mode codegen native differential)
-    add_test(NAME ${mode} COMMAND "${Python3_EXECUTABLE}"
-      "${CMAKE_CURRENT_SOURCE_DIR}/tests/test_native.py" ${mode} "$<TARGET_FILE:forge>" "${fixtures}"
-      "${opt}" "${llc}" "${llvm-readobj}" "$<TARGET_OBJECTS:forge_native_harness>" ${harness_linker})
-    set_tests_properties(${mode} PROPERTIES FIXTURES_REQUIRED pe_images SKIP_RETURN_CODE 77 TIMEOUT 180)
-  endforeach()
+  add_subdirectory(tests)
 endif()

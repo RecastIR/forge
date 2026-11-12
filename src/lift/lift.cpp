@@ -1,4 +1,4 @@
-#include "analysis.h"
+#include "analysis/analysis.h"
 
 #include "llvm/ADT/SmallString.h"
 #include "llvm/IR/IRBuilder.h"

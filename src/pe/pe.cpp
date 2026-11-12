@@ -1,4 +1,4 @@
-#include "analysis.h"
+#include "analysis/analysis.h"
 
 #include "llvm/BinaryFormat/COFF.h"
 #include "llvm/Object/COFF.h"

@@ -8,8 +8,7 @@ import sys
 import tempfile
 import unittest
 
-CMAKE, LLVM_DIR = map(Path, sys.argv[1:])
-SOURCE = Path(__file__).resolve().parents[1]
+SOURCE, CMAKE, LLVM_DIR = map(Path, sys.argv[1:])
 
 
 class BuildConfig(unittest.TestCase):
@@ -70,7 +69,7 @@ class BuildConfig(unittest.TestCase):
         database = build / "compile_commands.json"
         contents = database.read_bytes()
         entries = json.loads(contents)
-        harness = SOURCE / "tests/native_harness.cpp"
+        harness = SOURCE / "tests/support/native_harness.cpp"
         self.assertIn(str(harness), [e["file"] for e in entries])
 
         # Exercise the wrapper even on machines without clang-tidy.
@@ -84,14 +83,18 @@ class BuildConfig(unittest.TestCase):
         subprocess.run(command, cwd=SOURCE, env=self.env, check=True)
         args = (self.tmp / "clang-tidy.args").read_text().splitlines()
         self.assertEqual(args[:2], ["-p", str(build)])
-        self.assertCountEqual(args[2:], [str(p) for p in (SOURCE / "src").glob("*.cpp")] + [str(harness)])
+        expected = [str(p) for folder in ("src", "tests/support")
+                    for p in (SOURCE / folder).rglob("*.cpp")]
+        self.assertCountEqual(args[2:], expected)
         self.assertEqual(database.read_bytes(), contents)
 
-        database.write_text(json.dumps([e for e in entries if e["file"] != str(harness)]))
-        failed = subprocess.run(command, cwd=SOURCE, env=self.env, capture_output=True, text=True)
-        self.assertNotEqual(failed.returncode, 0)
-        self.assertIn("Missing first-party compile commands", failed.stderr)
-        self.assertIn("native_harness.cpp", failed.stderr)
+        for missing in (harness, SOURCE / "src/pe/pe.cpp"):
+            with self.subTest(missing=missing):
+                database.write_text(json.dumps([e for e in entries if e["file"] != str(missing)]))
+                failed = subprocess.run(command, cwd=SOURCE, env=self.env, capture_output=True, text=True)
+                self.assertNotEqual(failed.returncode, 0)
+                self.assertIn("Missing first-party compile commands", failed.stderr)
+                self.assertIn(str(missing), failed.stderr)
 
 
 if __name__ == "__main__":

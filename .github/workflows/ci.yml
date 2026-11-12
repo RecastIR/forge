@@ -1,0 +1,40 @@
+name: Forge CI
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+
+jobs:
+  macos:
+    runs-on: macos-15
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Set up LLVM and the function oracle
+        run: |
+          brew install llvm@17 python@3.12
+          llvm_config="$(brew --prefix llvm@17)/bin/llvm-config"
+          test "$("$llvm_config" --version)" = 17.0.6
+          test "$(uname -m)" = arm64
+          venv="$RUNNER_TEMP/forge-python"
+          "$(brew --prefix python@3.12)/bin/python3.12" -m venv "$venv"
+          "$venv/bin/python" -m pip install --only-binary=:all: unicorn==2.1.4
+          "$venv/bin/python" -c 'import unicorn'
+          {
+            echo "LLVM_CONFIG=$llvm_config"
+            echo "LLVM_DIR=$("$llvm_config" --cmakedir)"
+            echo "CMAKE_ARGS=-DPython3_EXECUTABLE=$venv/bin/python"
+          } >> "$GITHUB_ENV"
+
+      - name: Check formatting
+        run: make format-check
+      - name: Run clang-tidy
+        run: make lint
+      - name: Build and test
+        run: make test CONFIG=Debug
+      - name: Test with ASan and UBSan
+        run: make sanitize

@@ -1,7 +1,6 @@
 cmake_minimum_required(VERSION 3.20)
 file(REAL_PATH "${CMAKE_CURRENT_LIST_DIR}/.." root)
-file(GLOB sources "${root}/src/*.cpp")
-list(APPEND sources "${root}/tests/native_harness.cpp")
+file(GLOB_RECURSE sources "${root}/src/*.cpp" "${root}/tests/support/*.cpp")
 
 if(LLVM_CONFIG)
   set(llvm_config "${LLVM_CONFIG}")
@@ -38,7 +37,7 @@ if(NOT executable)
 endif()
 
 if(NOT ACTION STREQUAL "lint")
-  file(GLOB headers "${root}/src/*.h")
+  file(GLOB_RECURSE headers "${root}/src/*.h" "${root}/tests/support/*.h")
   if(ACTION STREQUAL "format")
     set(flags -i)
   elseif(ACTION STREQUAL "format-check")

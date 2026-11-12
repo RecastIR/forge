@@ -2,6 +2,24 @@
 
 Forge inspects Windows PE32+ AMD64 executables and DLLs on macOS. It reports the image layout, imported and exported symbols, base relocations, TLS, AMD64 exception metadata, and the static dependency graph. Function analysis identifies unwind-backed code ranges. The experimental lifter translates individual register-only functions into LLVM IR for native ARM64 compilation. Inspection and lifting both read the PE as a file.
 
+## Repository layout
+
+The root CMake project builds one executable, `forge`. Its headers are private to the project.
+
+| Location | Responsibility |
+| --- | --- |
+| `src/cli/` | Command dispatch, argument validation, and inspection report rendering |
+| `src/pe/` | File input, PE parsing, image metadata, and DLL dependency resolution |
+| `src/analysis/` | Function discovery, debug information, and analysis reports |
+| `src/lift/` | Translation of supported function instructions to LLVM IR |
+| `cmake/` | Formatting and static-analysis commands |
+| `tests/integration/` | Build, CLI, code generation, and native execution suites and their Python helpers |
+| `tests/fixtures/` | SDK-free PE fixture sources and their generator |
+| `tests/support/` | C++ harness for calling a lifted function from a test |
+| `tests/differential/` | Design for future Windows and native executable comparisons |
+
+Add new production code to the component that owns it. Create `runtime/` when generated code first needs a shared native implementation, and `tests/unit/` with the first isolated unit suite. Register tests in `tests/CMakeLists.txt`. The planned executable comparison has its own [design and ownership guide](tests/differential/README.md).
+
 ## Build and run
 
 The verified baseline is Apple Silicon, Apple Clang with C++20, CMake 3.20 or later, and Homebrew LLVM 17.0.6. Tests also use Python 3.9+, LLVM Clang, `llvm-mc`, `llvm-dlltool`, `lld-link`, `llvm-readobj`, `opt`, and `llc`.
@@ -27,7 +45,7 @@ make clean BUILD_DIR=build-xcode CONFIG=Release
 
 ## Development checks
 
-Install Apple's developer tools with `xcode-select --install`. The Homebrew LLVM package in the build instructions also provides `clang-format`, `clang-tidy`, and `llvm-config`. Formatting and linting are opt-in.
+Install Apple's developer tools with `xcode-select --install`. The Homebrew LLVM package in the build instructions also provides `clang-format`, `clang-tidy`, and `llvm-config`. Formatting and linting are opt-in locally. The GitHub Actions workflow checks formatting, runs clang-tidy, and tests Debug and sanitizer builds on Apple Silicon for pull requests and pushes to `main`. It uses LLVM 17.0.6 and a Python environment with Unicorn 2.1.4 for the function-level oracle.
 
 ```sh
 make format-check   # Verify first-party C++ formatting
@@ -120,7 +138,7 @@ build/forge lift build/fixtures/add.exe --rva 0x1000 \
 "$llvm_bin/opt" -passes=verify -disable-output build/add.ll
 "$llvm_bin/llc" -filetype=obj build/add.ll -o build/add.o
 "$llvm_bin/llvm-readobj" --file-headers build/add.o
-xcrun clang++ -arch arm64 -std=c++20 tests/native_harness.cpp build/add.o -o build/add-harness
+xcrun clang++ -arch arm64 -std=c++20 tests/support/native_harness.cpp build/add.o -o build/add-harness
 printf 'a 14\nffffffffffffffff 1\n' | build/add-harness
 ```
 
