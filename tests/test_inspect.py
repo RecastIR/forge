@@ -162,10 +162,58 @@ class Dependencies(Case):
         self.assertEqual(len(r["modules"]), 3)
         direct, delay = [d for d in r["dependencies"] if d["importer"] == 0]
         self.assertEqual(direct["target_module"], delay["target_module"])
+        self.assertEqual(sum(d["name"] == "Middle.dll" for d in r["dependencies"]), 1)
         self.copy("i386.exe", "KERNEL32.dll")
         self.copy("Physics.DLL")
         r = self.report(self.copy("metadata.exe"), "--strict")
         self.assertEqual(r["summary"], {"resolved": 1, "external_api": 1})
+
+    def test_hard_links_resolve_from_each_importing_directory(self):
+        exe = self.copy("graph.exe")
+        direct = self.copy("Bridge.dll", "direct/Bridge.dll").parent
+        delay_alias = self.copy("Late.dll", "delay/Late.dll")
+        delayed = delay_alias.parent
+        os.link(delay_alias, direct / "Middle.dll")
+        args = ("inspect", exe, "--dll-path", direct, "--dll-path", delayed, "--strict", "--format", "json")
+        for incompatible, compatible, code in [(direct, delayed, 3), (delayed, direct, 0)]:
+            with self.subTest(code=code):
+                self.copy("i386.exe", incompatible / "MissingLeaf.dll")
+                self.copy("Physics.DLL", compatible / "MissingLeaf.dll")
+                p = self.invoke(*args, code=code)
+                self.assertEqual(p.stdout, self.invoke(*args, code=code).stdout)
+                r = json.loads(p.stdout)
+                self.assertEqual(len(r["modules"]), 4)
+                leaves = [d for d in r["dependencies"] if d["name"] == "MissingLeaf.dll"]
+                self.assertEqual(len(leaves), 2)
+                self.assertEqual({Path(d["importer_directory"]) for d in leaves}, {direct, delayed})
+                self.assertEqual(leaves[0]["importer"], leaves[1]["importer"])
+                self.assertEqual(r["diagnostics"][0]["code"], "DLL_ARCH_MISMATCH")
+                for edge in leaves:
+                    parent = Path(edge["importer_directory"])
+                    self.assertEqual(edge["path"], str(parent / "MissingLeaf.dll"))
+                    self.assertEqual(edge["required"], parent == direct)
+                    if parent == incompatible:
+                        self.assertEqual(edge["status"], "incompatible")
+                        self.assertNotIn("target_directory", edge)
+                        self.assertEqual(r["dependencies"][r["diagnostics"][0]["dependency"]], edge)
+                    else:
+                        self.assertEqual(edge["status"], "resolved")
+                        self.assertEqual(edge["target_directory"], str(parent))
+                aliases = [d for d in r["dependencies"] if d.get("target_module") == leaves[0]["importer"]]
+                self.assertEqual({d["target_directory"] for d in aliases}, {str(direct), str(delayed)})
+
+    def test_symlink_uses_target_directory(self):
+        exe = self.copy("graph.exe")
+        bridge = self.copy("Bridge.dll", "lib/Bridge.dll")
+        (exe.parent / bridge.name).symlink_to(bridge)
+        middle = self.copy("Middle.dll", "lib/Middle.dll")
+        r = self.report(exe)
+        edge, = [d for d in r["dependencies"] if d["name"] == "Bridge.dll"]
+        self.assertEqual(edge["search_directory"], str(exe.parent))
+        self.assertEqual(edge["target_directory"], str(bridge.parent))
+        child, = [d for d in r["dependencies"] if d["name"] == "Middle.dll"]
+        self.assertEqual(child["importer_directory"], str(bridge.parent))
+        self.assertEqual(child["path"], str(middle))
 
     def test_classification_and_strict(self):
         for filename, code in [("contract.exe", 3), ("delay-contract.exe", 0)]:
@@ -322,6 +370,19 @@ class Malformed(Case):
         struct.pack_into("<H", data, info.file_offset(info.u32(export + 36)), 1000)
         self.invalid(data, "export ordinal")
 
+    def test_tls_template_end(self):
+        data = bytearray((FIXTURES / "metadata.exe").read_bytes())
+        info = Layout(data)
+        tls = info.file_offset(info.directory(9)[0])
+        start, = struct.unpack_from("<Q", data, tls)
+        struct.pack_into("<Q", data, tls + 8, start - 1)
+        self.invalid(data, f"INVALID_PE: TLS directory at file offset {tls + 8:#x}")
+        struct.pack_into("<Q", data, tls + 8, start)
+        path = self.dir / "empty-template.exe"
+        path.write_bytes(data)
+        template = self.report(path)["modules"][0]["tls"]
+        self.assertEqual(template["raw_data_start_va"], template["raw_data_end_va"])
+
     def test_unterminated_tls_callbacks(self):
         data = bytearray((FIXTURES / "metadata.exe").read_bytes())
         info = Layout(data)
@@ -333,6 +394,19 @@ class Malformed(Case):
 
 
 class CLI(Case):
+    def test_fifo_root_and_dependency(self):
+        fifo = self.dir / "Physics.DLL"
+        os.mkfifo(fifo)
+        p = self.invoke("inspect", fifo, "--format", "json", code=1)
+        self.assertEqual(p.stdout, b"")
+        self.assertIn(b"READ_ERROR", p.stderr)
+        self.assertIn(b"regular file", p.stderr)
+        r = self.report(self.copy("metadata.exe"), "--strict", code=3)
+        edge, = [d for d in r["dependencies"] if d["status"] == "inaccessible"]
+        self.assertEqual(edge["path"], str(fifo))
+        self.assertTrue(edge["required"])
+        self.assertEqual(r["diagnostics"][0]["code"], "DLL_READ_ERROR")
+
     def test_usage_and_io_errors(self):
         for args in [[], ["inspect"], ["inspect", "a", "b"], ["inspect", "a", "--no-such-option"],
                      ["inspect", "a", "--format", "yaml"], ["inspect", "a", "--dll-path"],

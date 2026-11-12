@@ -1,28 +1,26 @@
 BUILD_DIR ?= build
-BUILD_TESTING ?= ON
-
-# Honor an explicit LLVM_DIR, then try the verified Homebrew toolchain.
-ifndef LLVM_DIR
-LLVM_DIR := $(shell prefix=$$(brew --prefix llvm@17 2>/dev/null) && "$$prefix/bin/llvm-config" --cmakedir 2>/dev/null)
-endif
+build_config = $(or $(CONFIG),Debug)
+configure_flags = $(if $(LLVM_DIR),"-DLLVM_DIR=$(LLVM_DIR)") \
+                  $(if $(BUILD_TESTING),"-DBUILD_TESTING=$(BUILD_TESTING)") \
+                  $(if $(CONFIG),"-DCMAKE_BUILD_TYPE=$(CONFIG)") \
+                  $(if $(SANITIZE),"-DFORGE_ENABLE_SANITIZERS=$(SANITIZE)")
 
 .PHONY: build configure test fixtures sanitize clean
 
 build: configure
-	cmake --build "$(BUILD_DIR)" --parallel
+	cmake --build "$(BUILD_DIR)" --config "$(build_config)" --parallel
 
 configure:
-	cmake -S . -B "$(BUILD_DIR)" $(if $(LLVM_DIR),"-DLLVM_DIR=$(LLVM_DIR)") -DBUILD_TESTING=$(BUILD_TESTING) $(CMAKE_ARGS)
+	cmake -S . -B "$(BUILD_DIR)" $(CMAKE_ARGS) $(configure_flags)
 
 test: build
-	ctest --test-dir "$(BUILD_DIR)" --output-on-failure --no-tests=error
+	ctest --test-dir "$(BUILD_DIR)" -C "$(build_config)" --output-on-failure --no-tests=error
 
 fixtures: configure
-	ctest --test-dir "$(BUILD_DIR)" --output-on-failure --no-tests=error -R '^fixtures$$'
+	ctest --test-dir "$(BUILD_DIR)" -C "$(build_config)" --output-on-failure --no-tests=error -R '^fixtures$$'
 
 sanitize:
-	$(MAKE) test BUILD_DIR="$(BUILD_DIR)-sanitize" \
-		CMAKE_ARGS='-DCMAKE_BUILD_TYPE=Debug "-DCMAKE_CXX_FLAGS=-fsanitize=address,undefined -fno-sanitize-recover=all -fno-omit-frame-pointer"'
+	$(MAKE) test BUILD_DIR="$(BUILD_DIR)-sanitize" CONFIG=Debug SANITIZE=ON
 
 clean:
-	@if test -f "$(BUILD_DIR)/CMakeCache.txt"; then cmake --build "$(BUILD_DIR)" --target clean; fi
+	@if test -f "$(BUILD_DIR)/CMakeCache.txt"; then cmake --build "$(BUILD_DIR)" --config "$(build_config)" --target clean; fi

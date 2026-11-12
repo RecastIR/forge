@@ -7,6 +7,7 @@
 #include "llvm/Support/Win64EH.h"
 
 #include <algorithm>
+#include <cstddef>
 #include <cstring>
 #include <map>
 #include <type_traits>
@@ -347,6 +348,9 @@ void Image::tls(Module &module) {
              t.SizeOfZeroFill,
              t.Characteristics,
              {}};
+  if (result.end < result.start)
+    invalid(dir->label, dir->offset + offsetof(coff_tls_directory64, EndAddressOfRawData),
+            "TLS template end VA precedes start VA");
   if (result.callbacks) {
     if (result.callbacks < module.imageBase)
       invalid(dir->label, dir->offset, "callback table VA below image base");

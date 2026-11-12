@@ -93,13 +93,22 @@ Value reportJson(const Report &r) {
   Array edges, diagnostics;
   std::map<std::string, size_t> counts;
   for (const auto &d : r.dependencies) {
-    const Import &i = r.modules[d.importer].imports[d.importIndex];
-    Object edge{{"importer", d.importer},   {"import_index", d.importIndex},
-                {"name", i.name},           {"normalized_name", i.normalizedName},
-                {"load_type", loadType(i)}, {"kind", d.kind},
-                {"required", d.required},   {"status", d.status}};
-    if (d.target)
-      edge["target_module"] = *d.target;
+    const auto &source = r.locations[d.importerLocation];
+    const Import &i = r.modules[source.module].imports[d.importIndex];
+    Object edge{{"importer", source.module},
+                {"importer_directory", pathText(source.path.parent_path())},
+                {"import_index", d.importIndex},
+                {"name", i.name},
+                {"normalized_name", i.normalizedName},
+                {"load_type", loadType(i)},
+                {"kind", d.kind},
+                {"required", d.required},
+                {"status", d.status}};
+    if (d.targetLocation) {
+      const auto &target = r.locations[*d.targetLocation];
+      edge["target_module"] = target.module;
+      edge["target_directory"] = pathText(target.path.parent_path());
+    }
     if (!d.path.empty())
       edge["path"] = pathText(d.path);
     if (!d.searchDirectory.empty())
@@ -188,9 +197,9 @@ void printReport(const Report &report, bool json, llvm::raw_ostream &out) {
     textModule(m, out);
   out << "Dependencies (" << report.dependencies.size() << ")\n";
   for (const auto &d : report.dependencies) {
-    const auto &m = report.modules[d.importer];
-    const auto &i = m.imports[d.importIndex];
-    out << "  " << m.path.filename().string() << " -> " << i.name << " (" << loadType(i) << ", "
+    const auto &source = report.locations[d.importerLocation];
+    const auto &i = report.modules[source.module].imports[d.importIndex];
+    out << "  " << source.path.string() << " -> " << i.name << " (" << loadType(i) << ", "
         << (d.required ? "required" : "optional") << ", " << d.kind << ") " << d.status;
     if (!d.path.empty())
       out << " " << d.path.string();
@@ -206,8 +215,9 @@ void printDiagnostics(const Report &report, llvm::raw_ostream &err) {
   for (const auto &d : report.dependencies) {
     if (d.code.empty())
       continue;
-    const auto &m = report.modules[d.importer];
-    err << m.path.string() << ": " << d.code << ": " << m.imports[d.importIndex].name;
+    const auto &source = report.locations[d.importerLocation];
+    err << source.path.string() << ": " << d.code << ": "
+        << report.modules[source.module].imports[d.importIndex].name;
     if (!d.path.empty())
       err << " (" << d.path.string() << ")";
     err << ": " << d.message << "\n";

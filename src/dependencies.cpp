@@ -1,11 +1,15 @@
 #include "forge.h"
 
+#include "llvm/ADT/ScopeExit.h"
 #include "llvm/ADT/STLExtras.h"
 #include "llvm/Support/FileSystem.h"
 #include "llvm/Support/MemoryBuffer.h"
 
 #include <algorithm>
+#include <cerrno>
+#include <fcntl.h>
 #include <map>
+#include <unistd.h>
 #include <variant>
 
 namespace forge {
@@ -96,57 +100,56 @@ void locate(Dependency &edge, const Import &import, const fs::path &parent,
   issue(edge, "missing", "DLL_NOT_FOUND", "no matching DLL in the configured search directories");
 }
 
-lfs::UniqueID identity(const fs::path &path) {
+using DllCache = std::map<lfs::UniqueID, std::variant<size_t, InspectionError>>;
+
+size_t loadModule(const fs::path &path, bool isRoot, DllCache &cache, std::vector<Module> &modules) {
+  int fd = ::open(path.c_str(), O_RDONLY | O_CLOEXEC | O_NONBLOCK);
+  if (fd == -1)
+    throw InspectionError(std::error_code(errno, std::generic_category()).message(), "READ_ERROR");
+  auto close = llvm::make_scope_exit([fd] { ::close(fd); });
   lfs::file_status status;
-  if (auto ec = lfs::status(path.native(), status))
+  if (auto ec = lfs::status(fd, status))
     throw InspectionError(ec.message(), "READ_ERROR");
   if (!lfs::is_regular_file(status))
     throw InspectionError("expected a regular file", "READ_ERROR");
-  return status.getUniqueID();
-}
-
-Module load(const fs::path &path) {
-  auto file = llvm::MemoryBuffer::getFile(path.native(), false, false, true);
-  if (!file)
-    throw InspectionError(file.getError().message(), "READ_ERROR");
-  Module module = inspectPE((*file)->getMemBufferRef());
-  std::error_code ec;
-  module.path = fs::canonical(path, ec);
-  if (ec)
-    throw InspectionError(ec.message(), "READ_ERROR");
-  return module;
-}
-
-using DllCache = std::map<lfs::UniqueID, std::variant<size_t, InspectionError>>;
-
-size_t inspectDll(const fs::path &path, DllCache &cache, std::vector<Module> &modules) {
-  auto id = identity(path);
+  auto id = status.getUniqueID();
   if (auto it = cache.find(id); it != cache.end()) {
     if (auto *error = std::get_if<InspectionError>(&it->second))
       throw *error;
     return std::get<size_t>(it->second);
   }
+  auto file = llvm::MemoryBuffer::getOpenFile(fd, path.native(), status.getSize(), false, true);
+  if (!file)
+    throw InspectionError(file.getError().message(), "READ_ERROR");
+  Module module;
   try {
-    auto module = load(path);
-    if (!module.dll)
-      throw InspectionError("expected a DLL image", "NOT_DLL");
-    size_t index = modules.size();
-    modules.push_back(std::move(module));
-    cache.emplace(id, index);
-    return index;
+    module = inspectPE((*file)->getMemBufferRef());
   } catch (const InspectionError &e) {
     cache.emplace(id, e);
     throw;
   }
+  size_t index = modules.size();
+  if (module.dll) {
+    cache.emplace(id, index);
+  } else {
+    // A valid EXE root cannot satisfy a later DLL import through an alias.
+    InspectionError error("expected a DLL image", "NOT_DLL");
+    cache.emplace(id, error);
+    if (!isRoot)
+      throw error;
+  }
+  module.path = path;
+  modules.push_back(std::move(module));
+  return index;
 }
 
 // Compute requiredness after discovery. A direct path can be discovered after
 // a delay-only path to the very same module.
 void markRequired(Report &report) {
-  std::vector<std::vector<size_t>> outgoing(report.modules.size());
+  std::vector<std::vector<size_t>> outgoing(report.locations.size());
   for (size_t i = 0; i < report.dependencies.size(); ++i)
-    outgoing[report.dependencies[i].importer].push_back(i);
-  std::vector<bool> reached(report.modules.size());
+    outgoing[report.dependencies[i].importerLocation].push_back(i);
+  std::vector<bool> reached(report.locations.size());
   std::vector<size_t> pending{0};
   reached[0] = true;
   while (!pending.empty()) {
@@ -154,12 +157,12 @@ void markRequired(Report &report) {
     pending.pop_back();
     for (size_t i : outgoing[source]) {
       auto &edge = report.dependencies[i];
-      if (report.modules[source].imports[edge.importIndex].delayed)
+      if (report.modules[report.locations[source].module].imports[edge.importIndex].delayed)
         continue;
       edge.required = true;
-      if (edge.target && !reached[*edge.target]) {
-        reached[*edge.target] = true;
-        pending.push_back(*edge.target);
+      if (edge.targetLocation && !reached[*edge.targetLocation]) {
+        reached[*edge.targetLocation] = true;
+        pending.push_back(*edge.targetLocation);
       }
       if (edge.status != "resolved" && edge.status != "external_api")
         report.strictFailure = true;
@@ -170,24 +173,33 @@ void markRequired(Report &report) {
 
 Report inspect(const fs::path &root, const std::vector<fs::path> &searchPaths) {
   Report report;
-  DllCache visited;
+  DllCache files;
+  std::map<std::pair<size_t, fs::path>, size_t> visited;
   std::map<fs::path, Directory> directories;
-  auto rootId = identity(root);
-  report.modules.push_back(load(root));
-  if (report.modules.front().dll)
-    visited.emplace(rootId, size_t{0});
-  else
-    visited.emplace(rootId, InspectionError("expected a DLL image", "NOT_DLL"));
-  for (size_t i = 0; i < report.modules.size(); ++i) {
-    for (size_t j = 0; j < report.modules[i].imports.size(); ++j) {
+  auto visit = [&](const fs::path &path, bool isRoot) {
+    std::error_code ec;
+    auto canonical = fs::canonical(path, ec);
+    if (ec)
+      throw InspectionError(ec.message(), "READ_ERROR");
+    size_t module = loadModule(canonical, isRoot, files, report.modules);
+    auto [it, added] =
+        visited.try_emplace({module, canonical.parent_path()}, report.locations.size());
+    if (added)
+      report.locations.push_back({module, std::move(canonical)});
+    return it->second;
+  };
+  visit(root, true);
+  for (size_t i = 0; i < report.locations.size(); ++i) {
+    size_t module = report.locations[i].module;
+    auto parent = report.locations[i].path.parent_path();
+    for (size_t j = 0; j < report.modules[module].imports.size(); ++j) {
       Dependency edge{};
-      edge.importer = i;
+      edge.importerLocation = i;
       edge.importIndex = j;
-      locate(edge, report.modules[i].imports[j], report.modules[i].path.parent_path(), searchPaths,
-             directories);
+      locate(edge, report.modules[module].imports[j], parent, searchPaths, directories);
       if (!edge.path.empty()) {
         try {
-          edge.target = inspectDll(edge.path, visited, report.modules);
+          edge.targetLocation = visit(edge.path, false);
           edge.status = "resolved";
           if (edge.kind == "unknown")
             edge.kind = "application";
