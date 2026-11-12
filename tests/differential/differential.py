@@ -10,6 +10,7 @@ import shutil
 import signal
 import subprocess
 import sys
+import tempfile
 
 from comparison import describe, differences
 from manifests import FIXTURE_ID, SUITE, field, load_catalog, unique_keys
@@ -23,8 +24,6 @@ OUTPUT = BUILD / "differential/windows-x64"
 DEFAULT_FORGE = BUILD / "forge"
 STAGES = ("reference_validation", "analysis", "lifting", "native_compilation",
           "native_execution", "comparison")
-
-
 CONFIGS = ("debug", "release")
 TARGET = "macos-arm64"
 
@@ -38,9 +37,15 @@ def read_json(path):
 
 
 def write_json(path, data):
-    temporary = path.with_suffix(".tmp")
-    temporary.write_text(json.dumps(data, indent=2) + "\n", encoding="utf-8")
-    temporary.replace(path)
+    stream = tempfile.NamedTemporaryFile(mode="w", encoding="utf-8", dir=path.parent, delete=False)
+    temporary = Path(stream.name)
+    try:
+        with stream:
+            json.dump(data, stream, indent=2)
+            stream.write("\n")
+        temporary.replace(path)
+    finally:
+        temporary.unlink(missing_ok=True)
 
 
 def case_definitions(catalog, path):
@@ -68,6 +73,10 @@ def case_definitions(catalog, path):
             raise ValueError(f"invalid differential function contract for {name}")
         definitions[name] = case
     return definitions
+
+
+def config_cases(definitions, config):
+    return {name: case for name, case in definitions.items() if config in case.get("configs", CONFIGS)}
 
 
 def resolve_export(inspection, analysis, name):
@@ -227,7 +236,7 @@ def run(config, fixture=None, *, binaries=BINARIES, references=REFERENCES, outpu
                        run_id=os.environ.get("FORGE_TEST_RUN_ID"))
         try:
             catalog = load_catalog(suite)
-            definitions = case_definitions(catalog, suite / "cases.json")
+            cases = config_cases(case_definitions(catalog, suite / "cases.json"), config)
             selected = [m for m in catalog if fixture is None or m.case["id"] == fixture]
             if not selected:
                 raise ValueError(f"unknown fixture {fixture!r}")
@@ -235,10 +244,7 @@ def run(config, fixture=None, *, binaries=BINARIES, references=REFERENCES, outpu
                 name = manifest.case["id"]
                 work = folder / name
                 work.mkdir(parents=True)
-                case = definitions.get(name)
-                if case and config not in case.get("configs", CONFIGS):
-                    case = None
-                result = run_case(manifest, case, config, binaries, references, forge, work)
+                result = run_case(manifest, cases.get(name), config, binaries, references, forge, work)
                 write_json(work / "result.json", result)
                 status = result["status"]
                 summary["cases"].append(dict(fixture_id=name, status=status, scope=result["scope"],

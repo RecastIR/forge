@@ -10,10 +10,14 @@ permissions:
   contents: read
 
 env:
-  FORGE_TEST_RUN_ID: ${{ github.run_id }}-${{ github.sha }}
+  FORGE_TEST_RUN_ID: ${{ github.run_id }}-${{ github.run_attempt }}-${{ github.sha }}
 
 jobs:
   macos:
+    outputs:
+      stages: ${{ toJSON(steps.verify.outputs) }}
+      debug_forge: ${{ steps.package.outputs.debug }}
+      release_forge: ${{ steps.package.outputs.release }}
     runs-on: macos-26
     steps:
       - uses: actions/checkout@v6
@@ -38,8 +42,14 @@ jobs:
             echo "CMAKE_ARGS=-DPython3_EXECUTABLE=$venv/bin/python"
           } >> "$GITHUB_ENV"
       - name: Check formatting, lint, Debug CTest, and sanitizer CTest
+        id: verify
         run: ./tools/test-forge.sh --native
-      - run: tar -czf tested-forge.tgz build/forge build-sanitize/forge
+      - name: Package the tested Forge executables
+        id: package
+        run: |
+          tar -czf tested-forge.tgz build/forge build-sanitize/forge
+          shasum -a 256 build-sanitize/forge | awk '{print "debug=" $1}' >> "$GITHUB_OUTPUT"
+          shasum -a 256 build/forge | awk '{print "release=" $1}' >> "$GITHUB_OUTPUT"
       - uses: actions/upload-artifact@v4
         with:
           name: tested-macos-arm64-forge
@@ -49,6 +59,8 @@ jobs:
           overwrite: true
 
   windows-fixtures:
+    outputs:
+      stages: ${{ toJSON(steps.verify.outputs) }}
     runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v6
@@ -60,6 +72,7 @@ jobs:
           python3 -B tests/differential/test_differential.py
           python3 -B tests/differential/test_coverage.py
       - name: Build reproducible PEs, capture references, and verify Wine boundaries
+        id: verify
         run: ./tools/test-forge.sh --references
       - name: Transfer matching validated inputs
         uses: actions/upload-artifact@v4
@@ -84,6 +97,9 @@ jobs:
           overwrite: true
 
   differential:
+    outputs:
+      evidence_run_id: ${{ github.run_id }}-${{ github.run_attempt }}-${{ github.sha }}
+      stages: ${{ toJSON(steps.verify.outputs) }}
     needs: [macos, windows-fixtures]
     runs-on: macos-26
     steps:
@@ -104,6 +120,7 @@ jobs:
           name: windows-x64-inputs
           path: build
       - name: Compare both configurations and exercise failure paths
+        id: verify
         run: ./tools/test-forge.sh --differential
       - name: Preserve case evidence and native diagnostics
         if: ${{ !cancelled() }}
@@ -134,7 +151,7 @@ jobs:
     steps:
       - uses: actions/checkout@v6
       - uses: actions/download-artifact@v4
-        if: needs.windows-fixtures.result == 'success'
+        if: ${{ always() && needs.windows-fixtures.result == 'success' }}
         with:
           name: windows-x64-inputs
           path: build
@@ -147,6 +164,7 @@ jobs:
         if: ${{ always() }}
         env:
           JOBS: ${{ toJSON(needs) }}
+          FORGE_TEST_RUN_ID: ${{ needs.differential.outputs.evidence_run_id || env.FORGE_TEST_RUN_ID }}
         run: python3 -B tests/differential/coverage_report.py --jobs "$JOBS"
       - uses: actions/upload-artifact@v4
         if: ${{ always() }}

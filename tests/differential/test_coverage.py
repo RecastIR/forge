@@ -1,6 +1,7 @@
 """Exercise the CI gate with real publication formats and controlled executions."""
 import contextlib
 import io
+import json
 import os
 import unittest
 from unittest.mock import patch
@@ -34,10 +35,10 @@ class CoverageTests(ArtifactSetup):
                 self.assertEqual(diff.run(config, binaries=self.binaries, references=self.references,
                                           output=self.output, forge=self.forge, suite=self.suite), 0)
 
-    def report(self, jobs=None):
+    def report(self, jobs=None, **kwargs):
         return coverage.aggregate("current", "revision", jobs or dict.fromkeys(coverage.JOBS, "success"),
                                   suite_root=self.suite, binaries=self.binaries, references=self.references,
-                                  output=self.output)
+                                  output=self.output, **kwargs)
 
     def test_actual_matrix(self):
         report = self.report()
@@ -48,6 +49,20 @@ class CoverageTests(ArtifactSetup):
             self.assertEqual(summary["passing_by_scope"], dict(function=1, application=0))
         for outcome in ("skipped", "failure", "cancelled"):
             self.assertEqual(self.report({"macos": outcome})["gate"], "failed")
+
+    def test_green_job_cannot_hide_a_skipped_step_or_substituted_forge(self):
+        report = self.report()
+        needs = {job: {"outputs": {"stages": json.dumps(dict.fromkeys(stages, "success"))}}
+                 for job, stages in coverage.JOB_STAGES.items()}
+        coverage.verify_job_stages(report, needs)
+        self.assertEqual(report["gate"], "passed")
+        needs["macos"]["outputs"]["stages"] = '{"formatting":"success"}'
+        coverage.verify_job_stages(report, needs)
+        self.assertEqual(report["gate"], "failed")
+        self.assertEqual(report["job_stages"]["macos"]["sanitize"], "not_run")
+        report = self.report(forge_digests=dict.fromkeys(diff.CONFIGS, "0" * 64))
+        self.assertEqual(report["gate"], "failed")
+        self.assertEqual(report["configurations"]["debug"]["counts"]["error"], 1)
 
     def test_membership_and_freshness(self):
         suite = self.output / "release/suite.json"
@@ -98,6 +113,29 @@ class CoverageTests(ArtifactSetup):
                 self.assertEqual(report["configurations"]["debug"]["counts"]["passed"], 1)
                 if name != "exit_code":
                     (folder / (name + ".bin")).write_bytes(getattr(self.wanted, name))
+
+    def test_enabled_stage_errors_reach_gate(self):
+        for stage, owner, method, failure in (
+                ("analysis", diff, "analyze", ValueError("ambiguous export")),
+                ("lifting", diff, "lift", diff.Unsupported("unsupported opcode at 0x10")),
+                ("native_compilation", diff.native, "build", ValueError("compile failed")),
+                ("native_execution", diff.native, "execute", diff.native.ExecutionFailure("timeout", "deadline")),
+                ("native_execution", diff.native, "execute", diff.native.ExecutionFailure("signaled", "signal", -9)),
+                ("native_execution", diff.native, "execute", diff.native.ExecutionFailure("output_limit", "overflow"))):
+            with self.subTest(stage=stage, failure=failure), contextlib.ExitStack() as stack:
+                for context in (patch.dict(os.environ, FORGE_TEST_RUN_ID="current"),
+                                patch.object(diff, "analyze", return_value="0x10"), patch.object(diff, "lift"),
+                                patch.object(diff.native, "build"), patch.object(owner, method, side_effect=failure),
+                                contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(io.StringIO())):
+                    stack.enter_context(context)
+                self.assertEqual(diff.run("release", binaries=self.binaries, references=self.references,
+                                          output=self.output, forge=self.forge, suite=self.suite), 1)
+                report = self.report()
+                row = next(r for r in report["cases"] if r["config"] == "release" and r["scope"])
+                self.assertEqual((report["gate"], row["status"], row["stages"][stage]), ("failed", "error", "failed"))
+                self.assertEqual(row["reason"], str(failure))
+                if isinstance(failure, diff.native.ExecutionFailure):
+                    self.assertEqual(row["execution_outcome"], failure.outcome)
 
     def test_reference_only_requires_a_trusted_reference(self):
         folder = self.references / "release/unit/uncovered"

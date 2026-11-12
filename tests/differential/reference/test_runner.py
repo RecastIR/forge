@@ -117,6 +117,13 @@ class PublicationTests(unittest.TestCase):
         self.execute.return_value = Capture(52, b"", b"err\r\n", "wine-test")
         self.assertIn("stderr mismatch", self.invoke(1))
         self.assertFalse(self.target.exists())
+        failure = self.output.parent / "failures/debug/a/b"
+        self.assertEqual((failure / "stderr.bin").read_bytes(), b"err\r\n")
+        detail = json.loads((failure / "failure.json").read_bytes())
+        self.assertEqual((detail["observed_exit_code"], detail["binary_sha256"]), (52, self.hash))
+        self.execute.return_value = Capture(4660, b"", b"err\n", "wine-test")
+        self.invoke(0)
+        self.assertFalse(failure.exists())
 
     def test_invalid_manifest_withdraws_results(self):
         self.invoke(0)

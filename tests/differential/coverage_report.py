@@ -16,17 +16,16 @@ from protocol import STREAM_LIMIT
 from run import verified_export
 
 STATUSES = ("passed", "failed", "error", "reference_only", "blocked")
-JOBS = ("macos", "windows-fixtures", "differential")
+JOB_STAGES = {"macos": ("formatting", "lint", "debug", "build_oracles", "sanitize", "build-sanitize_oracles"),
+              "windows-fixtures": ("build", "capture", "wine_tests"),
+              "differential": ("debug", "release", "negative_tests")}
+JOBS = tuple(JOB_STAGES)
 INVALID = (ValueError, OSError, KeyError, TypeError)
 
 
 def require(condition, message):
     if not condition:
         raise ValueError(message)
-
-
-def config_cases(definitions, config):
-    return {name: case for name, case in definitions.items() if config in case.get("configs", diff.CONFIGS)}
 
 
 def check_baseline(path, definitions):
@@ -38,7 +37,7 @@ def check_baseline(path, definitions):
         require(set(item) == {"id", "config", "target"} and key not in required, f"invalid baseline row {key}")
         required.add(key)
     enabled = {(name, config, diff.TARGET) for config in diff.CONFIGS
-               for name, case in config_cases(definitions, config).items() if "blocked_reason" not in case}
+               for name, case in diff.config_cases(definitions, config).items() if "blocked_reason" not in case}
     require(enabled == required, f"baseline disagrees with definitions: missing {sorted(required - enabled)}, "
                                  f"unlisted {sorted(enabled - required)}")
 
@@ -53,7 +52,7 @@ def build_metadata(binaries, config):
     return build
 
 
-def suite_index(folder, config, run_id, expected):
+def suite_index(folder, config, run_id, expected, errors):
     suite = diff.read_json(folder / "suite.json")
     require(field(suite, "schema_version", int) == 1 and suite["build_config"] == config
             and suite["selection"] == "all" and suite["run_id"] == run_id,
@@ -63,12 +62,13 @@ def suite_index(folder, config, run_id, expected):
         name = field(item, "fixture_id", str)
         require(name not in index and item["report"] == name + "/result.json", f"invalid suite entry {name}")
         index[name] = item
-    require(index.keys() == expected, f"suite membership mismatch: missing {sorted(expected - index.keys())}, "
-                                      f"unexpected {sorted(index.keys() - expected)}")
+    if index.keys() != expected:
+        errors.append(f"{config} suite membership: missing {sorted(expected - index.keys())}, "
+                      f"unexpected {sorted(index.keys() - expected)}")
     return suite, index
 
 
-def inspect_result(row, case, record, entry, folder, wanted, run_id):
+def inspect_result(row, case, record, entry, folder, wanted, run_id, expected_forge):
     name = row["fixture_id"]
     require(field(record, "schema_version", int) == 1 and record["fixture_id"] == name
             and record["build_config"] == row["config"] and record["run_id"] == run_id,
@@ -97,6 +97,8 @@ def inspect_result(row, case, record, entry, folder, wanted, run_id):
             and record["signature"] == case["signature"] and record["native_target"] == "Darwin/arm64",
             "function contract or native target mismatch")
     require(re.fullmatch("[0-9a-f]{64}", field(record, "forge_sha256", str)), "missing Forge digest")
+    if expected_forge is not None:
+        require(record["forge_sha256"] == expected_forge, "Forge executable differs from the tested native build")
     row["forge_sha256"] = record["forge_sha256"]
     require(record.get("execution_outcome") == "completed" and set(stages) == set(diff.STAGES)
             and all(stages[s] == "passed" for s in diff.STAGES[:-1]), "enabled execution incomplete")
@@ -107,13 +109,14 @@ def inspect_result(row, case, record, entry, folder, wanted, run_id):
         row.update(status="failed", reason="\n".join(map(describe, mismatch)))
     else:
         require(record["status"] == "passed" and stages["comparison"] == "passed"
+                and "native_process_status" not in record and actual.exit_code == 0
                 and not record.get("differences") and not record.get("failure_categories"),
                 "comparison result disagrees with captured behavior")
         row["status"] = "passed"
 
 
 def aggregate(run_id, revision, jobs, *, suite_root=diff.SUITE, binaries=diff.BINARIES,
-              references=diff.REFERENCES, output=diff.OUTPUT):
+              references=diff.REFERENCES, output=diff.OUTPUT, forge_digests=None):
     report = dict(schema_version=1, revision=revision, run_id=run_id, target=diff.TARGET, jobs=jobs,
                   fixture_count=0, enabled_case_count=0, gate="failed", configurations={}, cases=[], errors=[])
     errors = report["errors"]
@@ -136,19 +139,21 @@ def aggregate(run_id, revision, jobs, *, suite_root=diff.SUITE, binaries=diff.BI
     names = {m.case["id"] for m in catalog}
     for config in diff.CONFIGS:
         folder = output / config
-        selected = config_cases(definitions, config)
+        selected = diff.config_cases(definitions, config)
         counts = dict.fromkeys(STATUSES, 0)
         categories = {}
         scopes = dict(function=0, application=0)
         summary = dict(counts=counts, by_category=categories, passing_by_scope=scopes, references_validated=0)
         report["configurations"][config] = summary
+        trusted_inputs = jobs.get("windows-fixtures", "success") == "success"
         try:
+            require(trusted_inputs, "fixture producer did not complete successfully")
             summary["build"] = build_metadata(binaries, config)
         except INVALID as error:
             errors.append(f"{config} build: {error}")
         suite, index = None, {}
         try:
-            suite, index = suite_index(folder, config, run_id, names)
+            suite, index = suite_index(folder, config, run_id, names, errors)
         except INVALID as error:
             errors.append(f"{config} suite: {error}")
         executed = 0
@@ -160,6 +165,9 @@ def aggregate(run_id, revision, jobs, *, suite_root=diff.SUITE, binaries=diff.BI
                        scope=case.get("scope") if case else None, reference_status="invalid",
                        report=f"{config}/{name}/result.json")
             try:
+                if not trusted_inputs:
+                    row["reference_status"] = "unavailable"
+                    raise ValueError("fixture producer did not publish trusted inputs")
                 directory(binaries, config)
                 _, row["binary_sha256"] = verified_export(binaries, config, manifest.case["binary"])
                 wanted, row["reference"] = reference(references, manifest, config, row["binary_sha256"])
@@ -168,7 +176,8 @@ def aggregate(run_id, revision, jobs, *, suite_root=diff.SUITE, binaries=diff.BI
                 require(name in index, "missing full-suite evidence")
                 work = directory(output, config + "/" + name)
                 record = diff.read_json(work / "result.json")
-                inspect_result(row, case, record, index[name], work, wanted, run_id)
+                inspect_result(row, case, record, index[name], work, wanted, run_id,
+                               forge_digests[config] if forge_digests is not None else None)
                 if row["status"] in ("passed", "failed"):
                     executed += 1
             except INVALID as error:
@@ -194,9 +203,13 @@ def aggregate(run_id, revision, jobs, *, suite_root=diff.SUITE, binaries=diff.BI
 def markdown(report):
     lines = [f"## Forge differential coverage — {report['gate'].upper()}", "",
              f"Revision `{report['revision']}` · {report['target']} · {report['fixture_count']} fixtures",
-             "", " | ".join(f"{job}: {outcome}" for job, outcome in report["jobs"].items()), "",
-             "| Configuration / category | References | " + " | ".join(STATUSES) + " |",
-             "|---|---|" + "---|" * len(STATUSES)]
+             ""]
+    for job, outcome in report["jobs"].items():
+        stages = report.get("job_stages", {}).get(job, {})
+        details = ", ".join(f"{k}={v}" for k, v in stages.items())
+        lines.append(f"- {job}: {outcome}" + (f" ({details})" if details else ""))
+    lines.extend(["", "| Configuration / category | References | " + " | ".join(STATUSES) + " |",
+                  "|---|---|" + "---|" * len(STATUSES)])
     for config, item in report["configurations"].items():
         for label, counts in [(config, item["counts"]), *sorted(item["by_category"].items())]:
             refs = f"{item['references_validated']}/{report['fixture_count']}" if label == config else ""
@@ -215,6 +228,23 @@ def markdown(report):
     return "\n".join(lines) + "\n"
 
 
+def verify_job_stages(report, needs):
+    stages = {}
+    for job, expected in JOB_STAGES.items():
+        raw = needs.get(job, {}).get("outputs", {}).get("stages")
+        try:
+            observed = json.loads(raw) if raw else {}
+            require(isinstance(observed, dict), "invalid stage outputs")
+        except (ValueError, TypeError) as error:
+            report["errors"].append(f"{job}: {error}")
+            observed = {}
+        stages[job] = {k: observed.get(k, "not_run") for k in expected}
+        if any(value != "success" for value in stages[job].values()):
+            report["errors"].append(f"{job}: required stage failed or did not run")
+            report["gate"] = "failed"
+    report["job_stages"] = stages
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--jobs", help="JSON GitHub needs context (all three prerequisite jobs required)")
@@ -229,7 +259,13 @@ def main():
         jobs = dict(zip(JOBS, args.local_jobs))
     run_id = os.environ["FORGE_TEST_RUN_ID"]
     revision = subprocess.check_output(["git", "rev-parse", "HEAD"], cwd=diff.SUITE, text=True).strip()
-    report = aggregate(run_id, revision, jobs)
+    forge_digests = None
+    if args.jobs is not None:
+        outputs = needs.get("macos", {}).get("outputs", {})
+        forge_digests = {config: outputs.get(config + "_forge", "") for config in diff.CONFIGS}
+    report = aggregate(run_id, revision, jobs, forge_digests=forge_digests)
+    if args.jobs is not None:
+        verify_job_stages(report, needs)
     report["environment"] = "github-actions" if args.jobs is not None else "local"
     folder = diff.BUILD / "coverage"
     folder.mkdir(parents=True, exist_ok=True)

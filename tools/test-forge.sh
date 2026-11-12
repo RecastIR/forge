@@ -6,28 +6,41 @@ cd "$repo"
 test "$#" = 1 || { echo "usage: $0 --all | --native | --references | --differential" >&2; exit 2; }
 suite=tests/differential
 export FORGE_TEST_RUN_ID="${FORGE_TEST_RUN_ID:-$(python3 -c 'import uuid; print(uuid.uuid4())')}"
+stage() {
+    name=$1
+    shift
+    rc=0
+    "$@" || rc=$?
+    if test -n "${GITHUB_OUTPUT:-}"; then
+        outcome=success
+        if test "$rc" != 0; then outcome=failure; fi
+        echo "$name=$outcome" >> "$GITHUB_OUTPUT"
+    fi
+    return "$rc"
+}
+
 run_differential() (
     status=0
-    CMAKE_GENERATOR=Xcode ./tools/run-differential.sh --all --config debug --forge build-sanitize/forge || status=1
-    ./tools/run-differential.sh --all --config release || status=1
-    python3 -B "$suite/test_native_differential.py" || status=1
+    CMAKE_GENERATOR=Xcode stage debug ./tools/run-differential.sh --all --config debug --forge build-sanitize/forge || status=1
+    stage release ./tools/run-differential.sh --all --config release || status=1
+    stage negative_tests python3 -B "$suite/test_native_differential.py" || status=1
     exit "$status"
 )
 case "$1" in
 --native)
     test "$(uname -sm)" = 'Darwin arm64' || { echo "Full native tests require macOS arm64." >&2; exit 1; }
-    make format-check
-    make lint
+    stage formatting make format-check
+    stage lint make lint
     for tree in build build-sanitize; do
         result="$repo/$tree/required-tests.xml"
         # A fresh result is necessary even when reusing a configured build tree.
         if test -f "$result"; then unlink "$result"; fi
         if test "$tree" = build; then
-            make test BUILD_DIR=build CONFIG=Debug BUILD_TESTING=ON CTEST_ARGS="--output-junit \"$result\""
+            stage debug make test BUILD_DIR=build CONFIG=Debug BUILD_TESTING=ON CTEST_ARGS="--output-junit \"$result\""
         else
-            make sanitize BUILD_DIR=build BUILD_TESTING=ON CTEST_ARGS="--output-junit \"$result\""
+            stage sanitize make sanitize BUILD_DIR=build BUILD_TESTING=ON CTEST_ARGS="--output-junit \"$result\""
         fi
-        python3 - "$result" <<'PY'
+        stage "${tree}_oracles" python3 - "$result" <<'PY'
 import sys
 from xml.etree import ElementTree
 tests = ElementTree.parse(sys.argv[1]).findall(".//testcase")
@@ -40,9 +53,9 @@ PY
 --references)
     docker info >/dev/null || { echo "Start a Docker engine with Linux amd64 support for the pinned MinGW and Wine images." >&2; exit 1; }
     python3 -B "$suite/manifests.py"
-    ./tools/build-windows-fixtures.sh --all
-    ./tools/run-windows-references.sh --all
-    python3 -B "$suite/reference/test_wine.py" ;;
+    stage build ./tools/build-windows-fixtures.sh --all
+    stage capture ./tools/run-windows-references.sh --all
+    stage wine_tests python3 -B "$suite/reference/test_wine.py" ;;
 --differential)
     status=0
     run_differential || status=1
