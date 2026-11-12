@@ -56,27 +56,26 @@ def case_definitions(catalog, path):
     definitions = {}
     for case in cases:
         name = field(case, "fixture_id", str)
-        if name not in ids or name in definitions:
-            raise ValueError(f"unknown or duplicate differential fixture {name!r}")
+        if name not in ids:
+            raise ValueError(f"unknown differential fixture {name!r}")
         configs = case.get("configs", list(CONFIGS))
         if (not isinstance(configs, list) or not configs or any(c not in CONFIGS for c in configs)
                 or len(set(configs)) != len(configs)):
             raise ValueError(f"invalid differential configs for {name}")
         keys = set(case) - {"configs"}
-        if keys == {"fixture_id", "blocked_reason"} and field(case, "blocked_reason", str).strip():
-            definitions[name] = case
-            continue
-        if (keys != {"fixture_id", "scope", "export", "signature", "harness"}
+        if keys == {"fixture_id", "blocked_reason"}:
+            if not field(case, "blocked_reason", str).strip():
+                raise ValueError(f"empty blocking reason for {name}")
+        elif (keys != {"fixture_id", "scope", "export", "signature", "harness"}
                 or case.get("scope") != "function" or case.get("signature") != "i64(i64,i64)"
                 or not re.fullmatch(r"[A-Za-z_]\w*", field(case, "export", str), flags=re.ASCII)
                 or not re.fullmatch(r"[a-z][a-z0-9_]*", field(case, "harness", str))):
             raise ValueError(f"invalid differential function contract for {name}")
-        definitions[name] = case
+        for config in configs:
+            if (name, config) in definitions:
+                raise ValueError(f"duplicate differential fixture {name!r} for {config}")
+            definitions[name, config] = case
     return definitions
-
-
-def config_cases(definitions, config):
-    return {name: case for name, case in definitions.items() if config in case.get("configs", CONFIGS)}
 
 
 def resolve_export(inspection, analysis, name):
@@ -236,7 +235,7 @@ def run(config, fixture=None, *, binaries=BINARIES, references=REFERENCES, outpu
                        run_id=os.environ.get("FORGE_TEST_RUN_ID"))
         try:
             catalog = load_catalog(suite)
-            cases = config_cases(case_definitions(catalog, suite / "cases.json"), config)
+            cases = case_definitions(catalog, suite / "cases.json")
             selected = [m for m in catalog if fixture is None or m.case["id"] == fixture]
             if not selected:
                 raise ValueError(f"unknown fixture {fixture!r}")
@@ -244,7 +243,7 @@ def run(config, fixture=None, *, binaries=BINARIES, references=REFERENCES, outpu
                 name = manifest.case["id"]
                 work = folder / name
                 work.mkdir(parents=True)
-                result = run_case(manifest, cases.get(name), config, binaries, references, forge, work)
+                result = run_case(manifest, cases.get((name, config)), config, binaries, references, forge, work)
                 write_json(work / "result.json", result)
                 status = result["status"]
                 summary["cases"].append(dict(fixture_id=name, status=status, scope=result["scope"],

@@ -36,8 +36,7 @@ def check_baseline(path, definitions):
         key = tuple(field(item, k, str) for k in ("id", "config", "target"))
         require(set(item) == {"id", "config", "target"} and key not in required, f"invalid baseline row {key}")
         required.add(key)
-    enabled = {(name, config, diff.TARGET) for config in diff.CONFIGS
-               for name, case in diff.config_cases(definitions, config).items() if "blocked_reason" not in case}
+    enabled = {(name, config, diff.TARGET) for (name, config), case in definitions.items() if "blocked_reason" not in case}
     require(enabled == required, f"baseline disagrees with definitions: missing {sorted(required - enabled)}, "
                                  f"unlisted {sorted(enabled - required)}")
 
@@ -127,7 +126,8 @@ def aggregate(run_id, revision, jobs, *, suite_root=diff.SUITE, binaries=diff.BI
         catalog = diff.load_catalog(suite_root)
         report["fixture_count"] = len(catalog)
         definitions = diff.case_definitions(catalog, suite_root / "cases.json")
-        report["enabled_case_count"] = sum("blocked_reason" not in case for case in definitions.values())
+        report["enabled_case_count"] = len({name for (name, _), case in definitions.items()
+                                            if "blocked_reason" not in case})
     except INVALID as error:
         errors.append(str(error))
         return report
@@ -139,7 +139,6 @@ def aggregate(run_id, revision, jobs, *, suite_root=diff.SUITE, binaries=diff.BI
     names = {m.case["id"] for m in catalog}
     for config in diff.CONFIGS:
         folder = output / config
-        selected = diff.config_cases(definitions, config)
         counts = dict.fromkeys(STATUSES, 0)
         categories = {}
         scopes = dict(function=0, application=0)
@@ -159,7 +158,7 @@ def aggregate(run_id, revision, jobs, *, suite_root=diff.SUITE, binaries=diff.BI
         executed = 0
         for manifest in catalog:
             name = manifest.case["id"]
-            case = selected.get(name)
+            case = definitions.get((name, config))
             category = name.split("/")[0]
             row = dict(fixture_id=name, category=category, config=config, target=diff.TARGET, status="error",
                        scope=case.get("scope") if case else None, reference_status="invalid",

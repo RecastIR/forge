@@ -91,6 +91,18 @@ class CoverageTests(ArtifactSetup):
         diff.write_json(self.baseline, dict(schema_version=1, required_cases=self.required[:1]))
         self.assertTrue(any("zero successful" in e for e in self.report()["errors"]))
 
+    def test_disjoint_enabled_and_blocked_configurations(self):
+        blocked = dict(fixture_id=self.case["fixture_id"], blocked_reason="release opcode", configs=["release"])
+        path = self.suite / "cases.json"
+        diff.write_json(path, [dict(self.case, configs=["debug"]), blocked])
+        definitions = diff.case_definitions(self.catalog, path)
+        self.assertEqual(definitions[self.case["fixture_id"], "release"], blocked)
+        diff.write_json(self.baseline, dict(schema_version=1, required_cases=self.required[:1]))
+        coverage.check_baseline(self.baseline, definitions)
+        diff.write_json(path, [self.case, blocked])
+        with self.assertRaisesRegex(ValueError, "duplicate"):
+            diff.case_definitions(self.catalog, path)
+
     def test_zero_cases(self):
         diff.write_json(self.suite / "cases.json", [])
         diff.write_json(self.baseline, dict(schema_version=1, required_cases=[]))
