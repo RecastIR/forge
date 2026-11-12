@@ -1,4 +1,5 @@
 """Native regression runs using the genuine PE, Wine publication, Forge and native build."""
+import os
 from pathlib import Path
 import re
 import tempfile
@@ -51,6 +52,20 @@ class NativeDifferentialTests(unittest.TestCase):
                 manifest = next(m for m in diff.load_catalog() if m.case["id"] == fixture)
                 self.assertEqual(mismatch["operands"], manifest.case["args"][2 * pair_index:2 * pair_index + 2])
 
+    def test_signed_comparison_with_truncated_right_operand(self):
+        def truncate_right(source):
+            changed, count = re.subn(r"^  (%\w+ = icmp slt i64 %\w+, )(%\w+)$",
+                                     r"  %low = trunc i64 \2 to i32\n  %right = sext i32 %low to i64\n  \1%right",
+                                     source, flags=re.MULTILINE)
+            self.assertEqual(count, 1, "expected one signed comparison in the weighted fixture")
+            return changed
+
+        report = self.modified_ir(WEIGHTED, "truncated-right", "stdout_mismatch", truncate_right)
+        self.assertEqual(report["stages"]["native_execution"], "passed")
+        self.assertEqual(report["stages"]["comparison"], "failed")
+        mismatch, = report["differences"]
+        self.assertEqual(mismatch["operands"], ["1", "4294967295"])
+
     def test_native_build_failures(self):
         def missing_wrapper(source):
             self.assertEqual(source.count("@forge_lifted("), 1)
@@ -71,6 +86,19 @@ class NativeDifferentialTests(unittest.TestCase):
                     self.assertIn("_forge_lifted", report["diagnostic"])
                 self.assertEqual(report["stages"]["native_execution"], "not_run")
                 self.assertEqual(report["stages"]["comparison"], "not_run")
+
+    def test_instrumented_harness_link(self):
+        for generator in ("Unix Makefiles", "Xcode"):
+            with self.subTest(generator=generator), tempfile.TemporaryDirectory() as tmp:
+                output = Path(tmp).resolve()
+                flags = "-fsanitize=undefined"
+                link_map = output / "harness.map"
+                # The Xcode generator takes link options separately from CXXFLAGS.
+                ldflags = f'{flags} -Xlinker -map -Xlinker "{link_map}"' if generator == "Xcode" else ""
+                with patch.dict(os.environ, CMAKE_GENERATOR=generator, CXXFLAGS=flags, LDFLAGS=ldflags):
+                    self.assertEqual(diff.run("debug", WEIGHTED, output=output), 0)
+                if generator == "Xcode":
+                    self.assertIn("_forge_lifted", link_map.read_text())
 
     def test_weighted_repeatability(self):
         with tempfile.TemporaryDirectory() as tmp:
