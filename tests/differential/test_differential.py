@@ -181,6 +181,8 @@ class ArtifactTests(ArtifactSetup):
             execute.return_value = self.wanted
             status, suite = self.invoke()
             self.assertEqual((status, suite["executed"], suite["uncovered"]), (0, 1, 1))
+            self.assertEqual((lift.call_count, build.call_count, execute.call_count), (1, 2, 2))
+            self.assertEqual([call.args[-1] for call in build.call_args_list], list(diff.VARIANTS))
             passed = diff.read_json(report)
             self.assertEqual(passed["scope"], "function")
             self.assertEqual(passed["forge_sha256"], sha256(self.forge.read_bytes()))

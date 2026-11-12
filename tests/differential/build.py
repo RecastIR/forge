@@ -49,6 +49,47 @@ def inspect_pe(path, fixture_id):
                 raise ValueError(f"{path}: missing KERNEL32.dll import {name}")
 
 
+# Instruction-specific contracts are checked on the linked, callable leaf in
+# each configuration. Operand spelling matters for byte aliases and widths.
+INTEGER_WITNESSES = {
+    "flag_add": ("add cl,dl", "seto al", "lahf"),
+    "flag_sub": ("sub cx,dx", "lahf"),
+    "flag_adc": ("cmp rcx,rdx", "adc cl,dl", "lahf"),
+    "flag_sbb": ("cmp rcx,rdx", "sbb cl,dl", "lahf"),
+    "carry_chain": ("add rax,rdx", "inc ax", "not rax", "adc rax,", "dec ah", "sbb rax,"),
+    "neg_flags": ("shl rcx,", "neg rcx", "lahf"),
+    "mixed_widths": ("mov ah,dl", "xor dh,ch", "add ax,dx"),
+    "extensions": ("movsx eax,ch", "movsxd rax,eax", "movzx r8w,dl", "movsx rdx,r8w"),
+    "multiply_flags": ("imul cx,dx", "setb al", "seto ah"),
+    "logic_flags": ("or rcx,rdx", "and rcx,", "test rcx,rcx", "sete al", "setp ah"),
+    "predicates": tuple("set" + cc + " " for cc in
+                        ("o", "no", "b", "ae", "e", "ne", "be", "a", "s", "ns", "p", "np", "l", "ge", "le", "g")),
+    "conditional_moves": ("cmovl ax,dx", "cmovb eax,edx", "cmovp rax,rdx"),
+    "shift_flags": ("cmp rdx,rcx", "sar dl,cl", "setp al", "setb ah"),
+    "shift_widths": ("shr ax,cl", "shl dh,cl", "shr rdx,cl"),
+    "shift_one": ("shl dl,1", "seto al", "setb ah", "shr cx,1"),
+    "joined_flags": ("cmp rcx,rdx", "jbe ", "sub rdx,rcx", "jmp ", "add rdx,rcx", "lahf"),
+    "integer_mix": ("shl ", "xor ", "imul "),
+}
+
+
+def check_integer_leaf(path):
+    witnesses = INTEGER_WITNESSES.get(path.stem)
+    if witnesses is None:
+        return
+    output = subprocess.check_output(["x86_64-w64-mingw32-objdump", "-d", "--no-show-raw-insn",
+                                      "-Mintel", "--disassemble=" + path.stem, path], text=True)
+    instructions = [" ".join(line.split()) for line in
+                    re.findall(r"^\s*[0-9a-f]+:\s*([^\n]+)", output, re.MULTILINE)]
+    try:
+        body = iter(instructions[:instructions.index("ret")])
+        for witness in witnesses:
+            if not any(inst.startswith(witness) for inst in body):
+                raise ValueError(f"missing {witness!r}")
+    except ValueError as error:
+        raise ValueError(f"{path}: {path.stem} instruction contract: {error}\n{output}") from error
+
+
 def publish(staged, target):
     # Both renames are on the export filesystem. Serialize writers and recover a
     # previous export if an interrupted invocation stopped between the renames.
@@ -96,6 +137,7 @@ def build(config, cases, output):
                 other = hashlib.sha256((second / binary).read_bytes()).hexdigest()
                 raise ValueError(f"{config}/{binary}: clean builds differ: {hashlib.sha256(data).hexdigest()} vs {other}")
             inspect_pe(path, fixture_id)
+            check_integer_leaf(path)
             checksums.append(f"{hashlib.sha256(data).hexdigest()}  {binary}\n")
             shutil.copy2(path, staged / binary)
         (staged / "SHA256SUMS").write_text("".join(checksums), encoding="ascii")

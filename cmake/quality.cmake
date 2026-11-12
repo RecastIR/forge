@@ -1,6 +1,6 @@
 cmake_minimum_required(VERSION 3.20)
 file(REAL_PATH "${CMAKE_CURRENT_LIST_DIR}/.." root)
-file(GLOB_RECURSE sources "${root}/src/*.cpp" "${root}/tests/support/*.cpp")
+file(GLOB_RECURSE sources "${root}/src/*.cpp" "${root}/tests/support/*.cpp" "${root}/tests/unit/*.cpp")
 
 if(LLVM_CONFIG)
   set(llvm_config "${LLVM_CONFIG}")

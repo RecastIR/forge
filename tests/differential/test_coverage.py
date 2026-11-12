@@ -113,18 +113,38 @@ class CoverageTests(ArtifactSetup):
     def test_three_observation_mismatches(self):
         folder = self.output / "release/unit/enabled"
         record = diff.read_json(folder / "result.json")
-        for name in ("stdout", "stderr", "exit_code"):
-            with self.subTest(name=name):
-                if name == "exit_code":
-                    diff.write_json(folder / "result.json", dict(record, native_exit_code=7))
-                else:
-                    (folder / (name + ".bin")).write_bytes(b"different")
-                report = self.report()
-                self.assertEqual(report["gate"], "failed")
-                self.assertEqual(report["configurations"]["release"]["counts"]["failed"], 1)
-                self.assertEqual(report["configurations"]["debug"]["counts"]["passed"], 1)
-                if name != "exit_code":
-                    (folder / (name + ".bin")).write_bytes(getattr(self.wanted, name))
+        for variant in diff.VARIANTS:
+            for name in ("stdout", "stderr", "exit_code"):
+                with self.subTest(variant=variant, name=name):
+                    if name == "exit_code":
+                        changed = dict(record["variants"][variant], native_exit_code=7)
+                        variants = dict(record["variants"], **{variant: changed})
+                        diff.write_json(folder / "result.json", dict(record, variants=variants))
+                    else:
+                        (folder / variant / (name + ".bin")).write_bytes(b"different")
+                    report = self.report()
+                    self.assertEqual(report["gate"], "failed")
+                    self.assertEqual(report["configurations"]["release"]["counts"]["failed"], 1)
+                    self.assertEqual(report["configurations"]["debug"]["counts"]["passed"], 1)
+                    row = next(r for r in report["cases"] if r["status"] == "failed")
+                    self.assertIn(variant, row["reason"])
+                    diff.write_json(folder / "result.json", record)
+                    if name != "exit_code":
+                        (folder / variant / (name + ".bin")).write_bytes(getattr(self.wanted, name))
+
+    def test_missing_and_stale_variant(self):
+        folder = self.output / "release/unit/enabled"
+        record = diff.read_json(folder / "result.json")
+        record["variants"]["baseline"]["run_id"] = "previous"
+        diff.write_json(folder / "result.json", record)
+        self.assertEqual(self.report()["gate"], "failed")
+        record["variants"]["baseline"]["run_id"] = "current"
+        diff.write_json(folder / "result.json", record)
+        (folder / "o2/stdout.bin").unlink()
+        self.assertEqual(self.report()["gate"], "failed")
+        del record["variants"]["o2"]
+        diff.write_json(folder / "result.json", record)
+        self.assertEqual(self.report()["gate"], "failed")
 
     def test_enabled_stage_errors_reach_gate(self):
         for stage, owner, method, failure in (
@@ -145,9 +165,10 @@ class CoverageTests(ArtifactSetup):
                 report = self.report()
                 row = next(r for r in report["cases"] if r["config"] == "release" and r["scope"])
                 self.assertEqual((report["gate"], row["status"], row["stages"][stage]), ("failed", "error", "failed"))
-                self.assertEqual(row["reason"], str(failure))
+                self.assertIn(str(failure), row["reason"])
                 if isinstance(failure, diff.native.ExecutionFailure):
-                    self.assertEqual(row["execution_outcome"], failure.outcome)
+                    for variant in diff.VARIANTS:
+                        self.assertEqual(row["variants"][variant]["execution_outcome"], failure.outcome)
 
     def test_reference_only_requires_a_trusted_reference(self):
         folder = self.references / "release/unit/uncovered"

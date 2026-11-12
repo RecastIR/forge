@@ -238,7 +238,7 @@ class Lift(Case):
         output = self.dir/"existing.ll"
         output.write_text("sentinel")
         for code, expected in [
-                ("88 c8 c3", "width"), ("66 89 c8 c3", "prefix"), ("48 8b 01 c3", "operand form"),
+                ("88 c8 c3", "undefined RAX"), ("66 89 c8 c3", "undefined RAX"), ("48 8b 01 c3", "operand form"),
                 ("48 89 e0 c3", "RSP"), ("48 8d 05 00 00 00 00", "RIP"),
                 ("f3 c3", "prefix"), ("48 48 89 c8 c3", "prefix"),
                 ("ff d0 c3", "unsupported"), ("ff e0", "unsupported"),
@@ -247,7 +247,11 @@ class Lift(Case):
                 ("4c 89 c0 c3", "undefined incoming R8"), ("c3", "undefined RAX"),
                 ("48 29 c8 c3", "undefined incoming RAX"), ("44 29 c1 c3", "undefined incoming R8"),
                 ("48 39 d1 74 01 c3 c3", "undefined RAX"),
-                ("09 c0 c3", "unsupported"), ("48 89 c8 48 89 c8 40", "invalid or truncated"),
+                ("09 c0 c3", "undefined incoming RAX"), ("f7 f1 c3", "unsupported"),
+                ("31 c0 9f c3", "AF"), ("0f af ca 0f 94 c0 c3", "ZF"),
+                ("66 66 89 c8 c3", "prefix"), ("14 00 c3", "undefined incoming RAX"),
+                ("39 d1 0f 94 c0 c3", "undefined RAX"), ("c0 e9 08 0f 92 c0", "CF"),
+                ("83 d1 00 c3", "CF"), ("d2 e1 0f 90 c0 c3", "OF"), ("48 89 c8 48 89 c8 40", "invalid or truncated"),
                 ("31 c0 31 c0 31 c0 90", "unsupported")]:
             with self.subTest(code=code):
                 body = bytes.fromhex(code)
@@ -262,6 +266,23 @@ class Lift(Case):
                 self.assertIn(b"LIFT_ERROR: 0x100", p.stderr)
                 self.assertEqual(output.read_text(), "sentinel")
         self.assertFalse(list(self.dir.glob("*.tmp-*")))
+
+    def test_flag_missing_at_forward_join(self):
+        image = FIXTURES / "arithmetic.exe"
+        export = next(e for e in self.report(image)["modules"][0]["exports"] if "immediates" in e["names"])
+        rva = int(export["rva"], 16)
+        data = bytearray(image.read_bytes())
+        start = Layout(data).file_offset(rva)
+        # CMP defines AF. Only the fallthrough XOR invalidates it before LAHF.
+        body = bytes.fromhex("39 d1 74 02 31 c0 9f c3")
+        data[start:start + len(body)] = body
+        changed = self.dir / "join.exe"
+        changed.write_bytes(data)
+        for signature in ([], ["--signature", "i64(i64,i64)"]):
+            failure = self.invoke("lift", changed, "--rva", hex(rva), *signature,
+                                  "--output", self.dir / "join.ll", code=1)
+            self.assertIn(f"{hex(rva+6)}: LAHF [9f]".encode(), failure.stderr)
+            self.assertIn(b"undefined condition flags: AF", failure.stderr)
 
     def test_atomic_publication(self):
         image = FIXTURES / "add.exe"

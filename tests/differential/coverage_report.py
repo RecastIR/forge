@@ -77,7 +77,7 @@ def inspect_result(row, case, record, entry, folder, wanted, run_id, expected_fo
     stages = field(record, "stages", dict)
     row["stages"] = stages
     if record["status"] == "infrastructure_failure":
-        row["execution_outcome"] = record.get("execution_outcome")
+        row["variants"] = record.get("variants", {})
         raise ValueError(record.get("diagnostic") or "runner stage failure")
     require(record["binary_sha256"] == row["binary_sha256"] and record["reference"] == row["reference"]
             and stages["reference_validation"] == "passed", "PE or validated reference identity mismatch")
@@ -99,18 +99,38 @@ def inspect_result(row, case, record, entry, folder, wanted, run_id, expected_fo
     if expected_forge is not None:
         require(record["forge_sha256"] == expected_forge, "Forge executable differs from the tested native build")
     row["forge_sha256"] = record["forge_sha256"]
-    require(record.get("execution_outcome") == "completed" and set(stages) == set(diff.STAGES)
-            and all(stages[s] == "passed" for s in diff.STAGES[:-1]), "enabled execution incomplete")
-    actual = Observation(field(record, "native_exit_code", int),
-                         read_file(folder / "stdout.bin", STREAM_LIMIT), read_file(folder / "stderr.bin", STREAM_LIMIT))
-    mismatch = differences(wanted, actual)
-    if mismatch:
-        row.update(status="failed", reason="\n".join(map(describe, mismatch)))
+    require(set(stages) == set(diff.STAGES) and all(stages[s] == "passed" for s in diff.STAGES[:-1]),
+            "enabled execution incomplete")
+    variants = field(record, "variants", dict)
+    require(set(variants) == set(diff.VARIANTS), f"expected baseline and o2 evidence, found {sorted(variants)}")
+    failures = []
+    for name in diff.VARIANTS:
+        evidence = variants[name]
+        try:
+            execution = field(evidence, "stages", dict)
+            require(evidence["variant"] == name and evidence["run_id"] == run_id
+                    and evidence.get("execution_outcome") == "completed"
+                    and set(execution) == set(diff.NATIVE_STAGES)
+                    and all(execution[s] == "passed" for s in diff.NATIVE_STAGES[:-1]),
+                    "missing or stale execution")
+            work = directory(folder, name)
+            actual = Observation(field(evidence, "native_exit_code", int),
+                                 read_file(work / "stdout.bin", STREAM_LIMIT), read_file(work / "stderr.bin", STREAM_LIMIT))
+            mismatch = differences(wanted, actual)
+            if mismatch:
+                failures.extend(f"{name}: {describe(item)}" for item in mismatch)
+            else:
+                require(evidence["status"] == "passed" and execution["comparison"] == "passed"
+                        and "native_process_status" not in evidence and actual.exit_code == 0
+                        and not evidence.get("differences") and not evidence.get("failure_categories"),
+                        "comparison result disagrees with captured behavior")
+        except INVALID as error:
+            raise ValueError(f"{name}: {error}") from error
+    if failures:
+        row.update(status="failed", reason="\n".join(failures))
     else:
         require(record["status"] == "passed" and stages["comparison"] == "passed"
-                and "native_process_status" not in record and actual.exit_code == 0
-                and not record.get("differences") and not record.get("failure_categories"),
-                "comparison result disagrees with captured behavior")
+                and not record.get("failure_categories"), "fixture result disagrees with variant evidence")
         row["status"] = "passed"
 
 

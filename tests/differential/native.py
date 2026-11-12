@@ -45,14 +45,15 @@ def command(args, log, stdout=None, *, timeout=180):
         raise ValueError(f"{args[0]} exited {status} ({log.name})\n{tail}")
 
 
-def build(ir, harness, work, config):
+def build(ir, harness, work, config, variant):
     if (platform.system(), platform.machine()) != ("Darwin", "arm64"):
         raise ValueError("native differential execution requires macOS arm64")
     tree = work / "native"
     log = work / "compilation.log"
     name = "differential_" + harness
     configure = ["cmake", "-S", SUITE.parents[1], "-B", tree, "-DBUILD_TESTING=OFF",
-                 f"-DFORGE_DIFFERENTIAL_IR={ir}", f"-DCMAKE_BUILD_TYPE={config.capitalize()}"]
+                 f"-DFORGE_DIFFERENTIAL_IR={ir}", f"-DFORGE_DIFFERENTIAL_VARIANT={variant}",
+                 f"-DCMAKE_BUILD_TYPE={config.capitalize()}"]
     build_target = ["cmake", "--build", tree, "--config", config.capitalize(), "--target"]
     for phase, args in (("configuration", configure), ("object compilation", [*build_target, name + "_objects"]),
                         ("linking", [*build_target, name])):

@@ -21,13 +21,15 @@ class NativeDifferentialTests(unittest.TestCase):
         self.assertEqual(report["failure_categories"], [category])
         return report
 
-    def modified_ir(self, fixture, name, category, mutate):
+    def modified_ir(self, fixture, name, category, mutate, only=None):
         compile_native = diff.native.build
 
-        def compile_copy(ir, harness, work, config):
-            changed = ir.with_name(name + ".ll")
+        def compile_copy(ir, harness, work, config, variant):
+            if only and only != variant:
+                return compile_native(ir, harness, work, config, variant)
+            changed = work / (name + ".ll")
             changed.write_text(mutate(ir.read_text()))
-            return compile_native(changed, harness, work, config)
+            return compile_native(changed, harness, work, config, variant)
 
         with patch.object(diff.native, "build", compile_copy):
             return self.negative(name, category, fixture=fixture)
@@ -41,30 +43,36 @@ class NativeDifferentialTests(unittest.TestCase):
             self.assertEqual(count, 1, "expected one return in the native wrapper")
             return changed
 
-        for fixture, pair_index in ((CASE, 0), (WEIGHTED, 1)):
+        for fixture, pair_index, variant in ((CASE, 0, "baseline"), (WEIGHTED, 1, "o2")):
             with self.subTest(fixture=fixture):
-                report = self.modified_ir(fixture, "changed-return", "stdout_mismatch", change_return)
+                report = self.modified_ir(fixture, "changed-return", "stdout_mismatch", change_return, only=variant)
+                other = "baseline" if variant == "o2" else "o2"
+                self.assertEqual(report["variants"][other]["status"], "passed")
                 self.assertEqual(report["status"], "behavioral_failure")
                 self.assertEqual(report["stages"]["native_execution"], "passed")
                 self.assertEqual(report["stages"]["comparison"], "failed")
-                mismatch, = report["differences"]
+                mismatch, = report["variants"][variant]["differences"]
                 self.assertEqual(mismatch["field"], "stdout")
                 manifest = next(m for m in diff.load_catalog() if m.case["id"] == fixture)
                 self.assertEqual(mismatch["operands"], manifest.case["args"][2 * pair_index:2 * pair_index + 2])
 
     def test_signed_comparison_with_truncated_right_operand(self):
         def truncate_right(source):
-            changed, count = re.subn(r"^  (%\w+ = icmp slt i64 %\w+, )(%\w+)$",
-                                     r"  %low = trunc i64 \2 to i32\n  %right = sext i32 %low to i64\n  \1%right",
-                                     source, flags=re.MULTILINE)
-            self.assertEqual(count, 1, "expected one signed comparison in the weighted fixture")
+            # Change the incoming RDX bits once. The weighted term already uses
+            # only EDX, so the only behavior affected is the signed comparison.
+            pattern = r"^(  store i64 )%1(, ptr %\w+, align \d+)$"
+            changed, count = re.subn(pattern, r"  %low = trunc i64 %1 to i32\n"
+                                     r"  %right = sext i32 %low to i64\n\1%right\2", source,
+                                     flags=re.MULTILINE)
+            self.assertEqual(count, 1, "expected the wrapper to initialize RDX once")
             return changed
 
         report = self.modified_ir(WEIGHTED, "truncated-right", "stdout_mismatch", truncate_right)
         self.assertEqual(report["stages"]["native_execution"], "passed")
         self.assertEqual(report["stages"]["comparison"], "failed")
-        mismatch, = report["differences"]
-        self.assertEqual(mismatch["operands"], ["1", "4294967295"])
+        for evidence in report["variants"].values():
+            mismatch, = evidence["differences"]
+            self.assertEqual(mismatch["operands"], ["1", "4294967295"])
 
     def test_native_build_failures(self):
         def missing_wrapper(source):
@@ -110,8 +118,9 @@ class NativeDifferentialTests(unittest.TestCase):
                 report = diff.read_json(work / "result.json")
                 self.assertEqual(report["status"], "passed")
                 observations.append((report["binary_sha256"], report["forge_sha256"], report["reference"],
-                                     (work / "generated/lifted.ll").read_bytes(), report["native_exit_code"],
-                                     (work / "stdout.bin").read_bytes(), (work / "stderr.bin").read_bytes()))
+                                     (work / "generated/lifted.ll").read_bytes(), report["variants"],
+                                     [(work / v / file).read_bytes() for v in diff.VARIANTS
+                                      for file in ("stdout.bin", "stderr.bin")]))
             self.assertEqual(observations[0], observations[1])
 
     def test_harness_failure(self):
@@ -119,7 +128,8 @@ class NativeDifferentialTests(unittest.TestCase):
         with patch.object(diff.native, "execute", lambda exe, args, work: execute(exe, ["invalid", "1"], work)):
             report = self.negative("invalid-operands", "native_execution_failure")
         self.assertIn("exited 2", report["diagnostic"])
-        self.assertEqual((report["execution_outcome"], report["native_process_status"]), ("harness_error", 2))
+        for evidence in report["variants"].values():
+            self.assertEqual((evidence["execution_outcome"], evidence["native_process_status"]), ("harness_error", 2))
         self.assertEqual(report["stages"]["comparison"], "not_run")
 
     def test_stale_reference(self):

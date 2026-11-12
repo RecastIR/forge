@@ -1,4 +1,5 @@
 #include "analysis/analysis.h"
+#include "lift/integer.h"
 
 #include "llvm/ADT/SmallString.h"
 #include "llvm/IR/IRBuilder.h"
@@ -84,23 +85,44 @@ std::vector<Step> decode(StringRef bytes, uint32_t begin, const MCDisassembler& 
 
 constexpr std::array<StringLiteral, 7> wideRegs{"RAX", "RCX", "RDX", "R8", "R9", "R10", "R11"};
 constexpr std::array<StringLiteral, 7> lowRegs{"EAX", "ECX", "EDX", "R8D", "R9D", "R10D", "R11D"};
-constexpr unsigned argumentMask = (1U << 1) | (1U << 2);
-
-// A CMP supplies a condition only to its immediate successor. A second incoming
-// edge invalidates that proof. Forward edges make one definite-assignment pass sufficient.
-struct Comparison {
-    Value *lhs = nullptr, *rhs = nullptr;
+constexpr std::array<StringLiteral, 7> words{"AX", "CX", "DX", "R8W", "R9W", "R10W", "R11W"};
+constexpr std::array<StringLiteral, 7> lowBytes{"AL", "CL", "DL", "R8B", "R9B", "R10B", "R11B"};
+constexpr std::array<StringLiteral, 3> highBytes{"AH", "CH", "DH"};
+struct RegisterView {
+    unsigned index, width, offset = 0;
+    uint64_t mask() const { return maskTrailingOnes<uint64_t>(width) << offset; }
 };
+using Defined = std::array<uint64_t, wideRegs.size()>;
 struct Incoming {
     BasicBlock* block;
-    unsigned defined;
-    Comparison cmp;
+    Defined defined;
+    std::vector<std::pair<BasicBlock*, x86::Flags>> predecessors;
 };
+
+// All predecessors are known when a reachable forward target is visited.
+x86::Flags mergeFlags(IRBuilder<>& ir, const Incoming& incoming) {
+    const auto& predecessors = incoming.predecessors;
+    x86::Flags flags{};
+    for (unsigned f = 0; f < x86::FlagCount && !predecessors.empty(); ++f) {
+        auto* first = predecessors.front().second[f];
+        if (!first || llvm::any_of(predecessors, [&](const auto& p) { return !p.second[f]; }))
+            continue;
+        if (llvm::all_of(predecessors, [&](const auto& p) { return p.second[f] == first; })) {
+            flags[f] = first;
+        } else {
+            auto* phi = ir.CreatePHI(ir.getInt1Ty(), static_cast<unsigned>(predecessors.size()));
+            for (const auto& [source, incomingFlags] : predecessors)
+                phi->addIncoming(incomingFlags[f], source);
+            flags[f] = phi;
+        }
+    }
+    return flags;
+}
 
 class Translator {
   public:
     Translator(llvm::Module& module, uint32_t rva, bool wrapper, const MCRegisterInfo& regs)
-        : ir(module.getContext()), regs(regs), wrapper(wrapper) {
+        : ir(module.getContext()), semantics(ir), regs(regs), wrapper(wrapper) {
         auto* type = FunctionType::get(ir.getVoidTy(), ir.getPtrTy(), false);
         impl = Function::Create(type, Function::InternalLinkage,
                                 "forge_lifted_" + utohexstr(rva, true), module);
@@ -114,6 +136,9 @@ class Translator {
                 Function::Create(nativeType, Function::ExternalLinkage, "forge_lifted", module);
             ir.SetInsertPoint(BasicBlock::Create(module.getContext(), "entry", native));
             auto* state = ir.CreateAlloca(stateType);
+            // Backing bits for partial writes must be concrete. Read eligibility is
+            // proved separately, so these zeros are never exposed as incoming values.
+            ir.CreateStore(ConstantAggregateZero::get(stateType), state);
             ir.CreateStore(native->getArg(0), slot(state, 1));
             ir.CreateStore(native->getArg(1), slot(state, 2));
             ir.CreateCall(impl, state);
@@ -125,50 +150,86 @@ class Translator {
 
   private:
     IRBuilder<> ir;
+    x86::IntegerSemantics semantics;
     const MCRegisterInfo& regs;
     bool wrapper;
     Function* impl;
     ArrayType* stateType;
-    unsigned defined = 0;
+    Defined defined{};
 
     Value* slot(Value* state, unsigned index) {
         return ir.CreateInBoundsGEP(stateType, state, {ir.getInt32(0), ir.getInt32(index)});
     }
-    unsigned reg(const Step& s, const MCOperand& operand, unsigned width) const;
-    Value* read(const Step& s, unsigned index, unsigned width);
+    RegisterView reg(const Step& s, const MCOperand& operand, unsigned width) const;
+    Value* read(const Step& s, RegisterView view);
     Value* value(const Step& s, const MCOperand& operand, unsigned width);
-    void write(unsigned index, Value* v);
-    Comparison arithmetic(const Step& s);
+    void write(RegisterView view, Value* v);
+    Value* require(const Step& s, x86::Flag flag) const;
+    Value* condition(const Step& s);
+    void integer(const Step& s, const x86::IntegerInstruction& instruction);
+    void lower(const Step& s);
     void lea(const Step& s);
 };
 
-unsigned Translator::reg(const Step& s, const MCOperand& op, unsigned width) const {
+RegisterView Translator::reg(const Step& s, const MCOperand& op, unsigned width) const {
     if (!op.isReg() || !op.getReg())
         s.reject("expected a general-purpose register");
     auto name = StringRef(regs.getName(op.getReg()));
-    const auto& names = width == 64 ? wideRegs : lowRegs;
+    const auto& names = width == 64   ? wideRegs
+                        : width == 32 ? lowRegs
+                        : width == 16 ? words
+                                      : lowBytes;
     auto it = llvm::find(names, name);
-    if (it == names.end())
-        s.reject("unsupported register " + name);
-    return static_cast<unsigned>(it - names.begin());
+    if (it != names.end())
+        return {static_cast<unsigned>(it - names.begin()), width};
+    if (width == 8) {
+        auto high = llvm::find(highBytes, name);
+        if (high != highBytes.end())
+            return {static_cast<unsigned>(high - highBytes.begin()), 8, 8};
+    }
+    s.reject("unsupported register " + name);
 }
 
-Value* Translator::read(const Step& s, unsigned index, unsigned width) {
-    if (wrapper && !(defined & (1U << index)))
-        s.reject("native wrapper requires undefined incoming " + wideRegs[index]);
-    auto* v = ir.CreateLoad(ir.getInt64Ty(), slot(impl->getArg(0), index));
-    return ir.CreateTruncOrBitCast(v, ir.getIntNTy(width));
+Value* Translator::read(const Step& s, RegisterView view) {
+    if ((defined[view.index] & view.mask()) != view.mask())
+        s.reject("native wrapper requires undefined incoming " + wideRegs[view.index]);
+    Value* v = ir.CreateLoad(ir.getInt64Ty(), slot(impl->getArg(0), view.index));
+    if (view.offset)
+        v = ir.CreateLShr(v, view.offset);
+    return ir.CreateTruncOrBitCast(v, ir.getIntNTy(view.width));
 }
 
 Value* Translator::value(const Step& s, const MCOperand& op, unsigned width) {
     if (op.isImm())
         return ConstantInt::getSigned(ir.getIntNTy(width), op.getImm());
-    return read(s, reg(s, op, width), width);
+    return read(s, reg(s, op, width));
 }
 
-void Translator::write(unsigned index, Value* v) {
-    ir.CreateStore(ir.CreateZExtOrBitCast(v, ir.getInt64Ty()), slot(impl->getArg(0), index));
-    defined |= 1U << index;
+void Translator::write(RegisterView view, Value* v) {
+    auto* ptr = slot(impl->getArg(0), view.index);
+    auto* result = ir.CreateZExtOrBitCast(v, ir.getInt64Ty());
+    if (view.width < 32) {
+        auto* parent = ir.CreateLoad(ir.getInt64Ty(), ptr);
+        result = ir.CreateOr(ir.CreateAnd(parent, ~view.mask()), ir.CreateShl(result, view.offset));
+        defined[view.index] |= view.mask();
+    } else {
+        defined[view.index] = UINT64_MAX;
+    }
+    ir.CreateStore(result, ptr);
+}
+
+Value* Translator::require(const Step& s, x86::Flag flag) const {
+    if (!semantics.flags[flag])
+        s.reject("unsupported use of undefined condition flags: " + x86::flagNames[flag]);
+    return semantics.flags[flag];
+}
+
+Value* Translator::condition(const Step& s) {
+    auto code = s.inst.getOperand(s.inst.getNumOperands() - 1).getImm();
+    if (code < 0 || code > 15)
+        s.reject("unsupported condition code");
+    return semantics.condition(static_cast<unsigned>(code),
+                               [&](x86::Flag f) { return require(s, f); });
 }
 
 void Translator::lea(const Step& s) {
@@ -189,78 +250,64 @@ void Translator::lea(const Step& s) {
     write(reg(s, i.getOperand(0), width), ir.CreateTruncOrBitCast(result, ir.getIntNTy(width)));
 }
 
-Comparison Translator::arithmetic(const Step& s) {
-    // Public MC instruction names allow an exact form check with packaged LLVM,
-    // which does not install the generated X86 opcode and register enums.
-    StringRef form = s.opcode;
-    StringRef operation = form.take_while([](char c) { return c >= 'A' && c <= 'Z'; });
-    form = form.drop_front(operation.size());
-    unsigned width = 0;
-    if (form.consume_front("64"))
-        width = 64;
-    else if (form.consume_front("32"))
-        width = 32;
-    else
-        s.reject("unsupported instruction or operand width");
+void Translator::integer(const Step& s, const x86::IntegerInstruction& instruction) {
+    using x86::Form;
+    using x86::Op;
+    auto [op, form, width, sourceWidth] = instruction;
     const auto& i = s.inst;
-    bool registerPair = form == "rr" || form == "rr_REV";
-    bool registerImmediate = form == "ri" || form == "ri8" || form == "ri32";
-    bool accumulatorImmediate = form == "i32"; // implicit EAX/RAX accumulator immediate
-    if (operation == "MOV" && (registerPair || registerImmediate || form == "ri_alt")) {
-        write(reg(s, i.getOperand(0), width), value(s, i.getOperand(1), width));
-        return {};
+    auto dest = form == Form::Accumulator ? RegisterView{0, width} : reg(s, i.getOperand(0), width);
+    const auto& last = i.getOperand(i.getNumOperands() - 1);
+    if (op == Op::Mov || form == Form::Extend) {
+        write(dest,
+              ir.CreateIntCast(value(s, last, sourceWidth), ir.getIntNTy(width), op == Op::Movsx));
+        return;
     }
-    if ((operation == "XOR" || operation == "SUB") && registerPair &&
-        i.getOperand(1).getReg() == i.getOperand(2).getReg()) {
-        write(reg(s, i.getOperand(0), width), ir.getIntN(width, 0));
-        return {};
+    if (form == Form::ShiftCL || form == Form::ShiftOne || form == Form::ShiftImmediate) {
+        auto* count =
+            form == Form::ShiftCL
+                ? read(s, {1, 8})
+                : ir.getInt8(form == Form::ShiftOne ? 1 : static_cast<uint8_t>(last.getImm()));
+        write(dest, semantics.shift(op, read(s, dest), count));
+        return;
     }
-    bool compare = operation == "CMP";
-    if (!((operation == "ADD" || operation == "SUB" || compare) &&
-          (registerPair || registerImmediate || accumulatorImmediate)) &&
-        !(operation == "IMUL" && registerPair))
-        s.reject("unsupported instruction or operand form");
-    unsigned dest = accumulatorImmediate ? 0 : reg(s, i.getOperand(0), width);
-    Value* lhs = read(s, dest, width);
-    Value* rhs = value(s, i.getOperand(i.getNumOperands() - 1), width);
-    if (compare)
-        return {lhs, rhs};
-    Value* result;
-    if (operation == "ADD")
-        result = ir.CreateAdd(lhs, rhs);
-    else if (operation == "SUB")
-        result = ir.CreateSub(lhs, rhs);
-    else
-        result = ir.CreateMul(lhs, rhs);
-    write(dest, result);
-    return {};
+    // XOR and SUB of an identical register define a result and flags even if
+    // that register's previous value was unavailable at wrapper entry.
+    bool zeroing = (op == Op::Xor || op == Op::Sub) && form == Form::Pair &&
+                   i.getOperand(0).getReg() == last.getReg();
+    Value* lhs = zeroing ? ir.getIntN(width, 0) : read(s, dest);
+    Value* rhs = nullptr;
+    if (form != Form::Reg)
+        rhs = zeroing ? lhs : value(s, last, width);
+    if (op == Op::Adc || op == Op::Sbb)
+        require(s, x86::CF);
+    auto* result = semantics.arithmetic(op, lhs, rhs);
+    if (op != Op::Cmp && op != Op::Test)
+        write(dest, result);
 }
 
-CmpInst::Predicate predicate(const Step& s) {
-    // Intel condition-code nibble from the decoded Jcc operand.
-    switch (s.inst.getOperand(1).getImm()) {
-    case 2:
-        return CmpInst::ICMP_ULT;
-    case 3:
-        return CmpInst::ICMP_UGE;
-    case 4:
-        return CmpInst::ICMP_EQ;
-    case 5:
-        return CmpInst::ICMP_NE;
-    case 6:
-        return CmpInst::ICMP_ULE;
-    case 7:
-        return CmpInst::ICMP_UGT;
-    case 12:
-        return CmpInst::ICMP_SLT;
-    case 13:
-        return CmpInst::ICMP_SGE;
-    case 14:
-        return CmpInst::ICMP_SLE;
-    case 15:
-        return CmpInst::ICMP_SGT;
-    default:
-        s.reject("unsupported condition code");
+void Translator::lower(const Step& s) {
+    if (s.opcode == "LEA64r" || s.opcode == "LEA64_32r") {
+        lea(s);
+    } else if (s.opcode == "SETCCr") {
+        write(reg(s, s.inst.getOperand(0), 8), ir.CreateZExt(condition(s), ir.getInt8Ty()));
+    } else if (s.opcode == "CMOV16rr" || s.opcode == "CMOV32rr" || s.opcode == "CMOV64rr") {
+        unsigned width = s.opcode == "CMOV16rr" ? 16 : s.opcode == "CMOV32rr" ? 32 : 64;
+        auto dest = reg(s, s.inst.getOperand(0), width);
+        auto* old = read(s, dest);
+        auto* src = value(s, s.inst.getOperand(2), width);
+        write(dest, ir.CreateSelect(condition(s), src, old));
+    } else if (s.opcode == "LAHF") {
+        Value* byte = ir.getInt8(2);
+        for (auto [flag, bit] :
+             {std::pair{x86::SF, 7U}, {x86::ZF, 6U}, {x86::AF, 4U}, {x86::PF, 2U}, {x86::CF, 0U}}) {
+            byte = ir.CreateOr(byte,
+                               ir.CreateShl(ir.CreateZExt(require(s, flag), ir.getInt8Ty()), bit));
+        }
+        write({0, 8, 8}, byte);
+    } else if (auto instruction = x86::integerInstruction(s.opcode)) {
+        integer(s, *instruction);
+    } else {
+        s.reject("unsupported instruction or operand form");
     }
 }
 
@@ -269,14 +316,19 @@ void Translator::translate(const std::vector<Step>& steps) {
     auto block = [&](uint32_t addr) {
         return BasicBlock::Create(ir.getContext(), "rva_" + utohexstr(addr, true), impl);
     };
-    incoming.emplace(steps.front().rva, Incoming{block(steps.front().rva), argumentMask, {}});
+    Defined entry{};
+    if (!wrapper)
+        entry.fill(UINT64_MAX);
+    entry[1] = entry[2] = UINT64_MAX;
+    incoming.emplace(steps.front().rva, Incoming{block(steps.front().rva), entry, {}});
     for (const Step& s : steps) {
         auto it = incoming.find(s.rva);
         if (it == incoming.end())
             continue;
         ir.SetInsertPoint(it->second.block);
         defined = it->second.defined;
-        auto edge = [&](int64_t address, Comparison cmp = {}) {
+        semantics.flags = mergeFlags(ir, it->second);
+        auto edge = [&](int64_t address) {
             if (address <= s.rva || address >= steps.back().next)
                 s.reject("backward edge or control flow outside function to " +
                          hex(static_cast<uint64_t>(address)));
@@ -287,38 +339,38 @@ void Translator::translate(const std::vector<Step>& steps) {
                 s.reject("branch enters an instruction at " + hex(static_cast<uint64_t>(address)));
             auto [dest, added] = incoming.try_emplace(target->rva);
             if (added)
-                dest->second = {block(target->rva), defined, cmp};
+                dest->second = {block(target->rva), defined, {}};
             else {
-                dest->second.defined &= defined;
-                dest->second.cmp = {};
+                for (size_t j = 0; j < defined.size(); ++j)
+                    dest->second.defined[j] &= defined[j];
             }
+            dest->second.predecessors.emplace_back(ir.GetInsertBlock(), semantics.flags);
             return dest->second.block;
         };
-        auto bytes = arrayRefFromStringRef(s.bytes);
-        uint8_t first = bytes.front();
-        if (legacyPrefix(first) || ((first & 0xf0) == 0x40 && bytes.size() > 1 &&
-                                    (legacyPrefix(bytes[1]) || (bytes[1] & 0xf0) == 0x40)))
+        auto encoding = arrayRefFromStringRef(s.bytes);
+        if (encoding.front() == 0x66) {
+            auto instruction = x86::integerInstruction(s.opcode);
+            if ((!instruction || instruction->width != 16) && s.opcode != "CMOV16rr")
+                s.reject("unsupported instruction prefix");
+            encoding = encoding.drop_front();
+        }
+        if (!encoding.empty() && (encoding.front() & 0xf0) == 0x40)
+            encoding = encoding.drop_front();
+        if (encoding.empty() || legacyPrefix(encoding.front()) || (encoding.front() & 0xf0) == 0x40)
             s.reject("unsupported instruction prefix");
         if (s.opcode == "RET64") {
-            if (wrapper && !(defined & 1U))
+            if (wrapper && defined[0] != UINT64_MAX)
                 s.reject("return with undefined RAX");
             ir.CreateRetVoid();
         } else if (s.opcode == "JMP_1" || s.opcode == "JMP_4") {
             ir.CreateBr(edge(int64_t(s.next) + s.inst.getOperand(0).getImm()));
         } else if (s.opcode == "JCC_1" || s.opcode == "JCC_4") {
-            auto cmp = it->second.cmp;
-            if (!cmp.lhs)
-                s.reject("condition flags require an immediately preceding CMP on every path");
-            auto* cond = ir.CreateICmp(predicate(s), cmp.lhs, cmp.rhs);
+            auto* cond = condition(s);
             auto* taken = edge(int64_t(s.next) + s.inst.getOperand(0).getImm());
             ir.CreateCondBr(cond, taken, edge(s.next));
         } else {
-            Comparison cmp;
-            if (s.opcode == "LEA64r" || s.opcode == "LEA64_32r")
-                lea(s);
-            else
-                cmp = arithmetic(s);
-            ir.CreateBr(edge(s.next, cmp));
+            lower(s);
+            ir.CreateBr(edge(s.next));
         }
     }
 }
