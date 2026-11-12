@@ -51,12 +51,20 @@ def build(ir, harness, work, config):
     tree = work / "native"
     log = work / "compilation.log"
     name = "differential_" + harness
-    command(["cmake", "-S", SUITE.parents[1], "-B", tree, "-DBUILD_TESTING=OFF",
-             f"-DFORGE_DIFFERENTIAL_IR={ir}", f"-DCMAKE_BUILD_TYPE={config.capitalize()}"], log)
-    command(["cmake", "--build", tree, "--config", config.capitalize(), "--target", name], log)
+    configure = ["cmake", "-S", SUITE.parents[1], "-B", tree, "-DBUILD_TESTING=OFF",
+                 f"-DFORGE_DIFFERENTIAL_IR={ir}", f"-DCMAKE_BUILD_TYPE={config.capitalize()}"]
+    build_target = ["cmake", "--build", tree, "--config", config.capitalize(), "--target"]
+    for phase, args in (("configuration", configure), ("object compilation", [*build_target, name + "_objects"]),
+                        ("linking", [*build_target, name])):
+        with log.open("a") as stream:
+            print(f"\n--- {phase} ---", file=stream)
+        try:
+            command(args, log)
+        except (OSError, ValueError, subprocess.SubprocessError) as error:
+            raise ValueError(f"native {phase} failed: {error}") from error
     executable = tree / "bin" / name
     if not executable.is_file() or not os.access(executable, os.X_OK):
-        raise ValueError(f"native build did not produce an executable harness: {executable} ({log.name})")
+        raise ValueError(f"native linking did not produce an executable harness: {executable} ({log.name})")
     return executable
 
 

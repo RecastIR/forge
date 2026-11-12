@@ -40,6 +40,14 @@ class ComparisonTests(unittest.TestCase):
         self.assertEqual([e["field"] for e in errors], ["exit_code", "stdout", "stderr"])
         self.assertEqual(errors[0], dict(field="exit_code", expected=4660, actual=52))
 
+    def test_decimal_pair_at_first_differing_expected_byte(self):
+        args = ["0", "0", "0", "7"]
+        wanted = Observation(0, b"0\n-7\n", b"")
+        for stdout, operands in ((b"1\n-7\n", args[:2]), (b"0\n", args[2:]), (b"0\n-7\n0\n", None)):
+            with self.subTest(stdout=stdout):
+                mismatch, = diff.native_differences(wanted, Observation(0, stdout, b""), "decimal_pairs", args)
+                self.assertEqual(mismatch.get("operands"), operands)
+
 
 class ArtifactSetup(unittest.TestCase):
     def setUp(self):

@@ -119,6 +119,17 @@ def lift(forge, image, case, rva, ir):
         raise
 
 
+def native_differences(wanted, actual, harness, args):
+    mismatches = differences(wanted, actual)
+    for mismatch in mismatches:
+        if harness == "decimal_pairs" and mismatch["field"] == "stdout":
+            offset = mismatch["offset"]
+            first = 2 * wanted.stdout.count(b"\n", 0, offset)
+            if offset < len(wanted.stdout) and first + 1 < len(args):
+                mismatch["operands"] = args[first:first + 2]
+    return mismatches
+
+
 def run_case(manifest, case, config, binaries, references, forge, work):
     report = dict(schema_version=1, fixture_id=manifest.case["id"], build_config=config,
                   status="uncovered", scope=None)
@@ -170,7 +181,7 @@ def run_case(manifest, case, config, binaries, references, forge, work):
         stages[stage] = "passed"
 
         stage = "comparison"
-        mismatches = differences(wanted, actual)
+        mismatches = native_differences(wanted, actual, case["harness"], manifest.case["args"])
         if mismatches:
             report.update(status="behavioral_failure", differences=mismatches,
                           failure_categories=[e["field"] + "_mismatch" for e in mismatches])
@@ -258,11 +269,13 @@ def run(config, fixture=None, *, binaries=BINARIES, references=REFERENCES, outpu
                     print("  " + ", ".join(f"{k}={v}" for k, v in result["stages"].items()))
                 if "reference" in result and result["scope"]:
                     print(f"  {result['reference']['wine_version']} -> {result['native_target']}, "
-                          f"{result['function']} {result.get('function_rva', '(unresolved)')}")
+                          f"{result['function']} {result.get('function_rva', '(unresolved)')} {result['signature']}")
                 if "diagnostic" in result:
                     print(result["diagnostic"])
                 for mismatch in result.get("differences", []):
                     print(describe(mismatch))
+                    if "operands" in mismatch:
+                        print("  operands: " + ", ".join(mismatch["operands"]))
             if not summary["executed"]:
                 raise ValueError("zero differential cases executed")
             if summary["passed"] + summary["uncovered"] + summary["blocked"] == len(selected):

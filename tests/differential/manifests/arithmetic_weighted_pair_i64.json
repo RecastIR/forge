@@ -1,0 +1,27 @@
+{
+  "schema_version": 1,
+  "id": "arithmetic/weighted_pair_i64",
+  "description": "Print a weighted sum or difference of the low 32 bits, selected by signed 64-bit operand order.",
+  "source": "fixtures/arithmetic/weighted_pair_i64.c",
+  "binary": "arithmetic_weighted_pair_i64.exe",
+  "args": [
+    "0", "0",
+    "0", "7",
+    "7", "7",
+    "19", "5",
+    "5", "19",
+    "-30", "-7",
+    "-7", "-30",
+    "-1", "1",
+    "4294967295", "1",
+    "1", "-1",
+    "4294967296", "17",
+    "-9999999999", "9999999999",
+    "9999999999", "-9999999999"
+  ],
+  "expected": {
+    "exit_code": 0,
+    "stdout": "0\n-7\n28\n62\n-4\n8589934509\n17179869133\n12884901884\n12884901886\n4294967298\n17\n7244640260\n7115098110\n",
+    "stderr": ""
+  }
+}
