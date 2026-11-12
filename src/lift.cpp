@@ -1,5 +1,6 @@
 #include "analysis.h"
 
+#include "llvm/ADT/SmallString.h"
 #include "llvm/IR/IRBuilder.h"
 #include "llvm/IR/Module.h"
 #include "llvm/IR/Verifier.h"
@@ -13,6 +14,7 @@
 #include "llvm/MC/TargetRegistry.h"
 #include "llvm/Support/FileSystem.h"
 #include "llvm/Support/TargetSelect.h"
+#include "llvm/Support/ToolOutputFile.h"
 #include "llvm/Transforms/Utils/ModuleUtils.h"
 
 #include <algorithm>
@@ -101,6 +103,7 @@ public:
     impl = Function::Create(type, Function::InternalLinkage, "forge_lifted_" + utohexstr(rva, true),
                             module);
     impl->getArg(0)->setName("state");
+    appendToUsed(module, {impl});
     stateType = ArrayType::get(ir.getInt64Ty(), wideRegs.size());
     if (wrapper) {
       auto *nativeType =
@@ -113,8 +116,6 @@ public:
       ir.CreateStore(native->getArg(1), slot(state, 2));
       ir.CreateCall(impl, state);
       ir.CreateRet(ir.CreateLoad(ir.getInt64Ty(), slot(state, 0)));
-    } else {
-      appendToUsed(module, {impl});
     }
   }
 
@@ -206,7 +207,8 @@ Comparison Translator::arithmetic(const Step &s) {
     write(reg(s, i.getOperand(0), width), value(s, i.getOperand(1), width));
     return {};
   }
-  if (operation == "XOR" && registerPair && i.getOperand(1).getReg() == i.getOperand(2).getReg()) {
+  if ((operation == "XOR" || operation == "SUB") && registerPair &&
+      i.getOperand(1).getReg() == i.getOperand(2).getReg()) {
     write(reg(s, i.getOperand(0), width), ir.getIntN(width, 0));
     return {};
   }
@@ -317,20 +319,22 @@ void Translator::translate(const std::vector<Step> &steps) {
 }
 
 void publish(const llvm::Module &module, const fs::path &path) {
-  auto file = sys::fs::TempFile::create(path.string() + ".tmp-%%%%%%");
-  if (!file)
-    throw InspectionError(toString(file.takeError()), "OUTPUT_ERROR");
-  raw_fd_ostream stream(file->FD, false);
+  SmallString<128> temporary;
+  int fd;
+  if (auto ec = sys::fs::createUniqueFile(path.string() + ".tmp-%%%%%%", fd, temporary))
+    throw InspectionError(ec.message(), "OUTPUT_ERROR");
+  ToolOutputFile file(temporary, fd);
+  auto &stream = file.os();
   module.print(stream, nullptr);
-  stream.flush();
+  stream.close();
   if (stream.has_error()) {
     auto error = stream.error();
     stream.clear_error();
-    throw InspectionError(toString(joinErrors(errorCodeToError(error), file->discard())),
-                          "OUTPUT_ERROR");
+    throw InspectionError(error.message(), "OUTPUT_ERROR");
   }
-  if (auto err = file->keep(path.native()))
-    throw InspectionError(toString(std::move(err)), "OUTPUT_ERROR");
+  if (auto ec = sys::fs::rename(temporary, path.native()))
+    throw InspectionError(ec.message(), "OUTPUT_ERROR");
+  file.keep();
 }
 } // namespace
 
@@ -340,15 +344,19 @@ void lift(const Analysis &a, MemoryBufferRef buffer, uint32_t rva, bool wrapper,
     fail(rva, "DLL lifting is unsupported");
   auto it = llvm::lower_bound(a.functions, rva,
                               [](const auto &f, uint32_t addr) { return f.record.begin < addr; });
-  while (it != a.functions.end() && it->record.begin == rva && !it->eligible())
+  while (it != a.functions.end() && it->record.begin == rva && (it->invalid || it->overlapGroup))
     ++it;
   if (it == a.functions.end() || it->record.begin != rva)
     fail(rva, "expected an exact, valid, unambiguous discovered function start");
+  if (it->unsupportedUnwindVersion)
+    fail(rva, "unsupported unwind version " + Twine(*it->unsupportedUnwindVersion));
+  if (it->chainedFragment)
+    fail(rva, "chained unwind fragment has no independent function entry");
   const auto &f = it->record;
   auto size = f.end - f.begin;
-  auto *section = backingSection(a.module, rva, size);
-  auto bytes =
-      buffer.getBuffer().substr(uint64_t(section->fileOffset) + (rva - section->rva), size);
+  auto code = mapRva(a.module.sections, buffer.getBuffer(), rva, size);
+  if (!code)
+    fail(rva, "function bytes outside file-backed sections");
   for (const auto &b : a.module.relocations)
     for (const auto &rel : b.entries) {
       if (!rel.type)
@@ -374,7 +382,7 @@ void lift(const Analysis &a, MemoryBufferRef buffer, uint32_t rva, bool wrapper,
       target->createMCAsmInfo(*regs, triple.str(), MCTargetOptions()));
   MCContext mc(triple, assembly.get(), regs.get(), sub.get());
   std::unique_ptr<MCDisassembler> dis(target->createMCDisassembler(*sub, mc));
-  auto steps = decode(bytes, rva, *dis, *instructions);
+  auto steps = decode(code->bytes, rva, *dis, *instructions);
   LLVMContext context;
   llvm::Module module("forge_" + utohexstr(rva, true), context);
   module.setTargetTriple("arm64-apple-macosx11.0.0");

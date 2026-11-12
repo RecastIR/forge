@@ -22,8 +22,8 @@ class Case(unittest.TestCase):
         shutil.copyfile(FIXTURES / name, dest)
         return dest
 
-    def invoke(self, *args, code=0, cwd=None, env=None):
-        p = subprocess.run([FORGE, *args], capture_output=True, cwd=cwd, env=env, timeout=15)
+    def invoke(self, *args, code=0, **options):
+        p = subprocess.run([FORGE, *args], capture_output=True, timeout=15, **options)
         self.assertEqual(p.returncode, code, (args, p.stderr.decode(errors="replace")))
         self.assertNotIn(b"Sanitizer", p.stderr)
         self.assertNotIn(b"runtime error:", p.stderr)

@@ -12,11 +12,30 @@
 #include <type_traits>
 
 namespace forge {
+
+std::optional<MappedRange> mapRva(llvm::ArrayRef<Section> sections, llvm::StringRef file,
+                                  uint64_t rva, std::optional<uint32_t> size) {
+  for (const auto &s : sections) {
+    if (rva < s.rva)
+      continue;
+    const uint64_t delta = rva - s.rva;
+    const uint32_t extent = std::min(s.virtualSize, s.rawSize);
+    if (delta >= extent)
+      continue;
+    const uint32_t available = extent - delta;
+    const uint32_t length = size.value_or(available);
+    const uint64_t offset = uint64_t(s.fileOffset) + delta;
+    if (length > available || offset > file.size() || length > file.size() - offset)
+      return std::nullopt;
+    return MappedRange{s, file.substr(offset, length), offset};
+  }
+  return std::nullopt;
+}
+
 namespace {
 using namespace llvm;
 using namespace llvm::object;
 using namespace llvm::support;
-
 
 [[noreturn]] void invalid(StringRef field, uint64_t offset, StringRef reason) {
   throw InspectionError(field.str() + " at file offset " + hex(offset) + ": " + reason.str());
@@ -65,7 +84,7 @@ public:
 private:
   View file;
   pe32plus_header header;
-  std::vector<coff_section> sections;
+  std::vector<Section> sections;
   std::unique_ptr<COFFObjectFile> object;
   // Shared or overlapping tables can expand a tiny input into a huge report.
   size_t remainingRecords = 1'000'000;
@@ -84,17 +103,8 @@ private:
 };
 
 View Image::tail(uint64_t rva, StringRef label) const {
-  for (const auto &s : sections) {
-    if (rva < s.VirtualAddress)
-      continue;
-    uint64_t delta = rva - s.VirtualAddress;
-    const uint32_t size = std::min(s.VirtualSize, s.SizeOfRawData);
-    if (delta < size) {
-      View result = file.slice(uint64_t(s.PointerToRawData) + delta, size - delta);
-      result.label = label;
-      return result;
-    }
-  }
+  if (auto mapped = mapRva(sections, file.bytes, rva))
+    return {mapped->bytes, mapped->fileOffset, label};
   throw InspectionError(label.str() + " RVA " + hex(rva) + " is outside file-backed sections");
 }
 
@@ -137,12 +147,20 @@ Image::Image(MemoryBufferRef buffer) : file{buffer.getBuffer(), 0, "PE headers"}
     if (uint64_t(s.VirtualAddress) + s.VirtualSize > header.SizeOfImage)
       invalid("section virtual range", table + i * sizeof(s), "exceeds SizeOfImage");
     for (const auto &previous : sections) {
-      if (s.VirtualSize && previous.VirtualSize &&
-          s.VirtualAddress < uint64_t(previous.VirtualAddress) + previous.VirtualSize &&
-          previous.VirtualAddress < uint64_t(s.VirtualAddress) + s.VirtualSize)
+      if (s.VirtualSize && previous.virtualSize &&
+          s.VirtualAddress < uint64_t(previous.rva) + previous.virtualSize &&
+          previous.rva < uint64_t(s.VirtualAddress) + s.VirtualSize)
         invalid("section virtual range", table + i * sizeof(s), "overlaps another section");
     }
-    sections.push_back(s);
+    std::string rwx = "---";
+    if (s.Characteristics & COFF::IMAGE_SCN_MEM_READ)
+      rwx[0] = 'r';
+    if (s.Characteristics & COFF::IMAGE_SCN_MEM_WRITE)
+      rwx[1] = 'w';
+    if (s.Characteristics & COFF::IMAGE_SCN_MEM_EXECUTE)
+      rwx[2] = 'x';
+    sections.push_back(
+        {{}, rwx, s.VirtualAddress, s.VirtualSize, s.PointerToRawData, s.SizeOfRawData});
   }
   if (coff.NumberOfSymbols && !coff.PointerToSymbolTable)
     invalid("COFF symbol table", pe + 4, "missing file offset");
@@ -391,8 +409,8 @@ Module Image::inspect(bool analysis) {
   module.dll = object->getCharacteristics() & COFF::IMAGE_FILE_DLL;
   module.imageBase = object->getImageBase();
   module.entryPoint = header.AddressOfEntryPoint;
+  size_t index = 0;
   for (const auto &section : object->sections()) {
-    const auto *s = object->getCOFFSection(section);
     auto n = section.getName();
     if (!n)
       throw InspectionError("section name: " + toString(n.takeError()));
@@ -401,15 +419,7 @@ Module Image::inspect(bool analysis) {
     remainingNameBytes -= n->size();
     if (!json::isUTF8(*n))
       throw InspectionError("invalid UTF-8 section name");
-    std::string rwx = "---";
-    if (s->Characteristics & COFF::IMAGE_SCN_MEM_READ)
-      rwx[0] = 'r';
-    if (s->Characteristics & COFF::IMAGE_SCN_MEM_WRITE)
-      rwx[1] = 'w';
-    if (s->Characteristics & COFF::IMAGE_SCN_MEM_EXECUTE)
-      rwx[2] = 'x';
-    module.sections.push_back(
-        {n->str(), rwx, s->VirtualAddress, s->VirtualSize, s->PointerToRawData, s->SizeOfRawData});
+    sections[index++].name = n->str();
   }
   if (!analysis) {
     imports(module, false);
@@ -419,6 +429,7 @@ Module Image::inspect(bool analysis) {
   relocations(module);
   tls(module);
   exceptions(module, analysis);
+  module.sections = std::move(sections);
   return module;
 }
 } // namespace
@@ -426,7 +437,7 @@ Module Image::inspect(bool analysis) {
 Module inspectPE(llvm::MemoryBufferRef buffer) { return Image(buffer).inspect(); }
 Analysis analyzePE(llvm::MemoryBufferRef buffer, bool debugInfo) {
   Image image(buffer);
-  auto result = discover(image.inspect(true));
+  auto result = discover(image.inspect(true), buffer.getBuffer());
   if (debugInfo)
     enrichFunctions(result, image.coff());
   return result;

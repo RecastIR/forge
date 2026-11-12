@@ -2,8 +2,8 @@
 
 #include "llvm/Support/FormatVariadic.h"
 #include "llvm/Support/JSON.h"
+#include "llvm/Support/Unicode.h"
 
-#include "llvm/Support/Format.h"
 #include <algorithm>
 #include <map>
 
@@ -141,16 +141,24 @@ void textModule(const Module &m, bool verbose, raw_ostream &out) {
   out << m.path.string() << "  (PE32+ AMD64 " << (m.dll ? "DLL" : "EXE") << ")\n"
       << "  Image base VA " << hex(m.imageBase) << "  Entry point RVA " << hex(m.entryPoint)
       << "\n";
-  size_t width = 8;
+  auto columns = [](StringRef name) -> size_t {
+    int width = sys::unicode::columnWidthUTF8(name);
+    return width < 0 ? name.size() : static_cast<size_t>(width);
+  };
+  constexpr StringLiteral heading = "Sections";
+  size_t width = heading.size();
   for (const auto &s : m.sections)
-    width = std::max(width, s.name.size());
-  out << "    " << left_justify("Sections", width) << "  "
+    width = std::max(width, columns(s.name));
+  out << "    " << heading;
+  out.indent(width - heading.size() + 2)
       << formatv("{0,-12}{1,-15}{2,-14}{3,-11}{4}\n", "RVA", "Virtual size", "File offset",
                  "Raw size", "Permissions");
-  for (const auto &s : m.sections)
-    out << "    " << left_justify(s.name, width) << "  "
+  for (const auto &s : m.sections) {
+    out << "    " << s.name;
+    out.indent(width - columns(s.name) + 2)
         << formatv("{0,-12}{1,-15}{2,-14}{3,-11}{4}\n", hex(s.rva), s.virtualSize, s.fileOffset,
                    s.rawSize, s.permissions);
+  }
   size_t symbols = 0, relocations = 0;
   for (const auto &i : m.imports)
     symbols += i.symbols.size();

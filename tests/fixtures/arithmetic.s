@@ -67,6 +67,15 @@ function immediates
   addq $-100000, %rax
   finish
 
+function zero64
+  subq %rax, %rax
+  finish
+
+function zero32
+  subl %ecx, %ecx
+  movq %rcx, %rax
+  finish
+
 .globl uncovered
 uncovered:
   retq

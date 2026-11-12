@@ -4,21 +4,17 @@
 #include "llvm/Object/ObjectFile.h"
 #include "llvm/Support/FormatVariadic.h"
 #include "llvm/Support/JSON.h"
+#include "llvm/Support/MathExtras.h"
+#include "llvm/Support/Win64EH.h"
 
 #include <algorithm>
+#include <cstddef>
+#include <cstring>
 #include <numeric>
 #include <tuple>
 
 namespace forge {
 using namespace llvm;
-
-const Section *backingSection(const Module &module, uint32_t rva, uint32_t size) {
-  for (const auto &s : module.sections) {
-    if (rva >= s.rva && uint64_t(rva - s.rva) + size <= std::min(s.virtualSize, s.rawSize))
-      return &s;
-  }
-  return nullptr;
-}
 
 namespace {
 auto key(const RuntimeFunction &r) { return std::tie(r.begin, r.end, r.unwind); }
@@ -59,7 +55,7 @@ void findUnknown(Analysis &a) {
     auto it = std::lower_bound(a.functions.begin(), a.functions.end(), cursor,
                                [](const auto &f, uint32_t addr) { return f.record.begin < addr; });
     for (; it != a.functions.end() && it->record.begin < end; ++it) {
-      if (!it->eligible())
+      if (!it->covered())
         continue;
       if (cursor < it->record.begin)
         a.unknown.emplace_back(cursor, it->record.begin);
@@ -76,11 +72,13 @@ StringRef status(const FunctionRange &f) {
     return "invalid";
   if (f.overlapGroup)
     return "conflicting";
+  if (f.unsupportedUnwindVersion)
+    return "unsupported";
   return "valid";
 }
 } // namespace
 
-Analysis discover(Module module) {
+Analysis discover(Module module, StringRef file) {
   Analysis a{std::move(module), {}, {}, {}};
   std::vector<uint32_t> callbacks;
   if (a.module.tls)
@@ -121,15 +119,36 @@ Analysis discover(Module module) {
     if (end <= begin)
       invalid("empty or reversed range");
     else {
-      const auto *s = backingSection(a.module, begin, end - begin);
-      if (!s || s->permissions[2] != 'x')
+      auto code = mapRva(a.module.sections, file, begin, end - begin);
+      if (!code || code->section.permissions[2] != 'x')
         invalid("range outside a single file-backed executable section");
       f.entry = a.module.entryPoint && begin <= a.module.entryPoint && a.module.entryPoint < end;
       auto cb = llvm::lower_bound(callbacks, begin);
       f.callback = cb != callbacks.end() && *cb < end;
     }
-    if (!unwind || unwind % 4 || !backingSection(a.module, unwind, 4))
+    constexpr size_t headerSize = offsetof(Win64EH::UnwindInfo, UnwindCodes);
+    auto data = mapRva(a.module.sections, file, unwind);
+    if (!unwind || unwind % 4 || !data || data->bytes.size() < headerSize) {
       invalid("unwind RVA must point to a file-backed, aligned AMD64 unwind header");
+      continue;
+    }
+    Win64EH::UnwindInfo header{};
+    std::memcpy(&header, data->bytes.data(), headerSize);
+    if (header.getVersion() != 1 && header.getVersion() != 2) {
+      f.unsupportedUnwindVersion = header.getVersion();
+      continue;
+    }
+    f.chainedFragment = header.getFlags() & Win64EH::UNW_ChainInfo;
+    const size_t codesEnd = headerSize + header.NumCodes * sizeof(Win64EH::UnwindCode);
+    if (data->bytes.size() < codesEnd)
+      invalid("truncated unwind code array");
+    else if (f.chainedFragment) {
+      if (header.getFlags() & (Win64EH::UNW_ExceptionHandler | Win64EH::UNW_TerminateHandler))
+        invalid("chained unwind info also declares a handler");
+      const size_t trailer = alignTo(codesEnd, 4);
+      if (data->bytes.size() < trailer + sizeof(Win64EH::RuntimeFunction))
+        invalid("truncated chained runtime function");
+    }
   }
   markOverlaps(a);
   findUnknown(a);
@@ -146,8 +165,11 @@ void enrichFunctions(Analysis &a, const object::ObjectFile &obj) {
   for (auto &f : a.functions) {
     if (!f.eligible() || a.module.imageBase > UINT64_MAX - f.record.begin)
       continue;
-    auto info = context->getLineInfoForAddress(
+    auto frames = context->getInliningInfoForAddress(
         {a.module.imageBase + f.record.begin, object::SectionedAddress::UndefSection}, spec);
+    if (!frames.getNumberOfFrames())
+      continue;
+    const auto &info = frames.getFrame(frames.getNumberOfFrames() - 1);
     if (info.FunctionName != DILineInfo::BadString &&
         info.FunctionName != DILineInfo::Addr2LineBadString)
       f.name = json::fixUTF8(info.FunctionName);
@@ -174,6 +196,10 @@ void printAnalysis(const Analysis &a, bool jsonFormat, raw_ostream &out) {
         out << " entry";
       if (f.callback)
         out << " TLS callback";
+      if (f.chainedFragment)
+        out << " chained fragment";
+      if (f.unsupportedUnwindVersion)
+        out << " unwind version " << *f.unsupportedUnwindVersion;
       if (!f.name.empty())
         out << " " << f.name;
       if (f.line)
@@ -201,6 +227,10 @@ void printAnalysis(const Analysis &a, bool jsonFormat, raw_ostream &out) {
       o["size"] = r.end - r.begin;
     if (f.overlapGroup)
       o["overlap_diagnostic"] = *f.overlapGroup;
+    if (f.chainedFragment)
+      o["chained_fragment"] = true;
+    if (f.unsupportedUnwindVersion)
+      o["unwind_version"] = *f.unsupportedUnwindVersion;
     if (!f.name.empty())
       o["name"] = f.name;
     if (f.line)

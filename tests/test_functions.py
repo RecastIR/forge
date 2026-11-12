@@ -1,8 +1,11 @@
 """Exercise discovery and lift diagnostics through their CLI entry points."""
 import json
 import os
+import resource
+import signal
 import struct
 import sys
+import unicodedata
 import unittest
 
 from cli_case import Case, FIXTURES, SUITE
@@ -37,6 +40,84 @@ class Discovery(Case):
         rows = [line for line in lines if line.startswith("    .")]
         self.assertTrue(any(".debug_abbrev" in row for row in rows))
         self.assertTrue(all(row.index("0x") == column for row in rows))
+
+    def test_enclosing_dwarf_function(self):
+        f, = self.analyze(FIXTURES / "inlined.exe", "--strict")["functions"]
+        self.assertEqual(f["name"], "entry")
+        self.assertEqual(f["location"]["file"].split("/")[-1], "inlined.c")
+        self.assertEqual(f["location"]["line"], 6)  # call site in entry, helper body is line 2
+
+    def test_unicode_section_columns(self):
+        image = FIXTURES / "unicode.exe"
+        for flags in ((), ("--verbose",)):
+            lines = self.invoke("inspect", image, *flags).stdout.decode().splitlines()
+            column, = [line.index("RVA") for line in lines if "Permissions" in line]
+            for section in (".donnée", ".界区"):
+                row, = [line for line in lines if line.lstrip().startswith(section)]
+                prefix = row[:row.index("0x")]
+                self.assertEqual(sum(2 if unicodedata.east_asian_width(c) == "W" else 1
+                                     for c in prefix), column)
+        self.assertEqual(self.invoke("inspect", image, "--format", "json").stdout,
+                         self.invoke("inspect", image, "--format", "json", "--verbose").stdout)
+
+    def test_chained_fragment_and_gap(self):
+        image = FIXTURES / "chained.exe"
+        oracle = self.readobj("chained.exe", "--unwind")
+        self.assertIn("ChainInfo (0x4)", oracle)
+        self.assertIn("Chained {\n        StartAddress: (0x140001000)", oracle)
+        a = self.analyze(image, "--strict")
+        primary, fragment, unrelated = a["functions"]
+        self.assertTrue(primary["liftable"] and unrelated["liftable"])
+        self.assertEqual((fragment["start_rva"], fragment["chained_fragment"], fragment["status"],
+                          fragment["liftable"]), ("0x1010", True, "valid", False))
+        self.assertEqual(a["diagnostics"], [])
+        self.assertEqual(a["unknown_executable_ranges"],
+                         [{"start_rva": primary["end_rva"], "end_rva": fragment["start_rva"]}])
+        self.assertIn(b"chained fragment", self.invoke("analyze", image, "--functions").stdout)
+        output = self.dir / "function.ll"
+        for signature in ((), ("--signature", "i64(i64,i64)")):
+            p = self.invoke("lift", image, "--rva", fragment["start_rva"], "--output", output,
+                            *signature, code=1)
+            self.assertIn(b"0x1010: chained unwind fragment", p.stderr)
+            self.assertFalse(output.exists())
+        self.invoke("lift", image, "--rva", unrelated["start_rva"], "--output", output)
+
+        data = bytearray(image.read_bytes())
+        layout = Layout(data)
+        table = layout.file_offset(layout.directory(3)[0])
+        struct.pack_into("<I", data, table+12, int(primary["end_rva"], 16)-1)
+        image = self.dir / "overlap.exe"
+        image.write_bytes(data)
+        rows = self.analyze(image, "--strict", code=3)["functions"]
+        self.assertEqual([row["status"] for row in rows], ["conflicting", "conflicting", "valid"])
+        self.assertTrue(rows[1]["chained_fragment"])
+
+    def test_unwind_header_and_trailer(self):
+        original = FIXTURES / "chained.exe"
+        fragment = self.analyze(original)["functions"][1]
+        data = bytearray(original.read_bytes())
+        offset = Layout(data).file_offset(int(fragment["unwind_rva"], 16))
+        image = self.dir / "unwind.exe"
+        output = self.dir / "fragment.ll"
+        for version_flags, slots, status, exit_code, reason in [
+                (0x22, 0, "valid", 0, None),       # version 2 chained header
+                (0x27, 0, "unsupported", 0, None),
+                (0x21, 1, "invalid", 3, "truncated chained runtime function"),
+                (0x29, 0, "invalid", 3, "also declares a handler")]:
+            with self.subTest(version_flags=version_flags, slots=slots):
+                data[offset] = version_flags
+                data[offset+2] = slots
+                image.write_bytes(data)
+                a = self.analyze(image, "--strict", code=exit_code)
+                row = a["functions"][1]
+                self.assertEqual((row["status"], row["liftable"]), (status, False))
+                if reason:
+                    self.assertIn(reason, a["diagnostics"][0]["message"])
+                if status == "unsupported":
+                    self.assertEqual(row["unwind_version"], 7)
+                    p = self.invoke("lift", image, "--rva", row["start_rva"], "--output", output, code=1)
+                    self.assertIn(b"unsupported unwind version 7", p.stderr)
+                self.invoke("inspect", image, "--strict")
 
     def test_recover_readable_conflicts(self):
         data = bytearray((FIXTURES / "arithmetic.exe").read_bytes())
@@ -164,6 +245,7 @@ class Lift(Case):
                 ("b8 01 00 00 00 31 c0", "outside"), ("eb fe", "backward"), ("eb 05", "outside"), ("eb 01 48 89 c8 c3", "enters an instruction"),
                 ("75 02 31 c0 c3", "flags"), ("e8 00 00 00 00", "unsupported"),
                 ("4c 89 c0 c3", "undefined incoming R8"), ("c3", "undefined RAX"),
+                ("48 29 c8 c3", "undefined incoming RAX"), ("44 29 c1 c3", "undefined incoming R8"),
                 ("48 39 d1 74 01 c3 c3", "undefined RAX"),
                 ("09 c0 c3", "unsupported"), ("48 89 c8 48 89 c8 40", "invalid or truncated"),
                 ("31 c0 31 c0 31 c0 90", "unsupported")]:
@@ -180,6 +262,35 @@ class Lift(Case):
                 self.assertIn(b"LIFT_ERROR: 0x100", p.stderr)
                 self.assertEqual(output.read_text(), "sentinel")
         self.assertFalse(list(self.dir.glob("*.tmp-*")))
+
+    def test_atomic_publication(self):
+        image = FIXTURES / "add.exe"
+        output = self.dir / "function.ll"
+        args = ("lift", image, "--rva", "0x1000", "--output", output)
+        output.write_bytes(b"old contents")
+        previous = self.dir / "previous.ll"
+        os.link(output, previous)
+
+        def limit_file_size():
+            signal.signal(signal.SIGXFSZ, signal.SIG_IGN)
+            resource.setrlimit(resource.RLIMIT_FSIZE, (64, 64))
+
+        p = self.invoke(*args, code=1, preexec_fn=limit_file_size)
+        self.assertIn(b"OUTPUT_ERROR", p.stderr)
+        self.assertEqual(output.read_bytes(), b"old contents")
+        self.assertEqual(list(self.dir.glob("*.tmp-*")), [])
+
+        self.invoke(*args)
+        self.assertIn("define internal void @forge_lifted_1000(", output.read_text())
+        self.assertEqual(previous.read_bytes(), b"old contents")
+        output.unlink()
+        output.mkdir()
+        sentinel = output / "keep"
+        sentinel.write_bytes(b"keep")
+        p = self.invoke(*args, code=1)
+        self.assertIn(b"OUTPUT_ERROR", p.stderr)
+        self.assertEqual(sentinel.read_bytes(), b"keep")
+        self.assertEqual(list(self.dir.glob("*.tmp-*")), [])
 
     def test_relocation_overlaps_instruction(self):
         data = bytearray((FIXTURES / "metadata.exe").read_bytes())

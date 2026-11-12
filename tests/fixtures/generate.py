@@ -54,17 +54,21 @@ def generate(output, mc, link, dlltool, clang):
 
         sources = Path(__file__).resolve().parent
         # Remap debug paths so builds in different source directories produce identical PEs.
-        run(clang, "--target=x86_64-windows-msvc", "-O2", "-fwrapv", "-gdwarf-4", "-g",
-            "-fdebug-compilation-dir=.", f"-ffile-prefix-map={sources}=.", "-S", sources / "add.c",
-            "-o", "add.s")
-        with (work / "add.s").open("a") as assembly:
-            assembly.write((sources / "leaf-range.s").read_text())
-        run(mc, "-triple=x86_64-windows-msvc", "-filetype=obj", "add.s", "-o", "add.obj")
-        run(link, "/nodefaultlib", "/timestamp:0", "/debug:dwarf", "/entry:entry", "/subsystem:console",
-            "/out:add.exe", "add.obj")
-        (output / "add.exe").write_bytes((work / "add.exe").read_bytes())
+        for name in ("add", "inlined"):
+            run(clang, "--target=x86_64-windows-msvc", "-O2", "-fwrapv", "-gdwarf-4", "-g",
+                "-fdebug-compilation-dir=.", f"-ffile-prefix-map={sources}=.", "-S",
+                sources / f"{name}.c", "-o", f"{name}.s")
+            with (work / f"{name}.s").open("a") as assembly:
+                assembly.write((sources / "leaf-range.s").read_text())
+            run(mc, "-triple=x86_64-windows-msvc", "-filetype=obj", f"{name}.s", "-o", f"{name}.obj")
+            run(link, "/nodefaultlib", "/timestamp:0", "/debug:dwarf", "/entry:entry", "/subsystem:console",
+                f"/out:{name}.exe", f"{name}.obj")
+            (output / f"{name}.exe").write_bytes((work / f"{name}.exe").read_bytes())
+        image("chained.exe", (sources / "chained.s").read_text())
+        image("unicode.exe", stub + '.section ".donnée","dr"\n.byte 1\n.section ".界区","dr"\n.byte 1\n')
         image("arithmetic.exe", (sources / "arithmetic.s").read_text(),
-              exports=["entry", "product", "expr", "low_product", "select_signed", "select_unsigned", "equal", "immediates"])
+              exports=["entry", "product", "expr", "low_product", "select_signed", "select_unsigned",
+                       "equal", "immediates", "zero64", "zero32"])
         image("minimal.exe")
         image("Physics.DLL")
         image("metadata.exe", metadata, [("Physics.DLL", "Named"), ("Physics.DLL", "ByOrdinal"),

@@ -1,4 +1,4 @@
-# Append to the compiler output for the single leaf in add.c.
+# Append to the compiler output for a single leaf named entry.
 # Only metadata is added. The label marks the exact end of its .text.
 .text
 end_entry:

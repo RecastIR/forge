@@ -1,5 +1,6 @@
 #pragma once
 
+#include "llvm/ADT/ArrayRef.h"
 #include "llvm/ADT/StringExtras.h"
 #include "llvm/Support/MemoryBufferRef.h"
 #include "llvm/Support/raw_ostream.h"
@@ -28,6 +29,15 @@ struct Section {
   std::string name, permissions;
   uint32_t rva, virtualSize, fileOffset, rawSize;
 };
+struct MappedRange {
+  const Section &section;
+  llvm::StringRef bytes;
+  uint64_t fileOffset;
+};
+// The section and bytes borrow from the supplied image. Omitting size maps to
+// the end of the file-backed part of the section.
+std::optional<MappedRange> mapRva(llvm::ArrayRef<Section> sections, llvm::StringRef file,
+                                  uint64_t rva, std::optional<uint32_t> size = std::nullopt);
 struct Symbol {
   std::string name;
   std::optional<uint16_t> ordinal;

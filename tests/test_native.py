@@ -20,6 +20,18 @@ def run(*args, **kwargs):
     return subprocess.run(args, check=True, capture_output=True, timeout=45, **kwargs).stdout
 
 
+def check(condition, message):
+    if not condition:
+        raise AssertionError(message)
+
+
+def check_ir(path, rva, wrapper):
+    module = path.read_text()
+    internal = f"define internal void @forge_lifted_{rva:x}("
+    check(internal in module, f"{path.name} missing {internal}")
+    check(("define i64 @forge_lifted(" in module) == wrapper, f"{path.name} wrapper={wrapper}")
+
+
 def report(image):
     return json.loads(run(FORGE, "inspect", image, "--format", "json"))["modules"][0]
 
@@ -31,43 +43,51 @@ def cases(work):
     image = root / "arithmetic.exe"
     exports = {e["names"][0]: int(e["rva"], 16) for e in report(image)["exports"]}
 
-    def signed(x):
-        return x - (1 << 64) if x >> 63 else x
+    def signed(x, width=64):
+        return x - (1 << width) if x >> (width - 1) else x
 
     for name, reference in [
             ("entry", lambda a, b: a-b), ("product", lambda a, b: a*b),
             ("expr", lambda a, b: a + b*4 - 7 - 128),
             ("low_product", lambda a, b: (a*b-1) & 0xffffffff),
             ("select_signed", lambda a, b: min(signed(a), signed(b))),
-            ("select_unsigned", lambda a, b: -int((a & 0xffffffff) < (b & 0xffffffff))),
-            ("equal", lambda a, b: int(a == b)),
+            ("zero32", lambda a, b: 0), ("zero64", lambda a, b: 0),
             ("immediates", lambda a, b: ((a + 8*b - 3 - 0x12345678) & 0xffffffff) - 100000)]:
         yield name, image, exports[name], reference
 
-    # Exercise all ten accepted condition codes with the same two branch targets.
+    # Each branch returns distinct constants even when the compared operands are equal.
     original = image.read_bytes()
-    select = exports["select_signed"]
-    branch = Layout(original).file_offset(select) + 3
-    assert original[branch] == 0x7d
-    for opcode, pred, is_signed in [
-            (0x72, operator.lt, False), (0x73, operator.ge, False), (0x74, operator.eq, False),
-            (0x75, operator.ne, False), (0x76, operator.le, False), (0x77, operator.gt, False),
-            (0x7c, operator.lt, True), (0x7e, operator.le, True), (0x7f, operator.gt, True)]:
-        data = bytearray(original)
-        data[branch] = opcode
-        variant = work / f"jcc-{opcode:x}.exe"
-        variant.write_bytes(data)
+    layout = Layout(original)
+    conditions = [
+        (0x72, operator.lt, False), (0x73, operator.ge, False), (0x74, operator.eq, False),
+        (0x75, operator.ne, False), (0x76, operator.le, False), (0x77, operator.gt, False),
+        (0x7c, operator.lt, True), (0x7d, operator.ge, True), (0x7e, operator.le, True),
+        (0x7f, operator.gt, True)]
+    for name, width, prefix, taken, fallthrough in [
+            ("select_unsigned", 32, bytes.fromhex("39 d1 72"), MASK, 0),
+            ("equal", 64, bytes.fromhex("48 39 d1 75"), 0, 1)]:
+        start = layout.file_offset(exports[name])
+        check(original.startswith(prefix, start), f"unexpected CMP/Jcc encoding in {name}")
+        for opcode, pred, is_signed in conditions:
+            data = bytearray(original)
+            data[start + len(prefix) - 1] = opcode
+            variant = work / f"jcc-{width}-{opcode:x}.exe"
+            variant.write_bytes(data)
 
-        def select_reference(a, b, pred=pred, is_signed=is_signed):
-            take = pred(signed(a), signed(b)) if is_signed else pred(a, b)
-            return b if take else a
+            def reference(a, b, width=width, pred=pred, is_signed=is_signed,
+                          taken=taken, fallthrough=fallthrough):
+                mask = (1 << width) - 1
+                a, b = a & mask, b & mask
+                if is_signed:
+                    a, b = signed(a, width), signed(b, width)
+                return taken if pred(a, b) else fallthrough
 
-        yield f"Jcc {opcode:x}", variant, select, select_reference
+            yield f"Jcc {width} {opcode:x}", variant, exports[name], reference
 
     # Change only the SUB opcode in the linked PE, preserving its RVA and signature.
     patched = bytearray(image.read_bytes())
     start = Layout(patched).file_offset(exports["entry"])
-    assert patched[start:start+7] == bytes.fromhex("48 89 c8 48 29 d0 c3")
+    check(patched.startswith(bytes.fromhex("48 89 c8 48 29 d0 c3"), start), "unexpected SUB fixture")
     patched[start+4] = 0x01
     image = work / "patched.exe"
     image.write_bytes(patched)
@@ -97,7 +117,8 @@ def original_results(image, rva, vectors):
         vm.reg_write(x86.UC_X86_REG_RDX, b)
         vm.reg_write(x86.UC_X86_REG_RAX, 0xdeadbeefdeadbeef)
         vm.emu_start(base+rva, stop, count=100)
-        assert vm.reg_read(x86.UC_X86_REG_RIP) == stop and vm.reg_read(x86.UC_X86_REG_RSP) == rsp+8
+        check(vm.reg_read(x86.UC_X86_REG_RIP) == stop and vm.reg_read(x86.UC_X86_REG_RSP) == rsp+8,
+              f"original function at {rva:#x} did not return for {(a, b)}")
         results.append(vm.reg_read(x86.UC_X86_REG_RAX))
     return results
 
@@ -129,29 +150,30 @@ def main():
             cmd = [FORGE, "lift", image, "--rva", hex(rva), "--output", ir]
             if MODE == "codegen":
                 run(*cmd)
-                assert "define internal void @forge_lifted_" in ir.read_text()
-                assert "define i64 @forge_lifted(" not in ir.read_text()
+                check_ir(ir, rva, wrapper=False)
                 run(OPT, "-S", "-passes=default<O2>", ir, "-o", optimized)
-                assert "define internal" in optimized.read_text()
+                check_ir(optimized, rva, wrapper=False)
                 run(LLC, "-filetype=obj", optimized, "-o", obj)
-                assert b"Mach-O arm64" in run(READOBJ, "--file-headers", obj)
+                check(b"Mach-O arm64" in run(READOBJ, "--file-headers", obj), name)
             run(*cmd, "--signature", "i64(i64,i64)")
-            assert "define i64 @forge_lifted(" in ir.read_text()
+            check_ir(ir, rva, wrapper=True)
             run(OPT, "-passes=verify", "-disable-output", ir)
             run(OPT, "-S", "-passes=default<O2>", ir, "-o", optimized)
+            check_ir(optimized, rva, wrapper=True)
             expected = [reference(a, b) & MASK for a, b in vectors]
             if MODE == "differential":
                 expected = original_results(image, rva, vectors)
             for source in ([ir, optimized] if MODE == "native" else [optimized]):
                 run(LLC, "-filetype=obj", source, "-o", obj)
-                assert b"Mach-O arm64" in run(READOBJ, "--file-headers", obj)
+                check(b"Mach-O arm64" in run(READOBJ, "--file-headers", obj), name)
                 if MODE == "codegen":
                     continue
                 run(CXX, "-arch", "arm64", work/"harness.o", obj, "-o", exe)
                 actual = [int(s, 16) for s in run(exe, input=stdin, text=True).splitlines()]
-                assert len(actual) == len(expected)
+                check(len(actual) == len(expected), (name, source.name, len(actual), len(expected)))
                 for pair, got, want in zip(vectors, actual, expected):
-                    assert got == want, (name, source.name, pair, hex(got), hex(want))
+                    if got != want:
+                        raise AssertionError((name, source.name, pair, hex(got), hex(want)))
             print(name, hex(rva), MODE, len(vectors) if MODE != "codegen" else "OK")
     return 0
 

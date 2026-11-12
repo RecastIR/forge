@@ -77,9 +77,11 @@ build/forge analyze fastgron.exe --functions
 build/forge analyze fastgron.exe --functions --format json --strict
 ```
 
-Analysis reads the root image's PE exception directory, conventionally stored in `.pdata`. Each function reports a half-open interval `[start_rva, end_rva)`, byte count, unwind RVA, original zero-based record indices, and entry-point/TLS-callback membership. Where embedded DWARF is usable, LLVM supplies the linkage name and source location. Gaps in executable sections remain `unknown_executable_ranges`. These may include leaf functions, padding, or embedded data.
+Analysis reads the root image's PE exception directory, conventionally stored in `.pdata`. Each record reports a half-open interval `[start_rva, end_rva)`, byte count, unwind RVA, original zero-based record indices, and entry-point/TLS-callback membership. Where embedded DWARF is usable, LLVM supplies the enclosing function's linkage name and source location, including when its first instruction comes from an inlined call. Gaps in executable sections remain `unknown_executable_ranges`. These may include leaf functions, padding, or embedded data.
 
-Exact duplicate triples share one row with all their indices. Overlapping, nested, and same-range/different-unwind records share an overlap diagnostic identifying the connected group of records. Each participating row is ineligible for lifting. Invalid bounds, ranges outside file-backed executable sections, and zero, unaligned, or unmapped unwind references produce warnings. Validation checks the address and availability of the four-byte unwind header. Unwind programs are outside this experiment.
+Exact duplicate triples share one row with all their indices. Overlapping, nested, and same-range/different-unwind records share an overlap diagnostic identifying the connected group of records. Each participating row is ineligible for lifting. Invalid bounds, ranges outside file-backed executable sections, and zero, unaligned, or unmapped unwind references produce warnings.
+
+For AMD64 unwind versions 1 and 2, Forge checks the four-byte header and the extent of the declared unwind codes. A record with `UNW_FLAG_CHAININFO` describes a continuation of another function. Forge checks that its aligned chain trailer fits and reports `chained_fragment: true`. A valid disjoint fragment counts as covered code, passes strict analysis, and has `liftable: false`. Both lift interfaces reject that start. An unrecognized version produces `status: "unsupported"` and the numeric `unwind_version`. Its range stays unknown. Strict analysis returns 0 when the only issue is an unrecognized version.
 
 The analysis JSON has its own schema version 1. Rows are sorted by start, end, unwind RVA, and original record index. `liftable` means discovery accepts the range. Instruction and ABI checks run during `lift`. Analysis exits with 0 upon completion, 3 for record findings under `--strict`, 1 for unreadable input or tables, and 2 for usage errors. A trailing partial record produces a finding and preserves the complete records before it.
 
@@ -102,13 +104,13 @@ printf 'a 14\nffffffffffffffff 1\n' | build/add-harness
 
 The object reports `Mach-O arm64`. The harness prints `1e` and `0` for 10 + 20 and −1 + 1.
 
-Without `--signature`, the module contains a retained internal `forge_lifted_<hex RVA>` function. Its pointer addresses seven 64-bit slots in this order — RAX, RCX, RDX, R8, R9, R10, R11. Reads use their incoming values. Writes update those slots. Condition flags are local to the supported compare/branch pair. Plain `ret` ends the isolated call. Guest stack state, return addresses, and flags across calls are outside this interface.
+Both IR interfaces retain the internal `forge_lifted_<hex RVA>` function through optimization. Its pointer addresses seven 64-bit slots in this order — RAX, RCX, RDX, R8, R9, R10, R11. Reads use their incoming values. Writes update those slots. Condition flags are local to the supported compare/branch pair. Plain `ret` ends the isolated call. Guest stack state, return addresses, and flags across calls are outside this interface.
 
-The sole supported signature adds `extern "C" int64_t forge_lifted(int64_t, int64_t)`. The caller declares this contract. The wrapper places its native arguments in the RCX and RDX slots, calls the lifted body, and returns RAX. Every reachable path must define any additional register before reading it and must define RAX before returning. Forge verifies the module before publishing the output. A failed lift preserves an existing output file.
+The sole supported signature adds `extern "C" int64_t forge_lifted(int64_t, int64_t)`. The caller declares this contract. The wrapper places its native arguments in the RCX and RDX slots, calls the lifted body, and returns RAX. Every reachable path must define any additional register before reading it and must define RAX before returning. Forge verifies the module, writes and closes a sibling temporary file, then publishes it with one rename. A failed lift preserves an existing output file.
 
 | Supported x86-64 forms | Semantics |
 | --- | --- |
-| 32/64-bit register and immediate moves, same-register XOR | A 32-bit write clears the upper register half. Same-register XOR defines zero independently of the previous value. |
+| 32/64-bit register and immediate moves, same-register XOR and SUB | A 32-bit write clears the upper register half. Same-register XOR and SUB define zero independently of the previous value. |
 | ADD, SUB, two-register IMUL | Arithmetic wraps at the operand width. Immediate forms use the decoder's sign extension. IMUL retains the low half. |
 | LEA with a 64-bit base/index address expression | Scaled index and displacement use integer arithmetic. The destination can be 32 or 64 bits. |
 | CMP immediately followed by Jcc | Equality, inequality, and signed and unsigned order comparisons at the CMP operand width. Each incoming path to Jcc must supply that comparison. |
@@ -126,11 +128,15 @@ RetDec lifts x86-64 for decompilation and documents macOS support. Its modified 
 
 ### Verification and fastgron
 
-The `codegen` suite verifies both IR interfaces and emits ARM64 objects. On Apple Silicon, `native` compares the C++ harness with arithmetic references, before and after LLVM IR optimization. It exercises 272 boundary and seeded random input pairs per case, all ten supported condition codes, and a linked PE whose SUB opcode is changed to ADD. The original PE bytes, including that edit, are the only instruction input to Forge.
+The `codegen` suite checks the exact RVA-named function in both optimized IR interfaces and emits ARM64 objects. On Apple Silicon, `native` compares the C++ harness with arithmetic references before and after IR optimization. It exercises 272 boundary and seeded random input pairs per case. All ten predicates run at both 32 and 64 bits. Their two paths return distinct constants so equal operands reveal a strict/inclusive comparison error. A separate fixture changes SUB to ADD in the linked PE.
 
 The optional `differential` suite uses Unicorn when its Python package is available to CTest's interpreter. It executes the fixture's original x86-64 code bytes with a Windows x64 call frame and compares the resulting RAX with the native harness. This is isolated machine-code differential execution. The standard native run and the generated functions have no emulator dependency. CTest reports a skip when the optional oracle or native host is unavailable.
 
-On Apple Silicon, 19 fixture cases passed all 5,168 source-reference comparisons both before and after IR optimization. The optimized native functions also matched all 5,168 independent Unicorn 2.1.4 results.
+```sh
+ctest --test-dir build -C Debug -R '^differential$' --output-on-failure
+```
+
+On Apple Silicon, 30 fixture cases passed all 8,160 source-reference comparisons before optimization and all 8,160 after optimization. The optimized native functions also matched all 8,160 independent Unicorn 2.1.4 results. As a negative check, substituting JL for JLE in the linked PE failed on input `(0, 0)` under both normal Python and `PYTHONOPTIMIZE=1`.
 
 The pinned Windows fastgron v0.7.7 executable (SHA-256 `1c18064f88804a0519fa51d9a4755bd25b7b73d16e28bddf24e3e1688480eb47`) produced 235 valid ranges and no analysis findings. LLVM resolved `0x29c50` to `std::ctype<char>::do_widen(char) const` at `locale_facets.h:1092`. Its bytes `89 d0 c3` lifted and compiled to ARM64. The signatureless form models the EDX-to-EAX move and zero-extension. That C++ member function has a different prototype from the fixture wrapper. At `0x18670`, lifting stopped at `0x18673` on `CMP8ri [80f909]`. The subsequent `setbe %al` also requires unsupported byte semantics. [fastgron v0.7.7 release](https://github.com/adamritter/fastgron/releases/tag/v0.7.7)
 
