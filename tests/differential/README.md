@@ -1,6 +1,6 @@
 # Windows whole-executable fixtures
 
-These seven small C11 and C++20 console programs provide Windows x64 inputs for future whole-executable comparisons. Each manifest records a single invocation and its expected output. The programs build independently of Forge.
+These ten C11 and C++20 console programs provide Windows x64 inputs for whole-executable reference runs. Each manifest records a single invocation and its expected output. The programs build independently of Forge.
 
 | Fixture | What the invocation exercises |
 | --- | --- |
@@ -11,6 +11,9 @@ These seven small C11 and C++20 console programs provide Windows x64 inputs for 
 | `globals/state` | An initialized global, a zero-initialized global, and a static local change across iterations. Input bytes select weights from read-only data. |
 | `imports/kernel32` | Process and module validity and a last-error round trip yield three Boolean results. |
 | `cpp/lifetime` | The input selects both derived types. The program prints the result of virtual dispatch and the order of construction and destruction after each scope ends. |
+| `runner/stderr_only` | Writes exactly `runner-error\n` to stderr and exits zero. |
+| `runner/exit_nonzero` | Exits 7 with both streams empty. |
+| `runner/exit_and_stderr` | Writes the same 13 stderr bytes and calls `ExitProcess(0x1234)`. |
 
 ## Build and inspect
 
@@ -54,13 +57,53 @@ Both expected streams are required, including empty strings. Their UTF-8 encodin
 ## Add a fixture
 
 1. Add a small source under `fixtures/<category>/`. Include `streams.h` and call `open_binary_streams()` before output. Make the result depend on arguments or an observable API operation. Bound arithmetic, shifts, memory accesses, and recursion for every accepted input. Convert environment-dependent values into deterministic checks inside the program.
-2. Add the manifest. Derive the expected exit status and streams from the declared input. CMake discovers targets from the validated manifests.
+2. Add the manifest under `manifests/` or a category subdirectory. Derive the expected exit status and streams from the declared input. CMake discovers targets from the validated manifests.
 3. Run `python3 -B tests/differential/manifests.py`, `make format-check`, and the Docker build from the repository root. Inspect optimized code when a particular call, memory access, or branch is essential to the case. Commit source and metadata. Git ignores the generated binaries and checksums under `build/`.
 
-## Verification and remaining work
+## Capture Wine references
+
+Use Python 3.9 or newer and a local Docker engine with Linux amd64 support. Run these commands from the repository root after building the corresponding configurations.
+
+```sh
+./tools/run-windows-references.sh --all
+./tools/run-windows-references.sh --config release
+./tools/run-windows-references.sh --fixture runner/exit_and_stderr --config debug
+```
+
+The runner locks the publication directory, withdraws the selected previous results, and loads the same validated catalog as the builder. For each invocation it checks a private binary snapshot against the export's `SHA256SUMS` and mounts that file read-only in a fresh container. MinGW objdump checks the snapshot's PE format. The container runs as an unprivileged user with a fixed hostname, UTC, `C.UTF-8`, a private initialized 64-bit Wine prefix, and networking disabled. The Windows working directory is `C:\work`, stdin reads from `NUL`, and the fixture starts with the ordered manifest arguments. Container removal discards the working directory, registry, and remaining processes.
+
+The reference image extends the pinned toolchain with Debian Wine and libwine `8.0~repack-4`. A Windows parent starts the PE with separate inheritable pipe handles and drains both concurrently. On this Wine version the initial ntdll breakpoint follows DLL initialization. The parent detaches there, waits for termination and both pipe readers, and reads the full unsigned status with `GetExitCodeProcess`. A separate control record carries that value to the host. Wine runs with `WINEDEBUG=-all`; its launcher diagnostics have a separate channel with a bounded 64 KiB diagnostic tail.
+
+The startup deadline is 120 seconds and the execution deadline is 10 seconds. Each fixture stream can contain up to 1 MiB. Exceeding a limit fails the invocation and the supervisor removes the container, including descendants holding a pipe open. The deadlines cover fixture execution after image preparation. The runner is intended for repository-owned console fixtures. GUI, interactive input, external services, and arbitrary untrusted programs fall outside this workflow.
+
+### Result layout and interpretation
+
+```text
+build/reference/windows-x64/wine/debug/runner/exit_and_stderr/
+  result.json
+  stdout.bin
+  stderr.bin
+```
+
+Manifest expectations describe intended behavior. A passing reference records the observed Wine behavior for one exact binary and manifest. The publisher compares each byte with the UTF-8 encoding of the expected stream, including whitespace, CR, LF, and trailing newlines. It also checks the full exit code. Expected stderr may contain data and an expected nonzero status may pass.
+
+The version 1 JSON names both raw files and records their lengths and SHA-256 hashes, fixture ID, configuration, pass status, exit code, binary SHA-256, relative manifest path and SHA-256, runner version, Wine version, immutable image ID, container platform, and Docker host architecture. The runner version fingerprints the host implementation and the image ID identifies the guest implementation. All three files appear together by directory rename after validation. Git ignores the output tree. A rerun of one fixture withdraws only that fixture's selected configuration.
+
+For the combined regression, `stdout.bin` is empty, `stderr.bin` contains the 13 bytes ending in hex `0a`, and `result.json` records `4660`. Task 4 can select the backend and configuration, verify the manifest and binary hashes, and read these streams and the exit code before comparing a native program.
+
+### Troubleshooting and CI
+
+- **Missing executable or checksum mismatch.** Rebuild with `./tools/build-windows-fixtures.sh --config debug` or `--config release`. An unsupported PE fails inspection before Wine launches it.
+- **Wine startup or dependency failure.** Check the fixture/configuration label, loader status, and diagnostic tail. Use the pinned toolchain's `x86_64-w64-mingw32-objdump -p` to inspect imported DLL names. A missing imported DLL can yield `0xc0000135`; a fixture that deliberately exits with that value after startup has an observable exit code.
+- **Output or exit mismatch.** Rerun the individual fixture. Diagnostics identify every differing field, the first differing byte offset, both lengths, and escaped byte context. Check binary stream mode, arguments, and flushes before explicit process termination.
+- **Timeout, overflow, or artifact write failure.** Check fixture termination, descendants inheriting handles, output volume, and permissions or free space under `build/reference/`. Correct the cause and rerun to publish a fresh result.
+
+The existing `windows-fixtures` job on native Linux amd64 builds both configurations, runs this CLI, reopens the entire artifact matrix, exercises real Wine failure cases, and uploads `windows-x64-wine-references` on success. Run `python3 -B tests/differential/reference/test_runner.py` for Wine-free tests and `python3 -B tests/differential/reference/test_wine.py` after a complete capture for integration tests. The native Forge CTest suite includes the Wine-free runner tests.
+
+Linux amd64 CI is the canonical Wine environment. Apple Silicon results record the ARM64 Docker host separately. The image disables Rosetta AVX advertisement because the emulator can otherwise abort while restoring Wine's breakpoint signal context. Wine implements Windows APIs with its own loader and runtime. Equivalence with native Windows requires separate evidence and backend provenance.
+
+## Related Forge tests
 
 The initial suite produced seven Debug and seven Release PEs with byte-identical clean rebuilds for each configuration. Native Forge inspection identified all fourteen as AMD64 PE32+ executables importing `KERNEL32.dll` and `msvcrt.dll`. On macOS, Forge reports `DLL_NOT_FOUND` for `msvcrt.dll` when inspecting without Windows DLL search paths. Release disassembly confirmed recursive calls, stack-passed arguments, stack-to-heap copies, and indirect virtual dispatch.
 
-The existing SDK-free parser and lifter samples live in `tests/fixtures/`. The existing `differential` CTest uses Unicorn to compare an individual x86-64 function with the ARM64 harness. Whole-executable execution is pending. Task 3 will run the original PEs in a controlled Windows environment, capture raw stdout, stderr, and exit status, verify the manifest expectations, and store validated reference results with the executable identity. A later harness will compare the translated programs against those captures.
-
-The planned `reference/` runner and native `harness/` will start each invocation in a fresh working directory with the same inputs. CI will transfer reference artifacts between hosts. Native comparison tests will use a CTest setup fixture and `FIXTURES_REQUIRED` to prepare those artifacts when a case is selected.
+The SDK-free parser and lifter samples live in `tests/fixtures/`. The existing `differential` CTest uses Unicorn to compare an individual x86-64 function with the ARM64 harness. Task 4 will add whole-executable native comparisons against the validated references.

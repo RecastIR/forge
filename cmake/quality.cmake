@@ -38,7 +38,8 @@ endif()
 
 if(NOT ACTION STREQUAL "lint")
   file(GLOB_RECURSE fixture_sources "${root}/tests/differential/fixtures/*.c"
-    "${root}/tests/differential/fixtures/*.cpp" "${root}/tests/differential/fixtures/*.h")
+    "${root}/tests/differential/fixtures/*.cpp" "${root}/tests/differential/fixtures/*.h"
+    "${root}/tests/differential/reference/*.c")
   file(GLOB_RECURSE headers "${root}/src/*.h" "${root}/tests/support/*.h")
   if(ACTION STREQUAL "format")
     set(flags -i)

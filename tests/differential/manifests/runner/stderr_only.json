@@ -1,0 +1,13 @@
+{
+  "schema_version": 1,
+  "id": "runner/stderr_only",
+  "description": "Write exact LF-terminated stderr bytes with a successful exit.",
+  "source": "fixtures/runner/stderr_only.c",
+  "binary": "runner_stderr_only.exe",
+  "args": [],
+  "expected": {
+    "exit_code": 0,
+    "stdout": "",
+    "stderr": "runner-error\n"
+  }
+}

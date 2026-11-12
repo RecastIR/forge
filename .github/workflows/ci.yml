@@ -13,11 +13,27 @@ jobs:
     runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v6
+      - name: Validate manifests and reference runner
+        run: |
+          test "$(uname -m)" = x86_64
+          python3 -B tests/differential/manifests.py
+          python3 -B tests/differential/test_manifests.py
+          python3 -B tests/differential/reference/test_runner.py
       - name: Build and verify Windows x64 fixtures
         run: ./tools/build-windows-fixtures.sh --all
+      - name: Capture Wine references
+        run: ./tools/run-windows-references.sh --all
+      - name: Verify reference artifacts and Wine capture boundaries
+        run: python3 -B tests/differential/reference/test_wine.py
+      - name: Upload validated Wine references
+        uses: actions/upload-artifact@v4
+        with:
+          name: windows-x64-wine-references
+          path: build/reference/windows-x64/wine
+          if-no-files-found: error
 
   macos:
-    runs-on: macos-15
+    runs-on: macos-26
     steps:
       - uses: actions/checkout@v6
 

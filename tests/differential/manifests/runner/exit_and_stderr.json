@@ -1,0 +1,13 @@
+{
+  "schema_version": 1,
+  "id": "runner/exit_and_stderr",
+  "description": "Write stderr and exit with a status wider than a Unix shell exit code.",
+  "source": "fixtures/runner/exit_and_stderr.c",
+  "binary": "runner_exit_and_stderr.exe",
+  "args": [],
+  "expected": {
+    "exit_code": 4660,
+    "stdout": "",
+    "stderr": "runner-error\n"
+  }
+}
