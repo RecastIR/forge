@@ -9,6 +9,13 @@ permissions:
   contents: read
 
 jobs:
+  windows-fixtures:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v6
+      - name: Build and verify Windows x64 fixtures
+        run: ./tools/build-windows-fixtures.sh --all
+
   macos:
     runs-on: macos-15
     steps:

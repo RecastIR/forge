@@ -1,0 +1,15 @@
+{
+  "schema_version": 1,
+  "id": "control_flow/branches",
+  "description": "Score each byte through early returns, nested conditions and switch arms.",
+  "source": "fixtures/control_flow/branches.c",
+  "binary": "control_flow_branches.exe",
+  "args": [
+    "-27ABCX"
+  ],
+  "expected": {
+    "exit_code": 0,
+    "stdout": "-7\n1\n21\n11\n-5\n8\n3\n",
+    "stderr": ""
+  }
+}

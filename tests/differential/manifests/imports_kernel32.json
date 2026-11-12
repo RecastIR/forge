@@ -1,0 +1,13 @@
+{
+  "schema_version": 1,
+  "id": "imports/kernel32",
+  "description": "Check process and module validity and round-trip a thread-local last error.",
+  "source": "fixtures/imports/kernel32.c",
+  "binary": "imports_kernel32.exe",
+  "args": [],
+  "expected": {
+    "exit_code": 0,
+    "stdout": "process=1 module=1 last_error=1\n",
+    "stderr": ""
+  }
+}

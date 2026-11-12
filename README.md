@@ -16,9 +16,9 @@ The root CMake project builds one executable, `forge`. Its headers are private t
 | `tests/integration/` | Build, CLI, code generation, and native execution suites and their Python helpers |
 | `tests/fixtures/` | SDK-free PE fixture sources and their generator |
 | `tests/support/` | C++ harness for calling a lifted function from a test |
-| `tests/differential/` | Design for future Windows and native executable comparisons |
+| `tests/differential/` | Reproducible Windows x64 fixture programs, manifests, and cross-build tooling |
 
-Add new production code to the component that owns it. Create `runtime/` when generated code first needs a shared native implementation, and `tests/unit/` with the first isolated unit suite. Register tests in `tests/CMakeLists.txt`. The planned executable comparison has its own [design and ownership guide](tests/differential/README.md).
+Add new production code to the component that owns it. Create `runtime/` when generated code first needs a shared native implementation, and `tests/unit/` with the first isolated unit suite. Register tests in `tests/CMakeLists.txt`. Build the whole-executable fixtures with `./tools/build-windows-fixtures.sh --all`. See the [fixture guide](tests/differential/README.md).
 
 ## Build and run
 
@@ -48,7 +48,7 @@ make clean BUILD_DIR=build-xcode CONFIG=Release
 Install Apple's developer tools with `xcode-select --install`. The Homebrew LLVM package in the build instructions also provides `clang-format`, `clang-tidy`, and `llvm-config`. Formatting and linting are opt-in locally. The GitHub Actions workflow checks formatting, runs clang-tidy, and tests Debug and sanitizer builds on Apple Silicon for pull requests and pushes to `main`. It uses LLVM 17.0.6 and a Python environment with Unicorn 2.1.4 for the function-level oracle.
 
 ```sh
-make format-check   # Verify first-party C++ formatting
+make format-check   # Verify Forge, harness, and Windows fixture formatting
 make format         # Apply the same formatting
 make lint           # Analyze Forge and the native C++ test harness
 make test CONFIG=Debug

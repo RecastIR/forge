@@ -1,0 +1,15 @@
+{
+  "schema_version": 1,
+  "id": "globals/state",
+  "description": "Update initialized, zero-initialized and local static state using a constant table.",
+  "source": "fixtures/globals/state.c",
+  "binary": "globals_state.exe",
+  "args": [
+    "0123"
+  ],
+  "expected": {
+    "exit_code": 0,
+    "stdout": "bias=43 total=290\n",
+    "stderr": ""
+  }
+}

@@ -1,0 +1,15 @@
+{
+  "schema_version": 1,
+  "id": "functions/calls",
+  "description": "Combine six arguments while unwinding nested recursive calls.",
+  "source": "fixtures/functions/calls.c",
+  "binary": "functions_calls.exe",
+  "args": [
+    "3"
+  ],
+  "expected": {
+    "exit_code": 0,
+    "stdout": "calls=26500\n",
+    "stderr": ""
+  }
+}

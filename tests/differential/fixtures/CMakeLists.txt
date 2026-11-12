@@ -1,0 +1,43 @@
+cmake_minimum_required(VERSION 3.20)
+project(ForgeWindowsFixtures LANGUAGES C CXX)
+
+if(NOT MINGW OR NOT CMAKE_SIZEOF_VOID_P EQUAL 8 OR NOT CMAKE_SYSTEM_PROCESSOR STREQUAL "AMD64")
+  message(FATAL_ERROR "Use the Windows x64 toolchain via tools/build-windows-fixtures.sh")
+endif()
+if(NOT CMAKE_BUILD_TYPE MATCHES "^(Debug|Release)$")
+  message(FATAL_ERROR "Choose Debug or Release")
+endif()
+
+set(suite "${CMAKE_CURRENT_SOURCE_DIR}/..")
+find_package(Python3 3.9 REQUIRED COMPONENTS Interpreter)
+file(GLOB manifests CONFIGURE_DEPENDS "${suite}/manifests/*.json")
+set_property(DIRECTORY APPEND PROPERTY CMAKE_CONFIGURE_DEPENDS ${manifests} "${suite}/manifests.py")
+execute_process(COMMAND "${Python3_EXECUTABLE}" -B "${suite}/manifests.py" --catalog
+  OUTPUT_VARIABLE catalog COMMAND_ERROR_IS_FATAL ANY)
+
+set(CMAKE_C_STANDARD 11)
+set(CMAKE_CXX_STANDARD 20)
+set(CMAKE_C_STANDARD_REQUIRED ON)
+set(CMAKE_CXX_STANDARD_REQUIRED ON)
+set(CMAKE_C_EXTENSIONS OFF)
+set(CMAKE_CXX_EXTENSIONS OFF)
+foreach(lang C CXX)
+  set(CMAKE_${lang}_FLAGS_DEBUG "-O0 -g")
+  set(CMAKE_${lang}_FLAGS_RELEASE "-O2 -DNDEBUG")
+endforeach()
+add_compile_options(-Wall -Wextra -Wpedantic -Wconversion -Wshadow -Werror
+  "-ffile-prefix-map=${CMAKE_CURRENT_SOURCE_DIR}=fixtures"
+  "-ffile-prefix-map=${CMAKE_CURRENT_BINARY_DIR}=build")
+add_link_options(-static -Wl,--no-insert-timestamp)
+include_directories("${CMAKE_CURRENT_SOURCE_DIR}")
+set(CMAKE_RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/bin")
+
+string(JSON count LENGTH "${catalog}")
+math(EXPR last "${count} - 1")
+foreach(i RANGE 0 ${last})
+  string(JSON source GET "${catalog}" ${i} source)
+  string(JSON binary GET "${catalog}" ${i} binary)
+  get_filename_component(name "${binary}" NAME_WE)
+  add_executable("fixture_${name}" "${suite}/${source}")
+  set_target_properties("fixture_${name}" PROPERTIES OUTPUT_NAME "${name}")
+endforeach()

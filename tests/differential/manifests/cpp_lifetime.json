@@ -1,0 +1,15 @@
+{
+  "schema_version": 1,
+  "id": "cpp/lifetime",
+  "description": "Dispatch through a base reference and record constructor and destructor order.",
+  "source": "fixtures/cpp/lifetime.cpp",
+  "binary": "cpp_lifetime.exe",
+  "args": [
+    "ab"
+  ],
+  "expected": {
+    "exit_code": 0,
+    "stdout": "value=104 lifetime=1254\nvalue=196 lifetime=1364\n",
+    "stderr": ""
+  }
+}

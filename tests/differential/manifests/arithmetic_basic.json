@@ -1,0 +1,15 @@
+{
+  "schema_version": 1,
+  "id": "arithmetic/basic",
+  "description": "Bounded signed operations and a 32-bit unsigned mix and rotation.",
+  "source": "fixtures/arithmetic/basic.c",
+  "binary": "arithmetic_basic.exe",
+  "args": [
+    "36"
+  ],
+  "expected": {
+    "exit_code": 0,
+    "stdout": "sum=-47 product=-427 quotient=-7 bits=1037477846\n",
+    "stderr": ""
+  }
+}

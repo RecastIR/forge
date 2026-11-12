@@ -1,0 +1,15 @@
+{
+  "schema_version": 1,
+  "id": "memory/arrays",
+  "description": "Sum weighted bytes copied from stack records to a heap array.",
+  "source": "fixtures/memory/arrays.c",
+  "binary": "memory_arrays.exe",
+  "args": [
+    "Forge"
+  ],
+  "expected": {
+    "exit_code": 0,
+    "stdout": "sum=1551\n",
+    "stderr": ""
+  }
+}

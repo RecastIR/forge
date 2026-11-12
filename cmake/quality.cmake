@@ -37,6 +37,8 @@ if(NOT executable)
 endif()
 
 if(NOT ACTION STREQUAL "lint")
+  file(GLOB_RECURSE fixture_sources "${root}/tests/differential/fixtures/*.c"
+    "${root}/tests/differential/fixtures/*.cpp" "${root}/tests/differential/fixtures/*.h")
   file(GLOB_RECURSE headers "${root}/src/*.h" "${root}/tests/support/*.h")
   if(ACTION STREQUAL "format")
     set(flags -i)
@@ -45,7 +47,8 @@ if(NOT ACTION STREQUAL "lint")
   else()
     message(FATAL_ERROR "Unknown quality command: ${ACTION}")
   endif()
-  execute_process(COMMAND "${executable}" ${flags} ${sources} ${headers} COMMAND_ERROR_IS_FATAL ANY)
+  execute_process(COMMAND "${executable}" ${flags} ${sources} ${headers} ${fixture_sources}
+    COMMAND_ERROR_IS_FATAL ANY)
   return()
 endif()
 
