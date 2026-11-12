@@ -1,15 +1,10 @@
 #include "forge.h"
 
-#include "llvm/ADT/ScopeExit.h"
+#include "input.h"
 #include "llvm/ADT/STLExtras.h"
-#include "llvm/Support/FileSystem.h"
-#include "llvm/Support/MemoryBuffer.h"
 
 #include <algorithm>
-#include <cerrno>
-#include <fcntl.h>
 #include <map>
-#include <unistd.h>
 #include <variant>
 
 namespace forge {
@@ -103,27 +98,17 @@ void locate(Dependency &edge, const Import &import, const fs::path &parent,
 using DllCache = std::map<lfs::UniqueID, std::variant<size_t, InspectionError>>;
 
 size_t loadModule(const fs::path &path, bool isRoot, DllCache &cache, std::vector<Module> &modules) {
-  int fd = ::open(path.c_str(), O_RDONLY | O_CLOEXEC | O_NONBLOCK);
-  if (fd == -1)
-    throw InspectionError(std::error_code(errno, std::generic_category()).message(), "READ_ERROR");
-  auto close = llvm::make_scope_exit([fd] { ::close(fd); });
-  lfs::file_status status;
-  if (auto ec = lfs::status(fd, status))
-    throw InspectionError(ec.message(), "READ_ERROR");
-  if (!lfs::is_regular_file(status))
-    throw InspectionError("expected a regular file", "READ_ERROR");
-  auto id = status.getUniqueID();
+  InputFile input(path);
+  auto id = input.id();
   if (auto it = cache.find(id); it != cache.end()) {
     if (auto *error = std::get_if<InspectionError>(&it->second))
       throw *error;
     return std::get<size_t>(it->second);
   }
-  auto file = llvm::MemoryBuffer::getOpenFile(fd, path.native(), status.getSize(), false, true);
-  if (!file)
-    throw InspectionError(file.getError().message(), "READ_ERROR");
+  auto file = input.read();
   Module module;
   try {
-    module = inspectPE((*file)->getMemBufferRef());
+    module = inspectPE(file->getMemBufferRef());
   } catch (const InspectionError &e) {
     cache.emplace(id, e);
     throw;

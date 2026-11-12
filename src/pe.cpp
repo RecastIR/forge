@@ -1,6 +1,5 @@
-#include "forge.h"
+#include "analysis.h"
 
-#include "llvm/ADT/StringExtras.h"
 #include "llvm/BinaryFormat/COFF.h"
 #include "llvm/Object/COFF.h"
 #include "llvm/Support/JSON.h"
@@ -18,7 +17,6 @@ using namespace llvm;
 using namespace llvm::object;
 using namespace llvm::support;
 
-std::string hex(uint64_t n) { return "0x" + utohexstr(n, true); }
 
 [[noreturn]] void invalid(StringRef field, uint64_t offset, StringRef reason) {
   throw InspectionError(field.str() + " at file offset " + hex(offset) + ": " + reason.str());
@@ -61,7 +59,8 @@ std::string machineName(uint16_t machine) {
 class Image {
 public:
   explicit Image(MemoryBufferRef buffer);
-  Module inspect();
+  Module inspect(bool analysis = false);
+  const COFFObjectFile &coff() const { return *object; }
 
 private:
   View file;
@@ -81,7 +80,7 @@ private:
   void exports(Module &module);
   void relocations(Module &module);
   void tls(Module &module);
-  void exceptions(Module &module);
+  void exceptions(Module &module, bool recover);
 };
 
 View Image::tail(uint64_t rva, StringRef label) const {
@@ -366,28 +365,28 @@ void Image::tls(Module &module) {
   module.tls = std::move(result);
 }
 
-void Image::exceptions(Module &module) {
+void Image::exceptions(Module &module, bool recover) {
   auto dir = directory(COFF::EXCEPTION_TABLE, "exception directory");
   if (!dir)
     return;
   using Entry = Win64EH::RuntimeFunction;
-  if (dir->bytes.size() % sizeof(Entry))
+  if (!recover && dir->bytes.size() % sizeof(Entry))
     invalid(dir->label, dir->offset, "partial AMD64 runtime function");
   Exceptions result{object->getDataDirectory(COFF::EXCEPTION_TABLE)->RelativeVirtualAddress,
                     uint32_t(dir->bytes.size()),
                     {}};
   count(dir->bytes.size() / sizeof(Entry), *dir);
-  for (size_t i = 0; i < dir->bytes.size(); i += sizeof(Entry)) {
+  for (size_t i = 0; i + sizeof(Entry) <= dir->bytes.size(); i += sizeof(Entry)) {
     auto e = dir->read<Entry>(i);
-    if (e.StartAddress >= e.EndAddress || e.EndAddress > header.SizeOfImage ||
-        e.UnwindInfoOffset >= header.SizeOfImage)
+    if (!recover && (e.StartAddress >= e.EndAddress || e.EndAddress > header.SizeOfImage ||
+                     e.UnwindInfoOffset >= header.SizeOfImage))
       invalid(dir->label, dir->offset + i, "runtime function range or unwind RVA outside image");
     result.functions.push_back({e.StartAddress, e.EndAddress, e.UnwindInfoOffset});
   }
   module.exceptions = std::move(result);
 }
 
-Module Image::inspect() {
+Module Image::inspect(bool analysis) {
   Module module{};
   module.dll = object->getCharacteristics() & COFF::IMAGE_FILE_DLL;
   module.imageBase = object->getImageBase();
@@ -412,15 +411,24 @@ Module Image::inspect() {
     module.sections.push_back(
         {n->str(), rwx, s->VirtualAddress, s->VirtualSize, s->PointerToRawData, s->SizeOfRawData});
   }
-  imports(module, false);
-  imports(module, true);
-  exports(module);
+  if (!analysis) {
+    imports(module, false);
+    imports(module, true);
+    exports(module);
+  }
   relocations(module);
   tls(module);
-  exceptions(module);
+  exceptions(module, analysis);
   return module;
 }
 } // namespace
 
 Module inspectPE(llvm::MemoryBufferRef buffer) { return Image(buffer).inspect(); }
+Analysis analyzePE(llvm::MemoryBufferRef buffer, bool debugInfo) {
+  Image image(buffer);
+  auto result = discover(image.inspect(true));
+  if (debugInfo)
+    enrichFunctions(result, image.coff());
+  return result;
+}
 } // namespace forge

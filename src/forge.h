@@ -1,6 +1,6 @@
 #pragma once
 
-#include "llvm/ADT/StringRef.h"
+#include "llvm/ADT/StringExtras.h"
 #include "llvm/Support/MemoryBufferRef.h"
 #include "llvm/Support/raw_ostream.h"
 
@@ -13,6 +13,8 @@
 
 namespace forge {
 namespace fs = std::filesystem;
+
+inline std::string hex(uint64_t n) { return "0x" + llvm::utohexstr(n, true); }
 
 struct InspectionError : std::runtime_error {
   std::string code, architecture;
@@ -98,6 +100,6 @@ struct Report {
 
 Module inspectPE(llvm::MemoryBufferRef buffer);
 Report inspect(const fs::path &root, const std::vector<fs::path> &searchPaths);
-void printReport(const Report &report, bool json, llvm::raw_ostream &out);
+void printReport(const Report &report, bool json, bool verbose, llvm::raw_ostream &out);
 void printDiagnostics(const Report &report, llvm::raw_ostream &err);
 } // namespace forge

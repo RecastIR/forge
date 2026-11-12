@@ -1,9 +1,10 @@
 #include "forge.h"
 
-#include "llvm/ADT/StringExtras.h"
 #include "llvm/Support/FormatVariadic.h"
 #include "llvm/Support/JSON.h"
 
+#include "llvm/Support/Format.h"
+#include <algorithm>
 #include <map>
 
 namespace forge {
@@ -13,7 +14,6 @@ using json::Array;
 using json::Object;
 using json::Value;
 
-std::string hex(uint64_t n) { return "0x" + utohexstr(n, true); }
 std::string pathText(const fs::path &p) { return json::fixUTF8(p.native()); }
 const char *loadType(const Import &i) { return i.delayed ? "delay" : "direct"; }
 
@@ -137,13 +137,37 @@ Value reportJson(const Report &r) {
                 {"summary", std::move(summary)}};
 }
 
-void textModule(const Module &m, raw_ostream &out) {
+void textModule(const Module &m, bool verbose, raw_ostream &out) {
   out << m.path.string() << "  (PE32+ AMD64 " << (m.dll ? "DLL" : "EXE") << ")\n"
-      << "  Image base VA " << hex(m.imageBase) << "  Entry point RVA " << hex(m.entryPoint) << "\n"
-      << "  Sections      RVA       Virtual size   File offset   Raw size   Permissions\n";
+      << "  Image base VA " << hex(m.imageBase) << "  Entry point RVA " << hex(m.entryPoint)
+      << "\n";
+  size_t width = 8;
   for (const auto &s : m.sections)
-    out << formatv("    {0,-12}{1,-12}{2,-15}{3,-14}{4,-11}{5}\n", s.name, hex(s.rva),
-                   s.virtualSize, s.fileOffset, s.rawSize, s.permissions);
+    width = std::max(width, s.name.size());
+  out << "    " << left_justify("Sections", width) << "  "
+      << formatv("{0,-12}{1,-15}{2,-14}{3,-11}{4}\n", "RVA", "Virtual size", "File offset",
+                 "Raw size", "Permissions");
+  for (const auto &s : m.sections)
+    out << "    " << left_justify(s.name, width) << "  "
+        << formatv("{0,-12}{1,-15}{2,-14}{3,-11}{4}\n", hex(s.rva), s.virtualSize, s.fileOffset,
+                   s.rawSize, s.permissions);
+  size_t symbols = 0, relocations = 0;
+  for (const auto &i : m.imports)
+    symbols += i.symbols.size();
+  for (const auto &b : m.relocations)
+    relocations += b.entries.size();
+  out << "  Imports: " << m.imports.size() << " descriptors, " << symbols
+      << " symbols; exports: " << m.exports.size() << "\n  Relocations: " << relocations
+      << " entries in " << m.relocations.size()
+      << " blocks; exception records: " << (m.exceptions ? m.exceptions->functions.size() : 0)
+      << "\n";
+  if (m.tls)
+    out << "  TLS directory RVA " << hex(m.tls->rva) << ", " << m.tls->callbackVas.size()
+        << " callbacks\n";
+  else
+    out << "  TLS: absent\n";
+  if (!verbose)
+    return;
   for (const auto &i : m.imports) {
     out << "  Import " << i.name << " (" << loadType(i) << ")\n";
     for (const auto &s : i.symbols) {
@@ -188,14 +212,22 @@ void textModule(const Module &m, raw_ostream &out) {
 }
 } // namespace
 
-void printReport(const Report &report, bool json, llvm::raw_ostream &out) {
+void printReport(const Report &report, bool json, bool verbose, llvm::raw_ostream &out) {
   if (json) {
     out << llvm::formatv("{0:2}\n", reportJson(report));
     return;
   }
   for (const auto &m : report.modules)
-    textModule(m, out);
-  out << "Dependencies (" << report.dependencies.size() << ")\n";
+    textModule(m, verbose, out);
+  out << "Dependencies (" << report.dependencies.size() << ")";
+  std::map<std::string, size_t> counts;
+  for (const auto &d : report.dependencies)
+    ++counts[d.status];
+  for (const auto &[status, count] : counts)
+    out << "  " << status << " " << count;
+  out << "\n";
+  if (!verbose)
+    return;
   for (const auto &d : report.dependencies) {
     const auto &source = report.locations[d.importerLocation];
     const auto &i = report.modules[source.module].imports[d.importIndex];

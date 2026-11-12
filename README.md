@@ -1,15 +1,16 @@
 # Forge
 
-Forge inspects Windows PE32+ AMD64 executables and DLLs on macOS. It reports the image layout, imported and exported symbols, base relocations, TLS, AMD64 exception metadata, and the static dependency graph. All inspection reads files without executing their code.
+Forge inspects Windows PE32+ AMD64 executables and DLLs on macOS. It reports the image layout, imported and exported symbols, base relocations, TLS, AMD64 exception metadata, and the static dependency graph. Function analysis identifies unwind-backed code ranges. The experimental lifter translates individual register-only functions into LLVM IR for native ARM64 compilation. Inspection and lifting both read the PE as a file.
 
 ## Build and run
 
-The verified baseline is Apple Silicon, Apple Clang with C++20, CMake 3.20 or later, and Homebrew LLVM 17.0.6. Tests also use Python 3.9+, `llvm-mc`, `llvm-dlltool`, `lld-link`, and `llvm-readobj`.
+The verified baseline is Apple Silicon, Apple Clang with C++20, CMake 3.20 or later, and Homebrew LLVM 17.0.6. Tests also use Python 3.9+, LLVM Clang, `llvm-mc`, `llvm-dlltool`, `lld-link`, `llvm-readobj`, `opt`, and `llc`.
 
 ```sh
 brew install cmake llvm@17
 make
 build/forge inspect path/to/game.exe
+build/forge inspect path/to/game.exe --verbose
 build/forge inspect path/to/game.exe --dll-path ./bin --dll-path ./plugins --format json
 build/forge inspect path/to/game.exe --strict --format json > report.json
 ```
@@ -37,11 +38,11 @@ The first matching directory wins. Case variants in the same directory produce `
 | Third-party runtime | `msvcp140`, `msvcp140_1`, `msvcp140_2`, `vcruntime140`, and `vcruntime140_1` (each with `.dll`) require a compatible physical DLL. |
 | Other | A compatible match is classified as `application`. A missing file remains `unknown`. |
 
-Forge applies this static policy independently of the Windows loader. Dynamic loads, export-forwarder resolution, API implementations, symbol binding, and native code generation are outside this stage. A resolved edge means Forge found and inspected a compatible DLL. Exception results contain runtime-function metadata. Legacy VA-based delay descriptors produce an unsupported-form diagnostic. Metadata tables must fit in file-backed section data. Variable-length tables and names have per-image expansion limits of one million records and 64 MiB of name data.
+Forge applies this static policy independently of the Windows loader. Dynamic loads, export-forwarder resolution, API implementations, and symbol binding are outside the dependency resolver. A resolved edge means Forge found and inspected a compatible DLL. Exception results contain runtime-function metadata. Legacy VA-based delay descriptors produce an unsupported-form diagnostic. Metadata tables must fit in file-backed section data. Variable-length tables and names have per-image expansion limits of one million records and 64 MiB of name data.
 
 ## Reports and exit codes
 
-Text is the default. With `--format json`, stdout contains one schema-v1 document for a completed inspection. Human-readable diagnostics go to stderr.
+Default text shows section layouts and counts for each metadata table and dependency status. Use `--verbose` for individual symbols, relocation entries, exception ranges, callbacks, resolution edges, and search paths. With `--format json`, stdout contains one schema-v1 document for a completed inspection. Human-readable diagnostics go to stderr.
 
 - `schema_version` is the integer `1`. `inspection.root_module` indexes `modules`. Each physical module records its first-discovered canonical path, binary metadata, sections, imports, exports, relocations, TLS, and exceptions. Absent TLS and exception directories are `null`. Empty tables use arrays.
 - Fields ending in `_rva` are relative virtual addresses. VA and RVA fields are hexadecimal strings. File offsets and sizes are integers in bytes. Relocation types use PE numeric codes.
@@ -68,3 +69,73 @@ build/forge inspect build/fixtures/metadata.exe --strict
 CTest runs `tests/fixtures/generate.py` to assemble and link SDK-free sources with fixed PE timestamps into the build directory. Tests compare metadata to `llvm-readobj` and create malformed copies in temporary directories. To exercise same-directory case collisions on a case-insensitive Mac, point `TMPDIR` at a writable directory on a case-sensitive volume.
 
 `make fixtures` regenerates just the test images. `make sanitize` builds and runs the suite in Debug with AddressSanitizer and UndefinedBehaviorSanitizer in `<BUILD_DIR>-sanitize/`. It forwards `CMAKE_ARGS`, including compiler and deployment-target settings. Direct CMake builds can enable the same instrumentation with `-DFORGE_ENABLE_SANITIZERS=ON`. `make clean` removes compiled targets from the selected configuration and keeps the CMake cache.
+
+## Discover functions
+
+```sh
+build/forge analyze fastgron.exe --functions
+build/forge analyze fastgron.exe --functions --format json --strict
+```
+
+Analysis reads the root image's PE exception directory, conventionally stored in `.pdata`. Each function reports a half-open interval `[start_rva, end_rva)`, byte count, unwind RVA, original zero-based record indices, and entry-point/TLS-callback membership. Where embedded DWARF is usable, LLVM supplies the linkage name and source location. Gaps in executable sections remain `unknown_executable_ranges`. These may include leaf functions, padding, or embedded data.
+
+Exact duplicate triples share one row with all their indices. Overlapping, nested, and same-range/different-unwind records share an overlap diagnostic identifying the connected group of records. Each participating row is ineligible for lifting. Invalid bounds, ranges outside file-backed executable sections, and zero, unaligned, or unmapped unwind references produce warnings. Validation checks the address and availability of the four-byte unwind header. Unwind programs are outside this experiment.
+
+The analysis JSON has its own schema version 1. Rows are sorted by start, end, unwind RVA, and original record index. `liftable` means discovery accepts the range. Instruction and ABI checks run during `lift`. Analysis exits with 0 upon completion, 3 for record findings under `--strict`, 1 for unreadable input or tables, and 2 for usage errors. A trailing partial record produces a finding and preserves the complete records before it.
+
+## Lift and run a native function
+
+The following example builds a Windows EXE from `tests/fixtures/add.c`. Clang compiles its arithmetic and the generator adds a PE unwind record for the leaf. Forge reads the resulting five bytes at RVA `0x1000`. The native C++ harness reads pairs of hexadecimal integers and prints each result in hexadecimal.
+
+```sh
+make test
+llvm_bin="$(brew --prefix llvm@17)/bin"
+build/forge analyze build/fixtures/add.exe --functions
+build/forge lift build/fixtures/add.exe --rva 0x1000 \
+  --signature 'i64(i64,i64)' --output build/add.ll
+"$llvm_bin/opt" -passes=verify -disable-output build/add.ll
+"$llvm_bin/llc" -filetype=obj build/add.ll -o build/add.o
+"$llvm_bin/llvm-readobj" --file-headers build/add.o
+xcrun clang++ -arch arm64 -std=c++20 tests/native_harness.cpp build/add.o -o build/add-harness
+printf 'a 14\nffffffffffffffff 1\n' | build/add-harness
+```
+
+The object reports `Mach-O arm64`. The harness prints `1e` and `0` for 10 + 20 and −1 + 1.
+
+Without `--signature`, the module contains a retained internal `forge_lifted_<hex RVA>` function. Its pointer addresses seven 64-bit slots in this order — RAX, RCX, RDX, R8, R9, R10, R11. Reads use their incoming values. Writes update those slots. Condition flags are local to the supported compare/branch pair. Plain `ret` ends the isolated call. Guest stack state, return addresses, and flags across calls are outside this interface.
+
+The sole supported signature adds `extern "C" int64_t forge_lifted(int64_t, int64_t)`. The caller declares this contract. The wrapper places its native arguments in the RCX and RDX slots, calls the lifted body, and returns RAX. Every reachable path must define any additional register before reading it and must define RAX before returning. Forge verifies the module before publishing the output. A failed lift preserves an existing output file.
+
+| Supported x86-64 forms | Semantics |
+| --- | --- |
+| 32/64-bit register and immediate moves, same-register XOR | A 32-bit write clears the upper register half. Same-register XOR defines zero independently of the previous value. |
+| ADD, SUB, two-register IMUL | Arithmetic wraps at the operand width. Immediate forms use the decoder's sign extension. IMUL retains the low half. |
+| LEA with a 64-bit base/index address expression | Scaled index and displacement use integer arithmetic. The destination can be 32 or 64 bits. |
+| CMP immediately followed by Jcc | Equality, inequality, and signed and unsigned order comparisons at the CMP operand width. Each incoming path to Jcc must supply that comparison. |
+| Short/near forward direct jumps and ordinary RET | Targets must lie on decoded instruction boundaries within the discovered range. Every reachable path ends in a return. |
+
+The experiment accepts exact discovered starts in PE32+ AMD64 EXEs, with a 64 KiB per-function limit. The whole range must decode linearly. Reachable instructions must satisfy the allowlist. Unsupported cases include 8/16-bit operands, legacy prefixes, nonvolatile registers, guest memory, explicit stack operations, RIP-relative addressing, calls, loops, indirect branches, SIMD, and code bytes subject to base relocations. Diagnostics include the RVA and failing form or bytes.
+
+### Lifting approach
+
+Forge uses LLVM 17 MC for instruction decoding, an explicit translation for each supported form, and LLVM's AArch64 backend via `llc`. The same installed toolchain builds on Apple Silicon, verifies the IR, and produces Mach-O objects. The opcode names and operand layouts follow LLVM 17.0.6. Upgrading LLVM requires rerunning the decoder and behavioral tests.
+
+Remill provides maintained x86-64 semantics and tests LLVM 17 and newer in CI, with macOS builds in its Nix matrix. Using its IR for this native interface would also require adapting its state, memory, and control-flow intrinsics. Its broader instruction coverage is relevant when Forge grows beyond register-only functions. [Remill build matrix](https://github.com/lifting-bits/remill/blob/master/.github/workflows/build.yml) · [Remill intrinsics](https://github.com/lifting-bits/remill/blob/master/docs/INTRINSICS.md)
+
+RetDec lifts x86-64 for decompilation and documents macOS support. Its modified LLVM 8 dependency and limited maintenance make direct integration into Forge's LLVM 17 ARM64 build a larger undertaking. Native Apple Silicon integration and executable equivalence were unverified for that option. [RetDec](https://github.com/avast/retdec) · [RetDec LLVM fork](https://github.com/avast/llvm)
+
+### Verification and fastgron
+
+The `codegen` suite verifies both IR interfaces and emits ARM64 objects. On Apple Silicon, `native` compares the C++ harness with arithmetic references, before and after LLVM IR optimization. It exercises 272 boundary and seeded random input pairs per case, all ten supported condition codes, and a linked PE whose SUB opcode is changed to ADD. The original PE bytes, including that edit, are the only instruction input to Forge.
+
+The optional `differential` suite uses Unicorn when its Python package is available to CTest's interpreter. It executes the fixture's original x86-64 code bytes with a Windows x64 call frame and compares the resulting RAX with the native harness. This is isolated machine-code differential execution. The standard native run and the generated functions have no emulator dependency. CTest reports a skip when the optional oracle or native host is unavailable.
+
+On Apple Silicon, 19 fixture cases passed all 5,168 source-reference comparisons both before and after IR optimization. The optimized native functions also matched all 5,168 independent Unicorn 2.1.4 results.
+
+The pinned Windows fastgron v0.7.7 executable (SHA-256 `1c18064f88804a0519fa51d9a4755bd25b7b73d16e28bddf24e3e1688480eb47`) produced 235 valid ranges and no analysis findings. LLVM resolved `0x29c50` to `std::ctype<char>::do_widen(char) const` at `locale_facets.h:1092`. Its bytes `89 d0 c3` lifted and compiled to ARM64. The signatureless form models the EDX-to-EAX move and zero-extension. That C++ member function has a different prototype from the fixture wrapper. At `0x18670`, lifting stopped at `0x18673` on `CMP8ri [80f909]`. The subsequent `setbe %al` also requires unsupported byte semantics. [fastgron v0.7.7 release](https://github.com/adamritter/fastgron/releases/tag/v0.7.7)
+
+```sh
+build/forge lift fastgron.exe --rva 0x29c50 --output build/fastgron.ll
+"$llvm_bin/llc" -filetype=obj build/fastgron.ll -o build/fastgron.o
+"$llvm_bin/llvm-objdump" -d build/fastgron.o
+```

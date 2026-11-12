@@ -3,47 +3,12 @@ import json
 import os
 from pathlib import Path
 import re
-import shutil
 import struct
-import subprocess
 import sys
-import tempfile
 import unittest
 
-SUITE, FORGE, fixture_dir, READOBJ = sys.argv[1:]
-FIXTURES = Path(fixture_dir)
-
-
-class Case(unittest.TestCase):
-    def setUp(self):
-        self.tmp = tempfile.TemporaryDirectory()
-        self.addCleanup(self.tmp.cleanup)
-        self.dir = Path(self.tmp.name).resolve()
-
-    def copy(self, name, dest=None):
-        dest = self.dir / (dest or name)
-        dest.parent.mkdir(parents=True, exist_ok=True)
-        shutil.copyfile(FIXTURES / name, dest)
-        return dest
-
-    def invoke(self, *args, code=0, cwd=None, env=None):
-        p = subprocess.run([FORGE, *args], capture_output=True, cwd=cwd, env=env, timeout=15)
-        self.assertEqual(p.returncode, code, (args, p.stderr.decode(errors="replace")))
-        self.assertNotIn(b"Sanitizer", p.stderr)
-        self.assertNotIn(b"runtime error:", p.stderr)
-        return p
-
-    def report(self, image, *args, code=0):
-        p = self.invoke("inspect", image, *args, "--format", "json", code=code)
-        r = json.loads(p.stdout)
-        self.assertEqual(r["schema_version"], 1)
-        self.assertEqual(r["inspection"], {"status": "completed", "root_module": 0})
-        for diagnostic in r["diagnostics"]:
-            self.assertIn(diagnostic["code"].encode(), p.stderr)
-        return r
-
-    def readobj(self, name, *flags):
-        return subprocess.check_output([READOBJ, *flags, FIXTURES / name], text=True)
+from pe_layout import Layout
+from cli_case import Case, FIXTURES, SUITE
 
 
 class Metadata(Case):
@@ -289,30 +254,6 @@ class Dependencies(Case):
         self.assertEqual(r["diagnostics"][0]["code"], "DLL_AMBIGUOUS")
 
 
-class Layout:
-    """Locate fields in our linked PE32+ fixtures for single-field test edits."""
-    def __init__(self, data):
-        self.data = data
-        self.pe = self.u32(0x3c)
-        self.opt = self.pe + 24
-        self.directories = self.opt + 112
-        table = self.opt + struct.unpack_from("<H", data, self.pe + 20)[0]
-        count = struct.unpack_from("<H", data, self.pe + 6)[0]
-        self.sections = [struct.unpack_from("<IIII", data, table + 40 * i + 8) for i in range(count)]
-
-    def u32(self, offset):
-        return struct.unpack_from("<I", self.data, offset)[0]
-
-    def directory(self, index):
-        return struct.unpack_from("<II", self.data, self.directories + 8 * index)
-
-    def file_offset(self, rva):
-        for size, start, raw_size, offset in self.sections:
-            if start <= rva < start + min(size, raw_size):
-                return offset + rva - start
-        raise ValueError(f"unmapped fixture RVA {rva:x}")
-
-
 class Malformed(Case):
     def invalid(self, data, expected):
         path = self.dir / "bad.exe"
@@ -425,7 +366,13 @@ class CLI(Case):
         self.assertEqual(self.invoke(*args, "--strict", code=3).stdout, p.stdout)
         t = self.invoke("inspect", exe)
         self.assertIn(b"PE32+ AMD64", t.stdout)
-        self.assertIn(b"ordinal 7", t.stdout)
+        self.assertNotIn(b"ordinal 7", t.stdout)
+        verbose = self.invoke("inspect", exe, "--verbose")
+        self.assertIn(b"ordinal 7", verbose.stdout)
+        self.assertIn(b"Relocations at page", verbose.stdout)
+        self.assertNotIn(b"Relocations at page", t.stdout)
+        self.assertEqual(self.invoke(*args, "--verbose").stdout, p.stdout)
+        self.assertEqual(verbose.stderr, t.stderr)
         self.assertIn(b"TLS directory RVA", t.stdout)
         self.assertIn(b"DLL_NOT_FOUND", t.stderr)
         self.assertNotIn(b"DLL_NOT_FOUND", t.stdout)

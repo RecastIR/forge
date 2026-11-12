@@ -1,11 +1,11 @@
-"""Build small static-analysis inputs; nothing produced here is executed."""
+"""Build SDK-free Windows machine-code fixtures with deterministic timestamps."""
 import argparse
 from pathlib import Path
 import subprocess
 import tempfile
 
 
-def generate(output, mc, link, dlltool):
+def generate(output, mc, link, dlltool, clang):
     output.mkdir(parents=True, exist_ok=True)
     metadata = Path(__file__).with_name("metadata.s").read_text()
     stub = ".text\n.globl entry\nentry:\n  retq\n"
@@ -35,7 +35,7 @@ def generate(output, mc, link, dlltool):
             definition.write_text("LIBRARY " + dll + "\nEXPORTS\n" + "\n".join(public) + "\n")
             run(dlltool, "-m", "i386:x86-64", "-d", definition, "-l", dll + ".lib")
 
-        def image(filename, assembly=stub, imports=(), delays=()):
+        def image(filename, assembly=stub, imports=(), delays=(), exports=()):
             assembly += helper if delays else ""
             for _, symbol in imports:
                 assembly += "\n.section .rdata,\"dr\"\n.quad __imp_" + symbol + "\n"
@@ -47,11 +47,24 @@ def generate(output, mc, link, dlltool):
                 definition = work / "exports.def"
                 definition.write_text("EXPORTS\n" + "\n".join(definitions[filename]) + "\n")
                 flags = ["/dll", "/noentry", "/def:exports.def", "/implib:unused.lib"]
-            run(link, "/nodefaultlib", "/timestamp:0", *flags, "/out:" + filename, "image.obj",
+            run(link, "/nodefaultlib", "/timestamp:0", *flags, *("/export:" + name for name in exports), "/out:" + filename, "image.obj",
                 *dict.fromkeys(dll + ".lib" for dll, _ in imports),
                 *("/delayload:" + dll for dll in delays))
             (output / filename).write_bytes((work / filename).read_bytes())
 
+        sources = Path(__file__).resolve().parent
+        # Remap debug paths so builds in different source directories produce identical PEs.
+        run(clang, "--target=x86_64-windows-msvc", "-O2", "-fwrapv", "-gdwarf-4", "-g",
+            "-fdebug-compilation-dir=.", f"-ffile-prefix-map={sources}=.", "-S", sources / "add.c",
+            "-o", "add.s")
+        with (work / "add.s").open("a") as assembly:
+            assembly.write((sources / "leaf-range.s").read_text())
+        run(mc, "-triple=x86_64-windows-msvc", "-filetype=obj", "add.s", "-o", "add.obj")
+        run(link, "/nodefaultlib", "/timestamp:0", "/debug:dwarf", "/entry:entry", "/subsystem:console",
+            "/out:add.exe", "add.obj")
+        (output / "add.exe").write_bytes((work / "add.exe").read_bytes())
+        image("arithmetic.exe", (sources / "arithmetic.s").read_text(),
+              exports=["entry", "product", "expr", "low_product", "select_signed", "select_unsigned", "equal", "immediates"])
         image("minimal.exe")
         image("Physics.DLL")
         image("metadata.exe", metadata, [("Physics.DLL", "Named"), ("Physics.DLL", "ByOrdinal"),
@@ -79,5 +92,6 @@ if __name__ == "__main__":
     parser.add_argument("--mc", default="llvm-mc")
     parser.add_argument("--link", default="lld-link")
     parser.add_argument("--dlltool", default="llvm-dlltool")
+    parser.add_argument("--clang", default="clang")
     args = parser.parse_args()
-    generate(args.output, args.mc, args.link, args.dlltool)
+    generate(args.output, args.mc, args.link, args.dlltool, args.clang)
