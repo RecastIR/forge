@@ -74,6 +74,16 @@ class NativeDifferentialTests(unittest.TestCase):
             mismatch, = evidence["differences"]
             self.assertEqual(mismatch["operands"], ["1", "4294967295"])
 
+    def test_word_sign_extension(self):
+        def zero_extend(source):
+            changed, count = re.subn(r"\bsext i16 (%\w+) to i64\b", r"zext i16 \1 to i64", source)
+            self.assertEqual(count, 1, "expected one signed word-to-quadword extension")
+            return changed
+
+        report = self.modified_ir("arithmetic/extensions", "unsigned-word", "stdout_mismatch", zero_extend)
+        for variant in diff.VARIANTS:
+            self.assertEqual(report["variants"][variant]["failure_categories"], ["stdout_mismatch"])
+
     def test_native_build_failures(self):
         def missing_wrapper(source):
             self.assertEqual(source.count("@forge_lifted("), 1)

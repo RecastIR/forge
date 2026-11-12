@@ -1,7 +1,7 @@
 {
   "schema_version": 1,
   "id": "arithmetic/predicates",
-  "description": "Return a bitmap of the sixteen conditions for one comparison.",
+  "description": "Return all sixteen conditions, including signed comparisons that overflow in both directions.",
   "source": "fixtures/arithmetic/integer_driver.c",
   "binary": "predicates.exe",
   "args": [
@@ -25,11 +25,13 @@
     "-1", "-1",
     "4294967296", "17",
     "1431655765", "-1431655766",
-    "-9999999999", "9999999999"
+    "-9999999999", "9999999999",
+    "23", "1",
+    "24", "-1"
   ],
   "expected": {
     "exit_code": 0,
-    "stdout": "26202\n21862\n43622\n22954\n42666\n26202\n43690\n21862\n43690\n42666\n22886\n43690\n43622\n22886\n26202\n43690\n43690\n26202\n43690\n43622\n22954\n",
+    "stdout": "26202\n21862\n43622\n22954\n42666\n26202\n43690\n21862\n43690\n42666\n22886\n43690\n43622\n22886\n26202\n43690\n43690\n26202\n43690\n43622\n22954\n22185\n42341\n",
     "stderr": ""
   }
 }

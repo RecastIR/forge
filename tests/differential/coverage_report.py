@@ -9,7 +9,7 @@ import subprocess
 import sys
 
 import differential as diff
-from artifacts import directory, read_file, reference
+from artifacts import directory, file_sha256, read_file, reference
 from comparison import Observation, describe, differences
 from manifests import field
 from protocol import STREAM_LIMIT
@@ -67,6 +67,34 @@ def suite_index(folder, config, run_id, expected, errors):
     return suite, index
 
 
+def inspect_variant(folder, variant, evidence, identity, canonical_digest, wanted):
+    require(all(evidence.get(k) == value for k, value in identity.items())
+            and evidence.get("variant") == variant, "variant identity or run ID mismatch")
+    require(evidence.get("canonical_ir_sha256") == canonical_digest, "canonical IR digest mismatch")
+    stages = field(evidence, "stages", dict)
+    require(set(stages) == set(diff.NATIVE_STAGES), "missing variant stages")
+    if stages["native_compilation"] != "passed":
+        raise ValueError(evidence.get("diagnostic") or "native compilation incomplete")
+
+    work = directory(folder, variant)
+    input_digest = canonical_digest
+    if variant == "o2":
+        input_digest = file_sha256(directory(work, diff.native.OPTIMIZED_IR))
+    require(evidence.get("compiler_ir_sha256") == input_digest, "compiler input IR digest mismatch")
+    if stages["native_execution"] != "passed" or evidence.get("execution_outcome") != "completed":
+        raise ValueError(evidence.get("diagnostic") or "native execution incomplete")
+
+    actual = Observation(field(evidence, "native_exit_code", int),
+                         read_file(work / "stdout.bin", STREAM_LIMIT), read_file(work / "stderr.bin", STREAM_LIMIT))
+    mismatch = differences(wanted, actual)
+    if not mismatch:
+        require(evidence["status"] == "passed" and stages["comparison"] == "passed"
+                and "native_process_status" not in evidence and actual.exit_code == 0
+                and not evidence.get("differences") and not evidence.get("failure_categories"),
+                "comparison result disagrees with captured behavior")
+    return mismatch
+
+
 def inspect_result(row, case, record, entry, folder, wanted, run_id, expected_forge):
     name = row["fixture_id"]
     require(field(record, "schema_version", int) == 1 and record["fixture_id"] == name
@@ -76,8 +104,7 @@ def inspect_result(row, case, record, entry, folder, wanted, run_id, expected_fo
             "suite and case disagree")
     stages = field(record, "stages", dict)
     row["stages"] = stages
-    if record["status"] == "infrastructure_failure":
-        row["variants"] = record.get("variants", {})
+    if record["status"] == "infrastructure_failure" and "variants" not in record:
         raise ValueError(record.get("diagnostic") or "runner stage failure")
     require(record["binary_sha256"] == row["binary_sha256"] and record["reference"] == row["reference"]
             and stages["reference_validation"] == "passed", "PE or validated reference identity mismatch")
@@ -99,37 +126,32 @@ def inspect_result(row, case, record, entry, folder, wanted, run_id, expected_fo
     if expected_forge is not None:
         require(record["forge_sha256"] == expected_forge, "Forge executable differs from the tested native build")
     row["forge_sha256"] = record["forge_sha256"]
-    require(set(stages) == set(diff.STAGES) and all(stages[s] == "passed" for s in diff.STAGES[:-1]),
-            "enabled execution incomplete")
+    require(set(stages) == set(diff.STAGES) and all(stages[s] == "passed" for s in diff.STAGES[:3]),
+            "shared reference, analysis or lifting stage incomplete")
+    if record["status"] == "infrastructure_failure":
+        row["variants"] = record.get("variants", {})
+    try:
+        canonical_digest = file_sha256(directory(folder, diff.CANONICAL_IR))
+    except INVALID as error:
+        raise ValueError(f"baseline and o2: canonical IR: {error}") from error
+    identity = dict(fixture_id=name, build_config=row["config"], binary_sha256=row["binary_sha256"], run_id=run_id)
     variants = field(record, "variants", dict)
-    require(set(variants) == set(diff.VARIANTS), f"expected baseline and o2 evidence, found {sorted(variants)}")
-    failures = []
-    for name in diff.VARIANTS:
-        evidence = variants[name]
+    require(not (variants.keys() - set(diff.VARIANTS)), "unexpected native variant")
+    errors, failures = [], []
+    for variant in diff.VARIANTS:
         try:
-            execution = field(evidence, "stages", dict)
-            require(evidence["variant"] == name and evidence["run_id"] == run_id
-                    and evidence.get("execution_outcome") == "completed"
-                    and set(execution) == set(diff.NATIVE_STAGES)
-                    and all(execution[s] == "passed" for s in diff.NATIVE_STAGES[:-1]),
-                    "missing or stale execution")
-            work = directory(folder, name)
-            actual = Observation(field(evidence, "native_exit_code", int),
-                                 read_file(work / "stdout.bin", STREAM_LIMIT), read_file(work / "stderr.bin", STREAM_LIMIT))
-            mismatch = differences(wanted, actual)
-            if mismatch:
-                failures.extend(f"{name}: {describe(item)}" for item in mismatch)
-            else:
-                require(evidence["status"] == "passed" and execution["comparison"] == "passed"
-                        and "native_process_status" not in evidence and actual.exit_code == 0
-                        and not evidence.get("differences") and not evidence.get("failure_categories"),
-                        "comparison result disagrees with captured behavior")
+            mismatch = inspect_variant(folder, variant, field(variants, variant, dict), identity,
+                                       canonical_digest, wanted)
+            row["executed"] = True
+            failures.extend(f"{variant}: {describe(item)}" for item in mismatch)
         except INVALID as error:
-            raise ValueError(f"{name}: {error}") from error
+            errors.append(f"{variant}: {error}")
+    if errors:
+        raise ValueError("\n".join(errors + failures))
     if failures:
         row.update(status="failed", reason="\n".join(failures))
     else:
-        require(record["status"] == "passed" and stages["comparison"] == "passed"
+        require(record["status"] == "passed" and all(stages[s] == "passed" for s in diff.NATIVE_STAGES)
                 and not record.get("failure_categories"), "fixture result disagrees with variant evidence")
         row["status"] = "passed"
 
@@ -197,15 +219,15 @@ def aggregate(run_id, revision, jobs, *, suite_root=diff.SUITE, binaries=diff.BI
                 record = diff.read_json(work / "result.json")
                 inspect_result(row, case, record, index[name], work, wanted, run_id,
                                forge_digests[config] if forge_digests is not None else None)
-                if row["status"] in ("passed", "failed"):
-                    executed += 1
             except INVALID as error:
                 row["reason"] = str(error)
+            executed += row.get("executed", False)
             counts[row["status"]] += 1
             categories.setdefault(category, Counter())[row["status"]] += 1
             if row["status"] == "passed":
                 scopes[row["scope"]] += 1
             report["cases"].append(row)
+        summary["executed"] = executed
         if not counts["passed"]:
             errors.append(f"{config}: zero successful differential executions")
         if suite:

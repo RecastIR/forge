@@ -270,14 +270,14 @@ void Translator::integer(const Step& s, const x86::IntegerInstruction& instructi
         write(dest, semantics.shift(op, read(s, dest), count));
         return;
     }
-    // XOR and SUB of an identical register define a result and flags even if
-    // that register's previous value was unavailable at wrapper entry.
-    bool zeroing = (op == Op::Xor || op == Op::Sub) && form == Form::Pair &&
-                   i.getOperand(0).getReg() == last.getReg();
-    Value* lhs = zeroing ? ir.getIntN(width, 0) : read(s, dest);
+    // Equal operands cancel even if the guest register has no incoming value.
+    // SBB still subtracts CF, and CMP only updates flags.
+    bool cancel = (op == Op::Xor || op == Op::Sub || op == Op::Cmp || op == Op::Sbb) &&
+                  form == Form::Pair && i.getOperand(0).getReg() == last.getReg();
+    Value* lhs = cancel ? ir.getIntN(width, 0) : read(s, dest);
     Value* rhs = nullptr;
     if (form != Form::Reg)
-        rhs = zeroing ? lhs : value(s, last, width);
+        rhs = cancel ? lhs : value(s, last, width);
     if (op == Op::Adc || op == Op::Sbb)
         require(s, x86::CF);
     auto* result = semantics.arithmetic(op, lhs, rhs);

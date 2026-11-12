@@ -55,14 +55,14 @@ INTEGER_WITNESSES = {
     "flag_add": ("add cl,dl", "seto al", "lahf"),
     "flag_sub": ("sub cx,dx", "lahf"),
     "flag_adc": ("cmp rcx,rdx", "adc cl,dl", "lahf"),
-    "flag_sbb": ("cmp rcx,rdx", "sbb cl,dl", "lahf"),
+    "flag_sbb": ("cmp r9,r9", "sete r9b", "cmp rcx,rdx", "sbb r8,r8", "sbb cl,dl", "lahf"),
     "carry_chain": ("add rax,rdx", "inc ax", "not rax", "adc rax,", "dec ah", "sbb rax,"),
     "neg_flags": ("shl rcx,", "neg rcx", "lahf"),
     "mixed_widths": ("mov ah,dl", "xor dh,ch", "add ax,dx"),
-    "extensions": ("movsx eax,ch", "movsxd rax,eax", "movzx r8w,dl", "movsx rdx,r8w"),
+    "extensions": ("movsx eax,ch", "movsxd rax,eax", "movzx r8w,dl", "movsx rdx,dx", "xor rax,r8"),
     "multiply_flags": ("imul cx,dx", "setb al", "seto ah"),
     "logic_flags": ("or rcx,rdx", "and rcx,", "test rcx,rcx", "sete al", "setp ah"),
-    "predicates": tuple("set" + cc + " " for cc in
+    "predicates": ("movabs rcx,0x8000000000000000", "movabs rcx,0x7fffffffffffffff") + tuple("set" + cc + " " for cc in
                         ("o", "no", "b", "ae", "e", "ne", "be", "a", "s", "ns", "p", "np", "l", "ge", "le", "g")),
     "conditional_moves": ("cmovl ax,dx", "cmovb eax,edx", "cmovp rax,rdx"),
     "shift_flags": ("cmp rdx,rcx", "sar dl,cl", "setp al", "setb ah"),

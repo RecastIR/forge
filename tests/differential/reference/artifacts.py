@@ -1,4 +1,6 @@
 """Reopen a v1 publication from a trusted reference root without invoking Wine."""
+from contextlib import contextmanager
+import hashlib
 import json
 import os
 import re
@@ -26,19 +28,41 @@ def directory(root, relative):
     return path
 
 
-def read_file(path, limit):
+@contextmanager
+def artifact_file(path):
     fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
     try:
         info = os.fstat(fd)
-        if not stat.S_ISREG(info.st_mode) or info.st_size > limit:
-            raise ValueError(f"invalid artifact type or size: {path}")
+        if not stat.S_ISREG(info.st_mode):
+            raise ValueError(f"invalid artifact type: {path}")
         with os.fdopen(fd, "rb", closefd=False) as stream:
-            data = stream.read(limit + 1)
-        if len(data) != info.st_size:
-            raise ValueError(f"artifact changed while reading: {path}")
-        return data
+            yield stream, info.st_size
     finally:
         os.close(fd)
+
+
+def read_file(path, limit):
+    with artifact_file(path) as (stream, size):
+        if size > limit:
+            raise ValueError(f"invalid artifact size: {path}")
+        data = stream.read(limit + 1)
+        if len(data) != size:
+            raise ValueError(f"artifact changed while reading: {path}")
+        return data
+
+
+def file_sha256(path):
+    digest = hashlib.sha256()
+    with artifact_file(path) as (stream, size):
+        total = 0
+        while chunk := stream.read(1 << 20):
+            digest.update(chunk)
+            total += len(chunk)
+            if total > size:
+                break
+        if total != size:
+            raise ValueError(f"artifact changed while hashing: {path}")
+    return digest.hexdigest()
 
 
 def reference(root, manifest, config, binary_hash):

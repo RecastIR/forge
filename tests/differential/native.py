@@ -1,6 +1,7 @@
 """Compile a generated module through the Forge CMake project and observe its harness."""
 from contextlib import nullcontext
 import os
+from pathlib import Path
 import platform
 import selectors
 import signal
@@ -13,6 +14,8 @@ from manifests import SUITE
 
 from docker_wine import EXECUTION_TIMEOUT
 from protocol import STREAM_LIMIT
+
+OPTIMIZED_IR = Path("native/tests/optimized.ll")
 
 
 class ExecutionFailure(ValueError):
@@ -66,7 +69,7 @@ def build(ir, harness, work, config, variant):
     executable = tree / "bin" / name
     if not executable.is_file() or not os.access(executable, os.X_OK):
         raise ValueError(f"native linking did not produce an executable harness: {executable} ({log.name})")
-    return executable
+    return executable, work / OPTIMIZED_IR if variant == "o2" else ir
 
 
 def execute(executable, args, work, *, timeout=EXECUTION_TIMEOUT, limit=STREAM_LIMIT):

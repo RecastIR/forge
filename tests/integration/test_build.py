@@ -71,6 +71,10 @@ class BuildConfig(unittest.TestCase):
         entries = json.loads(contents)
         harness = SOURCE / "tests/support/native_harness.cpp"
         self.assertIn(str(harness), [e["file"] for e in entries])
+        self.assertIn(str(SOURCE / "tests/unit/integer.cpp"), [e["file"] for e in entries])
+        subprocess.run([CMAKE, "--build", build, "--parallel", "4"], env=self.env, check=True)
+        self.assertTrue((build / "forge").is_file())
+        self.assertFalse((build / "tests/integer_semantics").exists())
 
         # Exercise the wrapper even on machines without clang-tidy.
         config = self.tmp / "llvm-config"

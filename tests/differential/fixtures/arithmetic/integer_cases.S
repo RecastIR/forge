@@ -37,9 +37,18 @@ leaf flag_adc
     finish
 
 leaf flag_sbb
+    cmpq %r9, %r9
+    sete %r9b
     cmpq %rdx, %rcx
+    sbbq %r8, %r8
     sbbb %dl, %cl
     snapshot
+    # Keep the borrow mask and scratch comparison visible above the flag snapshot.
+    shlq $32, %r8
+    orq %r8, %rax
+    movzbl %r9b, %r9d
+    shll $16, %r9d
+    orq %r9, %rax
     finish
 
 leaf carry_chain
@@ -69,8 +78,11 @@ leaf extensions
     movsbl %ch, %eax
     movslq %eax, %rax
     movzbw %dl, %r8w
-    movswq %r8w, %rdx
+    movswq %dx, %rdx
     xorq %rdx, %rax
+    movzwl %r8w, %r8d
+    shlq $24, %r8
+    xorq %r8, %rax
     finish
 
 leaf multiply_flags
@@ -112,6 +124,16 @@ leaf logic_flags
     orl %r9d, %eax
 .endm
 leaf predicates
+    # Select full-width values outside the driver's decimal input range.
+    cmpq $23, %rcx
+    jne 1f
+    movabsq $0x8000000000000000, %rcx
+    jmp 2f
+1:
+    cmpq $24, %rcx
+    jne 2f
+    movabsq $0x7fffffffffffffff, %rcx
+2:
     xorl %eax, %eax
     cmpq %rdx, %rcx
     pair o, no, 0

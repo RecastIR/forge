@@ -1,7 +1,7 @@
 {
   "schema_version": 1,
   "id": "arithmetic/flag_sbb",
-  "description": "Propagate unsigned borrow into a byte subtraction and capture all flags.",
+  "description": "Pack the same-register borrow mask, scratch equality and byte subtraction flags.",
   "source": "fixtures/arithmetic/integer_driver.c",
   "binary": "flag_sbb.exe",
   "args": [
@@ -29,7 +29,7 @@
   ],
   "expected": {
     "exit_code": 0,
-    "stdout": "17920\n37632\n4864\n33280\n1536\n17920\n33280\n37632\n512\n5632\n4864\n33280\n22272\n22272\n17920\n33280\n512\n17920\n37632\n38657\n4864\n",
+    "stdout": "83456\n-4294864128\n-4294896896\n98816\n67072\n83456\n98816\n-4294864128\n66048\n71168\n-4294896896\n98816\n-4294879488\n-4294879488\n83456\n98816\n66048\n83456\n103168\n-4294863103\n70400\n",
     "stderr": ""
   }
 }

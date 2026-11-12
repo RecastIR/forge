@@ -1,7 +1,7 @@
 {
   "schema_version": 1,
   "id": "arithmetic/extensions",
-  "description": "Sign-extend the high input byte and combine it with a zero-extended byte.",
+  "description": "Combine sign-extended CH and DX with a separately observable zero-extended DL.",
   "source": "fixtures/arithmetic/integer_driver.c",
   "binary": "extensions.exe",
   "args": [
@@ -25,11 +25,14 @@
     "-1", "-1",
     "4294967296", "17",
     "1431655765", "-1431655766",
-    "-9999999999", "9999999999"
+    "-9999999999", "9999999999",
+    "0", "32767",
+    "0", "32768",
+    "0", "65535"
   ],
   "expected": {
     "exit_code": 0,
-    "stdout": "0\n1\n255\n-2\n1\n128\n1\n255\n1\n1\n255\n126\n-129\n-129\n-256\n-2\n-254\n-256\n17\n255\n227\n",
+    "stdout": "0\n16777217\n-4278190081\n-16777218\n16777217\n2147483776\n16777217\n4278190335\n16777217\n16777217\n4278190335\n16777342\n4278190207\n4278190207\n4278190080\n-16777218\n4244635650\n4278190080\n285212689\n-2852148481\n-4278197277\n4278222847\n-32768\n-4278190081\n",
     "stderr": ""
   }
 }

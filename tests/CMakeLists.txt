@@ -21,9 +21,12 @@ if(DEFINED FORGE_DIFFERENTIAL_IR)
   set(input_ir "${FORGE_DIFFERENTIAL_IR}")
   if(FORGE_DIFFERENTIAL_VARIANT STREQUAL "o2")
     set(input_ir "${CMAKE_CURRENT_BINARY_DIR}/optimized.ll")
+    get_filename_component(ir_directory "${FORGE_DIFFERENTIAL_IR}" DIRECTORY)
+    get_filename_component(ir_name "${FORGE_DIFFERENTIAL_IR}" NAME)
     add_custom_command(OUTPUT "${input_ir}"
-      COMMAND "${LLVM_TOOLS_BINARY_DIR}/opt" -passes=verify -disable-output "${FORGE_DIFFERENTIAL_IR}"
-      COMMAND "${LLVM_TOOLS_BINARY_DIR}/opt" "-passes=default<O2>" -S "${FORGE_DIFFERENTIAL_IR}" -o "${input_ir}"
+      COMMAND "${LLVM_TOOLS_BINARY_DIR}/opt" -passes=verify -disable-output "${ir_name}"
+      COMMAND "${LLVM_TOOLS_BINARY_DIR}/opt" "-passes=default<O2>" -S "${ir_name}" -o "${input_ir}"
+      WORKING_DIRECTORY "${ir_directory}"
       DEPENDS "${FORGE_DIFFERENTIAL_IR}" VERBATIM)
   elseif(NOT FORGE_DIFFERENTIAL_VARIANT STREQUAL "baseline")
     message(FATAL_ERROR "Select baseline or o2 for the differential IR variant")
@@ -51,7 +54,11 @@ if(BUILD_TESTING OR CMAKE_EXPORT_COMPILE_COMMANDS)
   target_link_libraries(integer_semantics PRIVATE forge_integer LLVMAnalysis)
   target_link_options(integer_semantics PRIVATE ${sanitizer_link_flags})
   configure_forge_cxx(integer_semantics)
-  add_test(NAME integer_semantics COMMAND integer_semantics)
+  if(BUILD_TESTING)
+    add_test(NAME integer_semantics COMMAND integer_semantics)
+  else()
+    set_target_properties(integer_semantics PROPERTIES EXCLUDE_FROM_ALL ON)
+  endif()
 endif()
 if(NOT BUILD_TESTING)
   set_target_properties(forge_native_harness PROPERTIES EXCLUDE_FROM_ALL ON)

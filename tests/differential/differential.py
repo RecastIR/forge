@@ -16,7 +16,7 @@ from comparison import describe, differences
 from manifests import FIXTURE_ID, SUITE, field, load_catalog, unique_keys
 
 sys.path.insert(0, str(SUITE / "reference"))
-from artifacts import directory, reference
+from artifacts import directory, file_sha256, reference
 from run import BINARIES, BUILD, REFERENCES, interrupt, sha256, snapshot, verified_export
 import native
 
@@ -25,6 +25,7 @@ DEFAULT_FORGE = BUILD / "forge"
 STAGES = ("reference_validation", "analysis", "lifting", "native_compilation",
           "native_execution", "comparison")
 VARIANTS = ("baseline", "o2")
+CANONICAL_IR = Path("generated/lifted.ll")
 NATIVE_STAGES = STAGES[3:]
 CONFIGS = ("debug", "release")
 TARGET = "macos-arm64"
@@ -132,13 +133,14 @@ def native_differences(wanted, actual, harness, args):
     return mismatches
 
 
-def run_variant(ir, harness, args, wanted, work, config, variant):
+def run_variant(ir, harness, args, wanted, work, identity, variant):
     stages = dict.fromkeys(NATIVE_STAGES, "not_run")
-    report = dict(variant=variant, stages=stages, run_id=os.environ.get("FORGE_TEST_RUN_ID"))
+    report = dict(identity, variant=variant, stages=stages)
     stage = "native_compilation"
     try:
         work.mkdir()
-        executable = native.build(ir, harness, work, config, variant)
+        executable, compiler_input = native.build(ir, harness, work, identity["build_config"], variant)
+        report["compiler_ir_sha256"] = file_sha256(compiler_input)
         stages[stage] = "passed"
 
         stage = "native_execution"
@@ -201,16 +203,18 @@ def run_case(manifest, case, config, binaries, references, forge, work):
         stage = "lifting"
         if wanted.exit_code:
             raise Unsupported(f"function harness cannot convey Windows termination status {wanted.exit_code}")
-        ir = work / "generated/lifted.ll"
+        ir = work / CANONICAL_IR
         ir.parent.mkdir()
         lift(forge, image, case, rva, ir)
+        identity = {key: report[key] for key in ("fixture_id", "build_config", "binary_sha256", "run_id")}
+        identity["canonical_ir_sha256"] = file_sha256(ir)
         stages[stage] = "passed"
 
         variants = {}
         for variant in VARIANTS:
             variant_work = work / variant
             variants[variant] = run_variant(ir, case["harness"], manifest.case["args"], wanted,
-                                            variant_work, config, variant)
+                                            variant_work, identity, variant)
         report["variants"] = variants
         for name in NATIVE_STAGES:
             states = [r["stages"][name] for r in variants.values()]
@@ -293,7 +297,8 @@ def run(config, fixture=None, *, binaries=BINARIES, references=REFERENCES, outpu
                 summary["passed"] += status == "passed"
                 summary["uncovered"] += status == "uncovered"
                 summary["blocked"] += status == "blocked"
-                summary["executed"] += result.get("stages", {}).get("native_execution") == "passed"
+                summary["executed"] += any(v.get("execution_outcome") == "completed"
+                                           for v in result.get("variants", {}).values())
                 label = f"{status.upper()} {name} [{config}]"
                 print(f"{label} {result['scope']}" if result["scope"] else label)
                 if "stages" in result:

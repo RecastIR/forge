@@ -80,6 +80,24 @@ class ArtifactSetup(unittest.TestCase):
         self.record = self.folder / "result.json"
         self.wanted = Observation.from_manifest(self.manifest.case["expected"])
 
+    @staticmethod
+    def lift_fixture(forge, image, case, rva, ir):
+        ir.write_bytes(b"IR for " + image.read_bytes())
+
+    @staticmethod
+    def build_fixture(ir, harness, work, config, variant):
+        compiler_input = ir
+        if variant == "o2":
+            compiler_input = work / diff.native.OPTIMIZED_IR
+            compiler_input.parent.mkdir(parents=True)
+            compiler_input.write_bytes(b"optimized " + ir.read_bytes())
+        return work / "harness", compiler_input
+
+    def execute_fixture(self, exe, args, work):
+        (work / "stdout.bin").write_bytes(self.wanted.stdout)
+        (work / "stderr.bin").write_bytes(self.wanted.stderr)
+        return self.wanted
+
     def prepare_exports(self, config):
         bins = self.binaries / config
         bins.mkdir(parents=True)
@@ -176,8 +194,8 @@ class ArtifactTests(ArtifactSetup):
     def test_statuses_and_stale_pass_rejection(self):
         name = self.manifest.case["id"]
         report = self.root / "output" / self.config / name / "result.json"
-        with patch.object(diff, "analyze", return_value="0x1234") as analyze, patch.object(diff, "lift") as lift, \
-                patch.object(diff.native, "build") as build, patch.object(diff.native, "execute") as execute:
+        with patch.object(diff, "analyze", return_value="0x1234") as analyze, patch.object(diff, "lift", side_effect=self.lift_fixture) as lift, \
+                patch.object(diff.native, "build", side_effect=self.build_fixture) as build, patch.object(diff.native, "execute") as execute:
             execute.return_value = self.wanted
             status, suite = self.invoke()
             self.assertEqual((status, suite["executed"], suite["uncovered"]), (0, 1, 1))
@@ -199,13 +217,14 @@ class ArtifactTests(ArtifactSetup):
                     (analyze, ValueError("ambiguous export"), "analysis_failure"),
                     (lift, ValueError("write failed"), "lifting_failure"),
                     (lift, diff.Unsupported("unsupported opcode"), "unsupported_lifting_capability")):
+                previous = mock.side_effect
                 mock.side_effect = error
                 status, suite = self.invoke(name)
                 result = diff.read_json(report)
                 self.assertEqual((status, suite["executed"], result["stages"]["comparison"]), (1, 0, "not_run"))
                 self.assertEqual(result["failure_categories"], [category])
                 self.assertEqual(result["status"], "infrastructure_failure")
-                mock.side_effect = None
+                mock.side_effect = previous
         self.image.write_bytes(b"stale")
         status, suite = self.invoke(name)
         self.assertEqual((status, suite["passed"]), (1, 0))
@@ -285,7 +304,7 @@ class ArtifactTests(ArtifactSetup):
         self.assertEqual(selected.read_bytes(), b"selected executable")
 
     def test_successful_commands_without_product_fail_compilation(self):
-        with patch.object(diff, "analyze", return_value="0x1234"), patch.object(diff, "lift"), \
+        with patch.object(diff, "analyze", return_value="0x1234"), patch.object(diff, "lift", side_effect=self.lift_fixture), \
                 patch.object(diff.native, "command"), patch.object(diff.platform, "system", return_value="Darwin"), \
                 patch.object(diff.platform, "machine", return_value="arm64"):
             status, _ = self.invoke(self.case["fixture_id"])
