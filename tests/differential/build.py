@@ -1,6 +1,7 @@
 """Build and inspect the Windows fixtures inside the pinned Linux container."""
 import fcntl
 import hashlib
+import json
 import os
 from pathlib import Path
 import re
@@ -92,11 +93,15 @@ def build(config, cases, output):
             path = first / binary
             data = path.read_bytes()
             if data != (second / binary).read_bytes():
-                raise ValueError(f"{config}/{binary}: clean builds differ")
+                other = hashlib.sha256((second / binary).read_bytes()).hexdigest()
+                raise ValueError(f"{config}/{binary}: clean builds differ: {hashlib.sha256(data).hexdigest()} vs {other}")
             inspect_pe(path, fixture_id)
             checksums.append(f"{hashlib.sha256(data).hexdigest()}  {binary}\n")
             shutil.copy2(path, staged / binary)
         (staged / "SHA256SUMS").write_text("".join(checksums), encoding="ascii")
+        provenance = dict(schema_version=1, build_config=config, toolchain_image_id=os.environ["FORGE_TOOLCHAIN_ID"],
+                          reproducible=True, checksums_sha256=hashlib.sha256((staged / "SHA256SUMS").read_bytes()).hexdigest())
+        (staged / "build.json").write_text(json.dumps(provenance, indent=2) + "\n", encoding="ascii")
         publish(staged, output / config)
         print(f"{config}: inspected {len(cases)} byte-reproducible PE executables.", flush=True)
 

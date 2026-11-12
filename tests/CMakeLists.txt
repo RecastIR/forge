@@ -38,6 +38,8 @@ add_test(NAME windows_reference_runner COMMAND "${Python3_EXECUTABLE}" -B
   "${CMAKE_CURRENT_SOURCE_DIR}/differential/reference/test_runner.py")
 add_test(NAME windows_differential_runner COMMAND "${Python3_EXECUTABLE}" -B
   "${CMAKE_CURRENT_SOURCE_DIR}/differential/test_differential.py")
+add_test(NAME differential_coverage COMMAND "${Python3_EXECUTABLE}" -B
+  "${CMAKE_CURRENT_SOURCE_DIR}/differential/test_coverage.py")
 foreach(tool llvm-mc lld-link llvm-dlltool llvm-readobj clang opt llc)
   if(EXISTS "${CMAKE_BINARY_DIR}/CMakeCache.txt" AND NOT FORGE_FIXTURE_LLVM_DIR STREQUAL LLVM_DIR)
     unset(${tool} CACHE)

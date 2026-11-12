@@ -14,7 +14,7 @@ configure:
 	cmake -S . -B "$(BUILD_DIR)" $(CMAKE_ARGS) $(configure_flags)
 
 test: build
-	ctest --test-dir "$(BUILD_DIR)" -C "$(build_config)" --output-on-failure --no-tests=error
+	ctest --test-dir "$(BUILD_DIR)" -C "$(build_config)" --output-on-failure --no-tests=error $(CTEST_ARGS)
 
 fixtures: configure
 	ctest --test-dir "$(BUILD_DIR)" -C "$(build_config)" --output-on-failure --no-tests=error -R '^fixtures$$'

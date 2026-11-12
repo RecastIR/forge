@@ -13,6 +13,10 @@ from run import compare, runner_version, sha256
 TASK3_PUBLISHER = "1+sha256.4820c6fea7bcac32962ed3e13ae4254b9eb2f95270855c734e8d9601fc59a24d"
 
 
+# Task 4 publisher before extracting verified_export and recording failure diagnostics.
+TASK4_PUBLISHER = "1+sha256.daa8437a1f0dfe26c4eaee5e0df7df52fdb331db71e46a05c57bb4253c413b5e"
+
+
 def directory(root, relative):
     if root.is_symlink():
         raise ValueError(f"symbolic link at artifact root: {root}")
@@ -47,13 +51,15 @@ def reference(root, manifest, config, binary_hash):
     for key, wanted in required.items():
         if field(meta, key, type(wanted)) != wanted:
             raise ValueError(f"reference {key} mismatch (expected {wanted!r}, found {meta[key]!r})")
-    if field(meta, "runner_version", str) not in (runner_version(), TASK3_PUBLISHER):
+    if field(meta, "runner_version", str) not in (runner_version(), TASK3_PUBLISHER, TASK4_PUBLISHER):
         raise ValueError("unrecognized Wine runner_version")
     for key in ("wine_version", "docker_host_arch"):
         if not field(meta, key, str).strip():
             raise ValueError(f"missing reference {key}")
     if not re.fullmatch(r"sha256:[0-9a-f]{64}", field(meta, "container_image_id", str)):
         raise ValueError("invalid reference container_image_id")
+    if os.environ.get("GITHUB_ACTIONS") == "true" and meta["docker_host_arch"] not in ("amd64", "x86_64"):
+        raise ValueError("canonical Wine references require a Linux amd64 Docker host")
     status = field(meta, "exit_code", int)
     if not 0 <= status <= 0xffffffff:
         raise ValueError("invalid Windows exit_code")
@@ -72,4 +78,4 @@ def reference(root, manifest, config, binary_hash):
     identity = {k: meta[k] for k in ("execution_backend", "wine_version", "container_image_id",
                                       "container_platform", "docker_host_arch", "runner_version",
                                       "manifest_file", "manifest_sha256")}
-    return observed, dict(identity, path=str(folder), result_sha256=sha256(record))
+    return observed, dict(identity, path=config + "/" + manifest.case["id"], result_sha256=sha256(record))

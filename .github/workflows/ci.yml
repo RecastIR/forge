@@ -2,50 +2,25 @@ name: Forge CI
 
 on:
   pull_request:
+    branches: [main]
   push:
     branches: [main]
 
 permissions:
   contents: read
 
-jobs:
-  windows-fixtures:
-    runs-on: ubuntu-24.04
-    steps:
-      - uses: actions/checkout@v6
-      - name: Validate manifests and reference runner
-        run: |
-          test "$(uname -m)" = x86_64
-          python3 -B tests/differential/manifests.py
-          python3 -B tests/differential/test_manifests.py
-          python3 -B tests/differential/reference/test_runner.py
-          python3 -B tests/differential/test_differential.py
-      - name: Build and verify Windows x64 fixtures
-        run: ./tools/build-windows-fixtures.sh --all
-      - name: Capture Wine references
-        run: ./tools/run-windows-references.sh --all
-      - name: Verify reference artifacts and Wine capture boundaries
-        run: python3 -B tests/differential/reference/test_wine.py
-      - name: Upload validated Wine references
-        uses: actions/upload-artifact@v4
-        with:
-          name: windows-x64-wine-references
-          path: build/reference/windows-x64/wine
-          if-no-files-found: error
-      - name: Upload matching PE exports and checksums
-        uses: actions/upload-artifact@v4
-        with:
-          name: windows-x64-fixtures
-          path: build/fixtures/windows-x64
-          if-no-files-found: error
+env:
+  FORGE_TEST_RUN_ID: ${{ github.run_id }}-${{ github.sha }}
 
+jobs:
   macos:
-    needs: windows-fixtures
-    if: ${{ !cancelled() }}
     runs-on: macos-26
     steps:
       - uses: actions/checkout@v6
-
+      - uses: actions/cache@v4
+        with:
+          path: ${{ runner.temp }}/unicorn-wheels
+          key: unicorn-2.1.4-macos-arm64-python3.12-v1
       - name: Set up LLVM and the function oracle
         run: |
           brew install llvm@17 python@3.12
@@ -54,47 +29,133 @@ jobs:
           test "$(uname -m)" = arm64
           venv="$RUNNER_TEMP/forge-python"
           "$(brew --prefix python@3.12)/bin/python3.12" -m venv "$venv"
-          "$venv/bin/python" -m pip install --only-binary=:all: unicorn==2.1.4
-          "$venv/bin/python" -c 'import unicorn'
+          wheels="$RUNNER_TEMP/unicorn-wheels"
+          "$venv/bin/python" -m pip download --no-deps --only-binary=:all: --dest "$wheels" unicorn==2.1.4
+          "$venv/bin/python" -m pip install --no-index --find-links "$wheels" unicorn==2.1.4
           {
             echo "LLVM_CONFIG=$llvm_config"
             echo "LLVM_DIR=$("$llvm_config" --cmakedir)"
             echo "CMAKE_ARGS=-DPython3_EXECUTABLE=$venv/bin/python"
           } >> "$GITHUB_ENV"
+      - name: Check formatting, lint, Debug CTest, and sanitizer CTest
+        run: ./tools/test-forge.sh --native
+      - run: tar -czf tested-forge.tgz build/forge build-sanitize/forge
+      - uses: actions/upload-artifact@v4
+        with:
+          name: tested-macos-arm64-forge
+          path: tested-forge.tgz
+          if-no-files-found: error
+          retention-days: 7
+          overwrite: true
 
-      - name: Check formatting
-        run: make format-check
-      - name: Run clang-tidy
-        run: make lint
-      - name: Build and test
-        run: make test CONFIG=Debug
-      - name: Test with ASan and UBSan
-        run: make sanitize
-      - uses: actions/download-artifact@v4
-        if: needs.windows-fixtures.result == 'success'
-        with:
-          name: windows-x64-fixtures
-          path: build/fixtures/windows-x64
-      - uses: actions/download-artifact@v4
-        if: needs.windows-fixtures.result == 'success'
-        with:
-          name: windows-x64-wine-references
-          path: build/reference/windows-x64/wine
-      - name: Compare native execution against Wine
-        id: compare
-        if: needs.windows-fixtures.result == 'success'
+  windows-fixtures:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v6
+      - name: Verify host and runner contracts
         run: |
-          status=0
-          CMAKE_GENERATOR=Xcode ./tools/run-differential.sh --all --config debug --forge build-sanitize/forge || status=1
-          ./tools/run-differential.sh --all --config release || status=1
-          exit "$status"
-      - name: Verify differential failure reports
-        if: needs.windows-fixtures.result == 'success'
-        run: python3 -B tests/differential/test_native_differential.py
-      - name: Preserve differential reports, generated code, and diagnostics
-        if: ${{ !cancelled() && (steps.compare.outcome == 'success' || steps.compare.outcome == 'failure') }}
+          test "$(uname -m)" = x86_64
+          python3 -B tests/differential/test_manifests.py
+          python3 -B tests/differential/reference/test_runner.py
+          python3 -B tests/differential/test_differential.py
+          python3 -B tests/differential/test_coverage.py
+      - name: Build reproducible PEs, capture references, and verify Wine boundaries
+        run: ./tools/test-forge.sh --references
+      - name: Transfer matching validated inputs
+        uses: actions/upload-artifact@v4
+        with:
+          name: windows-x64-inputs
+          path: |
+            build/fixtures/windows-x64
+            build/reference/windows-x64/wine
+          if-no-files-found: error
+          retention-days: 7
+          overwrite: true
+      - name: Preserve incomplete producer diagnostics
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: windows-diagnostics
+          path: |
+            build/fixtures/windows-x64
+            build/reference/windows-x64
+          if-no-files-found: warn
+          retention-days: 7
+          overwrite: true
+
+  differential:
+    needs: [macos, windows-fixtures]
+    runs-on: macos-26
+    steps:
+      - uses: actions/checkout@v6
+      - name: Set up the native harness compiler
+        run: |
+          test "$(uname -m)" = arm64
+          brew install llvm@17
+          llvm_config="$(brew --prefix llvm@17)/bin/llvm-config"
+          test "$("$llvm_config" --version)" = 17.0.6
+          echo "LLVM_DIR=$("$llvm_config" --cmakedir)" >> "$GITHUB_ENV"
+      - uses: actions/download-artifact@v4
+        with:
+          name: tested-macos-arm64-forge
+      - run: tar -xzf tested-forge.tgz
+      - uses: actions/download-artifact@v4
+        with:
+          name: windows-x64-inputs
+          path: build
+      - name: Compare both configurations and exercise failure paths
+        run: ./tools/test-forge.sh --differential
+      - name: Preserve case evidence and native diagnostics
+        if: ${{ !cancelled() }}
         uses: actions/upload-artifact@v4
         with:
           name: macos-arm64-differential
+          path: |
+            build/differential/**/result.json
+            build/differential/**/suite.json
+            build/differential/**/inspect.json
+            build/differential/**/analysis.json
+            build/differential/**/inspect.log
+            build/differential/**/analysis.log
+            build/differential/**/lifting.log
+            build/differential/**/compilation.log
+            build/differential/**/generated/*.ll
+            build/differential/**/native/bin/differential_*
+            build/differential/**/stdout.bin
+            build/differential/**/stderr.bin
+          if-no-files-found: error
+          retention-days: 7
+          overwrite: true
+
+  regression-gate:
+    if: ${{ always() }}
+    needs: [macos, windows-fixtures, differential]
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/download-artifact@v4
+        if: needs.windows-fixtures.result == 'success'
+        with:
+          name: windows-x64-inputs
+          path: build
+      - uses: actions/download-artifact@v4
+        if: ${{ !cancelled() && (needs.differential.result == 'success' || needs.differential.result == 'failure') }}
+        with:
+          name: macos-arm64-differential
           path: build/differential
-          if-no-files-found: warn
+      - name: Reconcile required executions with observed behavior
+        if: ${{ always() }}
+        env:
+          JOBS: ${{ toJSON(needs) }}
+        run: python3 -B tests/differential/coverage_report.py --jobs "$JOBS"
+      - uses: actions/upload-artifact@v4
+        if: ${{ always() }}
+        with:
+          name: regression-coverage
+          path: build/coverage/coverage.json
+          if-no-files-found: error
+          retention-days: 7
+          overwrite: true
+      - name: Link diagnostic artifacts
+        if: ${{ always() }}
+        run: echo "[Run logs and downloadable artifacts]($GITHUB_SERVER_URL/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID#artifacts)" >> "$GITHUB_STEP_SUMMARY"

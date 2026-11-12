@@ -99,7 +99,7 @@ For the combined regression, `stdout.bin` is empty, `stderr.bin` contains the 13
 - **Output or exit mismatch.** Rerun the individual fixture. Diagnostics identify every differing field, the first differing byte offset, both lengths, and escaped byte context. Check binary stream mode, arguments, and flushes before explicit process termination.
 - **Timeout, overflow, or artifact write failure.** Check fixture termination, descendants inheriting handles, output volume, and permissions or free space under `build/reference/`. Correct the cause and rerun to publish a fresh result.
 
-The existing `windows-fixtures` job on native Linux amd64 builds both configurations, runs this CLI, reopens the entire artifact matrix, exercises real Wine failure cases, and uploads `windows-x64-wine-references` on success. Run `python3 -B tests/differential/reference/test_runner.py` for Wine-free tests and `python3 -B tests/differential/reference/test_wine.py` after a complete capture for integration tests. The native Forge CTest suite includes the Wine-free runner tests.
+The existing `windows-fixtures` job on native Linux amd64 builds both configurations, runs this CLI, reopens the entire artifact matrix, exercises real Wine failure cases, and uploads the references and matching PE exports together in `windows-x64-inputs` on success. Run `python3 -B tests/differential/reference/test_runner.py` for Wine-free tests and `python3 -B tests/differential/reference/test_wine.py` after a complete capture for integration tests. The native Forge CTest suite includes the Wine-free runner tests.
 
 Linux amd64 CI is the canonical Wine environment. Apple Silicon results record the ARM64 Docker host separately. The image disables Rosetta AVX advertisement because the emulator can otherwise abort while restoring Wine's breakpoint signal context. Wine implements Windows APIs with its own loader and runtime. Equivalence with native Windows requires separate evidence and backend provenance.
 
@@ -111,7 +111,7 @@ The SDK-free parser and lifter samples live in `tests/fixtures/`. The existing `
 
 ## Compare a lifted function with Wine
 
-On Apple Silicon, build Forge with LLVM 17. Prepare matching Windows binaries and references with the commands above, or download both artifacts from the same successful Linux workflow job. The native comparison runs offline using those files.
+On Apple Silicon, build Forge with LLVM 17. Prepare matching Windows binaries and references with the commands above, or extract the successful Linux job’s `windows-x64-inputs` artifact into `build/`. The native comparison runs offline using those files.
 
 ```sh
 make CONFIG=Debug
@@ -144,7 +144,7 @@ Each selected fixture has a `result.json` below `build/differential/windows-x64/
 | --- | --- |
 | Reference validation failure | Check the manifest, export checksum, producer identity, streams and downloaded configuration. Rebuild or recapture explicitly when the inputs change. |
 | Analysis failure | Inspect `inspect.json`, `analysis.json` and their logs for missing, forwarded or ambiguous exports and conflicting ranges. |
-| Blocked by unsupported lifting | Check the selected range and the opcode/RVA in `lifting.log` when present. An enabled blocked case fails the suite. |
+| Unsupported instruction in an enabled case | Check the selected range and the opcode/RVA in `lifting.log`. This stage error fails the suite. |
 | Lifting failure | Inspect `lifting.log` for verifier or IR publication errors. |
 | Native compilation failure | Check `compilation.log` for configuration, verifier, object generation, or linker diagnostics. |
 | Native execution failure | Inspect the captured bytes and diagnostic for launch errors, signals, harness exit, the 10-second deadline or the 1 MiB per-stream limit. The supervisor runs with closed stdin in a fresh directory and terminates the process group on failure. |
@@ -155,4 +155,33 @@ To add coverage, first obtain passing Debug and Release Wine references through 
 
 Use `python3 -B tests/differential/test_differential.py` for the Wine-free comparator, validator, supervisor and runner tests. With the full local artifacts available, `python3 -B tests/differential/test_native_differential.py` exercises a changed return in a copy of genuine IR, invalid IR, a failed harness invocation and a mismatched PE. The negative reports live under `build/differential/negative-tests/`.
 
-CI builds the PEs and captures their references on Linux amd64. The macOS arm64 job runs its native checks even if fixture production fails. With validated artifacts, it runs the Debug comparison with Xcode and the Release comparison with the default generator, exercises the negative cases, and uploads the differential reports and diagnostics.
+## Regression CI and local reproduction
+
+From a clean Apple Silicon checkout, install Xcode, LLVM 17.0.6, CMake 3.21+ (for CTest JUnit), and a Docker engine capable of running Linux amd64 containers. Select a Python environment with the pinned Unicorn oracle.
+
+```sh
+python3.12 -m venv /tmp/forge-oracle
+/tmp/forge-oracle/bin/python -m pip install --only-binary=:all: unicorn==2.1.4
+export CMAKE_ARGS="-DPython3_EXECUTABLE=/tmp/forge-oracle/bin/python"
+export LLVM_CONFIG="$(brew --prefix llvm@17)/bin/llvm-config"
+export LLVM_DIR="$("$LLVM_CONFIG" --cmakedir)"
+./tools/test-forge.sh --all
+```
+
+The stage commands also work individually. Run `--native` for formatting, clang-tidy, Debug CTest, and ASan/UBSan CTest. This stage requires the native and Unicorn tests to execute and needs no Docker. Run `--references` to build both PE configurations twice, inspect them, capture Wine behavior, and exercise the real capture boundaries. Run `--differential` after those stages, or after extracting the matching CI inputs. It consumes the existing exports, checks every reference, runs both configurations and the negative integrations, and writes local coverage. Use the individual fixture commands above to investigate a failure. A single-fixture run replaces that configuration’s suite index. Rerun the full differential stage to produce complete evidence.
+
+On PRs into `main` and pushes to `main`, `windows-fixtures` on Linux amd64 and `macos` on macOS 26 arm64 run in parallel. The former publishes validated PEs, checksums, per-configuration toolchain/reproducibility records, and captured references. The latter archives the two tested Forge executables. The `differential` job downloads those same-run artifacts on macOS 26 arm64, compiles the lifted IR with Xcode and sanitized Forge for Debug and the default generator and ordinary Forge for Release, and runs the harnesses. Linux `regression-gate` checks prerequisite outcomes, reopens the exports and references, and compares the saved native observations again. Hosted references require an amd64 Docker host. Local reports record the actual backend and are labeled local.
+
+The gate publishes a job summary and schema-v1 `build/coverage/coverage.json`. Each row identifies its configuration, target, scope, reference and case report. Read the category totals and passing scopes separately for Debug and Release. A missing prerequisite, case report, or successful execution fails the gate. The JSON and diagnostic artifacts are available from the workflow run for seven days. Extract `macos-arm64-differential` under `build/differential/` to follow report paths. The native harness in the downloaded diagnostics can be made executable with `chmod +x`. Failed Windows captures are kept separately in `windows-diagnostics` and are ineligible as CI reference inputs.
+
+| Coverage status | Evidence |
+| --- | --- |
+| `passed` | A completed native execution matched the validated Windows observation in all fields. |
+| `failed` | A completed execution differed in stdout, stderr, or full exit status. |
+| `error` | Required evidence was missing, inconsistent, or invalid, or an enabled stage failed. Inspect the stage diagnostics first. |
+| `reference_only` | The PE has a validated Windows reference and no differential case enabled for this configuration. |
+| `blocked` | A validated fixture has a predeclared capability limitation for this configuration. The row records the reason. |
+
+For a new enabled case, add its function contract to `cases.json` and add a matching `id`, `config`, `target` obligation to `coverage-baseline.json` for each supported configuration. Cases default to Debug and Release. Use the optional nonempty `configs` list for a narrower contract. A known blocker may be declared as a fixture ID with `blocked_reason` and optional `configs`. CI never converts an enabled failure into a blocker. An intentional coverage reduction requires matching definition and baseline edits plus an explanation in the PR, preferably with a replacement test or tracking issue. The baseline is maintained by hand.
+
+Repository administrators should require the GitHub Actions check `regression-gate` on `main`, require pull requests and code-owner review, and retain other required checks. The baseline and ownership file designate `@ziflex`. Add a second owner with write access before enforcing owner reviews on baseline changes authored by `@ziflex`. Verify the status check after the first hosted run.
