@@ -1,7 +1,23 @@
 add_library(forge_native_harness OBJECT support/native_harness.cpp)
 configure_forge_cxx(forge_native_harness)
+add_library(decimal_pairs OBJECT EXCLUDE_FROM_ALL support/decimal_pairs.cpp)
+configure_forge_cxx(decimal_pairs)
 if(APPLE)
-  set_target_properties(forge_native_harness PROPERTIES OSX_ARCHITECTURES arm64)
+  set_target_properties(forge_native_harness decimal_pairs PROPERTIES OSX_ARCHITECTURES arm64)
+endif()
+if(DEFINED FORGE_DIFFERENTIAL_IR)
+  if(NOT APPLE OR NOT LLVM_VERSION_MAJOR EQUAL 17)
+    message(FATAL_ERROR "Differential harness compilation requires macOS and LLVM 17")
+  endif()
+  set(object "${CMAKE_CURRENT_BINARY_DIR}/lifted.o")
+  add_custom_command(OUTPUT "${object}"
+    COMMAND "${LLVM_TOOLS_BINARY_DIR}/opt" -passes=verify -disable-output "${FORGE_DIFFERENTIAL_IR}"
+    COMMAND "${LLVM_TOOLS_BINARY_DIR}/llc" -filetype=obj "${FORGE_DIFFERENTIAL_IR}" -o "${object}"
+    DEPENDS "${FORGE_DIFFERENTIAL_IR}" VERBATIM)
+  add_executable(differential_decimal_pairs EXCLUDE_FROM_ALL $<TARGET_OBJECTS:decimal_pairs> "${object}")
+  set_target_properties(differential_decimal_pairs PROPERTIES LINKER_LANGUAGE CXX OSX_ARCHITECTURES arm64
+    RUNTIME_OUTPUT_DIRECTORY "$<1:${CMAKE_BINARY_DIR}/bin>")
+  target_link_options(differential_decimal_pairs PRIVATE ${sanitizer_link_flags})
 endif()
 if(NOT BUILD_TESTING)
   set_target_properties(forge_native_harness PROPERTIES EXCLUDE_FROM_ALL ON)
@@ -15,6 +31,8 @@ add_test(NAME windows_fixture_manifest_validation COMMAND "${Python3_EXECUTABLE}
   "${CMAKE_CURRENT_SOURCE_DIR}/differential/test_manifests.py")
 add_test(NAME windows_reference_runner COMMAND "${Python3_EXECUTABLE}" -B
   "${CMAKE_CURRENT_SOURCE_DIR}/differential/reference/test_runner.py")
+add_test(NAME windows_differential_runner COMMAND "${Python3_EXECUTABLE}" -B
+  "${CMAKE_CURRENT_SOURCE_DIR}/differential/test_differential.py")
 foreach(tool llvm-mc lld-link llvm-dlltool llvm-readobj clang opt llc)
   if(EXISTS "${CMAKE_BINARY_DIR}/CMakeCache.txt" AND NOT FORGE_FIXTURE_LLVM_DIR STREQUAL LLVM_DIR)
     unset(${tool} CACHE)

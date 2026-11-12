@@ -58,6 +58,6 @@ endfunction()
 configure_forge_cxx(forge)
 
 include(CTest)
-if(BUILD_TESTING OR CMAKE_EXPORT_COMPILE_COMMANDS)
+if(BUILD_TESTING OR CMAKE_EXPORT_COMPILE_COMMANDS OR DEFINED FORGE_DIFFERENTIAL_IR)
   add_subdirectory(tests)
 endif()

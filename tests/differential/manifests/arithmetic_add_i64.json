@@ -1,0 +1,9 @@
+{
+  "schema_version": 1,
+  "id": "arithmetic/add_i64",
+  "description": "Print a signed 64-bit sum for each bounded decimal operand pair.",
+  "source": "fixtures/arithmetic/add_i64.c",
+  "binary": "arithmetic_add_i64.exe",
+  "args": ["4294967296", "17", "-4000000000", "-9"],
+  "expected": {"exit_code": 0, "stdout": "4294967313\n-4000000009\n", "stderr": ""}
+}

@@ -8,6 +8,7 @@ import unittest
 
 from docker_wine import build_image, execute
 from run import BINARIES, REFERENCES, SUITE, load_catalog, sha256
+from artifacts import reference
 
 
 class WineTests(unittest.TestCase):
@@ -20,21 +21,11 @@ class WineTests(unittest.TestCase):
             for manifest in catalog:
                 case = manifest.case
                 with self.subTest(config=config, fixture=case["id"]):
-                    directory = root / case["id"]
-                    result = json.loads((directory / "result.json").read_bytes())
-                    self.assertEqual(result["fixture_id"], case["id"])
-                    self.assertEqual(result["build_config"], config)
-                    self.assertEqual(result["status"], "passed")
-                    self.assertEqual(result["execution_backend"], "wine")
-                    self.assertEqual(result["container_platform"], "linux/amd64")
-                    self.assertEqual(result["manifest_sha256"], manifest.sha256)
-                    self.assertEqual(result["binary_sha256"], sha256((BINARIES / config / case["binary"]).read_bytes()))
-                    self.assertEqual(result["exit_code"], case["expected"]["exit_code"])
+                    digest = sha256((BINARIES / config / case["binary"]).read_bytes())
+                    observed, _ = reference(REFERENCES, manifest, config, digest)
+                    self.assertEqual(observed.exit_code, case["expected"]["exit_code"])
                     for stream in ("stdout", "stderr"):
-                        data = (directory / result[stream + "_file"]).read_bytes()
-                        self.assertEqual(data, case["expected"][stream].encode("utf-8"))
-                        self.assertEqual(result[stream + "_size"], len(data))
-                        self.assertEqual(result[stream + "_sha256"], sha256(data))
+                        self.assertEqual(getattr(observed, stream), case["expected"][stream].encode("utf-8"))
             combined = root / "runner/exit_and_stderr"
             self.assertEqual(json.loads((combined / "result.json").read_bytes())["exit_code"], 4660)
             self.assertEqual((combined / "stdout.bin").read_bytes(), b"")

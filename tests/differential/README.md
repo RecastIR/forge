@@ -1,9 +1,10 @@
 # Windows whole-executable fixtures
 
-These ten C11 and C++20 console programs provide Windows x64 inputs for whole-executable reference runs. Each manifest records a single invocation and its expected output. The programs build independently of Forge.
+These eleven C11 and C++20 console programs provide Windows x64 inputs for whole-executable reference runs. Each manifest records a single invocation and its expected output. The programs build independently of Forge.
 
 | Fixture | What the invocation exercises |
 | --- | --- |
+| `arithmetic/add_i64` | Two signed 64-bit sums, one positive and one negative, computed by the exported two-argument leaf. Enabled for function-level differential testing. |
 | `arithmetic/basic` | Two digits supply bounded signed operands, a nonzero divisor, and the shift count for a 32-bit unsigned rotation. |
 | `control_flow/branches` | One pass covers the early return, even and odd digits, three switch arms, and the default. Each input byte has its own output line. |
 | `functions/calls` | Recursive calls return into a six-argument call that uses four Windows x64 argument registers and two stack slots. |
@@ -89,7 +90,7 @@ Manifest expectations describe intended behavior. A passing reference records th
 
 The version 1 JSON names both raw files and records their lengths and SHA-256 hashes, fixture ID, configuration, pass status, exit code, binary SHA-256, relative manifest path and SHA-256, runner version, Wine version, immutable image ID, container platform, and Docker host architecture. The runner version fingerprints the host implementation and the image ID identifies the guest implementation. All three files appear together by directory rename after validation. Git ignores the output tree. A rerun of one fixture withdraws only that fixture's selected configuration.
 
-For the combined regression, `stdout.bin` is empty, `stderr.bin` contains the 13 bytes ending in hex `0a`, and `result.json` records `4660`. Task 4 can select the backend and configuration, verify the manifest and binary hashes, and read these streams and the exit code before comparing a native program.
+For the combined regression, `stdout.bin` is empty, `stderr.bin` contains the 13 bytes ending in hex `0a`, and `result.json` records `4660`.
 
 ### Troubleshooting and CI
 
@@ -106,4 +107,43 @@ Linux amd64 CI is the canonical Wine environment. Apple Silicon results record t
 
 The initial suite produced seven Debug and seven Release PEs with byte-identical clean rebuilds for each configuration. Native Forge inspection identified all fourteen as AMD64 PE32+ executables importing `KERNEL32.dll` and `msvcrt.dll`. On macOS, Forge reports `DLL_NOT_FOUND` for `msvcrt.dll` when inspecting without Windows DLL search paths. Release disassembly confirmed recursive calls, stack-passed arguments, stack-to-heap copies, and indirect virtual dispatch.
 
-The SDK-free parser and lifter samples live in `tests/fixtures/`. The existing `differential` CTest uses Unicorn to compare an individual x86-64 function with the ARM64 harness. Task 4 will add whole-executable native comparisons against the validated references.
+The SDK-free parser and lifter samples live in `tests/fixtures/`. The existing `differential` CTest uses Unicorn to compare an individual x86-64 function with the ARM64 harness.
+
+## Compare a lifted function with Wine
+
+On Apple Silicon, build Forge with LLVM 17. Prepare matching Windows binaries and references with the commands above, or download both artifacts from the same successful Linux workflow job. The native comparison runs offline using those files.
+
+```sh
+make CONFIG=Debug
+./tools/run-differential.sh --fixture arithmetic/add_i64 --config debug
+./tools/run-differential.sh --all --config release
+# Downloaded roots each contain debug/ and release/.
+./tools/run-differential.sh --all --config debug \
+  --binary-root /path/to/windows-x64-fixtures \
+  --reference-root /path/to/windows-x64-wine-references
+```
+
+The manifest supplies the binary, arguments and expected Windows behavior. [cases.json](cases.json) associates an enabled fixture ID with its function export, explicit ABI signature, scope and CMake harness. Each invocation snapshots the selected PE against its configuration’s `SHA256SUMS`. The consumer checks the v1 reference’s validated status, IDs, configuration, binary and manifest hashes, publisher fingerprint, and Wine provenance. It requires the designated regular stream files, verifies sizes and hashes, and independently checks the recorded bytes and full exit code against the manifest. It compares native behavior with the verified observation held in memory. A local override must point to a trusted producer’s artifacts. Hashes detect changes relative to the publication. CI obtains producer identity from its same-run artifact transfer.
+
+For `arithmetic/add_i64`, the runner takes the named export RVA from the snapshot’s Forge inspection and matches it to an eligible start in Forge’s function analysis. The Windows driver calls the exported leaf for each decimal pair. MinGW’s `noipa` keeps this call observable, and function-local `optimize("O2")` keeps the leaf register-only even in the surrounding Debug build. Forge lifts the leaf with `i64(i64,i64)`. A test-only target in the root CMake project verifies the LLVM IR, emits a Mach-O ARM64 object with `llc`, and links it with the C++20 decimal-pairs harness. The harness receives only the manifest arguments, calls `forge_lifted` for each pair, and prints the return values. Debug and Release each resolve their own RVA and use the matching PE, reference and native build configuration.
+
+**Coverage is function-level.** The Windows reference exercises the entire console program. The native run exercises the lifted arithmetic and the harness’s formatting. Ten other fixtures remain in the Wine suite. Current lifting requires an eligible register-only function with an explicit supported ABI. The existing arithmetic, branching and call fixtures need additional instruction, stack or call support to reproduce their observations. The remaining fixtures exercise memory, globals, imports, C++ lifetime, or process behavior. In particular, Windows status 4660 in `runner/exit_and_stderr` requires a future full-width guest termination channel. The current harness provides a normal zero completion. Its nonzero statuses and signals indicate execution failure.
+
+### Reports and diagnosis
+
+Each selected fixture has a `result.json` below `build/differential/windows-x64/<config>/<fixture-id>/`. For enabled cases, the same directory holds the PE snapshot, inspection and analysis JSON, stage logs, `generated/lifted.ll`, the `native/` build, and captured `stdout.bin` and `stderr.bin`. The result records the Forge executable digest, original PE digest, reference identity, function RVA and scope, native architecture, each stage outcome, and any mismatch details. The configuration’s `suite.json` records the latest selection, case report paths, and counts. Reruns replace selected artifacts under a configuration lock.
+
+| Report | Where to look |
+| --- | --- |
+| Reference validation failure | Check the manifest, export checksum, producer identity, streams and downloaded configuration. Rebuild or recapture explicitly when the inputs change. |
+| Analysis failure | Inspect `inspect.json`, `analysis.json` and their logs for missing, forwarded or ambiguous exports and conflicting ranges. |
+| Blocked by unsupported lifting | Check the selected range and the opcode/RVA in `lifting.log` when present. An enabled blocked case fails the suite. |
+| Lifting failure | Inspect `lifting.log` for verifier or IR publication errors. |
+| Native compilation failure | Check `compilation.log` for configuration, verifier, object generation, or linker diagnostics. |
+| Native execution failure | Inspect the captured bytes and diagnostic for launch errors, signals, harness exit, the 10-second deadline or the 1 MiB per-stream limit. The supervisor runs with closed stdin in a fresh directory and terminates the process group on failure. |
+| Behavioral failure | The report lists every differing field. For stream differences it includes both lengths, the first differing byte offset and escaped byte context. For exit-code differences it includes both semantic values. |
+| Uncovered | The manifest has no enabled function-level case. Selecting only uncovered fixtures fails with zero executions. |
+
+To add coverage, first obtain passing Debug and Release Wine references through the fixture catalog. Identify a genuine callable export with a source-declared signature, add its entry in `cases.json`, and reuse the decimal-pairs harness when its invocation fits. A new harness belongs in `tests/support/` with a corresponding CMake target. Harness code may parse inputs and format observations. The computation comes from the linked Forge output.
+
+Use `python3 -B tests/differential/test_differential.py` for the Wine-free comparator, validator, supervisor and runner tests. With the full local artifacts available, `python3 -B tests/differential/test_native_differential.py` exercises a changed return in a copy of genuine IR, invalid IR, a failed harness invocation and a mismatched PE. The negative reports live under `build/differential/negative-tests/`. CI builds and captures on Linux amd64, runs both native comparisons and the negative tests on macOS arm64, and uploads the differential artifacts.
