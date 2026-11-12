@@ -14,6 +14,7 @@ import tempfile
 from docker_wine import CleanupFailure, build_image, execute
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+from comparison import Observation, describe, differences
 from manifests import FIXTURE_ID, SUITE, load_catalog
 
 BUILD = SUITE.parents[1] / "build"
@@ -41,7 +42,7 @@ def runner_version():
     # Image ID covers the guest and Windows parent; include the host-side implementation too.
     digest = hashlib.sha256()
     for path in (Path(__file__), Path(__file__).with_name("docker_wine.py"),
-                 Path(__file__).with_name("protocol.py"), SUITE / "manifests.py"):
+                 Path(__file__).with_name("protocol.py"), SUITE / "manifests.py", SUITE / "comparison.py"):
         digest.update(path.read_bytes())
         digest.update(b"\0")
     return "1+sha256." + digest.hexdigest()
@@ -96,22 +97,9 @@ def snapshot(directory, config, binary, staging):
 
 
 def compare(expected, capture):
-    errors = []
-    if capture.exit_code != expected["exit_code"]:
-        errors.append(f"exit-code mismatch: expected {expected['exit_code']}, actual {capture.exit_code}")
-    for name in ("stdout", "stderr"):
-        wanted = expected[name].encode("utf-8")
-        actual = getattr(capture, name)
-        if actual == wanted:
-            continue
-        offset = next((i for i, (a, b) in enumerate(zip(wanted, actual)) if a != b),
-                      min(len(wanted), len(actual)))
-        window = slice(max(0, offset - 12), offset + 20)
-        errors.append(f"{name} mismatch at byte {offset}\n"
-                      f"  expected ({len(wanted)} bytes): {wanted[window]!r}\n"
-                      f"  actual   ({len(actual)} bytes): {actual[window]!r}")
+    errors = differences(Observation.from_manifest(expected), capture)
     if errors:
-        raise ValueError("\n".join(errors))
+        raise ValueError("\n".join(map(describe, errors)))
 
 
 def publish(directory, target, manifest, config, capture, binary_hash, provenance):

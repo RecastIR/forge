@@ -1,0 +1,9 @@
+[
+  {
+    "fixture_id": "arithmetic/add_i64",
+    "scope": "function",
+    "export": "add_i64",
+    "signature": "i64(i64,i64)",
+    "harness": "decimal_pairs"
+  }
+]
