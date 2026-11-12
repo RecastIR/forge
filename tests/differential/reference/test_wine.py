@@ -1,0 +1,76 @@
+"""Integration checks for the published matrix and the real pinned Wine launcher."""
+import json
+from pathlib import Path
+import os
+import subprocess
+import tempfile
+import unittest
+
+from docker_wine import build_image, execute
+from run import BINARIES, REFERENCES, SUITE, load_catalog, sha256
+
+
+class WineTests(unittest.TestCase):
+    def test_complete_matrix(self):
+        catalog = load_catalog()
+        for config in ("debug", "release"):
+            root = REFERENCES / config
+            self.assertEqual({path.parent.relative_to(root).as_posix()
+                              for path in root.rglob("result.json")}, {m.case["id"] for m in catalog})
+            for manifest in catalog:
+                case = manifest.case
+                with self.subTest(config=config, fixture=case["id"]):
+                    directory = root / case["id"]
+                    result = json.loads((directory / "result.json").read_bytes())
+                    self.assertEqual(result["fixture_id"], case["id"])
+                    self.assertEqual(result["build_config"], config)
+                    self.assertEqual(result["status"], "passed")
+                    self.assertEqual(result["execution_backend"], "wine")
+                    self.assertEqual(result["container_platform"], "linux/amd64")
+                    self.assertEqual(result["manifest_sha256"], manifest.sha256)
+                    self.assertEqual(result["binary_sha256"], sha256((BINARIES / config / case["binary"]).read_bytes()))
+                    self.assertEqual(result["exit_code"], case["expected"]["exit_code"])
+                    for stream in ("stdout", "stderr"):
+                        data = (directory / result[stream + "_file"]).read_bytes()
+                        self.assertEqual(data, case["expected"][stream].encode("utf-8"))
+                        self.assertEqual(result[stream + "_size"], len(data))
+                        self.assertEqual(result[stream + "_sha256"], sha256(data))
+            combined = root / "runner/exit_and_stderr"
+            self.assertEqual(json.loads((combined / "result.json").read_bytes())["exit_code"], 4660)
+            self.assertEqual((combined / "stdout.bin").read_bytes(), b"")
+            self.assertEqual((combined / "stderr.bin").read_bytes(), b"runner-error\n")
+
+    def test_capture_boundaries(self):
+        image = build_image(SUITE)["container_image_id"]
+        with tempfile.TemporaryDirectory() as tmp:
+            directory = Path(tmp)
+            binary = directory / "probe.exe"
+            source = Path(__file__).with_name("test_probe.c").resolve()
+            subprocess.run(["docker", "run", "--rm", "--platform", "linux/amd64", "--network", "none",
+                            "--user", f"{os.getuid()}:{os.getgid()}", "-v", f"{directory}:/output",
+                            "-v", f"{source}:/input/test.c:ro", "--entrypoint", "x86_64-w64-mingw32-gcc-win32",
+                            image, "-std=c11", "-Wall", "-Wextra", "-Werror", "-municode", "-static",
+                            "/input/test.c", "-o", "/output/probe.exe"], check=True)
+            args = ["", "two words", 'embedded"quote', 'backslash\\"quote', "sp ace\\", "café", "a&b"]
+            observation = execute(image, binary, args, container_env=("WINEDEBUG=-all,trace+loaddll",
+                                                                     "FORGE_TEST_HOST_ONLY=sentinel"))
+            self.assertEqual(observation.stdout, b"".join(arg.encode() + b"\0" for arg in args))
+            self.assertEqual(observation.stderr, b"")
+            self.assertEqual(observation.exit_code, 0)
+            self.assertEqual(execute(image, binary, []).exit_code, 0xc0000135)
+            for arg, failure in (("--flood", "output-size limit"), ("--sleep", "execution timeout")):
+                with self.subTest(arg=arg), self.assertRaisesRegex(ValueError, failure):
+                    execute(image, binary, [arg])
+            # Only the imported DLL basename changes; the PE layout stays intact.
+            data = binary.read_bytes()
+            self.assertIn(b"msvcrt.dll\0", data)
+            binary.write_bytes(data.replace(b"msvcrt.dll\0", b"absent.dll\0"))
+            with self.assertRaisesRegex(ValueError, "missing Windows runtime dependency"):
+                execute(image, binary, [])
+            binary.write_bytes(b"not an executable")
+            with self.assertRaisesRegex(ValueError, "invalid or unsupported PE"):
+                execute(image, binary, [])
+
+
+if __name__ == "__main__":
+    unittest.main()

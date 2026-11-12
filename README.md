@@ -16,9 +16,9 @@ The root CMake project builds one executable, `forge`. Its headers are private t
 | `tests/integration/` | Build, CLI, code generation, and native execution suites and their Python helpers |
 | `tests/fixtures/` | SDK-free PE fixture sources and their generator |
 | `tests/support/` | C++ harness for calling a lifted function from a test |
-| `tests/differential/` | Reproducible Windows x64 fixture programs, manifests, and cross-build tooling |
+| `tests/differential/` | Windows x64 fixtures, manifests, cross-build tooling, and Wine reference capture |
 
-Add new production code to the component that owns it. Create `runtime/` when generated code first needs a shared native implementation, and `tests/unit/` with the first isolated unit suite. Register tests in `tests/CMakeLists.txt`. Build the whole-executable fixtures with `./tools/build-windows-fixtures.sh --all`. See the [fixture guide](tests/differential/README.md).
+Add new production code to the component that owns it. Create `runtime/` when generated code first needs a shared native implementation, and `tests/unit/` with the first isolated unit suite. Register tests in `tests/CMakeLists.txt`. Build the whole-executable fixtures with `./tools/build-windows-fixtures.sh --all`, then capture their Wine references with `./tools/run-windows-references.sh --all`. See the [fixture guide](tests/differential/README.md).
 
 ## Build and run
 

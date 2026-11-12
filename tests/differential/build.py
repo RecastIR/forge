@@ -20,7 +20,7 @@ def compile_suite(tree, config):
     return tree / "bin"
 
 
-def inspect_pe(path, fixture_id):
+def inspect_image(path):
     report = subprocess.check_output(["x86_64-w64-mingw32-objdump", "-p", path], text=True)
     characteristics = re.search(r"^Characteristics\s+(0x[0-9a-fA-F]+)$", report, re.MULTILINE)
     flags = int(characteristics[1], 16) if characteristics else 0
@@ -28,6 +28,11 @@ def inspect_pe(path, fixture_id):
             or not re.search(r"^Magic\s+020b\s+\(PE32\+\)", report, re.MULTILINE)
             or not flags & 0x0002 or flags & 0x2000):
         raise ValueError(f"{path}: expected an AMD64 PE32+ executable image")
+    return report
+
+
+def inspect_pe(path, fixture_id):
+    report = inspect_image(path)
     if not re.search(r"^Time/Date\s+Thu Jan\s+1 00:00:00 1970$", report, re.MULTILINE):
         raise ValueError(f"{path}: expected a zero COFF timestamp")
 

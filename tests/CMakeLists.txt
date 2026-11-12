@@ -13,6 +13,8 @@ add_test(NAME windows_fixture_manifests COMMAND "${Python3_EXECUTABLE}" -B
   "${CMAKE_CURRENT_SOURCE_DIR}/differential/manifests.py")
 add_test(NAME windows_fixture_manifest_validation COMMAND "${Python3_EXECUTABLE}" -B
   "${CMAKE_CURRENT_SOURCE_DIR}/differential/test_manifests.py")
+add_test(NAME windows_reference_runner COMMAND "${Python3_EXECUTABLE}" -B
+  "${CMAKE_CURRENT_SOURCE_DIR}/differential/reference/test_runner.py")
 foreach(tool llvm-mc lld-link llvm-dlltool llvm-readobj clang opt llc)
   if(EXISTS "${CMAKE_BINARY_DIR}/CMakeCache.txt" AND NOT FORGE_FIXTURE_LLVM_DIR STREQUAL LLVM_DIR)
     unset(${tool} CACHE)

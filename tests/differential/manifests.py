@@ -1,11 +1,14 @@
 """Validate fixture contracts before exposing their build inputs to CMake."""
 import argparse
+from dataclasses import dataclass
+import hashlib
 import json
 from pathlib import Path
 import re
 import sys
 
 SUITE = Path(__file__).resolve().parent
+FIXTURE_ID = re.compile(r"[a-z][a-z0-9_]*/[a-z][a-z0-9_]*")
 
 
 def unique_keys(pairs):
@@ -26,7 +29,7 @@ def field(obj, name, kind):
 def validate(case, root):
     if field(case, "schema_version", int) != 1:
         raise ValueError("expected schema_version 1")
-    if not re.fullmatch(r"[a-z][a-z0-9_]*/[a-z][a-z0-9_]*", field(case, "id", str)):
+    if not FIXTURE_ID.fullmatch(field(case, "id", str)):
         raise ValueError("id must be a lowercase category/name")
     if not field(case, "description", str).strip():
         raise ValueError("description must describe the fixture")
@@ -51,16 +54,24 @@ def validate(case, root):
         field(expected, stream, str).encode("utf-8")
 
 
-def load_cases(root=SUITE):
+@dataclass(frozen=True)
+class Manifest:
+    case: dict
+    path: str
+    sha256: str
+
+
+def load_catalog(root=SUITE):
     root = root.resolve()
     ids = set()
     binaries = set()
     cases = []
-    for path in sorted((root / "manifests").glob("*.json")):
+    for path in sorted((root / "manifests").rglob("*.json")):
         try:
             if not path.resolve(strict=True).is_relative_to(root / "manifests"):
                 raise ValueError("manifest outside manifests directory")
-            case = json.loads(path.read_text(encoding="utf-8"), object_pairs_hook=unique_keys)
+            data = path.read_bytes()
+            case = json.loads(data.decode("utf-8"), object_pairs_hook=unique_keys)
             validate(case, root)
             if case["id"] in ids:
                 raise ValueError(f"duplicate id {case['id']!r}")
@@ -68,17 +79,21 @@ def load_cases(root=SUITE):
                 raise ValueError(f"duplicate binary {case['binary']!r}")
             ids.add(case["id"])
             binaries.add(case["binary"].lower())
-            cases.append(case)
+            cases.append(Manifest(case, path.relative_to(root).as_posix(), hashlib.sha256(data).hexdigest()))
         except (ValueError, OSError, RuntimeError) as error:
             raise ValueError(f"{path}: {error}") from error
     if not cases:
         raise ValueError(f"{root / 'manifests'}: no fixture manifests")
     sources = {p.relative_to(root).as_posix() for p in (root / "fixtures").rglob("*")
                if p.suffix in (".c", ".cpp") and p.is_file()}
-    missing = sources.difference(case["source"] for case in cases)
+    missing = sources.difference(manifest.case["source"] for manifest in cases)
     if missing:
         raise ValueError(f"sources without manifests: {', '.join(sorted(missing))}")
     return cases
+
+
+def load_cases(root=SUITE):
+    return [manifest.case for manifest in load_catalog(root)]
 
 
 if __name__ == "__main__":

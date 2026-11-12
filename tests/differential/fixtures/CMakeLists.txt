@@ -10,7 +10,7 @@ endif()
 
 set(suite "${CMAKE_CURRENT_SOURCE_DIR}/..")
 find_package(Python3 3.9 REQUIRED COMPONENTS Interpreter)
-file(GLOB manifests CONFIGURE_DEPENDS "${suite}/manifests/*.json")
+file(GLOB_RECURSE manifests CONFIGURE_DEPENDS "${suite}/manifests/*.json")
 set_property(DIRECTORY APPEND PROPERTY CMAKE_CONFIGURE_DEPENDS ${manifests} "${suite}/manifests.py")
 execute_process(COMMAND "${Python3_EXECUTABLE}" -B "${suite}/manifests.py" --catalog
   OUTPUT_VARIABLE catalog COMMAND_ERROR_IS_FATAL ANY)

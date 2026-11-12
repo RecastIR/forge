@@ -1,0 +1,13 @@
+{
+  "schema_version": 1,
+  "id": "runner/exit_nonzero",
+  "description": "Exit with an ordinary nonzero status and empty streams.",
+  "source": "fixtures/runner/exit_nonzero.c",
+  "binary": "runner_exit_nonzero.exe",
+  "args": [],
+  "expected": {
+    "exit_code": 7,
+    "stdout": "",
+    "stderr": ""
+  }
+}

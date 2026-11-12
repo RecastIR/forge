@@ -27,6 +27,14 @@ class ManifestTests(unittest.TestCase):
         self.write(self.case)
         self.assertEqual(load_cases(self.root), [self.case])
 
+    def test_nested_manifests_share_uniqueness_checks(self):
+        (self.manifests / "runner").mkdir()
+        self.write(self.case, "runner/nested.json")
+        self.assertEqual(load_cases(self.root), [self.case])
+        self.write(self.case)
+        with self.assertRaisesRegex(ValueError, "duplicate id"):
+            load_cases(self.root)
+
     def test_required_types(self):
         for key in self.case:
             with self.subTest(missing=key):

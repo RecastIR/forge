@@ -26,6 +26,7 @@ if git -C "$repo" rev-parse --is-inside-work-tree >/dev/null 2>&1; then
     fi
 fi
 mkdir -p "$output"
-image=$(docker build --platform linux/amd64 -q -t forge-windows-fixture-toolchain "$suite/toolchain")
+image=$(docker build --platform linux/amd64 --target toolchain -q -t forge-windows-fixture-toolchain \
+    -f "$suite/toolchain/Dockerfile" "$suite")
 exec docker run --rm --platform linux/amd64 --network none --user "$(id -u):$(id -g)" \
     -v "$suite:/suite:ro" -v "$output:/output" "$image" python3 -B /suite/build.py "$@"
