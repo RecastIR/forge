@@ -1,4 +1,5 @@
 """Exercise the Make wrapper in disposable source and build directories."""
+import json
 import os
 from pathlib import Path
 import shutil
@@ -60,6 +61,37 @@ class BuildConfig(unittest.TestCase):
         cache = configure(f"LLVM_DIR={LLVM_DIR}")
         self.assertEqual(cache["LLVM_DIR"], str(LLVM_DIR))
         self.assertEqual(cache["llvm-readobj"], readobj)
+
+    def test_lint_requires_real_commands_in_external_database(self):
+        build = self.tmp / "analysis build"
+        subprocess.run([CMAKE, "-S", SOURCE, "-B", build, f"-DLLVM_DIR={LLVM_DIR}",
+                        "-DBUILD_TESTING=OFF", "-DCMAKE_EXPORT_COMPILE_COMMANDS=ON"],
+                       env=self.env, check=True)
+        database = build / "compile_commands.json"
+        contents = database.read_bytes()
+        entries = json.loads(contents)
+        harness = SOURCE / "tests/native_harness.cpp"
+        self.assertIn(str(harness), [e["file"] for e in entries])
+
+        # Exercise the wrapper even on machines without clang-tidy.
+        config = self.tmp / "llvm-config"
+        config.write_text('#!/bin/sh\ndirname "$0"\n')
+        config.chmod(0o755)
+        tidy = self.tmp / "clang-tidy"
+        tidy.write_text('#!/bin/sh\nprintf "%s\\n" "$@" > "$0.args"\n')
+        tidy.chmod(0o755)
+        command = ["make", "lint", f"LLVM_CONFIG={config}", f"LINT_DATABASE={database}"]
+        subprocess.run(command, cwd=SOURCE, env=self.env, check=True)
+        args = (self.tmp / "clang-tidy.args").read_text().splitlines()
+        self.assertEqual(args[:2], ["-p", str(build)])
+        self.assertCountEqual(args[2:], [str(p) for p in (SOURCE / "src").glob("*.cpp")] + [str(harness)])
+        self.assertEqual(database.read_bytes(), contents)
+
+        database.write_text(json.dumps([e for e in entries if e["file"] != str(harness)]))
+        failed = subprocess.run(command, cwd=SOURCE, env=self.env, capture_output=True, text=True)
+        self.assertNotEqual(failed.returncode, 0)
+        self.assertIn("Missing first-party compile commands", failed.stderr)
+        self.assertIn("native_harness.cpp", failed.stderr)
 
 
 if __name__ == "__main__":

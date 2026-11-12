@@ -1,0 +1,16 @@
+Checks: >
+  -*,
+  bugprone-*,
+  clang-analyzer-*,
+  performance-*,
+  portability-*,
+  modernize-use-nullptr,
+  modernize-use-override,
+  readability-duplicate-include,
+  readability-misleading-indentation
+WarningsAsErrors: >
+  clang-analyzer-*,
+  bugprone-dangling-handle,
+  bugprone-undefined-memory-manipulation,
+  bugprone-use-after-move
+HeaderFilterRegex: '(^|/)src/[^/]+\.h$'

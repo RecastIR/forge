@@ -12,7 +12,7 @@ import tempfile
 
 from pe_layout import Layout
 
-MODE, FORGE, FIXTURES, OPT, LLC, READOBJ, CXX = sys.argv[1:]
+MODE, FORGE, FIXTURES, OPT, LLC, READOBJ, HARNESS_OBJECT, *HARNESS_LINKER = sys.argv[1:]
 MASK = (1 << 64) - 1
 
 
@@ -143,9 +143,6 @@ def main():
     with tempfile.TemporaryDirectory() as temp:
         work = Path(temp)
         ir, optimized, obj, exe = (work / f for f in ["lift.ll", "opt.ll", "func.o", "harness"])
-        if MODE != "codegen":
-            run(CXX, "-arch", "arm64", "-std=c++20", "-c", Path(__file__).with_name("native_harness.cpp"),
-                "-o", work/"harness.o")
         for name, image, rva, reference in cases(work):
             cmd = [FORGE, "lift", image, "--rva", hex(rva), "--output", ir]
             if MODE == "codegen":
@@ -168,7 +165,7 @@ def main():
                 check(b"Mach-O arm64" in run(READOBJ, "--file-headers", obj), name)
                 if MODE == "codegen":
                     continue
-                run(CXX, "-arch", "arm64", work/"harness.o", obj, "-o", exe)
+                run(*HARNESS_LINKER, HARNESS_OBJECT, obj, "-o", exe)
                 actual = [int(s, 16) for s in run(exe, input=stdin, text=True).splitlines()]
                 check(len(actual) == len(expected), (name, source.name, len(actual), len(expected)))
                 for pair, got, want in zip(vectors, actual, expected):

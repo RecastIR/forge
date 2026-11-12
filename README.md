@@ -25,6 +25,28 @@ make fixtures BUILD_DIR=build-xcode CONFIG=Release
 make clean BUILD_DIR=build-xcode CONFIG=Release
 ```
 
+## Development checks
+
+Install Apple's developer tools with `xcode-select --install`. The Homebrew LLVM package in the build instructions also provides `clang-format`, `clang-tidy`, and `llvm-config`. Formatting and linting are opt-in.
+
+```sh
+make format-check   # Verify first-party C++ formatting
+make format         # Apply the same formatting
+make lint           # Analyze Forge and the native C++ test harness
+make test CONFIG=Debug
+make sanitize       # Run CTest in a separate Debug build with ASan and UBSan
+```
+
+`make lint` configures `<BUILD_DIR>-lint/` with Unix Makefiles and refreshes its `compile_commands.json` on each invocation. On macOS it pairs the selected LLVM compiler and clang-tidy with the macOS SDK. This also works alongside an Xcode build. Discovery uses `llvm-config` on `PATH`, then Homebrew's unversioned LLVM or the newest installed versioned formula. Set `LLVM_CONFIG` to choose the tools and `LLVM_DIR` to select a different LLVM library package.
+
+```sh
+make lint LLVM_CONFIG=/path/to/bin/llvm-config
+make configure CMAKE_ARGS=-DCMAKE_EXPORT_COMPILE_COMMANDS=ON
+make lint LINT_DATABASE=build/compile_commands.json
+```
+
+The last two commands regenerate and use a Unix Makefiles or Ninja build's own database. Choose a clang-tidy version compatible with that build's compiler and C++ headers. An external database must include the harness and every Forge translation unit. Analyzer findings and selected bug-prone checks fail lint. Other diagnostics are advisory.
+
 ## Dependency policy
 
 Discovery reads the direct and RVA-based delay import tables and preserves DLL spelling, symbol names, and ordinals. Resolution matches filenames using ASCII lowercase. For each physical DLL, Forge checks the importing module’s directory, then each explicit `--dll-path` in order. Relative command-line paths use the invocation directory. Each lookup considers only immediate directory entries.
