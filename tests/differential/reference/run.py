@@ -74,7 +74,7 @@ def read_export(path):
     return path.read_bytes()
 
 
-def snapshot(directory, config, binary, staging):
+def verified_export(directory, config, binary):
     source = directory / config / binary
     hint = f"./tools/build-windows-fixtures.sh --config {config}"
     try:
@@ -90,6 +90,11 @@ def snapshot(directory, config, binary, staging):
     rows = [line for line in lines if line.partition("  ")[2] == binary]
     if rows != [f"{digest}  {binary}"]:
         raise ValueError(f"checksum failure for {source}; rebuild with {hint}")
+    return data, digest
+
+
+def snapshot(directory, config, binary, staging):
+    data, digest = verified_export(directory, config, binary)
     path = staging / binary
     path.write_bytes(data)
     path.chmod(0o444)
@@ -135,12 +140,19 @@ def run(configs, fixture, *, suite=SUITE, binaries=BINARIES, output=REFERENCES):
         selected = [m for m in catalog if fixture is None or m.case["id"] == fixture]
         if not selected:
             raise ValueError(f"unknown fixture {fixture!r}")
+        failures = output.parent / "failures"
         provenance = None
         setup_failure = None
         for config in configs:
             for manifest in selected:
                 case = manifest.case
                 label = f"{case['id']} [{config}]"
+                failed_case = failures / config / case["id"]
+                if failed_case.resolve() != failed_case.absolute():
+                    raise ValueError(f"refusing symbolic link in diagnostic path: {failed_case}")
+                if failed_case.exists():
+                    failed_case.rename(staging / ("old-failure-" + config + "-" + case["binary"]))
+                capture = digest = None
                 try:
                     with tempfile.TemporaryDirectory() as tmp:
                         binary, digest = snapshot(binaries, config, case["binary"], Path(tmp))
@@ -158,6 +170,17 @@ def run(configs, fixture, *, suite=SUITE, binaries=BINARIES, output=REFERENCES):
                 except CleanupFailure as error:
                     raise CleanupFailure(f"FAIL {label}\n{error}") from error
                 except (OSError, ValueError, subprocess.SubprocessError) as error:
+                    try:
+                        failed_case.mkdir(parents=True)
+                        diagnostic = dict(fixture_id=case["id"], build_config=config, error=str(error),
+                                          binary_sha256=digest, manifest_sha256=manifest.sha256, backend=provenance)
+                        if capture is not None:
+                            diagnostic["observed_exit_code"] = capture.exit_code
+                            for stream in ("stdout", "stderr"):
+                                (failed_case / (stream + ".bin")).write_bytes(getattr(capture, stream))
+                        (failed_case / "failure.json").write_text(json.dumps(diagnostic, indent=2) + "\n")
+                    except OSError as write_error:
+                        print(f"Could not preserve {label} diagnostics: {write_error}", file=sys.stderr)
                     print(f"FAIL {label}\n{error}", file=sys.stderr, flush=True)
                 else:
                     passed += 1

@@ -1,0 +1,15 @@
+{
+  "schema_version": 1,
+  "required_cases": [
+    {
+      "id": "arithmetic/add_i64",
+      "config": "debug",
+      "target": "macos-arm64"
+    },
+    {
+      "id": "arithmetic/add_i64",
+      "config": "release",
+      "target": "macos-arm64"
+    }
+  ]
+}

@@ -26,6 +26,11 @@ class WineTests(unittest.TestCase):
                     self.assertEqual(observed.exit_code, case["expected"]["exit_code"])
                     for stream in ("stdout", "stderr"):
                         self.assertEqual(getattr(observed, stream), case["expected"][stream].encode("utf-8"))
+            for name, exit_code, stderr in (("stderr_only", 0, b"runner-error\n"), ("exit_nonzero", 7, b"")):
+                runner = root / "runner" / name
+                self.assertEqual(json.loads((runner / "result.json").read_bytes())["exit_code"], exit_code)
+                self.assertEqual((runner / "stdout.bin").read_bytes(), b"")
+                self.assertEqual((runner / "stderr.bin").read_bytes(), stderr)
             combined = root / "runner/exit_and_stderr"
             self.assertEqual(json.loads((combined / "result.json").read_bytes())["exit_code"], 4660)
             self.assertEqual((combined / "stdout.bin").read_bytes(), b"")

@@ -70,6 +70,13 @@ Every behavior change requires tests at the lowest useful level and, where cross
 - Report exact commands executed and their results. Clearly distinguish **passed**, **failed**, and **not run** with reasons.
 - Never claim a stage, platform, binary, or feature is supported merely because it compiles or a smoke test passes.
 
+### Coverage obligations
+
+- Add differential coverage for new lifting capabilities whenever practical. Incorrect lifting fixes require regression coverage.
+- Verify generated output against an independent observation. Preserve fixture expectations and run the relevant quality and correctness checks before completing changes.
+- Keep enabled cases and the reviewed coverage baseline in sync. Explain reductions in the PR and obtain code-owner review. Never disable a case or weaken an expectation to obtain a passing result.
+- Review test infrastructure for false passes from stale inputs, skipped execution, or incomplete configuration coverage. Use the [regression guide](tests/differential/README.md#regression-ci-and-local-reproduction) to exercise these paths.
+
 ## Documentation
 
 Documentation is part of the change, not follow-up work.

@@ -10,19 +10,22 @@ import shutil
 import signal
 import subprocess
 import sys
+import tempfile
 
 from comparison import describe, differences
 from manifests import FIXTURE_ID, SUITE, field, load_catalog, unique_keys
 
 sys.path.insert(0, str(SUITE / "reference"))
 from artifacts import directory, reference
-from run import BINARIES, BUILD, REFERENCES, interrupt, sha256, snapshot
+from run import BINARIES, BUILD, REFERENCES, interrupt, sha256, snapshot, verified_export
 import native
 
 OUTPUT = BUILD / "differential/windows-x64"
 DEFAULT_FORGE = BUILD / "forge"
 STAGES = ("reference_validation", "analysis", "lifting", "native_compilation",
           "native_execution", "comparison")
+CONFIGS = ("debug", "release")
+TARGET = "macos-arm64"
 
 
 class Unsupported(ValueError):
@@ -34,28 +37,45 @@ def read_json(path):
 
 
 def write_json(path, data):
-    temporary = path.with_suffix(".tmp")
-    temporary.write_text(json.dumps(data, indent=2) + "\n", encoding="utf-8")
-    temporary.replace(path)
+    stream = tempfile.NamedTemporaryFile(mode="w", encoding="utf-8", dir=path.parent, delete=False)
+    temporary = Path(stream.name)
+    try:
+        with stream:
+            json.dump(data, stream, indent=2)
+            stream.write("\n")
+        temporary.replace(path)
+    finally:
+        temporary.unlink(missing_ok=True)
 
 
-def enabled_cases(catalog, path):
+def case_definitions(catalog, path):
     cases = read_json(path)
     if not isinstance(cases, list):
         raise ValueError("differential cases must be a list")
     ids = {m.case["id"] for m in catalog}
-    enabled = {}
+    definitions = {}
     for case in cases:
         name = field(case, "fixture_id", str)
-        if name not in ids or name in enabled:
-            raise ValueError(f"unknown or duplicate differential fixture {name!r}")
-        if (set(case) != {"fixture_id", "scope", "export", "signature", "harness"}
+        if name not in ids:
+            raise ValueError(f"unknown differential fixture {name!r}")
+        configs = case.get("configs", list(CONFIGS))
+        if (not isinstance(configs, list) or not configs or any(c not in CONFIGS for c in configs)
+                or len(set(configs)) != len(configs)):
+            raise ValueError(f"invalid differential configs for {name}")
+        keys = set(case) - {"configs"}
+        if keys == {"fixture_id", "blocked_reason"}:
+            if not field(case, "blocked_reason", str).strip():
+                raise ValueError(f"empty blocking reason for {name}")
+        elif (keys != {"fixture_id", "scope", "export", "signature", "harness"}
                 or case.get("scope") != "function" or case.get("signature") != "i64(i64,i64)"
                 or not re.fullmatch(r"[A-Za-z_]\w*", field(case, "export", str), flags=re.ASCII)
                 or not re.fullmatch(r"[a-z][a-z0-9_]*", field(case, "harness", str))):
             raise ValueError(f"invalid differential function contract for {name}")
-        enabled[name] = case
-    return enabled
+        for config in configs:
+            if (name, config) in definitions:
+                raise ValueError(f"duplicate differential fixture {name!r} for {config}")
+            definitions[name, config] = case
+    return definitions
 
 
 def resolve_export(inspection, analysis, name):
@@ -90,7 +110,7 @@ def lift(forge, image, case, rva, ir):
                         "--output", ir], ir.parent.parent / "lifting.log")
     except ValueError as error:
         # The CLI also reports file errors and verifier failures. Only explicit capability
-        # diagnostics issued by the lifter are classified as blocked.
+        # diagnostics issued by the lifter identify a capability error.
         if re.search(r": LIFT_ERROR: 0x[\da-fA-F]+: .*(?:unsupported |native wrapper requires "
                      r"undefined|backward edge|segment-relative LEA|condition flags require|"
                      r"function bytes overlap base relocation|return with undefined|"
@@ -102,22 +122,28 @@ def lift(forge, image, case, rva, ir):
 def run_case(manifest, case, config, binaries, references, forge, work):
     report = dict(schema_version=1, fixture_id=manifest.case["id"], build_config=config,
                   status="uncovered", scope=None)
-    if case is None:
-        code = manifest.case["expected"]["exit_code"]
-        if code > 255:
-            report["diagnostic"] = f"Windows exit code {code} requires full-width guest termination support"
-        return report
-    report.update(scope=case["scope"], function=case["export"], signature=case["signature"],
-                  native_target=f"{platform.system()}/{platform.machine()}",
-                  stages=dict.fromkeys(STAGES, "not_run"))
+    enabled = case is not None and "blocked_reason" not in case
+    report.update(run_id=os.environ.get("FORGE_TEST_RUN_ID"), stages={"reference_validation": "not_run"})
+    if enabled:
+        report.update(scope=case["scope"], function=case["export"], signature=case["signature"],
+                      native_target=f"{platform.system()}/{platform.machine()}",
+                      stages=dict.fromkeys(STAGES, "not_run"))
     stage = "reference_validation"
     stages = report["stages"]
     try:
         directory(binaries, config)
-        image, digest = snapshot(binaries, config, manifest.case["binary"], work)
+        if enabled:
+            image, digest = snapshot(binaries, config, manifest.case["binary"], work)
+        else:
+            _, digest = verified_export(binaries, config, manifest.case["binary"])
         report["binary_sha256"] = digest
         wanted, report["reference"] = reference(references, manifest, config, digest)
         stages[stage] = "passed"
+
+        if not enabled:
+            if case:
+                report.update(status="blocked", diagnostic=case["blocked_reason"])
+            return report
 
         stage = "analysis"
         report["forge_sha256"] = sha256(forge.read_bytes())
@@ -156,9 +182,9 @@ def run_case(manifest, case, config, binaries, references, forge, work):
             report["execution_outcome"] = error.outcome
             if error.status is not None:
                 report["native_process_status"] = error.status
-        blocked = isinstance(error, Unsupported)
-        report.update(status="blocked" if blocked else "infrastructure_failure", diagnostic=str(error),
-                      failure_categories=["unsupported_lifting_capability" if blocked else stage + "_failure"])
+        capability = isinstance(error, Unsupported)
+        report.update(status="infrastructure_failure", diagnostic=str(error),
+                      failure_categories=["unsupported_lifting_capability" if capability else stage + "_failure"])
         stages[stage] = "failed"
     return report
 
@@ -205,10 +231,11 @@ def run(config, fixture=None, *, binaries=BINARIES, references=REFERENCES, outpu
             shutil.rmtree(target)
         folder.mkdir(exist_ok=True)
         summary = dict(schema_version=1, build_config=config, selection=fixture or "all",
-                       status="failed", executed=0, passed=0, uncovered=0, cases=[])
+                       status="failed", executed=0, passed=0, uncovered=0, blocked=0, cases=[],
+                       run_id=os.environ.get("FORGE_TEST_RUN_ID"))
         try:
             catalog = load_catalog(suite)
-            enabled = enabled_cases(catalog, suite / "cases.json")
+            cases = case_definitions(catalog, suite / "cases.json")
             selected = [m for m in catalog if fixture is None or m.case["id"] == fixture]
             if not selected:
                 raise ValueError(f"unknown fixture {fixture!r}")
@@ -216,19 +243,20 @@ def run(config, fixture=None, *, binaries=BINARIES, references=REFERENCES, outpu
                 name = manifest.case["id"]
                 work = folder / name
                 work.mkdir(parents=True)
-                result = run_case(manifest, enabled.get(name), config, binaries, references, forge, work)
+                result = run_case(manifest, cases.get((name, config)), config, binaries, references, forge, work)
                 write_json(work / "result.json", result)
                 status = result["status"]
                 summary["cases"].append(dict(fixture_id=name, status=status, scope=result["scope"],
                                              report=name + "/result.json"))
                 summary["passed"] += status == "passed"
                 summary["uncovered"] += status == "uncovered"
+                summary["blocked"] += status == "blocked"
                 summary["executed"] += result.get("stages", {}).get("native_execution") == "passed"
                 label = f"{status.upper()} {name} [{config}]"
                 print(f"{label} {result['scope']}" if result["scope"] else label)
                 if "stages" in result:
                     print("  " + ", ".join(f"{k}={v}" for k, v in result["stages"].items()))
-                if "reference" in result:
+                if "reference" in result and result["scope"]:
                     print(f"  {result['reference']['wine_version']} -> {result['native_target']}, "
                           f"{result['function']} {result.get('function_rva', '(unresolved)')}")
                 if "diagnostic" in result:
@@ -237,14 +265,14 @@ def run(config, fixture=None, *, binaries=BINARIES, references=REFERENCES, outpu
                     print(describe(mismatch))
             if not summary["executed"]:
                 raise ValueError("zero differential cases executed")
-            if summary["passed"] + summary["uncovered"] == len(selected):
+            if summary["passed"] + summary["uncovered"] + summary["blocked"] == len(selected):
                 summary["status"] = "passed"
         except (OSError, ValueError) as error:
             summary["diagnostic"] = str(error)
             print(error, file=sys.stderr)
         write_json(summary_path, summary)
         print(f"{summary['passed']} passed, {summary['executed']} executed, "
-              f"{summary['uncovered']} uncovered. Report: {summary_path}")
+              f"{summary['uncovered']} reference only, {summary['blocked']} blocked. Report: {summary_path}")
         return int(summary["status"] != "passed")
 
 

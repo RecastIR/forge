@@ -5,5 +5,13 @@
     "export": "add_i64",
     "signature": "i64(i64,i64)",
     "harness": "decimal_pairs"
+  },
+  {
+    "fixture_id": "runner/exit_nonzero",
+    "blocked_reason": "The function harness treats nonzero termination as a harness failure."
+  },
+  {
+    "fixture_id": "runner/exit_and_stderr",
+    "blocked_reason": "The function harness cannot return a full-width Windows termination status."
   }
 ]

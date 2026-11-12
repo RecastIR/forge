@@ -41,7 +41,7 @@ class ComparisonTests(unittest.TestCase):
         self.assertEqual(errors[0], dict(field="exit_code", expected=4660, actual=52))
 
 
-class ArtifactTests(unittest.TestCase):
+class ArtifactSetup(unittest.TestCase):
     def setUp(self):
         tmp = tempfile.TemporaryDirectory()
         self.addCleanup(tmp.cleanup)
@@ -64,21 +64,36 @@ class ArtifactTests(unittest.TestCase):
         self.forge = self.root / "selected forge"
         self.forge.write_bytes(b"unit test Forge")
         self.binaries = self.root / "binaries"
-        bins = self.binaries / self.config
-        bins.mkdir(parents=True)
-        self.image = bins / self.manifest.case["binary"]
-        self.image.write_bytes(b"unit test PE snapshot")
-        self.digest = sha256(self.image.read_bytes())
-        (bins / "SHA256SUMS").write_text(f"{self.digest}  {self.image.name}\n")
         self.references = self.root / "references"
+        self.prepare_exports(self.config)
+        self.image = self.binaries / self.config / self.manifest.case["binary"]
+        self.digest = sha256(self.image.read_bytes())
         self.folder = self.references / self.config / self.manifest.case["id"]
         self.record = self.folder / "result.json"
         self.wanted = Observation.from_manifest(self.manifest.case["expected"])
-        capture = Capture(self.wanted.exit_code, self.wanted.stdout, self.wanted.stderr, "wine-test")
-        publish(self.root, self.folder, self.manifest, self.config, capture, self.digest,
-                dict(runner_version=runner_version(), container_image_id="sha256:" + "a" * 64,
-                     container_platform="linux/amd64", docker_host_arch="x86_64"))
 
+    def prepare_exports(self, config):
+        bins = self.binaries / config
+        bins.mkdir(parents=True)
+        sums = []
+        for manifest in self.catalog:
+            case = manifest.case
+            data = f"{config} {case['id']} PE".encode()
+            (bins / case["binary"]).write_bytes(data)
+            digest = sha256(data)
+            sums.append(f"{digest}  {case['binary']}\n")
+            wanted = Observation.from_manifest(case["expected"])
+            capture = Capture(wanted.exit_code, wanted.stdout, wanted.stderr, "wine-test")
+            publish(self.root, self.references / config / case["id"], manifest, config, capture, digest,
+                    dict(runner_version=runner_version(), container_image_id="sha256:" + "a" * 64,
+                         container_platform="linux/amd64", docker_host_arch="x86_64"))
+        checksums = "".join(sums).encode()
+        (bins / "SHA256SUMS").write_bytes(checksums)
+        diff.write_json(bins / "build.json", dict(schema_version=1, build_config=config, reproducible=True,
+                        toolchain_image_id="sha256:" + "b" * 64, checksums_sha256=sha256(checksums)))
+
+
+class ArtifactTests(ArtifactSetup):
     def reference(self):
         return reference(self.references, self.manifest, self.config, self.digest)
 
@@ -179,8 +194,7 @@ class ArtifactTests(unittest.TestCase):
                 result = diff.read_json(report)
                 self.assertEqual((status, suite["executed"], result["stages"]["comparison"]), (1, 0, "not_run"))
                 self.assertEqual(result["failure_categories"], [category])
-                self.assertEqual(result["status"], "blocked" if isinstance(error, diff.Unsupported)
-                                 else "infrastructure_failure")
+                self.assertEqual(result["status"], "infrastructure_failure")
                 mock.side_effect = None
         self.image.write_bytes(b"stale")
         status, suite = self.invoke(name)
@@ -194,10 +208,10 @@ class ArtifactTests(unittest.TestCase):
         self.assertIn("zero differential cases", suite["diagnostic"])
         path = self.root / "empty.json"
         diff.write_json(path, [])
-        self.assertEqual(diff.enabled_cases(self.catalog, path), {})
+        self.assertEqual(diff.case_definitions(self.catalog, path), {})
         diff.write_json(path, [self.case, self.case])
         with self.assertRaisesRegex(ValueError, "duplicate"):
-            diff.enabled_cases(self.catalog, path)
+            diff.case_definitions(self.catalog, path)
 
     def test_input_root_cannot_be_used_as_output(self):
         original = self.record.read_bytes()

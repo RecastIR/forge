@@ -29,4 +29,4 @@ mkdir -p "$output"
 image=$(docker build --platform linux/amd64 --target toolchain -q -t forge-windows-fixture-toolchain \
     -f "$suite/toolchain/Dockerfile" "$suite")
 exec docker run --rm --platform linux/amd64 --network none --user "$(id -u):$(id -g)" \
-    -v "$suite:/suite:ro" -v "$output:/output" "$image" python3 -B /suite/build.py "$@"
+    -e "FORGE_TOOLCHAIN_ID=$image" -v "$suite:/suite:ro" -v "$output:/output" "$image" python3 -B /suite/build.py "$@"
