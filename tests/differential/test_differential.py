@@ -1,7 +1,12 @@
 """Wine-free tests of the reference consumer, native supervisor, and suite outcomes."""
 import contextlib
+import errno
+import fcntl
 import io
+import os
 from pathlib import Path
+import signal
+import subprocess
 import sys
 import tempfile
 import unittest
@@ -42,9 +47,22 @@ class ArtifactTests(unittest.TestCase):
         self.addCleanup(tmp.cleanup)
         self.root = Path(tmp.name).resolve()
         self.config = "debug"
-        self.catalog = diff.load_catalog()
-        self.manifest = next(m for m in self.catalog if m.case["id"] == "arithmetic/add_i64")
-        self.case = diff.enabled_cases(self.catalog, diff.SUITE / "cases.json")[self.manifest.case["id"]]
+        self.suite = self.root / "suite"
+        (self.suite / "manifests").mkdir(parents=True)
+        (self.suite / "fixtures").mkdir()
+        for name, code in (("enabled", 0), ("uncovered", 4660)):
+            source = f"fixtures/{name}.c"
+            (self.suite / source).touch()
+            diff.write_json(self.suite / "manifests" / f"{name}.json", dict(
+                schema_version=1, id=f"unit/{name}", description=name, source=source,
+                binary=f"{name}.exe", args=["2", "3"], expected=dict(exit_code=code, stdout="5\n", stderr="")))
+        self.case = dict(fixture_id="unit/enabled", scope="function", export="sum",
+                         signature="i64(i64,i64)", harness="decimal_pairs")
+        diff.write_json(self.suite / "cases.json", [self.case])
+        self.catalog = diff.load_catalog(self.suite)
+        self.manifest = next(m for m in self.catalog if m.case["id"] == self.case["fixture_id"])
+        self.forge = self.root / "selected forge"
+        self.forge.write_bytes(b"unit test Forge")
         self.binaries = self.root / "binaries"
         bins = self.binaries / self.config
         bins.mkdir(parents=True)
@@ -114,11 +132,22 @@ class ArtifactTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "symbolic link"):
             self.reference()
 
-    def invoke(self, selection=None):
+    def test_directory_record_releases_descriptor(self):
+        self.record.unlink()
+        self.record.mkdir()
+        for _ in range(8):
+            fd = os.open(self.record, os.O_RDONLY)
+            with patch("artifacts.os.open", return_value=fd), self.assertRaisesRegex(ValueError, "artifact type"):
+                self.reference()
+            with self.assertRaises(OSError) as closed:
+                os.fstat(fd)
+            self.assertEqual(closed.exception.errno, errno.EBADF)
+
+    def invoke(self, selection=None, *, forge=None):
         output = self.root / "output"
         with contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(io.StringIO()):
             status = diff.run(self.config, selection, binaries=self.binaries, references=self.references,
-                              output=output, forge=self.image)
+                              output=output, forge=self.forge if forge is None else forge, suite=self.suite)
         return status, diff.read_json(output / self.config / "suite.json")
 
     def test_statuses_and_stale_pass_rejection(self):
@@ -128,8 +157,12 @@ class ArtifactTests(unittest.TestCase):
                 patch.object(diff.native, "build") as build, patch.object(diff.native, "execute") as execute:
             execute.return_value = self.wanted
             status, suite = self.invoke()
-            self.assertEqual((status, suite["executed"], suite["uncovered"]), (0, 1, len(self.catalog) - 1))
-            self.assertEqual(diff.read_json(report)["scope"], "function")
+            self.assertEqual((status, suite["executed"], suite["uncovered"]), (0, 1, 1))
+            passed = diff.read_json(report)
+            self.assertEqual(passed["scope"], "function")
+            self.assertEqual(passed["forge_sha256"], sha256(self.forge.read_bytes()))
+            self.assertEqual(analyze.call_args.args[0], self.forge)
+            self.assertEqual(lift.call_args.args[0], self.forge)
             self.assertEqual(execute.call_args.args[1], self.manifest.case["args"])
             execute.return_value = Observation(0, b"divergent", b"")
             status, suite = self.invoke(name)
@@ -156,7 +189,7 @@ class ArtifactTests(unittest.TestCase):
         self.assertFalse((report.parent / "generated").exists())
 
     def test_zero_coverage(self):
-        status, suite = self.invoke("runner/exit_and_stderr")
+        status, suite = self.invoke("unit/uncovered")
         self.assertEqual((status, suite["executed"], suite["uncovered"]), (1, 0, 1))
         self.assertIn("zero differential cases", suite["diagnostic"])
         path = self.root / "empty.json"
@@ -169,8 +202,75 @@ class ArtifactTests(unittest.TestCase):
     def test_input_root_cannot_be_used_as_output(self):
         original = self.record.read_bytes()
         with self.assertRaisesRegex(ValueError, "overlaps input"):
-            diff.run(self.config, binaries=self.binaries, references=self.references, output=self.references)
+            diff.run(self.config, binaries=self.binaries, references=self.references,
+                     output=self.references, suite=self.suite)
         self.assertEqual(self.record.read_bytes(), original)
+
+    def test_overlap_through_case_alias_preserves_inputs_and_report(self):
+        if not (self.root / "SUITE").exists() or not (self.root / "SUITE").samefile(self.suite):
+            self.skipTest("requires a case-insensitive volume")
+        for kind in ("binaries", "references"):
+            for input_inside_output in (True, False):
+                with self.subTest(kind=kind, input_inside_output=input_inside_output):
+                    base = self.root / f"{kind}-{input_inside_output}"
+                    (base / "debug").mkdir(parents=True)
+                    nested = base / "DEBUG" / "nested"
+                    source, output = (nested, base) if input_inside_output else (base, nested)
+                    inputs = dict(binaries=self.binaries, references=self.references)
+                    inputs[kind] = source
+                    if kind == "references" and input_inside_output:
+                        nested.mkdir()
+                        downloads = self.root / "downloads"
+                        downloads.symlink_to(nested, target_is_directory=True)
+                        source = nested / "wine"
+                        inputs[kind] = downloads / "wine"
+                    marker = source / "debug/input.bin"
+                    summary = output / "debug/suite.json"
+                    for path, data in ((marker, b"input"), (summary, b"previous report")):
+                        path.parent.mkdir(parents=True, exist_ok=True)
+                        path.write_bytes(data)
+                    with self.assertRaisesRegex(ValueError, "overlaps input"):
+                        diff.run("debug", output=output, suite=self.suite, **inputs)
+                    self.assertEqual(marker.read_bytes(), b"input")
+                    self.assertEqual(summary.read_bytes(), b"previous report")
+
+    def test_cli_selects_forge(self):
+        args = ["--all", "--config", self.config]
+        with patch.object(diff, "run", return_value=0) as run:
+            self.assertEqual(diff.main(args), 0)
+            self.assertEqual(run.call_args.kwargs["forge"], diff.DEFAULT_FORGE)
+            relative = os.path.relpath(self.forge)
+            self.assertEqual(diff.main([*args, "--forge", relative]), 0)
+            self.assertEqual(run.call_args.kwargs["forge"], self.forge)
+        absent = self.root / "missing forge"
+        status, _ = self.invoke(self.case["fixture_id"], forge=absent)
+        report = diff.read_json(self.root / "output/debug/unit/enabled/result.json")
+        self.assertEqual(status, 1)
+        self.assertEqual(report["failure_categories"], ["analysis_failure"])
+        self.assertIn(str(absent), report["diagnostic"])
+        self.assertEqual(report["stages"]["lifting"], "not_run")
+
+    def test_cleanup_preserves_selected_forge(self):
+        output = self.root / "output"
+        folder = output / self.config
+        folder.mkdir(parents=True)
+        selected = folder / "custom-forge"
+        selected.write_bytes(b"selected executable")
+        with self.assertRaisesRegex(ValueError, "overlaps selected Forge"):
+            self.invoke(forge=selected)
+        self.assertEqual(selected.read_bytes(), b"selected executable")
+
+    def test_successful_commands_without_product_fail_compilation(self):
+        with patch.object(diff, "analyze", return_value="0x1234"), patch.object(diff, "lift"), \
+                patch.object(diff.native, "command"), patch.object(diff.platform, "system", return_value="Darwin"), \
+                patch.object(diff.platform, "machine", return_value="arm64"):
+            status, _ = self.invoke(self.case["fixture_id"])
+        report = diff.read_json(self.root / "output/debug/unit/enabled/result.json")
+        self.assertEqual(status, 1)
+        self.assertEqual(report["failure_categories"], ["native_compilation_failure"])
+        self.assertIn("executable harness", report["diagnostic"])
+        self.assertEqual(report["stages"]["native_execution"], "not_run")
+        self.assertEqual(report["stages"]["comparison"], "not_run")
 
 
 class AnalysisTests(unittest.TestCase):
@@ -209,6 +309,41 @@ class NativeTests(unittest.TestCase):
 
     def python(self, code, **options):
         return diff.native.execute(sys.executable, ["-c", code], self.work, **options)
+
+    def test_command_stops_descendants_before_returning(self):
+        # The child holds a lock until exit. Opening the gate after command returns
+        # would let a surviving writer modify the next build's output.
+        child = """
+import fcntl, os, signal, sys, time
+from pathlib import Path
+work = Path(sys.argv[1])
+with (work / 'ready').open('w') as locked:
+    fcntl.flock(locked, fcntl.LOCK_EX)
+    print('ready', flush=True)
+    if sys.argv[2] == 'interrupt':
+        os.kill(int(sys.argv[3]), signal.SIGUSR1)
+    for _ in range(500):
+        if (work / 'gate').exists():
+            (work / 'late').touch()
+            break
+        time.sleep(0.01)
+"""
+        parent = "import subprocess, sys; subprocess.run([sys.executable, '-c', *sys.argv[1:]], check=True)"
+        previous = signal.signal(signal.SIGUSR1, diff.interrupt)
+        self.addCleanup(signal.signal, signal.SIGUSR1, previous)
+        for mode, error in (("timeout", subprocess.TimeoutExpired), ("interrupt", KeyboardInterrupt)):
+            with self.subTest(mode=mode):
+                work = self.work / mode
+                work.mkdir()
+                log = work / "build.log"
+                args = [sys.executable, "-c", parent, child, str(work), mode, str(os.getpid())]
+                with self.assertRaises(error):
+                    diff.native.command(args, log, timeout=1 if mode == "timeout" else 5)
+                self.assertIn("ready", log.read_text())
+                (work / "gate").touch()
+                with (work / "ready").open() as lock:
+                    fcntl.flock(lock, fcntl.LOCK_SH)
+                    self.assertFalse((work / "late").exists())
 
     def test_streams_and_execution_failures(self):
         actual = self.python(r'import sys; print(len(sys.stdin.buffer.read())); sys.stderr.buffer.write(b"\xff\0")')

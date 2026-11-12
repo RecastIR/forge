@@ -24,14 +24,17 @@ def directory(root, relative):
 
 def read_file(path, limit):
     fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
-    with os.fdopen(fd, "rb") as stream:
-        info = os.fstat(stream.fileno())
+    try:
+        info = os.fstat(fd)
         if not stat.S_ISREG(info.st_mode) or info.st_size > limit:
             raise ValueError(f"invalid artifact type or size: {path}")
-        data = stream.read(limit + 1)
+        with os.fdopen(fd, "rb", closefd=False) as stream:
+            data = stream.read(limit + 1)
         if len(data) != info.st_size:
             raise ValueError(f"artifact changed while reading: {path}")
         return data
+    finally:
+        os.close(fd)
 
 
 def reference(root, manifest, config, binary_hash):

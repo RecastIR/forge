@@ -123,6 +123,13 @@ make CONFIG=Debug
   --reference-root /path/to/windows-x64-wine-references
 ```
 
+Use `--forge PATH` to select the executable for inspection, analysis, and lifting. Relative paths resolve from the directory where you invoke the runner. The default is the repository’s `build/forge`. The report records the SHA-256 of the selected executable. To use Xcode with a custom build directory, run both commands from the repository root.
+
+```sh
+CMAKE_GENERATOR=Xcode make BUILD_DIR=build-xcode CONFIG=Debug
+CMAKE_GENERATOR=Xcode ./tools/run-differential.sh --all --config debug --forge build-xcode/Debug/forge
+```
+
 The manifest supplies the binary, arguments and expected Windows behavior. [cases.json](cases.json) associates an enabled fixture ID with its function export, explicit ABI signature, scope and CMake harness. Each invocation snapshots the selected PE against its configuration’s `SHA256SUMS`. The consumer checks the v1 reference’s validated status, IDs, configuration, binary and manifest hashes, publisher fingerprint, and Wine provenance. It requires the designated regular stream files, verifies sizes and hashes, and independently checks the recorded bytes and full exit code against the manifest. It compares native behavior with the verified observation held in memory. A local override must point to a trusted producer’s artifacts. Hashes detect changes relative to the publication. CI obtains producer identity from its same-run artifact transfer.
 
 For `arithmetic/add_i64`, the runner takes the named export RVA from the snapshot’s Forge inspection and matches it to an eligible start in Forge’s function analysis. The Windows driver calls the exported leaf for each decimal pair. MinGW’s `noipa` keeps this call observable, and function-local `optimize("O2")` keeps the leaf register-only even in the surrounding Debug build. Forge lifts the leaf with `i64(i64,i64)`. A test-only target in the root CMake project verifies the LLVM IR, emits a Mach-O ARM64 object with `llc`, and links it with the C++20 decimal-pairs harness. The harness receives only the manifest arguments, calls `forge_lifted` for each pair, and prints the return values. Debug and Release each resolve their own RVA and use the matching PE, reference and native build configuration.
@@ -146,4 +153,6 @@ Each selected fixture has a `result.json` below `build/differential/windows-x64/
 
 To add coverage, first obtain passing Debug and Release Wine references through the fixture catalog. Identify a genuine callable export with a source-declared signature, add its entry in `cases.json`, and reuse the decimal-pairs harness when its invocation fits. A new harness belongs in `tests/support/` with a corresponding CMake target. Harness code may parse inputs and format observations. The computation comes from the linked Forge output.
 
-Use `python3 -B tests/differential/test_differential.py` for the Wine-free comparator, validator, supervisor and runner tests. With the full local artifacts available, `python3 -B tests/differential/test_native_differential.py` exercises a changed return in a copy of genuine IR, invalid IR, a failed harness invocation and a mismatched PE. The negative reports live under `build/differential/negative-tests/`. CI builds and captures on Linux amd64, runs both native comparisons and the negative tests on macOS arm64, and uploads the differential artifacts.
+Use `python3 -B tests/differential/test_differential.py` for the Wine-free comparator, validator, supervisor and runner tests. With the full local artifacts available, `python3 -B tests/differential/test_native_differential.py` exercises a changed return in a copy of genuine IR, invalid IR, a failed harness invocation and a mismatched PE. The negative reports live under `build/differential/negative-tests/`.
+
+CI builds the PEs and captures their references on Linux amd64. The macOS arm64 job runs its native checks even if fixture production fails. With validated artifacts, it runs the Debug comparison with Xcode and the Release comparison with the default generator, exercises the negative cases, and uploads the differential reports and diagnostics.

@@ -1,4 +1,5 @@
 """Compile a generated module through the Forge CMake project and observe its harness."""
+from contextlib import nullcontext
 import os
 import platform
 import selectors
@@ -21,18 +22,27 @@ class ExecutionFailure(ValueError):
         self.status = status
 
 
-def command(args, log, stdout=None):
-    with log.open("ab") as errors:
-        if stdout is None:
-            result = subprocess.run(args, stdout=errors, stderr=errors, timeout=180)
-        else:
-            with stdout.open("wb") as output:
-                result = subprocess.run(args, stdout=output, stderr=errors, timeout=180)
-    if result.returncode:
+def kill_group(pid):
+    try:
+        os.killpg(pid, signal.SIGKILL)
+    except ProcessLookupError:
+        pass
+
+
+def command(args, log, stdout=None, *, timeout=180):
+    with log.open("ab") as errors, (stdout.open("wb") if stdout else nullcontext(errors)) as output:
+        with subprocess.Popen(args, stdout=output, stderr=errors, start_new_session=True) as process:
+            try:
+                status = process.wait(timeout=timeout)
+            except BaseException:
+                kill_group(process.pid)
+                process.wait()
+                raise
+    if status:
         with log.open("rb") as stream:
             stream.seek(max(0, log.stat().st_size - 4096))
             tail = stream.read().decode("utf-8", "backslashreplace")
-        raise ValueError(f"{args[0]} exited {result.returncode} ({log.name})\n{tail}")
+        raise ValueError(f"{args[0]} exited {status} ({log.name})\n{tail}")
 
 
 def build(ir, harness, work, config):
@@ -44,7 +54,10 @@ def build(ir, harness, work, config):
     command(["cmake", "-S", SUITE.parents[1], "-B", tree, "-DBUILD_TESTING=OFF",
              f"-DFORGE_DIFFERENTIAL_IR={ir}", f"-DCMAKE_BUILD_TYPE={config.capitalize()}"], log)
     command(["cmake", "--build", tree, "--config", config.capitalize(), "--target", name], log)
-    return tree / "bin" / name
+    executable = tree / "bin" / name
+    if not executable.is_file() or not os.access(executable, os.X_OK):
+        raise ValueError(f"native build did not produce an executable harness: {executable} ({log.name})")
+    return executable
 
 
 def execute(executable, args, work, *, timeout=EXECUTION_TIMEOUT, limit=STREAM_LIMIT):
@@ -79,10 +92,7 @@ def execute(executable, args, work, *, timeout=EXECUTION_TIMEOUT, limit=STREAM_L
                 except subprocess.TimeoutExpired as error:
                     raise ExecutionFailure("timeout", "native execution timeout") from error
             finally:
-                try:
-                    os.killpg(process.pid, signal.SIGKILL)
-                except ProcessLookupError:
-                    pass
+                kill_group(process.pid)
             if status < 0:
                 raise ExecutionFailure("signaled", f"native harness terminated by signal {-status}", status)
             if status:

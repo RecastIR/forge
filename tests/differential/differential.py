@@ -2,6 +2,7 @@
 import argparse
 import fcntl
 import json
+import os
 from pathlib import Path
 import platform
 import re
@@ -19,6 +20,7 @@ from run import BINARIES, BUILD, REFERENCES, interrupt, sha256, snapshot
 import native
 
 OUTPUT = BUILD / "differential/windows-x64"
+DEFAULT_FORGE = BUILD / "forge"
 STAGES = ("reference_validation", "analysis", "lifting", "native_compilation",
           "native_execution", "comparison")
 
@@ -161,23 +163,43 @@ def run_case(manifest, case, config, binaries, references, forge, work):
     return report
 
 
+def contains_path(parent, path):
+    resolved = path.resolve()
+    if resolved.is_relative_to(parent.resolve()):
+        return True
+    try:
+        identity = parent.stat()
+    except FileNotFoundError:
+        return False
+    # A case-insensitive volume can retain two spellings for the same directory.
+    # Inspect the resolved ancestry as well as the path used to reach a symlink.
+    for ancestor in dict.fromkeys((resolved, *resolved.parents, *path.absolute().parents)):
+        try:
+            if os.path.samestat(identity, ancestor.stat()):
+                return True
+        except FileNotFoundError:
+            continue
+    return False
+
+
 def run(config, fixture=None, *, binaries=BINARIES, references=REFERENCES, output=OUTPUT,
-        forge=BUILD / "forge", suite=SUITE):
+        forge=DEFAULT_FORGE, suite=SUITE):
     if config not in ("debug", "release") or (fixture is not None and not FIXTURE_ID.fullmatch(fixture)):
         raise ValueError("invalid configuration or fixture ID")
     folder = output / config
-    for source in (binaries / config, references / config):
-        a, b = folder.resolve(), source.resolve()
-        if a.is_relative_to(b) or b.is_relative_to(a):
-            raise ValueError(f"differential output overlaps input artifacts: {source}")
     output.mkdir(parents=True, exist_ok=True)
     with (output / ("." + config + ".lock")).open("a+b") as lock:
         fcntl.flock(lock, fcntl.LOCK_EX)
+        for source in (binaries / config, references / config):
+            if contains_path(folder, source) or contains_path(source, folder):
+                raise ValueError(f"differential output overlaps input artifacts: {source}")
         target = folder / fixture if fixture else folder
         if target.absolute() != target.resolve():
             raise ValueError(f"refusing symbolic link in output path: {target}")
-        folder.mkdir(exist_ok=True)
         summary_path = folder / "suite.json"
+        if contains_path(target, forge) or contains_path(summary_path, forge):
+            raise ValueError(f"differential output overlaps selected Forge executable: {forge}")
+        folder.mkdir(exist_ok=True)
         summary_path.unlink(missing_ok=True)
         if target.exists():
             shutil.rmtree(target)
@@ -226,7 +248,7 @@ def run(config, fixture=None, *, binaries=BINARIES, references=REFERENCES, outpu
         return int(summary["status"] != "passed")
 
 
-if __name__ == "__main__":
+def main(argv=None):
     parser = argparse.ArgumentParser(description=__doc__)
     group = parser.add_mutually_exclusive_group(required=True)
     group.add_argument("--all", action="store_true")
@@ -234,11 +256,17 @@ if __name__ == "__main__":
     parser.add_argument("--config", required=True, choices=("debug", "release"))
     parser.add_argument("--reference-root", type=Path, default=REFERENCES)
     parser.add_argument("--binary-root", type=Path, default=BINARIES)
-    options = parser.parse_args()
+    parser.add_argument("--forge", type=Path, default=DEFAULT_FORGE, metavar="PATH",
+                        help="Forge executable (default: repository build/forge)")
+    options = parser.parse_args(argv)
+    return run(options.config, options.fixture, references=options.reference_root,
+               binaries=options.binary_root, forge=options.forge.resolve())
+
+
+if __name__ == "__main__":
     signal.signal(signal.SIGTERM, interrupt)
     try:
-        sys.exit(run(options.config, options.fixture, references=options.reference_root,
-                     binaries=options.binary_root))
+        sys.exit(main())
     except (ValueError, OSError) as error:
         sys.exit(str(error))
     except KeyboardInterrupt:
