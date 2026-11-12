@@ -1,11 +1,12 @@
 # Windows whole-executable fixtures
 
-These eleven C11 and C++20 console programs provide Windows x64 inputs for whole-executable reference runs. Each manifest records a single invocation and its expected output. The programs build independently of Forge.
+These C11 and C++20 console programs provide Windows x64 inputs for whole-executable reference runs. Each manifest records a single invocation and its expected output. The programs build independently of Forge.
 
 | Fixture | What the invocation exercises |
 | --- | --- |
 | `arithmetic/add_i64` | Two signed 64-bit sums, one positive and one negative, computed by the exported two-argument leaf. Enabled for function-level differential testing. |
 | `arithmetic/basic` | Two digits supply bounded signed operands, a nonzero divisor, and the shift count for a 32-bit unsigned rotation. |
+| `arithmetic/weighted_pair_i64` | A signed 64-bit branch selects addition or subtraction after tripling the left operand’s low 32 bits. Enabled for function-level differential testing. |
 | `control_flow/branches` | One pass covers the early return, even and odd digits, three switch arms, and the default. Each input byte has its own output line. |
 | `functions/calls` | Recursive calls return into a six-argument call that uses four Windows x64 argument registers and two stack slots. |
 | `memory/arrays` | Stack struct fields supply products written through a pointer into a heap allocation. The program sums the products and frees the allocation. |
@@ -116,6 +117,7 @@ On Apple Silicon, build Forge with LLVM 17. Prepare matching Windows binaries an
 ```sh
 make CONFIG=Debug
 ./tools/run-differential.sh --fixture arithmetic/add_i64 --config debug
+./tools/run-differential.sh --fixture arithmetic/weighted_pair_i64 --config debug
 ./tools/run-differential.sh --all --config release
 # Downloaded roots each contain debug/ and release/.
 ./tools/run-differential.sh --all --config debug \
@@ -132,7 +134,11 @@ CMAKE_GENERATOR=Xcode ./tools/run-differential.sh --all --config debug --forge b
 
 The manifest supplies the binary, arguments and expected Windows behavior. [cases.json](cases.json) associates an enabled fixture ID with its function export, explicit ABI signature, scope and CMake harness. Each invocation snapshots the selected PE against its configuration’s `SHA256SUMS`. The consumer checks the v1 reference’s validated status, IDs, configuration, binary and manifest hashes, publisher fingerprint, and Wine provenance. It requires the designated regular stream files, verifies sizes and hashes, and independently checks the recorded bytes and full exit code against the manifest. It compares native behavior with the verified observation held in memory. A local override must point to a trusted producer’s artifacts. Hashes detect changes relative to the publication. CI obtains producer identity from its same-run artifact transfer.
 
-For `arithmetic/add_i64`, the runner takes the named export RVA from the snapshot’s Forge inspection and matches it to an eligible start in Forge’s function analysis. The Windows driver calls the exported leaf for each decimal pair. MinGW’s `noipa` keeps this call observable, and function-local `optimize("O2")` keeps the leaf register-only even in the surrounding Debug build. Forge lifts the leaf with `i64(i64,i64)`. A test-only target in the root CMake project verifies the LLVM IR, emits a Mach-O ARM64 object with `llc`, and links it with the C++20 decimal-pairs harness. The harness receives only the manifest arguments, calls `forge_lifted` for each pair, and prints the return values. Debug and Release each resolve their own RVA and use the matching PE, reference and native build configuration.
+For both enabled arithmetic fixtures, the runner resolves the named PE export and checks that Forge discovered an eligible function at that RVA. The Windows driver calls the exported leaf for each decimal pair. MinGW’s `noipa` preserves the call, and function-local `optimize("O2")` keeps the leaf register-only in both builds. Forge lifts the leaf with `i64(i64,i64)`. The generated native wrapper initializes the guest RCX and RDX slots, calls the lifted body, and reads its result from the guest RAX slot. CMake verifies the IR, emits a Mach-O ARM64 object with `llc`, and links it with the C++20 harness. The harness calls `forge_lifted` for each manifest pair and prints its return value. Each configuration uses its own resolved RVA, PE, and Windows reference.
+
+The `weighted_pair_i64` export compares its original signed 64-bit inputs. It triples the left operand’s unsigned low 32 bits, then subtracts the right operand’s unsigned low 32 bits when the left input is smaller and adds them otherwise. Every intermediate fits in `int64_t`. The function disables MinGW if-conversion to exercise a forward conditional jump. Its 14 pairs include equality, both branch directions, negative results, truncation at 2³², and the decimal parser limits.
+
+The pairs `(-1, 1)` and `(4294967295, 1)` differ only in the left operand’s upper bits and take opposite branches. Swapping the operands checks the right side independently. Wine prints `4294967298` for `(1, -1)` and `-4294967292` for `(1, 4294967295)`. The manifest expectation comes from the Wine capture. The ARM64 comparison uses the validated Windows process observations.
 
 **Coverage is function-level.** The Windows reference exercises the entire console program. The native run exercises the lifted arithmetic and the harness’s formatting. Ten other fixtures remain in the Wine suite. Current lifting requires an eligible register-only function with an explicit supported ABI. The existing arithmetic, branching and call fixtures need additional instruction, stack or call support to reproduce their observations. The remaining fixtures exercise memory, globals, imports, C++ lifetime, or process behavior. In particular, Windows status 4660 in `runner/exit_and_stderr` requires a future full-width guest termination channel. The current harness provides a normal zero completion. Its nonzero statuses and signals indicate execution failure.
 
@@ -146,14 +152,14 @@ Each selected fixture has a `result.json` below `build/differential/windows-x64/
 | Analysis failure | Inspect `inspect.json`, `analysis.json` and their logs for missing, forwarded or ambiguous exports and conflicting ranges. |
 | Unsupported instruction in an enabled case | Check the selected range and the opcode/RVA in `lifting.log`. This stage error fails the suite. |
 | Lifting failure | Inspect `lifting.log` for verifier or IR publication errors. |
-| Native compilation failure | Check `compilation.log` for configuration, verifier, object generation, or linker diagnostics. |
+| Native compilation failure | The diagnostic identifies configuration, object compilation, or linking. The labelled phase in `compilation.log` contains the underlying CMake, LLVM, compiler, or linker output. |
 | Native execution failure | Inspect the captured bytes and diagnostic for launch errors, signals, harness exit, the 10-second deadline or the 1 MiB per-stream limit. The supervisor runs with closed stdin in a fresh directory and terminates the process group on failure. |
-| Behavioral failure | The report lists every differing field. For stream differences it includes both lengths, the first differing byte offset and escaped byte context. For exit-code differences it includes both semantic values. |
+| Behavioral failure | The report lists every differing field. For stream differences it includes both lengths, the first differing byte offset and escaped byte context. For decimal-pair stdout it also identifies the operands for the first differing expected line. Extra bytes after the last line have no associated pair. For exit-code differences it includes both semantic values. |
 | Uncovered | The manifest has no enabled function-level case. Selecting only uncovered fixtures fails with zero executions. |
 
-To add coverage, first obtain passing Debug and Release Wine references through the fixture catalog. Identify a genuine callable export with a source-declared signature, add its entry in `cases.json`, and reuse the decimal-pairs harness when its invocation fits. A new harness belongs in `tests/support/` with a corresponding CMake target. Harness code may parse inputs and format observations. The computation comes from the linked Forge output.
+To add coverage, first obtain passing Debug and Release Wine references through the fixture catalog. Identify a genuine callable export with a source-declared signature, add its entry in `cases.json`, and reuse the decimal-pairs harness when its invocation fits. A new harness belongs in `tests/support/` and supplies two CMake targets. The runner first builds `differential_<harness>_objects` to compile the harness and the verified IR, then builds `differential_<harness>` to link the executable at `bin/differential_<harness>` in the same build tree. Harness code may parse inputs and format observations. The computation comes from the linked Forge output.
 
-Use `python3 -B tests/differential/test_differential.py` for the Wine-free comparator, validator, supervisor and runner tests. With the full local artifacts available, `python3 -B tests/differential/test_native_differential.py` exercises a changed return in a copy of genuine IR, invalid IR, a failed harness invocation and a mismatched PE. The negative reports live under `build/differential/negative-tests/`.
+Use `python3 -B tests/differential/test_differential.py` for the Wine-free comparator, validator, supervisor and runner tests. With the full local artifacts available, `python3 -B tests/differential/test_native_differential.py` lifts and runs the weighted case twice in fresh directories and compares the generated IR and process observations. It checks instrumented harness linking with Unix Makefiles and Xcode. In private IR copies, it changes a return value, truncates the right operand of the signed comparison, injects invalid IR, and renames the callable wrapper to exercise mismatch, compilation, and link failures. It checks a failed harness invocation and a mismatched PE. The negative reports live under `build/differential/negative-tests/`.
 
 ## Regression CI and local reproduction
 

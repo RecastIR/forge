@@ -7,6 +7,13 @@
     "harness": "decimal_pairs"
   },
   {
+    "fixture_id": "arithmetic/weighted_pair_i64",
+    "scope": "function",
+    "export": "weighted_pair_i64",
+    "signature": "i64(i64,i64)",
+    "harness": "decimal_pairs"
+  },
+  {
     "fixture_id": "runner/exit_nonzero",
     "blocked_reason": "The function harness treats nonzero termination as a harness failure."
   },

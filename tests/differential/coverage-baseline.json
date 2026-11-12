@@ -10,6 +10,16 @@
       "id": "arithmetic/add_i64",
       "config": "release",
       "target": "macos-arm64"
+    },
+    {
+      "id": "arithmetic/weighted_pair_i64",
+      "config": "debug",
+      "target": "macos-arm64"
+    },
+    {
+      "id": "arithmetic/weighted_pair_i64",
+      "config": "release",
+      "target": "macos-arm64"
     }
   ]
 }
