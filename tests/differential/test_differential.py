@@ -408,6 +408,34 @@ with (work / 'ready').open('w') as locked:
         with self.assertRaisesRegex(ValueError, "timeout"):
             self.python(code, timeout=0.3)
 
+    def test_output_limit_survives_macos_group_cleanup(self):
+        def signal_group(pid, sig):
+            self.assertEqual(sig, signal.SIGKILL)
+            if killpg.call_count == 1:
+                raise PermissionError(errno.EPERM, "group leader exiting")
+            # The retry must follow reaping, even if the child has already exited.
+            with self.assertRaises(ChildProcessError):
+                os.waitpid(pid, os.WNOHANG)
+            raise ProcessLookupError(errno.ESRCH, "group has disappeared")
+
+        with patch.object(diff.native.platform, "system", return_value="Darwin"), \
+                patch.object(os, "killpg", side_effect=signal_group) as killpg:
+            with self.assertRaises(diff.native.ExecutionFailure) as failure:
+                self.python("import os; os.write(2, b'x' * 33); os._exit(0)", limit=32)
+        self.assertEqual(killpg.call_count, 2)
+        self.assertEqual(killpg.call_args_list[0], killpg.call_args_list[1])
+        self.assertEqual(failure.exception.outcome, "output_limit")
+        self.assertEqual((self.work / "stderr.bin").read_bytes(), b"x" * 32)
+
+    def test_persistent_group_permission_error(self):
+        denied = PermissionError(errno.EPERM, "cannot signal group")
+        with patch.object(diff.native.platform, "system", return_value="Darwin"), \
+                patch.object(os, "killpg", side_effect=denied) as killpg:
+            with self.assertRaises(PermissionError) as failure:
+                self.python("pass")
+        self.assertIs(failure.exception, denied)
+        self.assertEqual(killpg.call_count, 2)
+
 
 if __name__ == "__main__":
     unittest.main()
