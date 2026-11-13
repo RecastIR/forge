@@ -61,6 +61,8 @@ make clean BUILD_DIR=build-xcode CONFIG=Release
 
 ## Development checks
 
+For help choosing a component, tracing ownership, and testing a change to its contract, see the [component design guide](docs/design-guide.md).
+
 Run `./tools/test-forge.sh --all` on Apple Silicon for the complete native, Wine, and differential regression workflow. Stage commands, dependencies, CI artifacts, and the coverage policy are in the [regression guide](tests/differential/README.md#regression-ci-and-local-reproduction).
 
 Install Apple's developer tools with `xcode-select --install`. The LLVM release package also provides `clang-format`, `clang-tidy`, and `llvm-config`. Formatting and linting are opt-in locally. The GitHub Actions workflow checks formatting, runs clang-tidy, and tests Debug and sanitizer builds on macOS 26 ARM64 for pull requests and pushes to `main`. It uses LLVM 23.1.5 and a Python environment with Unicorn 2.1.4 for the function-level oracle.

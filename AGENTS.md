@@ -10,7 +10,7 @@ Priority order: **correctness and safety → architectural consistency → testa
 
 ## Before changing code
 
-1. Read relevant code, tests, documentation, build files, and recent adjacent implementations. Identify the existing ownership boundaries and patterns.
+1. Read relevant code, tests, documentation, build files, and recent adjacent implementations. Identify the existing ownership boundaries and patterns. Before introducing a component or making a cross-stage change, read the [component design guide](docs/design-guide.md).
 2. State the intended behavior, invariants, and scope. For nontrivial changes, sketch the data flow and interfaces before implementation.
 3. Search for reusable components and existing representations. Do not introduce a second source of truth.
 4. Identify the smallest independently verifiable change. Keep unrelated cleanup separate.
@@ -106,7 +106,7 @@ Before declaring work complete, inspect the diff as though reviewing someone els
 
 - **Correctness:** Are all success, failure, edge, and unsupported paths handled? Are assumptions and invariants enforced? Any undefined behavior, overflow, lifetime, or bounds risks?
 - **Semantic fidelity:** Could the transformation silently change program behavior? Are source facts, inferences, and overrides distinguishable?
-- **Architecture:** Does the code preserve stage boundaries and repository conventions?
+- **Architecture:** Check conformance with the [component design guide](docs/design-guide.md) and repository conventions. Explain meaningful architectural deviations in the change summary. Update the guide in the same change when intentionally revising a boundary or contract.
 - **Readability:** Can a reader follow the logical phases without unpacking dense expressions or jumping through trivial helpers?
 - Review vertical spacing explicitly. Separate independent control-flow statements and logical phases according to the C++ style guide. A successful formatter run does not establish that function bodies have readable paragraph structure. [Indentation and vertical spacing](docs/cpp-style.md#indentation-and-vertical-spacing)
 - Never remove useful blank lines, compress statements, or introduce trivial helpers merely to reduce function-length metrics. Function length is a review signal, not a reason to make code denser.
