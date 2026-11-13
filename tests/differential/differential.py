@@ -16,7 +16,7 @@ from comparison import describe, differences
 from manifests import FIXTURE_ID, SUITE, field, load_catalog, unique_keys
 
 sys.path.insert(0, str(SUITE / "reference"))
-from artifacts import directory, reference
+from artifacts import directory, file_sha256, reference
 from run import BINARIES, BUILD, REFERENCES, interrupt, sha256, snapshot, verified_export
 import native
 
@@ -24,6 +24,9 @@ OUTPUT = BUILD / "differential/windows-x64"
 DEFAULT_FORGE = BUILD / "forge"
 STAGES = ("reference_validation", "analysis", "lifting", "native_compilation",
           "native_execution", "comparison")
+VARIANTS = ("baseline", "o2")
+CANONICAL_IR = Path("generated/lifted.ll")
+NATIVE_STAGES = STAGES[3:]
 CONFIGS = ("debug", "release")
 TARGET = "macos-arm64"
 
@@ -130,6 +133,41 @@ def native_differences(wanted, actual, harness, args):
     return mismatches
 
 
+def run_variant(ir, harness, args, wanted, work, identity, variant):
+    stages = dict.fromkeys(NATIVE_STAGES, "not_run")
+    report = dict(identity, variant=variant, stages=stages)
+    stage = "native_compilation"
+    try:
+        work.mkdir()
+        executable, compiler_input = native.build(ir, harness, work, identity["build_config"], variant)
+        report["compiler_ir_sha256"] = file_sha256(compiler_input)
+        stages[stage] = "passed"
+
+        stage = "native_execution"
+        actual = native.execute(executable, args, work)
+        report["native_exit_code"] = actual.exit_code
+        report["execution_outcome"] = "completed"
+        stages[stage] = "passed"
+
+        stage = "comparison"
+        mismatches = native_differences(wanted, actual, harness, args)
+        if mismatches:
+            report.update(status="behavioral_failure", differences=mismatches,
+                          failure_categories=[e["field"] + "_mismatch" for e in mismatches])
+            stages[stage] = "failed"
+        else:
+            report["status"] = stages[stage] = "passed"
+    except (OSError, ValueError, KeyError, IndexError, TypeError, subprocess.SubprocessError) as error:
+        if isinstance(error, native.ExecutionFailure):
+            report["execution_outcome"] = error.outcome
+            if error.status is not None:
+                report["native_process_status"] = error.status
+        report.update(status="infrastructure_failure", diagnostic=str(error),
+                      failure_categories=[stage + "_failure"])
+        stages[stage] = "failed"
+    return report
+
+
 def run_case(manifest, case, config, binaries, references, forge, work):
     report = dict(schema_version=1, fixture_id=manifest.case["id"], build_config=config,
                   status="uncovered", scope=None)
@@ -165,34 +203,31 @@ def run_case(manifest, case, config, binaries, references, forge, work):
         stage = "lifting"
         if wanted.exit_code:
             raise Unsupported(f"function harness cannot convey Windows termination status {wanted.exit_code}")
-        ir = work / "generated/lifted.ll"
+        ir = work / CANONICAL_IR
         ir.parent.mkdir()
         lift(forge, image, case, rva, ir)
+        identity = {key: report[key] for key in ("fixture_id", "build_config", "binary_sha256", "run_id")}
+        identity["canonical_ir_sha256"] = file_sha256(ir)
         stages[stage] = "passed"
 
-        stage = "native_compilation"
-        executable = native.build(ir, case["harness"], work, config)
-        stages[stage] = "passed"
-
-        stage = "native_execution"
-        actual = native.execute(executable, manifest.case["args"], work)
-        report["native_exit_code"] = actual.exit_code
-        report["execution_outcome"] = "completed"
-        stages[stage] = "passed"
-
-        stage = "comparison"
-        mismatches = native_differences(wanted, actual, case["harness"], manifest.case["args"])
-        if mismatches:
-            report.update(status="behavioral_failure", differences=mismatches,
-                          failure_categories=[e["field"] + "_mismatch" for e in mismatches])
-            stages[stage] = "failed"
+        variants = {}
+        for variant in VARIANTS:
+            variant_work = work / variant
+            variants[variant] = run_variant(ir, case["harness"], manifest.case["args"], wanted,
+                                            variant_work, identity, variant)
+        report["variants"] = variants
+        for name in NATIVE_STAGES:
+            states = [r["stages"][name] for r in variants.values()]
+            stages[name] = "failed" if "failed" in states else "not_run" if "not_run" in states else "passed"
+        failures = {v: r for v, r in variants.items() if r["status"] != "passed"}
+        if failures:
+            report["status"] = ("infrastructure_failure" if any(r["status"] == "infrastructure_failure"
+                                for r in failures.values()) else "behavioral_failure")
+            report["failure_categories"] = sorted({c for r in failures.values() for c in r["failure_categories"]})
+            report["diagnostic"] = "\n".join(f"{v}: {r.get('diagnostic', r['status'])}" for v, r in failures.items())
         else:
-            report["status"] = stages[stage] = "passed"
+            report["status"] = "passed"
     except (OSError, ValueError, KeyError, IndexError, TypeError, subprocess.SubprocessError) as error:
-        if isinstance(error, native.ExecutionFailure):
-            report["execution_outcome"] = error.outcome
-            if error.status is not None:
-                report["native_process_status"] = error.status
         capability = isinstance(error, Unsupported)
         report.update(status="infrastructure_failure", diagnostic=str(error),
                       failure_categories=["unsupported_lifting_capability" if capability else stage + "_failure"])
@@ -262,7 +297,8 @@ def run(config, fixture=None, *, binaries=BINARIES, references=REFERENCES, outpu
                 summary["passed"] += status == "passed"
                 summary["uncovered"] += status == "uncovered"
                 summary["blocked"] += status == "blocked"
-                summary["executed"] += result.get("stages", {}).get("native_execution") == "passed"
+                summary["executed"] += any(v.get("execution_outcome") == "completed"
+                                           for v in result.get("variants", {}).values())
                 label = f"{status.upper()} {name} [{config}]"
                 print(f"{label} {result['scope']}" if result["scope"] else label)
                 if "stages" in result:
@@ -272,10 +308,12 @@ def run(config, fixture=None, *, binaries=BINARIES, references=REFERENCES, outpu
                           f"{result['function']} {result.get('function_rva', '(unresolved)')} {result['signature']}")
                 if "diagnostic" in result:
                     print(result["diagnostic"])
-                for mismatch in result.get("differences", []):
-                    print(describe(mismatch))
-                    if "operands" in mismatch:
-                        print("  operands: " + ", ".join(mismatch["operands"]))
+                for variant, evidence in result.get("variants", {}).items():
+                    print(f"  {variant}: {evidence['status']}")
+                    for mismatch in evidence.get("differences", []):
+                        print("  " + describe(mismatch))
+                        if "operands" in mismatch:
+                            print("  operands: " + ", ".join(mismatch["operands"]))
             if not summary["executed"]:
                 raise ValueError("zero differential cases executed")
             if summary["passed"] + summary["uncovered"] + summary["blocked"] == len(selected):

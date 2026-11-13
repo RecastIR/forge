@@ -80,6 +80,24 @@ class ArtifactSetup(unittest.TestCase):
         self.record = self.folder / "result.json"
         self.wanted = Observation.from_manifest(self.manifest.case["expected"])
 
+    @staticmethod
+    def lift_fixture(forge, image, case, rva, ir):
+        ir.write_bytes(b"IR for " + image.read_bytes())
+
+    @staticmethod
+    def build_fixture(ir, harness, work, config, variant):
+        compiler_input = ir
+        if variant == "o2":
+            compiler_input = work / diff.native.OPTIMIZED_IR
+            compiler_input.parent.mkdir(parents=True)
+            compiler_input.write_bytes(b"optimized " + ir.read_bytes())
+        return work / "harness", compiler_input
+
+    def execute_fixture(self, exe, args, work):
+        (work / "stdout.bin").write_bytes(self.wanted.stdout)
+        (work / "stderr.bin").write_bytes(self.wanted.stderr)
+        return self.wanted
+
     def prepare_exports(self, config):
         bins = self.binaries / config
         bins.mkdir(parents=True)
@@ -176,11 +194,13 @@ class ArtifactTests(ArtifactSetup):
     def test_statuses_and_stale_pass_rejection(self):
         name = self.manifest.case["id"]
         report = self.root / "output" / self.config / name / "result.json"
-        with patch.object(diff, "analyze", return_value="0x1234") as analyze, patch.object(diff, "lift") as lift, \
-                patch.object(diff.native, "build") as build, patch.object(diff.native, "execute") as execute:
+        with patch.object(diff, "analyze", return_value="0x1234") as analyze, patch.object(diff, "lift", side_effect=self.lift_fixture) as lift, \
+                patch.object(diff.native, "build", side_effect=self.build_fixture) as build, patch.object(diff.native, "execute") as execute:
             execute.return_value = self.wanted
             status, suite = self.invoke()
             self.assertEqual((status, suite["executed"], suite["uncovered"]), (0, 1, 1))
+            self.assertEqual((lift.call_count, build.call_count, execute.call_count), (1, 2, 2))
+            self.assertEqual([call.args[-1] for call in build.call_args_list], list(diff.VARIANTS))
             passed = diff.read_json(report)
             self.assertEqual(passed["scope"], "function")
             self.assertEqual(passed["forge_sha256"], sha256(self.forge.read_bytes()))
@@ -197,13 +217,14 @@ class ArtifactTests(ArtifactSetup):
                     (analyze, ValueError("ambiguous export"), "analysis_failure"),
                     (lift, ValueError("write failed"), "lifting_failure"),
                     (lift, diff.Unsupported("unsupported opcode"), "unsupported_lifting_capability")):
+                previous = mock.side_effect
                 mock.side_effect = error
                 status, suite = self.invoke(name)
                 result = diff.read_json(report)
                 self.assertEqual((status, suite["executed"], result["stages"]["comparison"]), (1, 0, "not_run"))
                 self.assertEqual(result["failure_categories"], [category])
                 self.assertEqual(result["status"], "infrastructure_failure")
-                mock.side_effect = None
+                mock.side_effect = previous
         self.image.write_bytes(b"stale")
         status, suite = self.invoke(name)
         self.assertEqual((status, suite["passed"]), (1, 0))
@@ -283,7 +304,7 @@ class ArtifactTests(ArtifactSetup):
         self.assertEqual(selected.read_bytes(), b"selected executable")
 
     def test_successful_commands_without_product_fail_compilation(self):
-        with patch.object(diff, "analyze", return_value="0x1234"), patch.object(diff, "lift"), \
+        with patch.object(diff, "analyze", return_value="0x1234"), patch.object(diff, "lift", side_effect=self.lift_fixture), \
                 patch.object(diff.native, "command"), patch.object(diff.platform, "system", return_value="Darwin"), \
                 patch.object(diff.platform, "machine", return_value="arm64"):
             status, _ = self.invoke(self.case["fixture_id"])
@@ -386,6 +407,34 @@ with (work / 'ready').open('w') as locked:
         code = "import subprocess,sys; subprocess.Popen([sys.executable, '-c', 'import time; time.sleep(20)'])"
         with self.assertRaisesRegex(ValueError, "timeout"):
             self.python(code, timeout=0.3)
+
+    def test_output_limit_survives_macos_group_cleanup(self):
+        def signal_group(pid, sig):
+            self.assertEqual(sig, signal.SIGKILL)
+            if killpg.call_count == 1:
+                raise PermissionError(errno.EPERM, "group leader exiting")
+            # The retry must follow reaping, even if the child has already exited.
+            with self.assertRaises(ChildProcessError):
+                os.waitpid(pid, os.WNOHANG)
+            raise ProcessLookupError(errno.ESRCH, "group has disappeared")
+
+        with patch.object(diff.native.platform, "system", return_value="Darwin"), \
+                patch.object(os, "killpg", side_effect=signal_group) as killpg:
+            with self.assertRaises(diff.native.ExecutionFailure) as failure:
+                self.python("import os; os.write(2, b'x' * 33); os._exit(0)", limit=32)
+        self.assertEqual(killpg.call_count, 2)
+        self.assertEqual(killpg.call_args_list[0], killpg.call_args_list[1])
+        self.assertEqual(failure.exception.outcome, "output_limit")
+        self.assertEqual((self.work / "stderr.bin").read_bytes(), b"x" * 32)
+
+    def test_persistent_group_permission_error(self):
+        denied = PermissionError(errno.EPERM, "cannot signal group")
+        with patch.object(diff.native.platform, "system", return_value="Darwin"), \
+                patch.object(os, "killpg", side_effect=denied) as killpg:
+            with self.assertRaises(PermissionError) as failure:
+                self.python("pass")
+        self.assertIs(failure.exception, denied)
+        self.assertEqual(killpg.call_count, 2)
 
 
 if __name__ == "__main__":

@@ -71,6 +71,10 @@ class BuildConfig(unittest.TestCase):
         entries = json.loads(contents)
         harness = SOURCE / "tests/support/native_harness.cpp"
         self.assertIn(str(harness), [e["file"] for e in entries])
+        self.assertIn(str(SOURCE / "tests/unit/integer.cpp"), [e["file"] for e in entries])
+        subprocess.run([CMAKE, "--build", build, "--parallel", "4"], env=self.env, check=True)
+        self.assertTrue((build / "forge").is_file())
+        self.assertFalse((build / "tests/integer_semantics").exists())
 
         # Exercise the wrapper even on machines without clang-tidy.
         config = self.tmp / "llvm-config"
@@ -83,12 +87,12 @@ class BuildConfig(unittest.TestCase):
         subprocess.run(command, cwd=SOURCE, env=self.env, check=True)
         args = (self.tmp / "clang-tidy.args").read_text().splitlines()
         self.assertEqual(args[:2], ["-p", str(build)])
-        expected = [str(p) for folder in ("src", "tests/support")
+        expected = [str(p) for folder in ("src", "tests/support", "tests/unit")
                     for p in (SOURCE / folder).rglob("*.cpp")]
         self.assertCountEqual(args[2:], expected)
         self.assertEqual(database.read_bytes(), contents)
 
-        for missing in (harness, SOURCE / "src/pe/pe.cpp"):
+        for missing in (harness, SOURCE / "src/pe/pe.cpp", SOURCE / "tests/unit/integer.cpp"):
             with self.subTest(missing=missing):
                 database.write_text(json.dumps([e for e in entries if e["file"] != str(missing)]))
                 failed = subprocess.run(command, cwd=SOURCE, env=self.env, capture_output=True, text=True)

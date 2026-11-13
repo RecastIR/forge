@@ -137,6 +137,7 @@ jobs:
             build/differential/**/lifting.log
             build/differential/**/compilation.log
             build/differential/**/generated/*.ll
+            build/differential/**/native/tests/optimized.ll
             build/differential/**/native/bin/differential_*
             build/differential/**/stdout.bin
             build/differential/**/stderr.bin

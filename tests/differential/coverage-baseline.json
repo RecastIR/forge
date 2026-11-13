@@ -20,6 +20,176 @@
       "id": "arithmetic/weighted_pair_i64",
       "config": "release",
       "target": "macos-arm64"
+    },
+    {
+      "id": "arithmetic/flag_add",
+      "config": "debug",
+      "target": "macos-arm64"
+    },
+    {
+      "id": "arithmetic/flag_add",
+      "config": "release",
+      "target": "macos-arm64"
+    },
+    {
+      "id": "arithmetic/flag_sub",
+      "config": "debug",
+      "target": "macos-arm64"
+    },
+    {
+      "id": "arithmetic/flag_sub",
+      "config": "release",
+      "target": "macos-arm64"
+    },
+    {
+      "id": "arithmetic/flag_adc",
+      "config": "debug",
+      "target": "macos-arm64"
+    },
+    {
+      "id": "arithmetic/flag_adc",
+      "config": "release",
+      "target": "macos-arm64"
+    },
+    {
+      "id": "arithmetic/flag_sbb",
+      "config": "debug",
+      "target": "macos-arm64"
+    },
+    {
+      "id": "arithmetic/flag_sbb",
+      "config": "release",
+      "target": "macos-arm64"
+    },
+    {
+      "id": "arithmetic/carry_chain",
+      "config": "debug",
+      "target": "macos-arm64"
+    },
+    {
+      "id": "arithmetic/carry_chain",
+      "config": "release",
+      "target": "macos-arm64"
+    },
+    {
+      "id": "arithmetic/neg_flags",
+      "config": "debug",
+      "target": "macos-arm64"
+    },
+    {
+      "id": "arithmetic/neg_flags",
+      "config": "release",
+      "target": "macos-arm64"
+    },
+    {
+      "id": "arithmetic/mixed_widths",
+      "config": "debug",
+      "target": "macos-arm64"
+    },
+    {
+      "id": "arithmetic/mixed_widths",
+      "config": "release",
+      "target": "macos-arm64"
+    },
+    {
+      "id": "arithmetic/extensions",
+      "config": "debug",
+      "target": "macos-arm64"
+    },
+    {
+      "id": "arithmetic/extensions",
+      "config": "release",
+      "target": "macos-arm64"
+    },
+    {
+      "id": "arithmetic/multiply_flags",
+      "config": "debug",
+      "target": "macos-arm64"
+    },
+    {
+      "id": "arithmetic/multiply_flags",
+      "config": "release",
+      "target": "macos-arm64"
+    },
+    {
+      "id": "arithmetic/logic_flags",
+      "config": "debug",
+      "target": "macos-arm64"
+    },
+    {
+      "id": "arithmetic/logic_flags",
+      "config": "release",
+      "target": "macos-arm64"
+    },
+    {
+      "id": "arithmetic/predicates",
+      "config": "debug",
+      "target": "macos-arm64"
+    },
+    {
+      "id": "arithmetic/predicates",
+      "config": "release",
+      "target": "macos-arm64"
+    },
+    {
+      "id": "arithmetic/conditional_moves",
+      "config": "debug",
+      "target": "macos-arm64"
+    },
+    {
+      "id": "arithmetic/conditional_moves",
+      "config": "release",
+      "target": "macos-arm64"
+    },
+    {
+      "id": "arithmetic/shift_flags",
+      "config": "debug",
+      "target": "macos-arm64"
+    },
+    {
+      "id": "arithmetic/shift_flags",
+      "config": "release",
+      "target": "macos-arm64"
+    },
+    {
+      "id": "arithmetic/shift_widths",
+      "config": "debug",
+      "target": "macos-arm64"
+    },
+    {
+      "id": "arithmetic/shift_widths",
+      "config": "release",
+      "target": "macos-arm64"
+    },
+    {
+      "id": "arithmetic/shift_one",
+      "config": "debug",
+      "target": "macos-arm64"
+    },
+    {
+      "id": "arithmetic/shift_one",
+      "config": "release",
+      "target": "macos-arm64"
+    },
+    {
+      "id": "arithmetic/joined_flags",
+      "config": "debug",
+      "target": "macos-arm64"
+    },
+    {
+      "id": "arithmetic/joined_flags",
+      "config": "release",
+      "target": "macos-arm64"
+    },
+    {
+      "id": "arithmetic/integer_mix",
+      "config": "debug",
+      "target": "macos-arm64"
+    },
+    {
+      "id": "arithmetic/integer_mix",
+      "config": "release",
+      "target": "macos-arm64"
     }
   ]
 }

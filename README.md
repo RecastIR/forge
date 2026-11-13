@@ -15,10 +15,11 @@ The root CMake project builds one executable, `forge`. Its headers are private t
 | `cmake/` | Formatting and static-analysis commands |
 | `tests/integration/` | Build, CLI, code generation, and native execution suites and their Python helpers |
 | `tests/fixtures/` | SDK-free PE fixture sources and their generator |
+| `tests/unit/` | Isolated checks of the integer and flag lowering |
 | `tests/support/` | C++ harness for calling a lifted function from a test |
 | `tests/differential/` | Windows x64 fixtures, manifests, cross-build tooling, and Wine reference capture |
 
-Add new production code to the component that owns it. Create `runtime/` when generated code first needs a shared native implementation, and `tests/unit/` with the first isolated unit suite. Register tests in `tests/CMakeLists.txt`. Build the whole-executable fixtures with `./tools/build-windows-fixtures.sh --all`, then capture their Wine references with `./tools/run-windows-references.sh --all`. On Apple Silicon, compare enabled lifted functions with `./tools/run-differential.sh --all --config debug` or `--config release`. See the [fixture guide](tests/differential/README.md).
+Add new production code to the component that owns it. Create `runtime/` when generated code first needs a shared native implementation. Register tests in `tests/CMakeLists.txt`. Build the whole-executable fixtures with `./tools/build-windows-fixtures.sh --all`, then capture their Wine references with `./tools/run-windows-references.sh --all`. On Apple Silicon, compare enabled lifted functions with `./tools/run-differential.sh --all --config debug` or `--config release`. See the [fixture guide](tests/differential/README.md).
 
 ## Build and run
 
@@ -146,25 +147,29 @@ printf 'a 14\nffffffffffffffff 1\n' | build/add-harness
 
 The object reports `Mach-O arm64`. The harness prints `1e` and `0` for 10 + 20 and −1 + 1.
 
-Both IR interfaces retain the internal `forge_lifted_<hex RVA>` function through optimization. Its pointer addresses seven 64-bit slots in this order — RAX, RCX, RDX, R8, R9, R10, R11. Reads use their incoming values. Writes update those slots. Condition flags are local to the supported compare/branch pair. Plain `ret` ends the isolated call. Guest stack state, return addresses, and flags across calls are outside this interface.
+Both IR interfaces retain the internal `forge_lifted_<hex RVA>` function through optimization. Its pointer addresses seven 64-bit slots in this order — RAX, RCX, RDX, R8, R9, R10, R11. Reads use their incoming values. Writes update those slots. Condition flags are local to each lifted invocation and start undefined. Plain `ret` ends the isolated call. Guest stack state, return addresses, and flags across calls are outside this interface.
 
-The sole supported signature adds `extern "C" int64_t forge_lifted(int64_t, int64_t)`. The caller declares this contract. The wrapper places its native arguments in the RCX and RDX slots, calls the lifted body, and returns RAX. Every reachable path must define any additional register before reading it and must define RAX before returning. Forge verifies the module, writes and closes a sibling temporary file, then publishes it with one rename. A failed lift preserves an existing output file.
+The sole supported signature adds `extern "C" int64_t forge_lifted(int64_t, int64_t)`. The caller declares this contract. The wrapper places its native arguments in the RCX and RDX slots, calls the lifted body, and returns RAX. On every incoming path, a read requires the bits it observes to be defined. Returning requires all 64 bits of RAX. Forge verifies the module, writes and closes a sibling temporary file, then publishes it with one rename. A failed lift preserves an existing output file.
 
 | Supported x86-64 forms | Semantics |
 | --- | --- |
-| 32/64-bit register and immediate moves, same-register XOR and SUB | A 32-bit write clears the upper register half. Same-register XOR and SUB define zero independently of the previous value. |
-| ADD, SUB, two-register IMUL | Arithmetic wraps at the operand width. Immediate forms use the decoder's sign extension. IMUL retains the low half. |
-| LEA with a 64-bit base/index address expression | Scaled index and displacement use integer arithmetic. The destination can be 32 or 64 bits. |
-| CMP immediately followed by Jcc | Equality, inequality, and signed and unsigned order comparisons at the CMP operand width. Each incoming path to Jcc must supply that comparison. |
-| Short/near forward direct jumps and ordinary RET | Targets must lie on decoded instruction boundaries within the discovered range. Every reachable path ends in a return. |
+| MOV, MOVZX, MOVSX, MOVSXD | Register views share their 64-bit parent. Byte and word writes preserve the other bits, including writes to AH, CH and DH. Doubleword writes clear the upper half. Extension instructions read the encoded source width. |
+| ADD, ADC, SUB, SBB, CMP, INC, DEC, NEG | Arithmetic wraps at 8, 16, 32 or 64 bits. CF represents unsigned carry or borrow, OF signed overflow, and AF carry or borrow between bits 3 and 4. INC and DEC preserve CF. CMP only updates flags. Comparing a scratch register with itself sets ZF and PF and clears CF, SF, OF and AF even on first use. SBB of a register with itself produces zero or all ones according to incoming CF. Both idioms require identical register views. |
+| AND, OR, XOR, TEST, NOT | Logical results define ZF, SF and even low-byte parity, clear CF and OF, and leave AF undefined. TEST only updates flags. NOT preserves all flags. Same-register XOR and SUB can define zero even on first use of a scratch register. |
+| Two-register IMUL | At 16, 32 and 64 bits the low product is stored. CF and OF indicate whether the signed product fits. The other four flags become undefined. |
+| SHL/SAL, SHR, SAR | Counts of one, an immediate byte or CL use the x86 five-bit mask (six for 64-bit operands). Effective zero preserves flags. Nonzero counts define ZF, SF and PF and invalidate AF. Only a single-bit shift defines OF. SHL and SHR invalidate CF at or beyond the operand width. |
+| SETcc, CMOVcc, LAHF | All sixteen conditions use the architectural flags. SETcc writes a byte. Register-source CMOVcc selects at 16, 32 or 64 bits. A 32-bit CMOVcc clears the upper half on either outcome. LAHF packs SF, ZF, AF, PF and CF into AH. |
+| LEA, forward direct JMP/Jcc, plain RET | LEA accepts a 64-bit base/index expression and a 32/64-bit destination. Short and near forward branches target decoded instruction boundaries. Every reachable path ends in a return. |
 
-The experiment accepts exact discovered starts in PE32+ AMD64 EXEs, with a 64 KiB per-function limit. The whole range must decode linearly. Reachable instructions must satisfy the allowlist. Unsupported cases include 8/16-bit operands, legacy prefixes, nonvolatile registers, guest memory, explicit stack operations, RIP-relative addressing, calls, loops, indirect branches, SIMD, and code bytes subject to base relocations. Diagnostics include the RVA and failing form or bytes.
+Register and applicable immediate arithmetic forms use LLVM MC's decoded operands. Forge tracks each flag independently and merges incoming definitions at forward joins. A consumer whose required flag lacks a definition on any incoming path fails during lifting, with its RVA, opcode, bytes and flag name. This proof is conservative for CL shifts. For example, SETO after a CL shift is rejected because a possible count exceeds one. An overwritten or unused undefined flag is harmless.
+
+The supported operand-size prefix selects verified 16-bit forms. Other legacy prefixes, nonvolatile register parents, guest memory, stack operations, RIP-relative addressing, calls, loops, indirect branches, division, other multiply forms, rotates, and SIMD remain unsupported. Lifting requires an exact discovered start in a PE32+ AMD64 EXE, a linearly decodable range of at most 64 KiB, and code bytes free of base relocations. [Intel instruction reference](https://cdrdv2-public.intel.com/671110/325383-sdm-vol-2abcd.pdf)
 
 ### Lifting approach
 
 Forge uses LLVM 17 MC for instruction decoding, an explicit translation for each supported form, and LLVM's AArch64 backend via `llc`. The same installed toolchain builds on Apple Silicon, verifies the IR, and produces Mach-O objects. The opcode names and operand layouts follow LLVM 17.0.6. Upgrading LLVM requires rerunning the decoder and behavioral tests.
 
-Remill provides maintained x86-64 semantics and tests LLVM 17 and newer in CI, with macOS builds in its Nix matrix. Using its IR for this native interface would also require adapting its state, memory, and control-flow intrinsics. Its broader instruction coverage is relevant when Forge grows beyond register-only functions. [Remill build matrix](https://github.com/lifting-bits/remill/blob/master/.github/workflows/build.yml) · [Remill intrinsics](https://github.com/lifting-bits/remill/blob/master/docs/INTRINSICS.md)
+The [binary lifting evaluation](docs/binary-lifting-evaluation.md) compares six projects, follows a Windows x64 carry-flag fixture through Remill and Forge, and explains the recommendation to keep Forge’s LLVM lifter and reuse upstream test and recovery techniques.
 
 RetDec lifts x86-64 for decompilation and documents macOS support. Its modified LLVM 8 dependency and limited maintenance make direct integration into Forge's LLVM 17 ARM64 build a larger undertaking. Native Apple Silicon integration and executable equivalence were unverified for that option. [RetDec](https://github.com/avast/retdec) · [RetDec LLVM fork](https://github.com/avast/llvm)
 
@@ -180,7 +185,7 @@ ctest --test-dir build -C Debug -R '^differential$' --output-on-failure
 
 On Apple Silicon, 30 fixture cases passed all 8,160 source-reference comparisons before optimization and all 8,160 after optimization. The optimized native functions also matched all 8,160 independent Unicorn 2.1.4 results. As a negative check, substituting JL for JLE in the linked PE failed on input `(0, 0)` under both normal Python and `PYTHONOPTIMIZE=1`.
 
-The pinned Windows fastgron v0.7.7 executable (SHA-256 `1c18064f88804a0519fa51d9a4755bd25b7b73d16e28bddf24e3e1688480eb47`) produced 235 valid ranges and no analysis findings. LLVM resolved `0x29c50` to `std::ctype<char>::do_widen(char) const` at `locale_facets.h:1092`. Its bytes `89 d0 c3` lifted and compiled to ARM64. The signatureless form models the EDX-to-EAX move and zero-extension. That C++ member function has a different prototype from the fixture wrapper. At `0x18670`, lifting stopped at `0x18673` on `CMP8ri [80f909]`. The subsequent `setbe %al` also requires unsupported byte semantics. [fastgron v0.7.7 release](https://github.com/adamritter/fastgron/releases/tag/v0.7.7)
+The pinned Windows fastgron v0.7.7 executable (SHA-256 `1c18064f88804a0519fa51d9a4755bd25b7b73d16e28bddf24e3e1688480eb47`) produced 235 valid ranges and no analysis findings. LLVM resolved `0x29c50` to `std::ctype<char>::do_widen(char) const` at `locale_facets.h:1092`. Its bytes `89 d0 c3` lifted and compiled to ARM64. The signatureless form models the EDX-to-EAX move and zero-extension. That C++ member function has a different prototype from the fixture wrapper. [fastgron v0.7.7 release](https://github.com/adamritter/fastgron/releases/tag/v0.7.7)
 
 ```sh
 build/forge lift fastgron.exe --rva 0x29c50 --output build/fastgron.ll

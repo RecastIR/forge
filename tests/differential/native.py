@@ -1,6 +1,8 @@
 """Compile a generated module through the Forge CMake project and observe its harness."""
-from contextlib import nullcontext
+from contextlib import nullcontext, suppress
+import errno
 import os
+from pathlib import Path
 import platform
 import selectors
 import signal
@@ -14,6 +16,8 @@ from manifests import SUITE
 from docker_wine import EXECUTION_TIMEOUT
 from protocol import STREAM_LIMIT
 
+OPTIMIZED_IR = Path("native/tests/optimized.ll")
+
 
 class ExecutionFailure(ValueError):
     def __init__(self, outcome, message, status=None):
@@ -22,11 +26,19 @@ class ExecutionFailure(ValueError):
         self.status = status
 
 
-def kill_group(pid):
-    try:
-        os.killpg(pid, signal.SIGKILL)
-    except ProcessLookupError:
-        pass
+def kill_group(process):
+    with suppress(ProcessLookupError):
+        try:
+            os.killpg(process.pid, signal.SIGKILL)
+            return
+        except PermissionError as error:
+            if error.errno != errno.EPERM or platform.system() != "Darwin":
+                raise
+        # macOS can report EPERM when the only group member is exiting.
+        # Reap it if possible, then signal the group again for any descendants.
+        with suppress(subprocess.TimeoutExpired):
+            process.wait(timeout=0.1)
+        os.killpg(process.pid, signal.SIGKILL)
 
 
 def command(args, log, stdout=None, *, timeout=180):
@@ -35,7 +47,7 @@ def command(args, log, stdout=None, *, timeout=180):
             try:
                 status = process.wait(timeout=timeout)
             except BaseException:
-                kill_group(process.pid)
+                kill_group(process)
                 process.wait()
                 raise
     if status:
@@ -45,14 +57,15 @@ def command(args, log, stdout=None, *, timeout=180):
         raise ValueError(f"{args[0]} exited {status} ({log.name})\n{tail}")
 
 
-def build(ir, harness, work, config):
+def build(ir, harness, work, config, variant):
     if (platform.system(), platform.machine()) != ("Darwin", "arm64"):
         raise ValueError("native differential execution requires macOS arm64")
     tree = work / "native"
     log = work / "compilation.log"
     name = "differential_" + harness
     configure = ["cmake", "-S", SUITE.parents[1], "-B", tree, "-DBUILD_TESTING=OFF",
-                 f"-DFORGE_DIFFERENTIAL_IR={ir}", f"-DCMAKE_BUILD_TYPE={config.capitalize()}"]
+                 f"-DFORGE_DIFFERENTIAL_IR={ir}", f"-DFORGE_DIFFERENTIAL_VARIANT={variant}",
+                 f"-DCMAKE_BUILD_TYPE={config.capitalize()}"]
     build_target = ["cmake", "--build", tree, "--config", config.capitalize(), "--target"]
     for phase, args in (("configuration", configure), ("object compilation", [*build_target, name + "_objects"]),
                         ("linking", [*build_target, name])):
@@ -65,7 +78,7 @@ def build(ir, harness, work, config):
     executable = tree / "bin" / name
     if not executable.is_file() or not os.access(executable, os.X_OK):
         raise ValueError(f"native linking did not produce an executable harness: {executable} ({log.name})")
-    return executable
+    return executable, work / OPTIMIZED_IR if variant == "o2" else ir
 
 
 def execute(executable, args, work, *, timeout=EXECUTION_TIMEOUT, limit=STREAM_LIMIT):
@@ -100,7 +113,7 @@ def execute(executable, args, work, *, timeout=EXECUTION_TIMEOUT, limit=STREAM_L
                 except subprocess.TimeoutExpired as error:
                     raise ExecutionFailure("timeout", "native execution timeout") from error
             finally:
-                kill_group(process.pid)
+                kill_group(process)
             if status < 0:
                 raise ExecutionFailure("signaled", f"native harness terminated by signal {-status}", status)
             if status:

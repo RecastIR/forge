@@ -14,6 +14,125 @@
     "harness": "decimal_pairs"
   },
   {
+    "fixture_id": "arithmetic/flag_add",
+    "scope": "function",
+    "export": "flag_add",
+    "signature": "i64(i64,i64)",
+    "harness": "decimal_pairs"
+  },
+  {
+    "fixture_id": "arithmetic/flag_sub",
+    "scope": "function",
+    "export": "flag_sub",
+    "signature": "i64(i64,i64)",
+    "harness": "decimal_pairs"
+  },
+  {
+    "fixture_id": "arithmetic/flag_adc",
+    "scope": "function",
+    "export": "flag_adc",
+    "signature": "i64(i64,i64)",
+    "harness": "decimal_pairs"
+  },
+  {
+    "fixture_id": "arithmetic/flag_sbb",
+    "scope": "function",
+    "export": "flag_sbb",
+    "signature": "i64(i64,i64)",
+    "harness": "decimal_pairs"
+  },
+  {
+    "fixture_id": "arithmetic/carry_chain",
+    "scope": "function",
+    "export": "carry_chain",
+    "signature": "i64(i64,i64)",
+    "harness": "decimal_pairs"
+  },
+  {
+    "fixture_id": "arithmetic/neg_flags",
+    "scope": "function",
+    "export": "neg_flags",
+    "signature": "i64(i64,i64)",
+    "harness": "decimal_pairs"
+  },
+  {
+    "fixture_id": "arithmetic/mixed_widths",
+    "scope": "function",
+    "export": "mixed_widths",
+    "signature": "i64(i64,i64)",
+    "harness": "decimal_pairs"
+  },
+  {
+    "fixture_id": "arithmetic/extensions",
+    "scope": "function",
+    "export": "extensions",
+    "signature": "i64(i64,i64)",
+    "harness": "decimal_pairs"
+  },
+  {
+    "fixture_id": "arithmetic/multiply_flags",
+    "scope": "function",
+    "export": "multiply_flags",
+    "signature": "i64(i64,i64)",
+    "harness": "decimal_pairs"
+  },
+  {
+    "fixture_id": "arithmetic/logic_flags",
+    "scope": "function",
+    "export": "logic_flags",
+    "signature": "i64(i64,i64)",
+    "harness": "decimal_pairs"
+  },
+  {
+    "fixture_id": "arithmetic/predicates",
+    "scope": "function",
+    "export": "predicates",
+    "signature": "i64(i64,i64)",
+    "harness": "decimal_pairs"
+  },
+  {
+    "fixture_id": "arithmetic/conditional_moves",
+    "scope": "function",
+    "export": "conditional_moves",
+    "signature": "i64(i64,i64)",
+    "harness": "decimal_pairs"
+  },
+  {
+    "fixture_id": "arithmetic/shift_flags",
+    "scope": "function",
+    "export": "shift_flags",
+    "signature": "i64(i64,i64)",
+    "harness": "decimal_pairs"
+  },
+  {
+    "fixture_id": "arithmetic/shift_widths",
+    "scope": "function",
+    "export": "shift_widths",
+    "signature": "i64(i64,i64)",
+    "harness": "decimal_pairs"
+  },
+  {
+    "fixture_id": "arithmetic/shift_one",
+    "scope": "function",
+    "export": "shift_one",
+    "signature": "i64(i64,i64)",
+    "harness": "decimal_pairs"
+  },
+  {
+    "fixture_id": "arithmetic/joined_flags",
+    "scope": "function",
+    "export": "joined_flags",
+    "signature": "i64(i64,i64)",
+    "harness": "decimal_pairs"
+  },
+  {
+    "fixture_id": "arithmetic/integer_mix",
+    "scope": "function",
+    "export": "integer_mix",
+    "signature": "i64(i64,i64)",
+    "harness": "decimal_pairs"
+  },
+  {
     "fixture_id": "runner/exit_nonzero",
     "blocked_reason": "The function harness treats nonzero termination as a harness failure."
   },
