@@ -40,17 +40,8 @@ Priority order: **correctness and safety → architectural consistency → testa
 - Avoid duplicate parsing, configuration, state, or logic. Extend existing components when appropriate.
 - Do not introduce dependencies or modify toolchain/build configuration without explaining the necessity and impact.
 - Use the repository's configured formatter, linter, static analyzer, compiler warnings, and sanitizers. Do not guess their command names; inspect the build/CI definitions.
-- Do not suppress warnings or weaken checks just to make a change pass. Narrow, documented exceptions require justification.
-
-## C++ readability and mandatory self-review
-
-Apply the [C++ style guide](docs/cpp-style.md) to new and substantially modified code. Before declaring a C++ task complete, review readability alongside correctness, memory safety, and test coverage.
-
-1. Run `make format-check` and `make lint`. Inspect the changed functions even when both commands pass.
-2. Review functions around 40 substantive lines and nesting beyond three levels. Consider early returns, logical phases, and helpers with a clear responsibility. Use these thresholds as review prompts.
-3. Check dense expressions, assignments inside conditions, nested ternaries, call chains, and names. Remove unnecessary abstractions and comments that repeat the code.
-4. Trace ownership, lifetimes, state transitions, and error paths. In lifting code, check guest semantics separately from IR construction, control flow, and diagnostics. Explain non-obvious widths, extensions, memory behavior, and invariants.
-5. Verify that readability edits preserve behavior, run the relevant tests, and report the results.
+- Never silence a meaningful error, suppress a warning, or weaken a check merely to satisfy tooling. Justify any narrow, documented exception.
+- Apply the [C++ style guide](docs/cpp-style.md) to new and substantially modified C++. Run `make format-check`, `make lint`, and the relevant tests, then review the changed functions even when all checks pass.
 
 ## Testing and validation
 
@@ -114,15 +105,17 @@ Before declaring work complete, inspect the diff as though reviewing someone els
 
 - **Correctness:** Are all success, failure, edge, and unsupported paths handled? Are assumptions and invariants enforced? Any undefined behavior, overflow, lifetime, or bounds risks?
 - **Semantic fidelity:** Could the transformation silently change program behavior? Are source facts, inferences, and overrides distinguishable?
-- **Architecture:** Is the code in the right module? Does it preserve stage boundaries and repository conventions? Is ownership clear?
-- **Simplicity:** Could this be smaller or more direct? Are there unnecessary abstractions, indirection, duplicated logic, or speculative extension points?
-- **Reuse:** Did we miss an existing helper, model, parser, diagnostic mechanism, or test utility? Did we introduce competing sources of truth?
-- **Maintainability:** Are names, errors, interfaces, and data flow understandable without reconstructing the entire change?
+- **Architecture:** Does the code preserve stage boundaries and repository conventions?
+- **Readability:** Can a reader follow the logical phases without unpacking dense expressions or jumping through trivial helpers?
+- **Ownership:** Who owns each new resource, and which values borrow from it? Could an early return, move, container mutation, or IR mutation invalidate a borrow?
+- **Behavior preservation:** Did cleanup change a guard, evaluation order, side effect, destruction point, or error path? In lifting code, did it change a width, conversion, register, or flag update?
+- **Complexity and reuse:** What current problem does each new abstraction or stored value solve? Could an existing representation or mechanism serve it? How is derived state kept valid?
+- **Diagnostics:** Did you inspect maintainability warnings relevant to changed code and justify each remaining exception?
 - **Tests:** Do tests assert behavior rather than implementation details? Would they catch a realistic regression? Are negative and conflicting inputs covered?
 - **Docs:** Do user-facing and developer-facing descriptions match the actual implementation?
 - **Scope:** Did unrelated changes, generated files, temporary artifacts, or accidental dependency changes slip in?
 
-Fix issues found during self-review, rerun affected checks, and disclose remaining risks. Do not treat self-review as proof of correctness or claim an independent review occurred.
+Fix issues found during self-review and rerun affected checks. Report meaningful remaining risks or exceptions briefly. A trivial change needs no checklist recital. Credit independent review only when someone else performed it.
 
 ## Change boundaries and communication
 
