@@ -253,16 +253,18 @@ namespace forge {
                                                  '-c', str(self.caller)]}]))
         command = (sys.executable, '-B', 'cmake/lint.py', LLVM_BIN.parent / 'include',
                    LLVM_BIN / 'clang-tidy', '-p', self.root, self.caller)
-        self.header.write_text('#pragma once\ninline int value(int lower = 3) { return lower ? 2 : lower ? 1 : 0; }\n')
+        self.header.write_text('#pragma once\ninline int value(int OldValue = 3, int newValue = 1) {\n'
+                               '    return OldValue ? 2 : newValue ? 1 : 0;\n}\n')
         advisories = self.run_command(*command)
-        for check in ('readability-identifier-naming', 'readability-avoid-nested-conditional-operator'):
-            self.assertIn(check, advisories)
+        self.assertIn("invalid case style for parameter 'OldValue' [readability-identifier-naming]", advisories)
+        self.assertNotIn("parameter 'newValue'", advisories)
+        self.assertIn('readability-avoid-nested-conditional-operator', advisories)
         self.run_command('git', '-c', 'user.name=Test', '-c', 'user.email=test@localhost',
                          'commit', '-qam', 'existing advisories')
         self.header.write_text(self.header.read_text() + 'inline int newValue(int new_name) { return new_name; }\n')
         advisories = self.run_command(*command, env=dict(self.env, FORGE_STYLE_BASE='HEAD'))
-        self.assertIn('readability-identifier-naming', advisories)
-        self.assertNotIn("parameter 'lower'", advisories)
+        self.assertIn("invalid case style for parameter 'new_name' [readability-identifier-naming]", advisories)
+        self.assertNotIn("parameter 'OldValue'", advisories)
         self.assertNotIn('readability-avoid-nested-conditional-operator', advisories)
         for body in ('if (N) --N;', 'if (N) { ++N; } else --N;', 'for (; N;) --N;',
                      'while (N) --N;', 'do --N; while (N);'):

@@ -8,13 +8,13 @@
 #include <memory>
 
 namespace forge::x86 {
-    // LLVM retains Options by reference for the lifetime of the returned assembly info.
+    // LLVM retains options by reference for the lifetime of the returned assembly info.
     inline std::unique_ptr<llvm::MCAsmInfo>
-    createAsmInfo(const llvm::Target &Target, const llvm::MCRegisterInfo &Registers,
-                  const llvm::Triple &Triple,
-                  std::reference_wrapper<const llvm::MCTargetOptions> Options) {
+    createAsmInfo(const llvm::Target &target, const llvm::MCRegisterInfo &registers,
+                  const llvm::Triple &triple,
+                  std::reference_wrapper<const llvm::MCTargetOptions> options) {
         return std::unique_ptr<llvm::MCAsmInfo>(
-            Target.createMCAsmInfo(Registers, Triple, Options.get()));
+            target.createMCAsmInfo(registers, triple, options.get()));
     }
 } // namespace forge::x86
 

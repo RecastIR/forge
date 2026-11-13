@@ -87,17 +87,17 @@ namespace forge {
             return steps;
         }
 
-        constexpr std::array<StringLiteral, 7> wideRegs{"RAX", "RCX", "RDX", "R8",
+        constexpr std::array<StringLiteral, 7> WideRegs{"RAX", "RCX", "RDX", "R8",
                                                         "R9",  "R10", "R11"};
-        constexpr std::array<StringLiteral, 7> lowRegs{"EAX", "ECX",  "EDX", "R8D",
+        constexpr std::array<StringLiteral, 7> LowRegs{"EAX", "ECX",  "EDX", "R8D",
                                                        "R9D", "R10D", "R11D"};
-        constexpr std::array<StringLiteral, 7> words{"AX",  "CX",   "DX",  "R8W",
+        constexpr std::array<StringLiteral, 7> Words{"AX",  "CX",   "DX",  "R8W",
                                                      "R9W", "R10W", "R11W"};
-        constexpr std::array<StringLiteral, 7> lowBytes{"AL",  "CL",   "DL",  "R8B",
+        constexpr std::array<StringLiteral, 7> LowBytes{"AL",  "CL",   "DL",  "R8B",
                                                         "R9B", "R10B", "R11B"};
-        constexpr std::array<StringLiteral, 3> highBytes{"AH", "CH", "DH"};
+        constexpr std::array<StringLiteral, 3> HighBytes{"AH", "CH", "DH"};
         // The signatureless ABI accepts a four-byte-aligned register array.
-        constexpr auto registerStateAlignment = Align::Constant<4>();
+        constexpr auto RegisterStateAlignment = Align::Constant<4>();
 
         struct RegisterView {
             unsigned index, width, offset = 0;
@@ -105,7 +105,7 @@ namespace forge {
             uint64_t mask() const { return maskTrailingOnes<uint64_t>(width) << offset; }
         };
 
-        using Defined = std::array<uint64_t, wideRegs.size()>;
+        using Defined = std::array<uint64_t, WideRegs.size()>;
 
         struct Incoming {
             BasicBlock *block;
@@ -129,8 +129,8 @@ namespace forge {
                 } else {
                     auto *phi =
                         ir.CreatePHI(ir.getInt1Ty(), static_cast<unsigned>(predecessors.size()));
-                    for (const auto &[source, incomingFlags] : predecessors) {
-                        phi->addIncoming(incomingFlags[f], source);
+                    for (const auto &[Source, IncomingFlags] : predecessors) {
+                        phi->addIncoming(IncomingFlags[f], Source);
                     }
                     flags[f] = phi;
                 }
@@ -147,7 +147,7 @@ namespace forge {
                                         "forge_lifted_" + utohexstr(rva, true), module);
                 impl->getArg(0)->setName("state");
                 appendToUsed(module, {impl});
-                stateType = ArrayType::get(ir.getInt64Ty(), wideRegs.size());
+                stateType = ArrayType::get(ir.getInt64Ty(), WideRegs.size());
                 if (wrapper) {
                     auto *nativeType = FunctionType::get(ir.getInt64Ty(),
                                                          {ir.getInt64Ty(), ir.getInt64Ty()}, false);
@@ -196,18 +196,18 @@ namespace forge {
                 s.reject("expected a general-purpose register");
             }
             auto name = StringRef(regs.getName(op.getReg()));
-            const auto &names = width == 64   ? wideRegs
-                                : width == 32 ? lowRegs
-                                : width == 16 ? words
-                                              : lowBytes;
+            const auto &names = width == 64   ? WideRegs
+                                : width == 32 ? LowRegs
+                                : width == 16 ? Words
+                                              : LowBytes;
             auto it = llvm::find(names, name);
             if (it != names.end()) {
                 return {static_cast<unsigned>(it - names.begin()), width};
             }
             if (width == 8) {
-                auto high = llvm::find(highBytes, name);
-                if (high != highBytes.end()) {
-                    return {static_cast<unsigned>(high - highBytes.begin()), 8, 8};
+                auto high = llvm::find(HighBytes, name);
+                if (high != HighBytes.end()) {
+                    return {static_cast<unsigned>(high - HighBytes.begin()), 8, 8};
                 }
             }
             s.reject("unsupported register " + name);
@@ -215,10 +215,10 @@ namespace forge {
 
         Value *Translator::read(const Step &s, RegisterView view) {
             if ((defined[view.index] & view.mask()) != view.mask()) {
-                s.reject("native wrapper requires undefined incoming " + wideRegs[view.index]);
+                s.reject("native wrapper requires undefined incoming " + WideRegs[view.index]);
             }
             Value *v = ir.CreateAlignedLoad(ir.getInt64Ty(), slot(impl->getArg(0), view.index),
-                                            registerStateAlignment);
+                                            RegisterStateAlignment);
             if (view.offset) {
                 v = ir.CreateLShr(v, view.offset);
             }
@@ -236,19 +236,19 @@ namespace forge {
             auto *ptr = slot(impl->getArg(0), view.index);
             auto *result = ir.CreateZExtOrBitCast(v, ir.getInt64Ty());
             if (view.width < 32) {
-                auto *parent = ir.CreateAlignedLoad(ir.getInt64Ty(), ptr, registerStateAlignment);
+                auto *parent = ir.CreateAlignedLoad(ir.getInt64Ty(), ptr, RegisterStateAlignment);
                 result = ir.CreateOr(ir.CreateAnd(parent, ~view.mask()),
                                      ir.CreateShl(result, view.offset));
                 defined[view.index] |= view.mask();
             } else {
                 defined[view.index] = UINT64_MAX;
             }
-            ir.CreateAlignedStore(result, ptr, registerStateAlignment);
+            ir.CreateAlignedStore(result, ptr, RegisterStateAlignment);
         }
 
         Value *Translator::require(const Step &s, x86::Flag flag) const {
             if (!semantics.flags[flag]) {
-                s.reject("unsupported use of undefined condition flags: " + x86::flagNames[flag]);
+                s.reject("unsupported use of undefined condition flags: " + x86::FlagNames[flag]);
             }
             return semantics.flags[flag];
         }
@@ -464,8 +464,8 @@ namespace forge {
         if (it == a.functions.end() || it->record.begin != rva) {
             fail(rva, "expected an exact, valid, unambiguous discovered function start");
         }
-        if (const auto version = it->unsupportedUnwindVersion) {
-            fail(rva, "unsupported unwind version " + Twine(*version));
+        if (const auto Version = it->unsupportedUnwindVersion) {
+            fail(rva, "unsupported unwind version " + Twine(*Version));
         }
         if (it->chainedFragment) {
             fail(rva, "chained unwind fragment has no independent function entry");
@@ -502,8 +502,8 @@ namespace forge {
         std::unique_ptr<MCInstrInfo> instructions(target->createMCInstrInfo());
         std::unique_ptr<MCSubtargetInfo> sub(target->createMCSubtargetInfo(triple, "generic", ""));
         const MCTargetOptions Options;
-        auto Assembly = x86::createAsmInfo(*target, *regs, triple, Options);
-        MCContext mc(triple, *Assembly, *regs, *sub);
+        auto assembly = x86::createAsmInfo(*target, *regs, triple, Options);
+        MCContext mc(triple, *assembly, *regs, *sub);
         std::unique_ptr<MCDisassembler> dis(target->createMCDisassembler(*sub, mc));
         auto steps = decode(code->bytes, rva, *dis, *instructions);
         LLVMContext context;

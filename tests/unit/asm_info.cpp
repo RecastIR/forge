@@ -17,30 +17,30 @@ int main() try {
     LLVMInitializeX86TargetInfo();
     LLVMInitializeX86TargetMC();
     const Triple Guest("x86_64-pc-windows-msvc");
-    std::string Error;
-    const auto *Target = TargetRegistry::lookupTarget(Guest, Error);
-    if (!Target) {
-        errs() << Error << '\n';
+    std::string error;
+    const auto *target = TargetRegistry::lookupTarget(Guest, error);
+    if (!target) {
+        errs() << error << '\n';
         return 1;
     }
-    std::unique_ptr<MCRegisterInfo> Registers(Target->createMCRegInfo(Guest));
-    if (!Registers) {
+    std::unique_ptr<MCRegisterInfo> registers(target->createMCRegInfo(Guest));
+    if (!registers) {
         errs() << "X86 register info unavailable\n";
         return 1;
     }
 
-    MCTargetOptions Options;
-    Options.OutputAsmVariant = 1;
-    auto Assembly = createAsmInfo(*Target, *Registers, Guest, Options);
-    if (!Assembly || &Assembly->getTargetOptions() != &Options) {
+    MCTargetOptions options;
+    options.OutputAsmVariant = 1;
+    auto assembly = createAsmInfo(*target, *registers, Guest, options);
+    if (!assembly || &assembly->getTargetOptions() != &options) {
         errs() << "X86 assembly info must borrow the caller's target options\n";
         return 1;
     }
-    if (Assembly->getOutputAssemblerDialect() != *Options.OutputAsmVariant) {
+    if (assembly->getOutputAssemblerDialect() != *options.OutputAsmVariant) {
         errs() << "X86 assembly info ignored the selected output dialect\n";
         return 1;
     }
-} catch (const std::exception &Error) {
-    errs() << "X86 assembly info: " << Error.what() << '\n';
+} catch (const std::exception &error) {
+    errs() << "X86 assembly info: " << error.what() << '\n';
     return 1;
 }

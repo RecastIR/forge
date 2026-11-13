@@ -144,29 +144,29 @@ namespace forge {
                 auto cb = llvm::lower_bound(callbacks, begin);
                 f.callback = cb != callbacks.end() && *cb < end;
             }
-            constexpr size_t headerSize = offsetof(Win64EH::UnwindInfo, UnwindCodes);
+            constexpr size_t HeaderSize = offsetof(Win64EH::UnwindInfo, UnwindCodes);
             auto data = mapRva(a.module.sections, file, unwind);
-            if (!unwind || unwind % 4 || !data || data->bytes.size() < headerSize) {
+            if (!unwind || unwind % 4 || !data || data->bytes.size() < HeaderSize) {
                 invalid("unwind RVA must point to a file-backed, aligned AMD64 unwind header");
                 continue;
             }
             Win64EH::UnwindInfo header{};
-            std::memcpy(&header, data->bytes.data(), headerSize);
+            std::memcpy(&header, data->bytes.data(), HeaderSize);
             if (header.getVersion() != 1 && header.getVersion() != 2) {
                 f.unsupportedUnwindVersion = header.getVersion();
                 continue;
             }
             f.chainedFragment = header.getFlags() & Win64EH::UNW_ChainInfo;
-            const size_t codesEnd = headerSize + header.NumCodes * sizeof(Win64EH::UnwindCode);
-            if (data->bytes.size() < codesEnd) {
+            const size_t CodesEnd = HeaderSize + header.NumCodes * sizeof(Win64EH::UnwindCode);
+            if (data->bytes.size() < CodesEnd) {
                 invalid("truncated unwind code array");
             } else if (f.chainedFragment) {
                 if (header.getFlags() &
                     (Win64EH::UNW_ExceptionHandler | Win64EH::UNW_TerminateHandler)) {
                     invalid("chained unwind info also declares a handler");
                 }
-                const size_t trailer = alignTo(codesEnd, 4);
-                if (data->bytes.size() < trailer + sizeof(Win64EH::RuntimeFunction)) {
+                const size_t Trailer = alignTo(CodesEnd, 4);
+                if (data->bytes.size() < Trailer + sizeof(Win64EH::RuntimeFunction)) {
                     invalid("truncated chained runtime function");
                 }
             }

@@ -143,8 +143,8 @@ namespace forge {
                 ++counts[d.status];
             }
             Object summary;
-            for (const auto &[key, count] : counts) {
-                summary[key] = count;
+            for (const auto &[Key, Count] : counts) {
+                summary[Key] = Count;
             }
             return Object{{"schema_version", 1},
                           {"inspection", Object{{"status", "completed"}, {"root_module", 0}}},
@@ -164,14 +164,14 @@ namespace forge {
                 return width < 0 ? static_cast<unsigned>(name.size())
                                  : static_cast<unsigned>(width);
             };
-            constexpr StringLiteral heading = "Sections";
-            constexpr unsigned headingWidth = heading.size();
-            unsigned width = headingWidth;
+            constexpr StringLiteral Heading = "Sections";
+            constexpr unsigned HeadingWidth = Heading.size();
+            unsigned width = HeadingWidth;
             for (const auto &s : m.sections) {
                 width = std::max(width, columns(s.name));
             }
-            out << "    " << heading;
-            out.indent(width - headingWidth + 2)
+            out << "    " << Heading;
+            out.indent(width - HeadingWidth + 2)
                 << formatv("{0,-12}{1,-15}{2,-14}{3,-11}{4}\n", "RVA", "Virtual size",
                            "File offset", "Raw size", "Permissions");
             for (const auto &s : m.sections) {
@@ -265,8 +265,8 @@ namespace forge {
         for (const auto &d : report.dependencies) {
             ++counts[d.status];
         }
-        for (const auto &[status, count] : counts) {
-            out << "  " << status << " " << count;
+        for (const auto &[Status, Count] : counts) {
+            out << "  " << Status << " " << Count;
         }
         out << "\n";
         if (!verbose) {

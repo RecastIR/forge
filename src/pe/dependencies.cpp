@@ -13,17 +13,17 @@ namespace forge {
         namespace lfs = llvm::sys::fs;
 
         std::string classify(StringRef name) {
-            static constexpr StringRef system[] = {"advapi32.dll", "combase.dll",    "gdi32.dll",
+            static constexpr StringRef System[] = {"advapi32.dll", "combase.dll",    "gdi32.dll",
                                                    "kernel32.dll", "kernelbase.dll", "ntdll.dll",
                                                    "ole32.dll",    "shell32.dll",    "shlwapi.dll",
                                                    "user32.dll",   "ws2_32.dll"};
-            static constexpr StringRef runtime[] = {"msvcp140.dll", "msvcp140_1.dll",
+            static constexpr StringRef Runtime[] = {"msvcp140.dll", "msvcp140_1.dll",
                                                     "msvcp140_2.dll", "vcruntime140.dll",
                                                     "vcruntime140_1.dll"};
-            if (llvm::is_contained(system, name)) {
+            if (llvm::is_contained(System, name)) {
                 return "windows_system";
             }
-            if (llvm::is_contained(runtime, name)) {
+            if (llvm::is_contained(Runtime, name)) {
                 return "third_party_runtime";
             }
             if (name.starts_with("api-ms-") || name.starts_with("ext-ms-") ||
@@ -40,8 +40,8 @@ namespace forge {
             explicit Directory(const fs::path &dir) {
                 fs::directory_iterator it(dir, error);
                 while (!error && it != fs::directory_iterator()) {
-                    const auto path = it->path();
-                    byName[StringRef(path.filename().native()).lower()].push_back(path);
+                    const auto Path = it->path();
+                    byName[StringRef(Path.filename().native()).lower()].push_back(Path);
                     it.increment(error);
                 }
             }

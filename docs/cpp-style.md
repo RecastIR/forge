@@ -1,6 +1,6 @@
 # C++ style in Forge
 
-Forge uses C++20 and the LLVM formatting preset with four-space indentation, a 100-column limit, attached braces, case-sensitive include sorting, and right-aligned pointers and references (`Type *Value`, `Type &Value`). Use braces for every `if`, `else`, `for`, `while`, and `do` body, including early returns. Write consecutive alternatives as `else if` chains. [LLVM coding standards](https://llvm.org/docs/CodingStandards.html)
+Forge uses C++20 and the LLVM formatting preset with four-space indentation, a 100-column limit, attached braces, case-sensitive include sorting, and right-aligned pointers and references (`Type *value`, `Type &value`). Use braces for every `if`, `else`, `for`, `while`, and `do` body, including early returns. Write consecutive alternatives as `else if` chains. [LLVM coding standards](https://llvm.org/docs/CodingStandards.html)
 
 ## Indentation and vertical spacing
 
@@ -11,15 +11,15 @@ Within a block, leave exactly one blank line between a complete control-flow sta
 Use one blank line between logical phases such as preparation, validation, processing, and output. Group declarations that prepare the same result and output statements that write one part of a report. Place the break before a leading explanatory comment so the comment stays with its statement.
 
 ```cpp
-Out << " records";
+out << " records";
 
 // Keep the order recorded in the exception directory.
-for (auto Index : Function.Indices) {
-    Out << " " << Index;
+for (auto index : function.indices) {
+    out << " " << index;
 }
 
-if (Function.Entry) {
-    Out << " entry";
+if (function.entry) {
+    out << " entry";
 }
 ```
 
@@ -32,12 +32,14 @@ Clang-format enforces indentation and spaces, inserts blank lines between defini
 | Kind | Form | Example |
 | --- | --- | --- |
 | Types, classes, enums, and aliases | PascalCase | `IntegerInstruction` |
-| Functions and methods | camelCase | `resultFlags` |
-| Local variables, parameters, and data members | PascalCase | `OperandWidth` |
+| Functions and methods | Lower camel case | `resultFlags` |
+| Local variables, parameters, and data members (including static members) | Lower camel case | `operandWidth` |
 | Constants and enumerators | PascalCase | `MaxOperandWidth` |
 | Macros | Uppercase with underscores | `FORGE_TEST_CASE` |
 
-Use `.cpp` for C++ implementations and `.h` for headers. Spell out names unless a term such as `IR`, `RVA`, or `CF` is established in the surrounding domain. Follow the required spelling for LLVM overrides, C linkage, ABI entry points, and other integration contracts. Preserve existing public and widely used names during migration. C fixtures share formatting and brace rules. Their C identifiers retain their own conventions.
+The constant rule applies to `constexpr` variables and to locals that hold a `const` value, including values computed at runtime. For example, use `const auto Result = compute();` and `const Section *section` (the pointer can change).
+
+Use `.cpp` for C++ implementations and `.h` for headers. Spell out names unless a term such as `IR`, `RVA`, or `CF` is established in the surrounding domain. Preserve spellings required by LLVM overrides, C linkage, ABI entry points, and other integration contracts. C fixtures share formatting and brace rules. Their C identifiers retain their own conventions.
 
 ## Ownership and borrowed storage
 
@@ -107,16 +109,16 @@ In a lifter, distinguish guest instruction semantics, LLVM IR construction, stat
 For example, this expression constructs the masked shift count for an x86 integer shift:
 
 ```cpp
-auto *N = IR.CreateAnd(IR.CreateZExt(Count, IR.getInt64Ty()), Width == 64 ? 63 : 31);
+auto *n = ir.CreateAnd(ir.CreateZExt(count, ir.getInt64Ty()), width == 64 ? 63 : 31);
 ```
 
 Naming the x86 rule makes it easier to review the IR operands. Both forms zero-extend the count and emit the same mask operation.
 
 ```cpp
 // x86 uses six count bits for 64-bit operands and five for the other supported widths.
-const unsigned CountMask = Width == 64 ? 63 : 31;
-auto *WideCount = IR.CreateZExt(Count, IR.getInt64Ty());
-auto *MaskedCount = IR.CreateAnd(WideCount, CountMask);
+const unsigned CountMask = width == 64 ? 63 : 31;
+auto *wideCount = ir.CreateZExt(count, ir.getInt64Ty());
+auto *maskedCount = ir.CreateAnd(wideCount, CountMask);
 ```
 
 ## Running the checks
