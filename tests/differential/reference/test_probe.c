@@ -3,7 +3,7 @@
 #include <wchar.h>
 #include <windows.h>
 
-int wmain(int argc, wchar_t** argv) {
+int wmain(int argc, wchar_t **argv) {
     if (GetEnvironmentVariableW(L"FORGE_TEST_HOST_ONLY", NULL, 0)) {
         return 3;
     }

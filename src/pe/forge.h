@@ -29,7 +29,7 @@ struct Section {
     uint32_t rva, virtualSize, fileOffset, rawSize;
 };
 struct MappedRange {
-    const Section& section;
+    const Section &section;
     llvm::StringRef bytes;
     uint64_t fileOffset;
 };
@@ -108,7 +108,7 @@ struct Report {
 };
 
 Module inspectPE(llvm::MemoryBufferRef buffer);
-Report inspect(const fs::path& root, const std::vector<fs::path>& searchPaths);
-void printReport(const Report& report, bool json, bool verbose, llvm::raw_ostream& out);
-void printDiagnostics(const Report& report, llvm::raw_ostream& err);
+Report inspect(const fs::path &root, const std::vector<fs::path> &searchPaths);
+void printReport(const Report &report, bool json, bool verbose, llvm::raw_ostream &out);
+void printDiagnostics(const Report &report, llvm::raw_ostream &err);
 } // namespace forge

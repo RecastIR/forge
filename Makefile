@@ -6,7 +6,7 @@ configure_flags = $(if $(LLVM_DIR),"-DLLVM_DIR=$(LLVM_DIR)") \
                   $(if $(CONFIG),"-DCMAKE_BUILD_TYPE=$(CONFIG)") \
                   $(if $(SANITIZE),"-DFORGE_ENABLE_SANITIZERS=$(SANITIZE)")
 
-.PHONY: build configure test fixtures sanitize clean format format-check lint
+.PHONY: build configure test fixtures sanitize clean format format-check format-audit lint
 
 build: configure
 	cmake --build "$(BUILD_DIR)" --config "$(build_config)" --parallel
@@ -23,7 +23,7 @@ fixtures: configure
 sanitize:
 	$(MAKE) test BUILD_DIR="$(BUILD_DIR)-sanitize" CONFIG=Debug SANITIZE=ON
 
-format format-check lint:
+format format-check format-audit lint:
 	cmake "-DACTION=$@" "-DBUILD_DIR=$(BUILD_DIR)-lint" "-DLLVM_CONFIG=$(LLVM_CONFIG)" \
 	      "-DLLVM_DIR=$(LLVM_DIR)" "-DLINT_DATABASE=$(LINT_DATABASE)" -P cmake/quality.cmake
 

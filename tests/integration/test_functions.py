@@ -1,6 +1,7 @@
 """Exercise discovery and lift diagnostics through their CLI entry points."""
 import json
 import os
+from pathlib import Path
 import resource
 import signal
 import struct
@@ -45,7 +46,10 @@ class Discovery(Case):
         f, = self.analyze(FIXTURES / "inlined.exe", "--strict")["functions"]
         self.assertEqual(f["name"], "entry")
         self.assertEqual(f["location"]["file"].split("/")[-1], "inlined.c")
-        self.assertEqual(f["location"]["line"], 6)  # call site in entry, helper body is line 2
+        source = Path(__file__).resolve().parents[1] / "fixtures/inlined.c"
+        call_line, = (i for i, line in enumerate(source.read_text().splitlines(), 1)
+                      if "return step(a) + b;" in line)
+        self.assertEqual(f["location"]["line"], call_line)
 
     def test_unicode_section_columns(self):
         image = FIXTURES / "unicode.exe"

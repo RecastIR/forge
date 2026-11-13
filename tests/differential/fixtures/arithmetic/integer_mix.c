@@ -8,4 +8,4 @@ __attribute__((dllexport, noipa, optimize("O2"))) int64_t integer_mix(int64_t le
     return result;
 }
 
-int main(int argc, char** argv) { return run_decimal_pairs(argc, argv, integer_mix); }
+int main(int argc, char **argv) { return run_decimal_pairs(argc, argv, integer_mix); }

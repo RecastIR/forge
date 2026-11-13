@@ -5,6 +5,10 @@ import subprocess
 import sys
 import tempfile
 
+from style import changed_sources, native
+
+
+ADVISORY_CHECKS = ("readability-identifier-naming", "readability-avoid-nested-conditional-operator")
 
 # LLVM User::operator new reserves storage immediately before the object.
 # ArrayBound models the C++ object as its own allocation and diagnoses valid
@@ -20,7 +24,30 @@ OPERAND_ACCESS = {
 }
 
 
-def main(include, tidy, *args):
+def check_changed_style(tidy, database, sources, changes):
+    filters = []
+    inputs = []
+    for path, ranges in changes.items():
+        if not native(path):
+            continue
+        name = str(path.absolute())
+        entry = {"name": name}
+        if ranges is not None:
+            entry["lines"] = ranges
+        filters.append(entry)
+        if path.suffix == ".cpp":
+            inputs.append(name)
+    if not filters:
+        return 0
+    # clang-tidy diagnoses headers while parsing their including translation units.
+    if len(inputs) != len(filters):
+        inputs = sources
+    return subprocess.run([tidy, "-p", database, "--checks=-*," + ",".join(ADVISORY_CHECKS),
+                           "--line-filter=" + json.dumps(filters), *inputs]).returncode
+
+
+def main(include, tidy, database_flag, database, *sources):
+    changes = changed_sources()
     with tempfile.TemporaryDirectory() as temp:
         folder = Path(temp)
         files = []
@@ -35,7 +62,14 @@ def main(include, tidy, *args):
                 files.append({"type": "file", "name": str(header), "external-contents": str(copy)})
         overlay = folder / "llvm-operands.json"
         overlay.write_text(json.dumps({"version": 0, "use-external-names": False, "roots": files}))
-        return subprocess.run([tidy, *args, f"--vfsoverlay={overlay}"]).returncode
+        # Check braces and correctness across complete translation units. Only
+        # naming and nested conditionals use the changed-line filter.
+        disable_advisories = ",".join("-" + check for check in ADVISORY_CHECKS)
+        result = subprocess.run([tidy, database_flag, database, "--checks=" + disable_advisories,
+                                 *sources, f"--vfsoverlay={overlay}"])
+        if result.returncode:
+            return result.returncode
+        return check_changed_style(tidy, database, sources, changes)
 
 
 if __name__ == "__main__":

@@ -9,42 +9,45 @@ using namespace forge::x86;
 using namespace llvm;
 
 namespace {
-Constant* evaluate(Value* value) {
-    auto* inst = dyn_cast_or_null<Instruction>(value);
+Constant *evaluate(Value *value) {
+    auto *inst = dyn_cast_or_null<Instruction>(value);
     if (inst) {
         // IRBuilder leaves intrinsics (including ctpop) as calls even for constants.
         // Fold the actual emitted IR before reading the architectural result.
-        SmallVector<Constant*> inputs;
-        for (Value* operand : inst->operands())
+        SmallVector<Constant *> inputs;
+        for (Value *operand : inst->operands()) {
             inputs.push_back(evaluate(operand));
+        }
         return ConstantFoldInstOperands(inst, inputs, inst->getModule()->getDataLayout());
     }
     return dyn_cast_or_null<Constant>(value);
 }
 
-void expect(Value* value, uint64_t expected, StringRef scenario) {
-    const auto* constant = dyn_cast_or_null<ConstantInt>(evaluate(value));
-    if (!constant || constant->getZExtValue() != expected)
+void expect(Value *value, uint64_t expected, StringRef scenario) {
+    const auto *constant = dyn_cast_or_null<ConstantInt>(evaluate(value));
+    if (!constant || constant->getZExtValue() != expected) {
         throw std::runtime_error(scenario.str());
+    }
 }
 
 // Flag bits use their architectural positions, so the literals can be checked
 // directly against an ADD/SUB truth table or a saved arithmetic flags word.
-void expectFlags(const Flags& flags, unsigned values, unsigned available, StringRef scenario) {
+void expectFlags(const Flags &flags, unsigned values, unsigned available, StringRef scenario) {
     constexpr std::array<unsigned, FlagCount> bits{1, 4, 16, 64, 128, 2048};
     for (unsigned i = 0; i < FlagCount; ++i) {
         auto label = (scenario + " " + flagNames[i]).str();
-        if (available & bits[i])
+        if (available & bits[i]) {
             expect(flags[i], static_cast<unsigned>((values & bits[i]) != 0), label);
-        else if (flags[i])
+        } else if (flags[i]) {
             throw std::runtime_error(label + " unexpectedly defined");
+        }
     }
 }
 
 void check() {
     LLVMContext context;
     Module module("integer-tests", context);
-    auto* fn = Function::Create(FunctionType::get(Type::getVoidTy(context), false),
+    auto *fn = Function::Create(FunctionType::get(Type::getVoidTy(context), false),
                                 Function::InternalLinkage, "test", module);
     IRBuilder<> ir(BasicBlock::Create(context, "entry", fn));
     IntegerSemantics semantics(ir);
@@ -111,7 +114,7 @@ void check() {
 int main() {
     try {
         check();
-    } catch (const std::exception& error) {
+    } catch (const std::exception &error) {
         errs() << "integer semantics: " << error.what() << '\n';
         return 1;
     }

@@ -29,9 +29,9 @@ struct Analysis {
     std::vector<Finding> findings;
 };
 Analysis discover(Module module, llvm::StringRef file);
-void enrichFunctions(Analysis& analysis, const llvm::object::ObjectFile& object);
+void enrichFunctions(Analysis &analysis, const llvm::object::ObjectFile &object);
 Analysis analyzePE(llvm::MemoryBufferRef buffer, bool debugInfo);
-void printAnalysis(const Analysis&, bool json, llvm::raw_ostream& out);
-void lift(const Analysis&, llvm::MemoryBufferRef buffer, uint32_t rva, bool wrapper,
-          const fs::path& output);
+void printAnalysis(const Analysis &, bool json, llvm::raw_ostream &out);
+void lift(const Analysis &, llvm::MemoryBufferRef buffer, uint32_t rva, bool wrapper,
+          const fs::path &output);
 } // namespace forge

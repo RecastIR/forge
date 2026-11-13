@@ -7,6 +7,12 @@ endif()
 project(Forge LANGUAGES C CXX)
 
 include(cmake/llvm.cmake)
+foreach(action format format-check format-audit)
+  add_custom_target(${action}
+    COMMAND "${CMAKE_COMMAND}" "-DACTION=${action}" "-DLLVM_DIR=${LLVM_DIR}"
+            -P "${CMAKE_CURRENT_SOURCE_DIR}/cmake/quality.cmake"
+    WORKING_DIRECTORY "${CMAKE_CURRENT_SOURCE_DIR}" VERBATIM)
+endforeach()
 add_executable(forge
   src/cli/main.cpp
   src/cli/report.cpp

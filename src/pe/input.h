@@ -8,10 +8,10 @@ namespace forge {
 // Bind identity, regular-file validation, and byte reads to the same open descriptor.
 class InputFile {
   public:
-    explicit InputFile(const fs::path& path);
+    explicit InputFile(const fs::path &path);
     ~InputFile();
-    InputFile(const InputFile&) = delete;
-    InputFile& operator=(const InputFile&) = delete;
+    InputFile(const InputFile &) = delete;
+    InputFile &operator=(const InputFile &) = delete;
     llvm::sys::fs::UniqueID id() const { return status.getUniqueID(); }
     std::unique_ptr<llvm::MemoryBuffer> read() const;
 

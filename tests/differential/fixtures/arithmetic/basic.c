@@ -2,10 +2,11 @@
 #include <inttypes.h>
 #include <string.h>
 
-int main(int argc, char** argv) {
+int main(int argc, char **argv) {
     if (!open_binary_streams() || argc != 2 || strlen(argv[1]) != 2 ||
-        strspn(argv[1], "0123456789") != 2)
+        strspn(argv[1], "0123456789") != 2) {
         return 2;
+    }
 
     const int a = 19 * (argv[1][0] - '0') - 111;
     const int b = argv[1][1] - '0' + 1;

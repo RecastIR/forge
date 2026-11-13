@@ -42,6 +42,16 @@ Priority order: **correctness and safety → architectural consistency → testa
 - Use the repository's configured formatter, linter, static analyzer, compiler warnings, and sanitizers. Do not guess their command names; inspect the build/CI definitions.
 - Do not suppress warnings or weaken checks just to make a change pass. Narrow, documented exceptions require justification.
 
+## C++ readability and mandatory self-review
+
+Apply the [C++ style guide](docs/cpp-style.md) to new and substantially modified code. Before declaring a C++ task complete, review readability alongside correctness, memory safety, and test coverage.
+
+1. Run `make format-check` and `make lint`. Inspect the changed functions even when both commands pass.
+2. Review functions around 40 substantive lines and nesting beyond three levels. Consider early returns, logical phases, and helpers with a clear responsibility. Use these thresholds as review prompts.
+3. Check dense expressions, assignments inside conditions, nested ternaries, call chains, and names. Remove unnecessary abstractions and comments that repeat the code.
+4. Trace ownership, lifetimes, state transitions, and error paths. In lifting code, check guest semantics separately from IR construction, control flow, and diagnostics. Explain non-obvious widths, extensions, memory behavior, and invariants.
+5. Verify that readability edits preserve behavior, run the relevant tests, and report the results.
+
 ## Testing and validation
 
 Every behavior change requires tests at the lowest useful level and, where cross-stage behavior is involved, at the relevant integration level.

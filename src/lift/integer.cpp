@@ -29,34 +29,39 @@ std::optional<IntegerInstruction> integerInstruction(StringRef opcode) {
                          .Case("SHR", Op::Shr)
                          .Case("SAR", Op::Sar)
                          .Default(std::nullopt);
-    if (!operation)
+    if (!operation) {
         return std::nullopt;
+    }
     StringRef suffix = opcode.drop_front(name.size());
     unsigned width = 0;
     if (suffix.consumeInteger(10, width) ||
-        (width != 8 && width != 16 && width != 32 && width != 64))
+        (width != 8 && width != 16 && width != 32 && width != 64)) {
         return std::nullopt;
+    }
     auto op = *operation;
     Form form;
     unsigned sourceWidth = width;
     if (op == Op::Movzx || op == Op::Movsx) {
         if (!suffix.consume_front("rr") || suffix.getAsInteger(10, sourceWidth) ||
             sourceWidth >= width ||
-            !(sourceWidth == 8 || sourceWidth == 16 || (op == Op::Movsx && sourceWidth == 32)))
+            !(sourceWidth == 8 || sourceWidth == 16 || (op == Op::Movsx && sourceWidth == 32))) {
             return std::nullopt;
+        }
         form = Form::Extend;
     } else if (op == Op::Shl || op == Op::Shr || op == Op::Sar) {
-        if (suffix == "r1")
+        if (suffix == "r1") {
             form = Form::ShiftOne;
-        else if (suffix == "ri")
+        } else if (suffix == "ri") {
             form = Form::ShiftImmediate;
-        else if (suffix == "rCL")
+        } else if (suffix == "rCL") {
             form = Form::ShiftCL;
-        else
+        } else {
             return std::nullopt;
+        }
     } else if (op == Op::Not || op == Op::Neg || op == Op::Inc || op == Op::Dec) {
-        if (suffix != "r")
+        if (suffix != "r") {
             return std::nullopt;
+        }
         form = Form::Reg;
     } else if (suffix == "rr" || suffix == "rr_REV") {
         form = Form::Pair;
@@ -72,28 +77,28 @@ std::optional<IntegerInstruction> integerInstruction(StringRef opcode) {
     return IntegerInstruction{op, form, width, sourceWidth};
 }
 
-void IntegerSemantics::resultFlags(Value* result) {
+void IntegerSemantics::resultFlags(Value *result) {
     flags[ZF] = ir.CreateIsNull(result);
     flags[SF] = ir.CreateIsNeg(result);
-    auto* byte = ir.CreateTruncOrBitCast(result, ir.getInt8Ty());
-    auto* population = ir.CreateUnaryIntrinsic(Intrinsic::ctpop, byte);
+    auto *byte = ir.CreateTruncOrBitCast(result, ir.getInt8Ty());
+    auto *population = ir.CreateUnaryIntrinsic(Intrinsic::ctpop, byte);
     flags[PF] = ir.CreateNot(ir.CreateTrunc(population, ir.getInt1Ty()));
 }
 
-Value* IntegerSemantics::addSub(bool subtract, Value* lhs, Value* rhs, Value* carry) {
-    auto* first = subtract ? ir.CreateSub(lhs, rhs) : ir.CreateAdd(lhs, rhs);
-    Value* result = first;
-    auto* cf = subtract ? ir.CreateICmpULT(lhs, rhs) : ir.CreateICmpULT(first, lhs);
+Value *IntegerSemantics::addSub(bool subtract, Value *lhs, Value *rhs, Value *carry) {
+    auto *first = subtract ? ir.CreateSub(lhs, rhs) : ir.CreateAdd(lhs, rhs);
+    Value *result = first;
+    auto *cf = subtract ? ir.CreateICmpULT(lhs, rhs) : ir.CreateICmpULT(first, lhs);
     if (carry) {
-        auto* bit = ir.CreateZExt(carry, lhs->getType());
+        auto *bit = ir.CreateZExt(carry, lhs->getType());
         result = subtract ? ir.CreateSub(first, bit) : ir.CreateAdd(first, bit);
-        auto* secondCarry =
+        auto *secondCarry =
             subtract ? ir.CreateICmpULT(first, bit) : ir.CreateICmpULT(result, first);
         cf = ir.CreateOr(cf, secondCarry);
     }
     flags[CF] = cf;
-    auto* different = ir.CreateXor(lhs, rhs);
-    auto* changed = ir.CreateXor(lhs, result);
+    auto *different = ir.CreateXor(lhs, rhs);
+    auto *changed = ir.CreateXor(lhs, result);
     flags[OF] =
         ir.CreateIsNeg(ir.CreateAnd(subtract ? different : ir.CreateNot(different), changed));
     flags[AF] = ir.CreateIsNotNull(ir.CreateAnd(ir.CreateXor(different, result), 0x10));
@@ -101,7 +106,7 @@ Value* IntegerSemantics::addSub(bool subtract, Value* lhs, Value* rhs, Value* ca
     return result;
 }
 
-Value* IntegerSemantics::arithmetic(Op op, Value* lhs, Value* rhs) {
+Value *IntegerSemantics::arithmetic(Op op, Value *lhs, Value *rhs) {
     switch (op) {
     case Op::Add:
     case Op::Adc:
@@ -112,8 +117,8 @@ Value* IntegerSemantics::arithmetic(Op op, Value* lhs, Value* rhs) {
                       op == Op::Adc || op == Op::Sbb ? flags[CF] : nullptr);
     case Op::Inc:
     case Op::Dec: {
-        auto* carry = flags[CF];
-        auto* result = addSub(op == Op::Dec, lhs, ConstantInt::get(lhs->getType(), 1), nullptr);
+        auto *carry = flags[CF];
+        auto *result = addSub(op == Op::Dec, lhs, ConstantInt::get(lhs->getType(), 1), nullptr);
         flags[CF] = carry;
         return result;
     }
@@ -122,7 +127,7 @@ Value* IntegerSemantics::arithmetic(Op op, Value* lhs, Value* rhs) {
     case Op::Not:
         return ir.CreateNot(lhs);
     case Op::Imul: {
-        auto* product = ir.CreateBinaryIntrinsic(Intrinsic::smul_with_overflow, lhs, rhs);
+        auto *product = ir.CreateBinaryIntrinsic(Intrinsic::smul_with_overflow, lhs, rhs);
         flags = {};
         flags[CF] = flags[OF] = ir.CreateExtractValue(product, 1);
         return ir.CreateExtractValue(product, 0);
@@ -131,7 +136,7 @@ Value* IntegerSemantics::arithmetic(Op op, Value* lhs, Value* rhs) {
     case Op::Test:
     case Op::Or:
     case Op::Xor: {
-        auto* result = op == Op::Xor  ? ir.CreateXor(lhs, rhs)
+        auto *result = op == Op::Xor  ? ir.CreateXor(lhs, rhs)
                        : op == Op::Or ? ir.CreateOr(lhs, rhs)
                                       : ir.CreateAnd(lhs, rhs);
         resultFlags(result);
@@ -144,28 +149,31 @@ Value* IntegerSemantics::arithmetic(Op op, Value* lhs, Value* rhs) {
     }
 }
 
-Value* IntegerSemantics::shift(Op op, Value* operand, Value* count) {
+Value *IntegerSemantics::shift(Op op, Value *operand, Value *count) {
     unsigned width = operand->getType()->getIntegerBitWidth();
-    auto* n = ir.CreateAnd(ir.CreateZExt(count, ir.getInt64Ty()), width == 64 ? 63 : 31);
-    auto* fixed = dyn_cast<ConstantInt>(n);
-    if (fixed && fixed->isZero())
+    auto *n = ir.CreateAnd(ir.CreateZExt(count, ir.getInt64Ty()), width == 64 ? 63 : 31);
+    auto *fixed = dyn_cast<ConstantInt>(n);
+    if (fixed && fixed->isZero()) {
         return operand;
+    }
     Flags prior = flags;
-    auto* wide = ir.CreateIntCast(operand, ir.getInt64Ty(), op == Op::Sar);
-    auto shifted = [&](Value* distance) {
-        if (op == Op::Shl)
+    auto *wide = ir.CreateIntCast(operand, ir.getInt64Ty(), op == Op::Sar);
+    auto shifted = [&](Value *distance) {
+        if (op == Op::Shl) {
             return ir.CreateShl(wide, distance);
-        if (op == Op::Shr)
+        }
+        if (op == Op::Shr) {
             return ir.CreateLShr(wide, distance);
+        }
         return ir.CreateAShr(wide, distance);
     };
-    auto* result = ir.CreateTruncOrBitCast(shifted(n), operand->getType());
+    auto *result = ir.CreateTruncOrBitCast(shifted(n), operand->getType());
     resultFlags(result);
     flags[AF] = nullptr;
     // Model the final one-bit step. Both distances are always legal i64 shifts,
     // including zero and counts greater than the narrow guest operand width.
-    auto* beforeLast = shifted(ir.CreateAnd(ir.CreateSub(n, ir.getInt64(1)), 63));
-    auto* carry = ir.CreateTrunc(op == Op::Shl ? ir.CreateLShr(beforeLast, width - 1) : beforeLast,
+    auto *beforeLast = shifted(ir.CreateAnd(ir.CreateSub(n, ir.getInt64(1)), 63));
+    auto *carry = ir.CreateTrunc(op == Op::Shl ? ir.CreateLShr(beforeLast, width - 1) : beforeLast,
                                  ir.getInt1Ty());
     flags[CF] =
         op == Op::Sar || width >= 32 || (fixed && fixed->getZExtValue() < width) ? carry : nullptr;
@@ -176,15 +184,16 @@ Value* IntegerSemantics::shift(Op op, Value* operand, Value* count) {
                                     : ir.CreateXor(flags[SF], carry);
     }
     if (!fixed) {
-        auto* zero = ir.CreateIsNull(n);
-        for (unsigned f = 0; f < FlagCount; ++f)
+        auto *zero = ir.CreateIsNull(n);
+        for (unsigned f = 0; f < FlagCount; ++f) {
             flags[f] = prior[f] && flags[f] ? ir.CreateSelect(zero, prior[f], flags[f]) : nullptr;
+        }
     }
     return result;
 }
 
-Value* IntegerSemantics::condition(unsigned code, function_ref<Value*(Flag)> require) {
-    Value* bit = nullptr;
+Value *IntegerSemantics::condition(unsigned code, function_ref<Value *(Flag)> require) {
+    Value *bit = nullptr;
     switch (code >> 1) {
     case 0:
         bit = require(OF);

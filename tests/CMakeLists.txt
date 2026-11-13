@@ -83,6 +83,10 @@ foreach(tool llvm-mc lld-link llvm-dlltool llvm-readobj clang opt llc)
 endforeach()
 add_test(NAME build_config COMMAND "${Python3_EXECUTABLE}" -B
   "${CMAKE_CURRENT_SOURCE_DIR}/integration/test_build.py" "${PROJECT_SOURCE_DIR}" "${CMAKE_COMMAND}" "${LLVM_DIR}" "${llvm_bin}")
+if(llvm_version STREQUAL "23.1.5" AND EXISTS "${llvm_bin}/clang-format" AND EXISTS "${llvm_bin}/clang-tidy")
+  add_test(NAME cpp_style COMMAND "${Python3_EXECUTABLE}" -B
+    "${CMAKE_CURRENT_SOURCE_DIR}/integration/test_style.py" "${PROJECT_SOURCE_DIR}" "${llvm_bin}")
+endif()
 set(fixtures "${PROJECT_BINARY_DIR}/fixtures")
 add_test(NAME fixtures COMMAND "${Python3_EXECUTABLE}" -B
   "${CMAKE_CURRENT_SOURCE_DIR}/fixtures/generate.py" "${fixtures}"
