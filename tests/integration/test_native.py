@@ -172,6 +172,13 @@ def main():
                 if MODE == "codegen":
                     continue
                 run(*HARNESS_LINKER, HARNESS_OBJECT, obj, "-o", exe)
+                if MODE == "native" and name == "C addition" and source == ir:
+                    check(run(exe, input=b"1 2") == b"3\n", "complete pair at EOF")
+                    for tail in (b"4", b"4 ", b"0x"):
+                        partial = subprocess.run([exe], input=b"1 2\n" + tail,
+                                                 capture_output=True, timeout=45)
+                        check((partial.returncode, partial.stdout, partial.stderr) == (1, b"3\n", b""),
+                              ("incomplete pair at EOF", tail, partial))
                 actual = [int(s, 16) for s in run(exe, input=stdin, text=True).splitlines()]
                 check(len(actual) == len(expected), (name, source.name, len(actual), len(expected)))
                 for pair, got, want in zip(vectors, actual, expected):

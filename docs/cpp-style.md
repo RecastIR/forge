@@ -47,16 +47,26 @@ Choose the owner at the boundary where a resource is created, transferred, or re
 
 | Situation | Convention |
 | --- | --- |
-| An object fits directly in a local, member, or container | Store it by value. |
-| One owner needs dynamic storage | Use `std::unique_ptr<T>`. Do not introduce raw owning allocation in ordinary application code. |
-| Several parties must keep an object alive independently | Use `std::shared_ptr<T>` and explain who shares ownership and why. |
-| A caller grants access | Borrow by reference for required objects or by pointer when appropriate. Make nullability and any retention clear. |
-| A file, mapping, or handle needs cleanup | Reuse a suitable RAII owner. Check release on early returns, exceptions, and failed construction. |
-| A dependency transfers ownership | Follow the specific API contract. Make the handoff and cleanup explicit, including on failure. |
+| An object fits directly in a local, member, or container | Store it by value. Use owning strings and containers for retained text and buffers. |
+| Lifetime or polymorphism requires a dynamically allocated object | Use `std::unique_ptr<T>` for exclusive ownership. Express transfer in the argument or return type. |
+| Several parties must keep an object alive independently | Use `std::shared_ptr<T>` and explain who shares ownership and why. Check for cycles and use a non-owning back-reference where needed. |
+| A caller grants access | Raw references and pointers borrow by default. A borrowing parameter accepts the referenced object even when its caller holds a smart pointer. Make nullability and retention explicit. |
+| A file, mapping, or handle needs cleanup | Reuse a suitable RAII owner. Establish ownership immediately upon acquisition, including during construction. |
+| An external API requires manual allocation or transfers ownership | Confine acquisition and release to its boundary. Avoid direct `new`/`delete` and `malloc`/`free` in ordinary application code. |
 
 `llvm::StringRef`, `llvm::ArrayRef`, `llvm::MemoryBufferRef`, `std::string_view`, and `std::span` borrow storage. Copying a view copies the borrow. Keep the backing characters or elements valid through the last use, including the buffer identifier if it is read from a `MemoryBufferRef`. Before retaining a view, check whether a temporary expires, a move changes the backing storage, or a container operation reallocates or erases its elements. Copy into owning storage when the result must survive those events.
 
-In Forge, `InputFile` closes its descriptor. Its `read()` transfers a `unique_ptr<MemoryBuffer>` to the caller. The CLI keeps that buffer alive across analysis and lifting. The parser owns its `COFFObjectFile`, which still borrows the input bytes. A `MappedRange` returned by `mapRva` borrows a section from the supplied section table and bytes from the input buffer. Both must stay valid while used. [Input reader](../src/pe/input.cpp) · [CLI](../src/cli/main.cpp) · [PE parser](../src/pe/pe.cpp)
+Apply the same lifetime contract to retained pointers, references, iterators and callbacks. For a type that owns storage and also refers into it, trace the actual copy and move constructors and assignments. For example, `Translator` owns its IR builder and its `IntegerSemantics` member refers to that builder. LLVM disables copying the builder, and Forge constructs and uses the translator in place. A new move operation would have to preserve that internal reference. [Forge translator](../src/lift/lift.cpp)
+
+`InputFile` owns one descriptor. Its `read()` fills one allocation from that descriptor and transfers a `unique_ptr<MemoryBuffer>` owning both bytes and identifier. Memory consumption is proportional to the file size. After a successful read, overwriting or truncating the original file cannot change the captured bytes. A writer active during acquisition can produce a mixture of versions. The reader rejects premature EOF and the parser validates the bytes actually acquired. The CLI keeps the same buffer alive through analysis and lifting. [Input reader](../src/pe/input.cpp) · [CLI](../src/cli/main.cpp)
+
+The parser owns its `COFFObjectFile`, which borrows the input bytes. `mapRva` returns a `MappedRange` borrowing both a section-table element and bytes from the caller's buffer. Reallocating the section vector invalidates the section reference even while the buffer lives. Reuse `mapRva` and `View::slice` for binary access. Check the offset before subtracting it from the available size, then check the requested length before slicing, pointer arithmetic, or reading. [PE parser](../src/pe/pe.cpp)
+
+### Cleanup and completion
+
+Prefer members that release their own resources. A resource owner needs intentional copy and move behavior and a non-throwing destructor. Keep `InputFile` nonmovable. If construction can fail after acquisition, protect the acquired resource until a fully constructed owner takes responsibility. Trace cleanup on early returns and during exception unwinding. Introduce a small resource-specific wrapper only when existing owners cannot express a concrete lifetime.
+
+When callers need to observe failure, finish explicitly while an error can still be reported. For example, the lifter closes the temporary IR stream, checks its error, then renames the file. `ToolOutputFile` removes unpublished output during unwinding. [IR publication](../src/lift/lift.cpp)
 
 ### LLVM IR and temporary strings
 

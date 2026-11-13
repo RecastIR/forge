@@ -2,6 +2,7 @@
 #include "lift/asm_info.h"
 #include "lift/integer.h"
 
+#include "llvm/ADT/ScopeExit.h"
 #include "llvm/ADT/SmallString.h"
 #include "llvm/IR/IRBuilder.h"
 #include "llvm/IR/Module.h"
@@ -13,6 +14,7 @@
 #include "llvm/MC/MCRegisterInfo.h"
 #include "llvm/MC/MCSubtargetInfo.h"
 #include "llvm/MC/TargetRegistry.h"
+#include "llvm/Support/Errno.h"
 #include "llvm/Support/FileSystem.h"
 #include "llvm/Support/TargetSelect.h"
 #include "llvm/Support/ToolOutputFile.h"
@@ -20,7 +22,9 @@
 
 #include <algorithm>
 #include <array>
+#include <fcntl.h>
 #include <map>
+#include <unistd.h>
 
 namespace forge {
     namespace {
@@ -33,8 +37,8 @@ namespace forge {
         struct Step {
             uint32_t rva, next;
             MCInst inst;
-            StringRef opcode;
-            StringRef bytes;
+            StringRef opcode; // Borrows the MC instruction-name table.
+            StringRef bytes;  // Borrows the input buffer through translation.
 
             [[noreturn]] void reject(const Twine &reason) const {
                 fail(rva, opcode + " [" + toHex(bytes, true) + "]: " + reason);
@@ -431,21 +435,50 @@ namespace forge {
         void publish(const llvm::Module &module, const fs::path &path) {
             SmallString<128> temporary;
             int fd;
+
             if (auto ec = sys::fs::createUniqueFile(path.string() + ".tmp-%%%%%%", fd, temporary)) {
                 throw InspectionError(ec.message(), "OUTPUT_ERROR");
             }
+
+            llvm::scope_exit discardOnFailure([&] {
+                // Preserve the acquisition error while rolling back the unpublished file.
+                (void)sys::fs::closeFile(fd);
+                (void)sys::fs::remove(temporary);
+            });
+
+            // LLVM reserves descriptors 0–2 even if open() reused a closed standard stream.
+            if (fd <= STDERR_FILENO) {
+                const int Duplicate =
+                    sys::RetryAfterSignal(-1, ::fcntl, fd, F_DUPFD_CLOEXEC, STDERR_FILENO + 1);
+
+                if (Duplicate < 0) {
+                    throw InspectionError(sys::StrError(), "OUTPUT_ERROR");
+                }
+
+                const auto Error = sys::fs::closeFile(fd);
+                fd = Duplicate;
+
+                if (Error) {
+                    throw InspectionError(Error.message(), "OUTPUT_ERROR");
+                }
+            }
+
             ToolOutputFile file(temporary, fd);
+            discardOnFailure.release();
             auto &stream = file.os();
             module.print(stream, nullptr);
             stream.close();
+
             if (stream.has_error()) {
                 auto error = stream.error();
                 stream.clear_error();
                 throw InspectionError(error.message(), "OUTPUT_ERROR");
             }
+
             if (auto ec = sys::fs::rename(temporary, path.native())) {
                 throw InspectionError(ec.message(), "OUTPUT_ERROR");
             }
+
             file.keep();
         }
     } // namespace

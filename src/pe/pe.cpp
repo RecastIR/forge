@@ -81,6 +81,8 @@ namespace forge {
             }
         }
 
+        // The caller's buffer backs both file and the owned COFF object for the lifetime
+        // of this parser. inspect() returns metadata with its own storage.
         class Image {
           public:
             explicit Image(MemoryBufferRef buffer);

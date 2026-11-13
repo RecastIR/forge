@@ -109,7 +109,7 @@ Before declaring work complete, inspect the diff as though reviewing someone els
 - **Readability:** Can a reader follow the logical phases without unpacking dense expressions or jumping through trivial helpers?
 - Review vertical spacing explicitly. Separate independent control-flow statements and logical phases according to the C++ style guide. A successful formatter run does not establish that function bodies have readable paragraph structure. [Indentation and vertical spacing](docs/cpp-style.md#indentation-and-vertical-spacing)
 - Never remove useful blank lines, compress statements, or introduce trivial helpers merely to reduce function-length metrics. Function length is a review signal, not a reason to make code denser.
-- **Ownership:** Who owns each new resource, and which values borrow from it? Could an early return, move, container mutation, or IR mutation invalidate a borrow?
+- For changes affecting host memory or resources, follow the [ownership guide](docs/cpp-style.md#ownership-and-borrowed-storage). Trace each acquisition, transfer and release for lost or duplicated ownership. Check retained borrows across moves, mutations, callbacks and IR transformations. Inspect destruction order and cleanup on every relevant exit, including failed construction. Verify bounds, arithmetic, initialization and guards before access. Identify the tests that exercise each relationship and any paths still unverified.
 - **Behavior preservation:** Did cleanup change a guard, evaluation order, side effect, destruction point, or error path? In lifting code, did it change a width, conversion, register, or flag update?
 - **Complexity and reuse:** What current problem does each new abstraction or stored value solve? Could an existing representation or mechanism serve it? How is derived state kept valid?
 - **Diagnostics:** Did you inspect maintainability warnings relevant to changed code and justify each remaining exception?
@@ -118,6 +118,8 @@ Before declaring work complete, inspect the diff as though reviewing someone els
 - **Scope:** Did unrelated changes, generated files, temporary artifacts, or accidental dependency changes slip in?
 
 Fix issues found during self-review and rerun affected checks. Report meaningful remaining risks or exceptions briefly. A trivial change needs no checklist recital. Credit independent review only when someone else performed it.
+
+For changes affecting these lifetimes or access guarantees, include a brief **Memory and Resource Safety** section in the completion report. For each area reviewed, identify the owner and borrowers, the finding and fix or reason the existing behavior is sound, and the test evidence and limitations. For sanitizer runs, identify the components both instrumented and exercised.
 
 ## Change boundaries and communication
 

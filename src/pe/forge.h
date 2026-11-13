@@ -37,8 +37,8 @@ namespace forge {
         uint64_t fileOffset;
     };
 
-    // The section and bytes borrow from the supplied image. Omitting size maps to
-    // the end of the file-backed part of the section.
+    // The result borrows a section from 'sections' and bytes from 'file'. Both must remain
+    // valid through its last use. Omitting size maps to the end of the file-backed extent.
     std::optional<MappedRange> mapRva(llvm::ArrayRef<Section> sections, llvm::StringRef file,
                                       uint64_t rva, std::optional<uint32_t> size = std::nullopt);
 

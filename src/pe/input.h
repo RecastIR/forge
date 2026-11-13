@@ -15,6 +15,8 @@ namespace forge {
 
         llvm::sys::fs::UniqueID id() const { return status.getUniqueID(); }
 
+        // Transfers the bytes and identifier. Both survive destruction of this reader
+        // and subsequent changes to the underlying file.
         std::unique_ptr<llvm::MemoryBuffer> read() const;
 
       private:

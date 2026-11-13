@@ -323,7 +323,7 @@ class Lift(Case):
         self.assertEqual(output.read_bytes(), b"old contents")
         self.assertEqual(list(self.dir.glob("*.tmp-*")), [])
 
-        self.invoke(*args)
+        self.invoke(*args, preexec_fn=lambda: os.close(0))
         self.assertIn("define internal void @forge_lifted_1000(", output.read_text())
         self.assertEqual(previous.read_bytes(), b"old contents")
         output.unlink()
@@ -333,6 +333,20 @@ class Lift(Case):
         p = self.invoke(*args, code=1)
         self.assertIn(b"OUTPUT_ERROR", p.stderr)
         self.assertEqual(sentinel.read_bytes(), b"keep")
+        self.assertEqual(list(self.dir.glob("*.tmp-*")), [])
+
+    def test_publication_descriptor_transfer_failure(self):
+        output = self.dir / "function.ll"
+        output.write_bytes(b"old contents")
+
+        def only_stdin_slot_available():
+            os.close(0)
+            resource.setrlimit(resource.RLIMIT_NOFILE, (3, resource.getrlimit(resource.RLIMIT_NOFILE)[1]))
+
+        p = self.invoke("lift", FIXTURES / "add.exe", "--rva", "0x1000", "--output", output,
+                        code=1, preexec_fn=only_stdin_slot_available)
+        self.assertIn(b"OUTPUT_ERROR", p.stderr)
+        self.assertEqual(output.read_bytes(), b"old contents")
         self.assertEqual(list(self.dir.glob("*.tmp-*")), [])
 
     def test_relocation_overlaps_instruction(self):
