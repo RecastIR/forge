@@ -23,6 +23,8 @@ if(NOT ACTION STREQUAL "lint")
   return()
 endif()
 
+execute_process(COMMAND "${executable}" --verify-config "--config-file=${root}/.clang-tidy"
+  WORKING_DIRECTORY "${root}" COMMAND_ERROR_IS_FATAL ANY)
 execute_process(COMMAND "${python}" -B "${style}" native-sources
   WORKING_DIRECTORY "${root}" OUTPUT_VARIABLE source_list OUTPUT_STRIP_TRAILING_WHITESPACE
   COMMAND_ERROR_IS_FATAL ANY)

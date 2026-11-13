@@ -1,14 +1,15 @@
 """Run clang-tidy with LLVM 23's co-allocated IR operand storage annotated."""
 import json
 from pathlib import Path
+import re
 import subprocess
 import sys
 import tempfile
 
-from style import changed_sources, native
+from style import changed_sources, native, sources
 
 
-ADVISORY_CHECKS = ("readability-identifier-naming", "readability-avoid-nested-conditional-operator")
+CHANGED_LINE_CHECKS = ("readability-identifier-naming", "readability-avoid-nested-conditional-operator")
 
 # LLVM User::operator new reserves storage immediately before the object.
 # ArrayBound models the C++ object as its own allocation and diagnoses valid
@@ -24,7 +25,7 @@ OPERAND_ACCESS = {
 }
 
 
-def check_changed_style(tidy, database, sources, changes):
+def check_changed_style(command, translation_units, changes):
     filters = []
     inputs = []
     for path, ranges in changes.items():
@@ -41,16 +42,21 @@ def check_changed_style(tidy, database, sources, changes):
         return 0
     # clang-tidy diagnoses headers while parsing their including translation units.
     if len(inputs) != len(filters):
-        inputs = sources
-    return subprocess.run([tidy, "-p", database, "--checks=-*," + ",".join(ADVISORY_CHECKS),
+        inputs = translation_units
+    return subprocess.run([*command, "--checks=-*," + ",".join(CHANGED_LINE_CHECKS),
                            "--line-filter=" + json.dumps(filters), *inputs]).returncode
 
 
-def main(include, tidy, database_flag, database, *sources):
+def main(include, tidy, database_flag, database, *translation_units):
     changes = changed_sources()
+    headers = [str(path.absolute()) for path in sources() if native(path) and path.suffix == ".h"]
+    header_filter = "^(" + "|".join(map(re.escape, headers)) + ")$" if headers else "^$"
     with tempfile.TemporaryDirectory() as temp:
         folder = Path(temp)
-        files = []
+        # clang-tidy filters the spelling used by the include, which can contain
+        # "..". Give each owned header its canonical name without changing its contents.
+        files = [{"type": "file", "name": path, "external-contents": path, "use-external-name": True}
+                 for path in headers]
         for name, expressions in OPERAND_ACCESS.items():
             header = Path(include) / "llvm/IR" / name
             lines = header.read_text().splitlines(keepends=True)
@@ -62,14 +68,14 @@ def main(include, tidy, database_flag, database, *sources):
                 files.append({"type": "file", "name": str(header), "external-contents": str(copy)})
         overlay = folder / "llvm-operands.json"
         overlay.write_text(json.dumps({"version": 0, "use-external-names": False, "roots": files}))
-        # Check braces and correctness across complete translation units. Only
-        # naming and nested conditionals use the changed-line filter.
-        disable_advisories = ",".join("-" + check for check in ADVISORY_CHECKS)
-        result = subprocess.run([tidy, database_flag, database, "--checks=" + disable_advisories,
-                                 *sources, f"--vfsoverlay={overlay}"])
+        command = [tidy, database_flag, database, f"--config-file={Path.cwd() / '.clang-tidy'}",
+                   f"--header-filter={header_filter}", f"--vfsoverlay={overlay}"]
+        # Keep function-level diagnostics visible at declarations outside the diff.
+        disable_changed_line_checks = ",".join("-" + check for check in CHANGED_LINE_CHECKS)
+        result = subprocess.run([*command, "--checks=" + disable_changed_line_checks, *translation_units])
         if result.returncode:
             return result.returncode
-        return check_changed_style(tidy, database, sources, changes)
+        return check_changed_style(command, translation_units, changes)
 
 
 if __name__ == "__main__":

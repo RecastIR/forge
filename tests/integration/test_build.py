@@ -146,7 +146,8 @@ class BuildConfig(unittest.TestCase):
         tidy = self.tmp / "clang-tidy"
         tidy.write_text('#!/bin/sh\ncase "$1" in\n'
                         '  --version) echo "LLVM version 23.1.5" ;;\n'
-                        '  *) case "$3" in --checks=-readability-*) printf "%s\\n" "$@" > "$0.args";; esac ;;\n'
+                        '  *) for arg do case "$arg" in --checks=-readability-*) '
+                        'printf "%s\\n" "$@" > "$0.args";; esac; done ;;\n'
                         'esac\n')
         tidy.chmod(0o755)
         command = ["make", "lint", f"LLVM_CONFIG={config}", f"LINT_DATABASE={database}"]
@@ -156,9 +157,8 @@ class BuildConfig(unittest.TestCase):
         self.assertEqual(args[:2], ["-p", str(build)])
         expected = [str(p) for folder in ("src", "tests/support", "tests/unit")
                     for p in (SOURCE / folder).rglob("*.cpp")]
-        self.assertTrue(args[-1].startswith("--vfsoverlay="))
-        self.assertTrue(args[2].startswith("--checks=-readability-"))
-        self.assertCountEqual(args[3:-1], expected)
+        self.assertTrue(any(arg.startswith("--vfsoverlay=") for arg in args))
+        self.assertCountEqual([arg for arg in args if arg.endswith(".cpp")], expected)
         self.assertEqual(database.read_bytes(), contents)
 
         for missing in (harness, SOURCE / "src/pe/pe.cpp", SOURCE / "tests/unit/integer.cpp"):

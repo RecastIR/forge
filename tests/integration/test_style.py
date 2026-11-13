@@ -1,4 +1,4 @@
-"""Exercise whole-tree formatting and braces, and changed-line advisory lint."""
+"""Exercise the formatting and lint policies with the selected LLVM tools."""
 import json
 import os
 from pathlib import Path
@@ -17,15 +17,16 @@ class StyleChecks(unittest.TestCase):
     def setUp(self):
         temp = tempfile.TemporaryDirectory()
         self.addCleanup(temp.cleanup)
-        self.root = Path(temp.name).resolve()
+        self.root = Path(temp.name).resolve() / 'src' / 'forge'
+        self.root.mkdir(parents=True)
         self.env = dict(os.environ, LLVM_CONFIG=str(LLVM_BIN / 'llvm-config'), GIT_CONFIG_NOSYSTEM='1',
                         GIT_CONFIG_GLOBAL=os.devnull)
         for key in ('LLVM_DIR', 'FORGE_STYLE_BASE', 'CMAKE_ARGS', 'MAKEFLAGS', 'MFLAGS', 'MAKEOVERRIDES'):
             self.env.pop(key, None)
         for file in ('CMakeLists.txt', 'Makefile', '.clang-format', '.clang-tidy', '.gitignore'):
             shutil.copyfile(SOURCE / file, self.root / file)
-        for folder in ('cmake', 'src'):
-            shutil.copytree(SOURCE / folder, self.root / folder)
+        shutil.copytree(SOURCE / 'cmake', self.root / 'cmake')
+        (self.root / 'src').mkdir()
         self.file = self.root / 'src/legacy.cpp'
         self.file.write_text(FORMATTED)
         self.header = self.root / 'src/model.h'
@@ -44,7 +45,81 @@ class StyleChecks(unittest.TestCase):
         self.assertEqual(p.returncode == 0, success, f'{args}\n{p.stdout}')
         return p.stdout
 
+    def fixture_lint_command(self):
+        # Supply both native translation units to the real make lint entry point.
+        flags = [str(LLVM_BIN / 'clang++'), '-std=c++20', '-I', str(self.root),
+                 '-isystem', str(LLVM_BIN.parent / 'include')]
+        if sys.platform == 'darwin':
+            flags.extend(['-isysroot', self.run_command('xcrun', '--sdk', 'macosx', '--show-sdk-path').strip()])
+        db = self.root / 'compile_commands.json'
+        db.write_text(json.dumps([{'directory': str(self.root), 'file': str(path),
+                                   'arguments': [*flags, '-c', str(path)]}
+                                  for path in (self.file, self.caller)]))
+        return ('make', 'lint', f'LINT_DATABASE={db}')
+
+    def test_whole_function_and_lifetime_advisories(self):
+        command = self.fixture_lint_command()
+        self.header.write_text('inline int score(int Value) {\n    return Value;\n}\n')
+        included = ('src/generated', 'src/third_party', 'tests/support/vendor',
+                    'tests/differential/fixtures', 'tests/support', 'tests/unit')
+        paths = []
+        for index, directory in enumerate(included):
+            path = self.root / directory / f'helper{index}.h'
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_text(f'inline void helper{index}() {{ return; }}\n')
+            paths.append(path)
+        self.caller.write_text(
+            '#include "../src/model.h"\n' +
+            ''.join(f'#include "{path.relative_to(self.root)}"\n' for path in paths) +
+            '#include <llvm/ADT/Twine.h>\n'
+            'std::string label(int Value) {\n'
+            '    llvm::Twine Label = llvm::Twine("label") + llvm::Twine(Value);\n'
+            '    return Label.str();\n}\n'
+            'int choose(int Value) {\n'
+            '    if (Value > 0) { return score(Value); } else { return 0; }\n}\n')
+        self.run_command('git', 'add', 'src', 'tests')
+        self.run_command('git', '-c', 'user.name=Test', '-c', 'user.email=test@localhost',
+                         'commit', '-qm', 'baseline advisory fixtures')
+        # Seven nested conditions score 28. Only the function body changes.
+        body = ''.join('    ' * n + f'if (Value > {n}) {{\n' for n in range(1, 8))
+        body += '    ' * 8 + 'return 1;\n'
+        body += ''.join('    ' * n + '}\n' for n in reversed(range(1, 8)))
+        self.header.write_text(self.header.read_text().replace('    return Value;', body + '    return Value;'))
+        env = dict(self.env, FORGE_STYLE_BASE='HEAD')
+        before = self.run_command('git', 'diff')
+        output = self.run_command(*command, env=env)
+        for check in ('readability-function-cognitive-complexity', 'readability-function-size'):
+            self.assertRegex(output, rf'model\.h:1:\d+: warning: .*\[{check}\]')
+        self.assertRegex(output, r'model\.h:\d+:\d+: note: \+\d')
+        for check in ('llvm-twine-local', 'readability-else-after-return'):
+            self.assertRegex(output, rf'sample\.cpp:\d+:\d+: warning: .*\[{check}\]')
+        for path in paths[-2:]:
+            self.assertRegex(output, rf'{path.name}:1:\d+: warning: .*\[readability-redundant-control-flow\]')
+        for path in paths[:-2]:
+            self.assertNotIn(f'{path.name}:1:', output)
+        self.assertEqual(self.run_command('git', 'diff'), before)
+
+        with self.caller.open('a') as stream:
+            stream.write('int broken() { int *Pointer = nullptr; return *Pointer; }\n')
+        output = self.run_command(*command, success=False, env=env)
+        self.assertIn('[readability-function-cognitive-complexity]', output)
+        self.assertIn('clang-analyzer-core.NullDereference', output)
+
+    def test_invalid_lint_configuration_fails(self):
+        command = self.fixture_lint_command()
+        config = self.root / '.clang-tidy'
+        original = config.read_text()
+        for valid, invalid, diagnostic in (
+                ('readability-else-after-return', 'readability-misspelled-check', 'unknown check'),
+                ("LineThreshold: '80'", "LineThreshold: 'invalid'", 'clang-tidy-config')):
+            with self.subTest(invalid=invalid):
+                config.write_text(original.replace(valid, invalid))
+                output = self.run_command(*command, success=False)
+                self.assertIn(diagnostic, output)
+                self.assertIn(invalid.split(':')[0], output)
+
     def test_whole_tree_formatting_and_entry_points(self):
+        shutil.copytree(SOURCE / 'src', self.root / 'src', dirs_exist_ok=True)
         self.run_command('cmake', '-S', '.', '-B', 'build', '-DBUILD_TESTING=OFF')
         target = ('cmake', '--build', 'build', '--target')
         bad = FORMATTED.replace('    int Value', '  int Value')

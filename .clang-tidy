@@ -4,21 +4,32 @@ Checks: >
   clang-analyzer-*,
   performance-*,
   portability-*,
+  llvm-twine-local,
   modernize-use-nullptr,
   modernize-use-override,
   readability-duplicate-include,
   readability-misleading-indentation,
   readability-braces-around-statements,
   readability-identifier-naming,
-  readability-avoid-nested-conditional-operator
+  readability-avoid-nested-conditional-operator,
+  readability-function-cognitive-complexity,
+  readability-function-size,
+  readability-else-after-return,
+  readability-redundant-control-flow
 WarningsAsErrors: >
   clang-analyzer-*,
+  clang-tidy-config,
   bugprone-dangling-handle,
   bugprone-undefined-memory-manipulation,
   bugprone-use-after-move,
   readability-braces-around-statements
+# make lint narrows this to the owned native headers in the current checkout.
 HeaderFilterRegex: '(^|/)(src|tests/(support|unit))/.+\.h$'
 CheckOptions:
+  readability-function-cognitive-complexity.Threshold: '25'
+  readability-function-cognitive-complexity.DescribeBasicIncrements: 'true'
+  readability-function-size.LineThreshold: '80'
+  readability-function-size.NestingThreshold: '3'
   readability-braces-around-statements.ShortStatementLines: 0
   readability-identifier-naming.ClassCase: CamelCase
   readability-identifier-naming.StructCase: CamelCase

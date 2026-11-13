@@ -64,7 +64,7 @@ Forge uses four-space indentation and checks formatting and braces across its C 
 make format-check   # Check all owned files for formatting and fixtures for braces
 make format         # Apply formatting across the same tree
 make format-audit   # Run the whole-tree check without writing
-make lint           # Analyze native C++, enforce braces, and report changed-line advisories
+make lint           # Check native safety and braces, report whole-function and changed-line advisories
 make test CONFIG=Debug
 make sanitize       # Run CTest in a separate Debug build with ASan and UBSan
 ```
