@@ -11,9 +11,11 @@ if(DEFINED FORGE_DIFFERENTIAL_IR OR CMAKE_EXPORT_COMPILE_COMMANDS)
   endif()
 endif()
 if(DEFINED FORGE_DIFFERENTIAL_IR)
-  if(NOT APPLE OR NOT LLVM_VERSION_MAJOR EQUAL 17)
-    message(FATAL_ERROR "Differential harness compilation requires macOS and LLVM 17")
+  if(NOT APPLE)
+    message(FATAL_ERROR "Differential harness compilation requires macOS")
   endif()
+  forge_llvm_tool(opt)
+  forge_llvm_tool(llc)
   set(object "${CMAKE_CURRENT_BINARY_DIR}/lifted.o")
   if(NOT DEFINED FORGE_DIFFERENTIAL_VARIANT)
     set(FORGE_DIFFERENTIAL_VARIANT baseline)
@@ -24,16 +26,16 @@ if(DEFINED FORGE_DIFFERENTIAL_IR)
     get_filename_component(ir_directory "${FORGE_DIFFERENTIAL_IR}" DIRECTORY)
     get_filename_component(ir_name "${FORGE_DIFFERENTIAL_IR}" NAME)
     add_custom_command(OUTPUT "${input_ir}"
-      COMMAND "${LLVM_TOOLS_BINARY_DIR}/opt" -passes=verify -disable-output "${ir_name}"
-      COMMAND "${LLVM_TOOLS_BINARY_DIR}/opt" "-passes=default<O2>" -S "${ir_name}" -o "${input_ir}"
+      COMMAND "${opt}" -passes=verify -disable-output "${ir_name}"
+      COMMAND "${opt}" "-passes=default<O2>" -S "${ir_name}" -o "${input_ir}"
       WORKING_DIRECTORY "${ir_directory}"
       DEPENDS "${FORGE_DIFFERENTIAL_IR}" VERBATIM)
   elseif(NOT FORGE_DIFFERENTIAL_VARIANT STREQUAL "baseline")
     message(FATAL_ERROR "Select baseline or o2 for the differential IR variant")
   endif()
   add_custom_command(OUTPUT "${object}"
-    COMMAND "${LLVM_TOOLS_BINARY_DIR}/opt" -passes=verify -disable-output "${input_ir}"
-    COMMAND "${LLVM_TOOLS_BINARY_DIR}/llc" -filetype=obj "${input_ir}" -o "${object}"
+    COMMAND "${opt}" -passes=verify -disable-output "${input_ir}"
+    COMMAND "${llc}" -filetype=obj "${input_ir}" -o "${object}"
     DEPENDS "${input_ir}" VERBATIM)
   add_custom_target(differential_decimal_pairs_objects DEPENDS "${object}")
   add_dependencies(differential_decimal_pairs_objects decimal_pairs)
@@ -77,14 +79,10 @@ add_test(NAME windows_differential_runner COMMAND "${Python3_EXECUTABLE}" -B
 add_test(NAME differential_coverage COMMAND "${Python3_EXECUTABLE}" -B
   "${CMAKE_CURRENT_SOURCE_DIR}/differential/test_coverage.py")
 foreach(tool llvm-mc lld-link llvm-dlltool llvm-readobj clang opt llc)
-  if(EXISTS "${CMAKE_BINARY_DIR}/CMakeCache.txt" AND NOT FORGE_FIXTURE_LLVM_DIR STREQUAL LLVM_DIR)
-    unset(${tool} CACHE)
-  endif()
-  find_program(${tool} NAMES ${tool} HINTS "${LLVM_TOOLS_BINARY_DIR}" REQUIRED)
+  forge_llvm_tool("${tool}")
 endforeach()
-set(FORGE_FIXTURE_LLVM_DIR "${LLVM_DIR}" CACHE INTERNAL "LLVM package used for fixture tools")
 add_test(NAME build_config COMMAND "${Python3_EXECUTABLE}" -B
-  "${CMAKE_CURRENT_SOURCE_DIR}/integration/test_build.py" "${PROJECT_SOURCE_DIR}" "${CMAKE_COMMAND}" "${LLVM_DIR}")
+  "${CMAKE_CURRENT_SOURCE_DIR}/integration/test_build.py" "${PROJECT_SOURCE_DIR}" "${CMAKE_COMMAND}" "${LLVM_DIR}" "${llvm_bin}")
 set(fixtures "${PROJECT_BINARY_DIR}/fixtures")
 add_test(NAME fixtures COMMAND "${Python3_EXECUTABLE}" -B
   "${CMAKE_CURRENT_SOURCE_DIR}/fixtures/generate.py" "${fixtures}"

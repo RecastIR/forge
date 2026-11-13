@@ -1,6 +1,7 @@
 BUILD_DIR ?= build
 build_config = $(or $(CONFIG),Debug)
 configure_flags = $(if $(LLVM_DIR),"-DLLVM_DIR=$(LLVM_DIR)") \
+                  $(if $(LLVM_CONFIG),"-DLLVM_CONFIG=$(LLVM_CONFIG)") \
                   $(if $(BUILD_TESTING),"-DBUILD_TESTING=$(BUILD_TESTING)") \
                   $(if $(CONFIG),"-DCMAKE_BUILD_TYPE=$(CONFIG)") \
                   $(if $(SANITIZE),"-DFORGE_ENABLE_SANITIZERS=$(SANITIZE)")

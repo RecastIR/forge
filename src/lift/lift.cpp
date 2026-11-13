@@ -88,6 +88,8 @@ constexpr std::array<StringLiteral, 7> lowRegs{"EAX", "ECX", "EDX", "R8D", "R9D"
 constexpr std::array<StringLiteral, 7> words{"AX", "CX", "DX", "R8W", "R9W", "R10W", "R11W"};
 constexpr std::array<StringLiteral, 7> lowBytes{"AL", "CL", "DL", "R8B", "R9B", "R10B", "R11B"};
 constexpr std::array<StringLiteral, 3> highBytes{"AH", "CH", "DH"};
+// The signatureless ABI accepts a four-byte-aligned register array.
+constexpr auto registerStateAlignment = Align::Constant<4>();
 struct RegisterView {
     unsigned index, width, offset = 0;
     uint64_t mask() const { return maskTrailingOnes<uint64_t>(width) << offset; }
@@ -193,7 +195,8 @@ RegisterView Translator::reg(const Step& s, const MCOperand& op, unsigned width)
 Value* Translator::read(const Step& s, RegisterView view) {
     if ((defined[view.index] & view.mask()) != view.mask())
         s.reject("native wrapper requires undefined incoming " + wideRegs[view.index]);
-    Value* v = ir.CreateLoad(ir.getInt64Ty(), slot(impl->getArg(0), view.index));
+    Value* v = ir.CreateAlignedLoad(ir.getInt64Ty(), slot(impl->getArg(0), view.index),
+                                    registerStateAlignment);
     if (view.offset)
         v = ir.CreateLShr(v, view.offset);
     return ir.CreateTruncOrBitCast(v, ir.getIntNTy(view.width));
@@ -209,13 +212,13 @@ void Translator::write(RegisterView view, Value* v) {
     auto* ptr = slot(impl->getArg(0), view.index);
     auto* result = ir.CreateZExtOrBitCast(v, ir.getInt64Ty());
     if (view.width < 32) {
-        auto* parent = ir.CreateLoad(ir.getInt64Ty(), ptr);
+        auto* parent = ir.CreateAlignedLoad(ir.getInt64Ty(), ptr, registerStateAlignment);
         result = ir.CreateOr(ir.CreateAnd(parent, ~view.mask()), ir.CreateShl(result, view.offset));
         defined[view.index] |= view.mask();
     } else {
         defined[view.index] = UINT64_MAX;
     }
-    ir.CreateStore(result, ptr);
+    ir.CreateAlignedStore(result, ptr, registerStateAlignment);
 }
 
 Value* Translator::require(const Step& s, x86::Flag flag) const {
@@ -429,21 +432,21 @@ void lift(const Analysis& a, MemoryBufferRef buffer, uint32_t rva, bool wrapper,
     LLVMInitializeX86Disassembler();
     Triple triple("x86_64-pc-windows-msvc");
     std::string error;
-    const auto* target = TargetRegistry::lookupTarget(triple.str(), error);
+    const auto* target = TargetRegistry::lookupTarget(triple, error);
     if (!target)
         fail(rva, error);
-    std::unique_ptr<MCRegisterInfo> regs(target->createMCRegInfo(triple.str()));
+    std::unique_ptr<MCRegisterInfo> regs(target->createMCRegInfo(triple));
     std::unique_ptr<MCInstrInfo> instructions(target->createMCInstrInfo());
-    std::unique_ptr<MCSubtargetInfo> sub(
-        target->createMCSubtargetInfo(triple.str(), "generic", ""));
-    std::unique_ptr<MCAsmInfo> assembly(
-        target->createMCAsmInfo(*regs, triple.str(), MCTargetOptions()));
-    MCContext mc(triple, assembly.get(), regs.get(), sub.get());
+    std::unique_ptr<MCSubtargetInfo> sub(target->createMCSubtargetInfo(triple, "generic", ""));
+    std::unique_ptr<MCAsmInfo> assembly(target->createMCAsmInfo(*regs, triple, MCTargetOptions()));
+    MCContext mc(triple, *assembly, *regs, *sub);
     std::unique_ptr<MCDisassembler> dis(target->createMCDisassembler(*sub, mc));
     auto steps = decode(code->bytes, rva, *dis, *instructions);
     LLVMContext context;
     llvm::Module module("forge_" + utohexstr(rva, true), context);
-    module.setTargetTriple("arm64-apple-macosx11.0.0");
+    Triple nativeTriple("arm64-apple-macosx11.0.0");
+    module.setTargetTriple(nativeTriple);
+    module.setDataLayout(nativeTriple.computeDataLayout());
     Translator(module, rva, wrapper, *regs).translate(steps);
     raw_string_ostream errors(error);
     if (verifyModule(module, &errors))

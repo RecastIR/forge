@@ -26,13 +26,13 @@ template <typename T, typename F> Array array(const std::vector<T>& values, F co
 }
 
 Object importJson(const Import& i) {
-    return Object{
-        {"name", i.name},
-        {"normalized_name", i.normalizedName},
-        {"load_type", loadType(i)},
-        {"symbols", array(i.symbols, [](const Symbol& s) {
-             return s.ordinal ? Object{{"ordinal", *s.ordinal}} : Object{{"name", s.name}};
-         })}};
+    return Object{{"name", i.name},
+                  {"normalized_name", i.normalizedName},
+                  {"load_type", loadType(i)},
+                  {"symbols", array(i.symbols, [](const Symbol& s) {
+                       return s.ordinal ? Object{{"ordinal", *s.ordinal}}
+                                        : Object{{"name", s.name}};
+                   })}};
 }
 
 Object moduleJson(const Module& m) {

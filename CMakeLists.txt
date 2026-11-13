@@ -6,12 +6,7 @@ if(source_dir STREQUAL binary_dir)
 endif()
 project(Forge LANGUAGES C CXX)
 
-if(APPLE AND NOT LLVM_DIR AND NOT DEFINED ENV{LLVM_DIR})
-  execute_process(COMMAND brew --prefix llvm@17 OUTPUT_VARIABLE brew_llvm_prefix
-                  OUTPUT_STRIP_TRAILING_WHITESPACE ERROR_QUIET)
-endif()
-find_package(LLVM REQUIRED CONFIG HINTS ${brew_llvm_prefix})
-message(STATUS "Using LLVM ${LLVM_PACKAGE_VERSION}")
+include(cmake/llvm.cmake)
 add_executable(forge
   src/cli/main.cpp
   src/cli/report.cpp
@@ -59,6 +54,11 @@ add_library(forge_integer OBJECT src/lift/integer.cpp)
 target_include_directories(forge_integer PUBLIC src)
 target_include_directories(forge_integer SYSTEM PUBLIC ${LLVM_INCLUDE_DIRS})
 target_link_libraries(forge_integer PUBLIC LLVMCore)
+if(APPLE AND TARGET LTO)
+  # The release archive contains ThinLTO objects. Let Apple's linker read
+  # those objects with the matching LLVM bitcode reader.
+  target_link_options(forge_integer INTERFACE "LINKER:-lto_library,$<TARGET_FILE:LTO>")
+endif()
 configure_forge_cxx(forge_integer)
 target_link_libraries(forge PRIVATE forge_integer)
 configure_forge_cxx(forge)

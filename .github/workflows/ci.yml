@@ -25,22 +25,16 @@ jobs:
         with:
           path: ${{ runner.temp }}/unicorn-wheels
           key: unicorn-2.1.4-macos-arm64-python3.12-v1
-      - name: Set up LLVM and the function oracle
+      - uses: ./.github/actions/llvm
+      - name: Set up the function oracle
         run: |
-          brew install llvm@17 python@3.12
-          llvm_config="$(brew --prefix llvm@17)/bin/llvm-config"
-          test "$("$llvm_config" --version)" = 17.0.6
-          test "$(uname -m)" = arm64
+          brew install python@3.12
           venv="$RUNNER_TEMP/forge-python"
           "$(brew --prefix python@3.12)/bin/python3.12" -m venv "$venv"
           wheels="$RUNNER_TEMP/unicorn-wheels"
           "$venv/bin/python" -m pip download --no-deps --only-binary=:all: --dest "$wheels" unicorn==2.1.4
           "$venv/bin/python" -m pip install --no-index --find-links "$wheels" unicorn==2.1.4
-          {
-            echo "LLVM_CONFIG=$llvm_config"
-            echo "LLVM_DIR=$("$llvm_config" --cmakedir)"
-            echo "CMAKE_ARGS=-DPython3_EXECUTABLE=$venv/bin/python"
-          } >> "$GITHUB_ENV"
+          echo "CMAKE_ARGS=-DPython3_EXECUTABLE=$venv/bin/python" >> "$GITHUB_ENV"
       - name: Check formatting, lint, Debug CTest, and sanitizer CTest
         id: verify
         run: ./tools/test-forge.sh --native
@@ -104,13 +98,7 @@ jobs:
     runs-on: macos-26
     steps:
       - uses: actions/checkout@v6
-      - name: Set up the native harness compiler
-        run: |
-          test "$(uname -m)" = arm64
-          brew install llvm@17
-          llvm_config="$(brew --prefix llvm@17)/bin/llvm-config"
-          test "$("$llvm_config" --version)" = 17.0.6
-          echo "LLVM_DIR=$("$llvm_config" --cmakedir)" >> "$GITHUB_ENV"
+      - uses: ./.github/actions/llvm
       - uses: actions/download-artifact@v4
         with:
           name: tested-macos-arm64-forge
