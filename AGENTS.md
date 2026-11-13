@@ -19,6 +19,7 @@ Priority order: **correctness and safety → architectural consistency → testa
 ## Design and architecture
 
 - Respect boundaries between binary/container parsing, analysis, intermediate representations, lifting, code generation, linking/packaging, runtime support, and validation. Use the actual repository module structure as the authority.
+- Keep guest instruction semantics and calling conventions distinct from the generated-code target and data layout. Introduce architecture abstractions only for a current consumer.
 - Each stage must have clear inputs, outputs, invariants, error behavior, and ownership. Avoid hidden cross-stage state and implicit coupling.
 - Prefer explicit typed models and stable interfaces to stringly typed conventions, ad hoc maps, magic values, and global mutable state.
 - Preserve provenance where needed for diagnostics: input file, address/range, symbol, transformation stage, and relevant source metadata.

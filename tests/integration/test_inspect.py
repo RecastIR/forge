@@ -293,6 +293,34 @@ class Malformed(Case):
                 struct.pack_into("<I", data, offset, value)
                 self.invalid(data, expected)
 
+    def test_analysis_skips_import_and_export_details(self):
+        for fixture, directory, field, expected in (
+            ("metadata.exe", 1, 12, "import DLL name"),
+            ("delay.exe", 13, 4, "import DLL name"),
+            ("Physics.DLL", 0, 32, "export name pointers"),
+        ):
+            with self.subTest(fixture=fixture):
+                baseline = self.invoke("analyze", FIXTURES / fixture, "--functions", "--format", "json")
+                data = bytearray((FIXTURES / fixture).read_bytes())
+                layout = Layout(data)
+                offset = layout.file_offset(layout.directory(directory)[0])
+                struct.pack_into("<I", data, offset + field, 0x7fff0000)
+                self.invalid(data, expected)
+                analysis = self.invoke("analyze", self.dir / "bad.exe", "--functions", "--format", "json")
+                self.assertEqual(analysis.stdout, baseline.stdout)
+
+    def test_analysis_validates_consumed_directory_extents(self):
+        for fixture, directory in (("metadata.exe", 1), ("delay.exe", 13), ("Physics.DLL", 0), ("add.exe", 3)):
+            with self.subTest(fixture=fixture):
+                data = bytearray((FIXTURES / fixture).read_bytes())
+                layout = Layout(data)
+                rva, _ = layout.directory(directory)
+                limit, = (start + min(size, raw) for size, start, raw, _ in layout.sections
+                          if start <= rva < start + min(size, raw))
+                struct.pack_into("<I", data, layout.directories + 8 * directory + 4, limit - rva + 1)
+                self.invalid(data, "range exceeds available bytes")
+                self.invoke("analyze", self.dir / "bad.exe", "--functions", code=1 if directory == 3 else 0)
+
     def test_names_and_directory_forms(self):
         data = bytearray((FIXTURES / "metadata.exe").read_bytes())
         info = Layout(data)

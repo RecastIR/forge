@@ -29,23 +29,30 @@ namespace forge::x86 {
                              .Case("SHR", Op::Shr)
                              .Case("SAR", Op::Sar)
                              .Default(std::nullopt);
+
         if (!operation) {
             return std::nullopt;
         }
+
         StringRef suffix = opcode.drop_front(name.size());
         unsigned width = 0;
+
         if (suffix.consumeInteger(10, width) ||
             (width != 8 && width != 16 && width != 32 && width != 64)) {
+
             return std::nullopt;
         }
+
         auto op = *operation;
         Form form;
         unsigned sourceWidth = width;
+
         if (op == Op::Movzx || op == Op::Movsx) {
             if (!suffix.consume_front("rr") || suffix.getAsInteger(10, sourceWidth) ||
                 sourceWidth >= width ||
                 !(sourceWidth == 8 || sourceWidth == 16 ||
                   (op == Op::Movsx && sourceWidth == 32))) {
+
                 return std::nullopt;
             }
             form = Form::Extend;
@@ -63,6 +70,7 @@ namespace forge::x86 {
             if (suffix != "r") {
                 return std::nullopt;
             }
+
             form = Form::Reg;
         } else if (suffix == "rr" || suffix == "rr_REV") {
             form = Form::Pair;
@@ -75,6 +83,7 @@ namespace forge::x86 {
         } else {
             return std::nullopt;
         }
+
         return IntegerInstruction{op, form, width, sourceWidth};
     }
 
@@ -90,6 +99,7 @@ namespace forge::x86 {
         auto *first = subtract ? ir.CreateSub(lhs, rhs) : ir.CreateAdd(lhs, rhs);
         Value *result = first;
         auto *cf = subtract ? ir.CreateICmpULT(lhs, rhs) : ir.CreateICmpULT(first, lhs);
+
         if (carry) {
             auto *bit = ir.CreateZExt(carry, lhs->getType());
             result = subtract ? ir.CreateSub(first, bit) : ir.CreateAdd(first, bit);
@@ -97,6 +107,7 @@ namespace forge::x86 {
                 subtract ? ir.CreateICmpULT(first, bit) : ir.CreateICmpULT(result, first);
             cf = ir.CreateOr(cf, secondCarry);
         }
+
         flags[CF] = cf;
         auto *different = ir.CreateXor(lhs, rhs);
         auto *changed = ir.CreateXor(lhs, result);
@@ -104,6 +115,7 @@ namespace forge::x86 {
             ir.CreateIsNeg(ir.CreateAnd(subtract ? different : ir.CreateNot(different), changed));
         flags[AF] = ir.CreateIsNotNull(ir.CreateAnd(ir.CreateXor(different, result), 0x10));
         resultFlags(result);
+
         return result;
     }
 
@@ -143,6 +155,7 @@ namespace forge::x86 {
             resultFlags(result);
             flags[CF] = flags[OF] = ir.getFalse();
             flags[AF] = nullptr;
+
             return result;
         }
         default:
@@ -154,23 +167,29 @@ namespace forge::x86 {
         unsigned width = operand->getType()->getIntegerBitWidth();
         auto *n = ir.CreateAnd(ir.CreateZExt(count, ir.getInt64Ty()), width == 64 ? 63 : 31);
         auto *fixed = dyn_cast<ConstantInt>(n);
+
         if (fixed && fixed->isZero()) {
             return operand;
         }
+
         Flags prior = flags;
         auto *wide = ir.CreateIntCast(operand, ir.getInt64Ty(), op == Op::Sar);
         auto shifted = [&](Value *distance) {
             if (op == Op::Shl) {
                 return ir.CreateShl(wide, distance);
             }
+
             if (op == Op::Shr) {
                 return ir.CreateLShr(wide, distance);
             }
+
             return ir.CreateAShr(wide, distance);
         };
+
         auto *result = ir.CreateTruncOrBitCast(shifted(n), operand->getType());
         resultFlags(result);
         flags[AF] = nullptr;
+
         // Model the final one-bit step. Both distances are always legal i64 shifts,
         // including zero and counts greater than the narrow guest operand width.
         auto *beforeLast = shifted(ir.CreateAnd(ir.CreateSub(n, ir.getInt64(1)), 63));
@@ -180,23 +199,28 @@ namespace forge::x86 {
                         ? carry
                         : nullptr;
         flags[OF] = nullptr;
+
         if (fixed && fixed->isOne()) {
             flags[OF] = op == Op::Sar   ? ir.getFalse()
                         : op == Op::Shr ? ir.CreateIsNeg(operand)
                                         : ir.CreateXor(flags[SF], carry);
         }
+
         if (!fixed) {
             auto *zero = ir.CreateIsNull(n);
+
             for (unsigned f = 0; f < FlagCount; ++f) {
                 flags[f] =
                     prior[f] && flags[f] ? ir.CreateSelect(zero, prior[f], flags[f]) : nullptr;
             }
         }
+
         return result;
     }
 
     Value *IntegerSemantics::condition(unsigned code, function_ref<Value *(Flag)> require) {
         Value *bit = nullptr;
+
         switch (code >> 1) {
         case 0:
             bit = require(OF);
@@ -225,6 +249,7 @@ namespace forge::x86 {
         default:
             llvm_unreachable("invalid condition nibble");
         }
+
         return code & 1U ? ir.CreateNot(bit) : bit;
     }
 } // namespace forge::x86

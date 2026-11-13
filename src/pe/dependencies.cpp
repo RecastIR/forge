@@ -1,6 +1,6 @@
-#include "forge.h"
+#include "dependencies.h"
 
-#include "input.h"
+#include "diagnostic.h"
 #include "llvm/ADT/STLExtras.h"
 
 #include <algorithm>
@@ -13,17 +13,17 @@ namespace forge {
         namespace lfs = llvm::sys::fs;
 
         std::string classify(StringRef name) {
-            static constexpr StringRef System[] = {"advapi32.dll", "combase.dll",    "gdi32.dll",
-                                                   "kernel32.dll", "kernelbase.dll", "ntdll.dll",
-                                                   "ole32.dll",    "shell32.dll",    "shlwapi.dll",
-                                                   "user32.dll",   "ws2_32.dll"};
-            static constexpr StringRef Runtime[] = {"msvcp140.dll", "msvcp140_1.dll",
-                                                    "msvcp140_2.dll", "vcruntime140.dll",
-                                                    "vcruntime140_1.dll"};
-            if (llvm::is_contained(System, name)) {
+            static constexpr StringRef systemDlls[] = {
+                "advapi32.dll",   "combase.dll", "gdi32.dll", "kernel32.dll",
+                "kernelbase.dll", "ntdll.dll",   "ole32.dll", "shell32.dll",
+                "shlwapi.dll",    "user32.dll",  "ws2_32.dll"};
+            static constexpr StringRef runtimeDlls[] = {"msvcp140.dll", "msvcp140_1.dll",
+                                                        "msvcp140_2.dll", "vcruntime140.dll",
+                                                        "vcruntime140_1.dll"};
+            if (llvm::is_contained(systemDlls, name)) {
                 return "windows_system";
             }
-            if (llvm::is_contained(Runtime, name)) {
+            if (llvm::is_contained(runtimeDlls, name)) {
                 return "third_party_runtime";
             }
             if (name.starts_with("api-ms-") || name.starts_with("ext-ms-") ||
@@ -40,8 +40,8 @@ namespace forge {
             explicit Directory(const fs::path &dir) {
                 fs::directory_iterator it(dir, error);
                 while (!error && it != fs::directory_iterator()) {
-                    const auto Path = it->path();
-                    byName[StringRef(Path.filename().native()).lower()].push_back(Path);
+                    const auto path = it->path();
+                    byName[StringRef(path.filename().native()).lower()].push_back(path);
                     it.increment(error);
                 }
             }
@@ -113,32 +113,43 @@ namespace forge {
                           std::vector<Module> &modules) {
             InputFile input(path);
             auto id = input.id();
+
             if (auto it = cache.find(id); it != cache.end()) {
                 if (auto *error = std::get_if<InspectionError>(&it->second)) {
                     throw *error;
                 }
+
                 return std::get<size_t>(it->second);
             }
-            auto file = input.read();
+
             Module module;
+
             try {
-                module = inspectPE(file->getMemBufferRef());
+                module = inspectPE(input);
             } catch (const InspectionError &e) {
-                cache.emplace(id, e);
+                // Failed reads can be retried through another alias; malformed images are cached.
+                if (e.kind != FailureCode::InputRead) {
+                    cache.emplace(id, e);
+                }
+
                 throw;
             }
+
             size_t index = modules.size();
+
             if (module.dll) {
                 cache.emplace(id, index);
             } else {
                 // A valid EXE root cannot satisfy a later DLL import through an alias.
-                InspectionError error("expected a DLL image", "NOT_DLL");
+                InspectionError error("expected a DLL image", FailureCode::NotDll);
+                error.context.input = path;
                 cache.emplace(id, error);
+
                 if (!isRoot) {
                     throw error;
                 }
             }
-            module.path = path;
+
             modules.push_back(std::move(module));
             return index;
         }
@@ -185,7 +196,9 @@ namespace forge {
             std::error_code ec;
             auto canonical = fs::canonical(path, ec);
             if (ec) {
-                throw InspectionError(ec.message(), "READ_ERROR");
+                InspectionError error(ec.message(), FailureCode::InputOpen);
+                error.context.input = path;
+                throw error;
             }
             size_t module = loadModule(canonical, isRoot, files, report.modules);
             auto [it, added] =
@@ -212,13 +225,14 @@ namespace forge {
                             edge.kind = "application";
                         }
                     } catch (const InspectionError &e) {
-                        edge.architecture = e.architecture;
-                        if (e.code == "READ_ERROR") {
+                        edge.architecture = e.context.architecture;
+                        if (e.kind == FailureCode::InputOpen || e.kind == FailureCode::InputRead) {
                             issue(edge, "inaccessible", "DLL_READ_ERROR", e.what());
                         } else {
                             issue(edge, "incompatible",
-                                  e.code == "UNSUPPORTED_ARCHITECTURE" ? "DLL_ARCH_MISMATCH"
-                                                                       : "DLL_INVALID_IMAGE",
+                                  e.kind == FailureCode::UnsupportedArchitecture
+                                      ? "DLL_ARCH_MISMATCH"
+                                      : "DLL_INVALID_IMAGE",
                                   e.what());
                         }
                     }

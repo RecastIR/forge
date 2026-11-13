@@ -161,9 +161,40 @@ class Discovery(Case):
                     self.assertFalse(any(f["liftable"] for f in functions[:2]))
                     self.assertCountEqual(a["diagnostics"][0]["record_indices"], [1, 2])
                     self.assertEqual(a["diagnostics"][0]["code"], "FUNCTION_RANGE_OVERLAP")
-                    self.invoke("lift", image, "--rva", hex(first[0]), "--output", self.dir/"bad.ll", code=1)
+                    args = ("lift", image, "--rva", hex(first[0]), "--output", self.dir/"bad.ll")
+                    self.assertIn(b"expected an exact, valid, unambiguous", self.invoke(*args, code=1).stderr)
+                    diagnostic = json.loads(self.invoke(*args, "--diagnostics-format", "json", code=1).stderr)
+                    self.assertEqual(diagnostic["code"], "ENTRY_INVALID_START")
+                    self.assertEqual(diagnostic["context"], dict(input=str(image), entry_rva=hex(first[0])))
                 self.invoke("lift", image, "--rva", hex(third[0]), "--output", self.dir/"ok.ll")
                 self.assertTrue(all(f["status"] == "valid" for f in functions if int(f["start_rva"],16) >= third[0]))
+
+    def test_exact_range_diagnostics(self):
+        original = (FIXTURES / "add.exe").read_bytes()
+        layout = Layout(original)
+        off = layout.file_offset(layout.directory(3)[0])
+        start, end, unwind = struct.unpack_from("<III", original, off)
+        image = self.dir / "entry.exe"
+        output = self.dir / "entry.ll"
+        for requested, stop, code in (
+                (start + 1, end, "ENTRY_INVALID_START"),
+                (start, start, "ENTRY_INVALID_START"),
+                (start, end + 0x100, "ENTRY_UNMAPPED_CODE")):
+            with self.subTest(requested=requested, end=stop):
+                data = bytearray(original)
+                struct.pack_into("<III", data, off, start, stop, unwind)
+                image.write_bytes(data)
+                args = ("lift", image, "--rva", hex(requested), "--output", output)
+                reason = "expected an exact, valid, unambiguous discovered function start"
+                self.assertEqual(self.invoke(*args, code=1).stderr,
+                                 f"{image}: LIFT_ERROR: {requested:#x}: {reason}\n".encode())
+                failure = json.loads(self.invoke(*args, "--diagnostics-format", "json", code=1).stderr)
+                context = dict(input=str(image), entry_rva=hex(requested))
+                if code == "ENTRY_UNMAPPED_CODE":
+                    context["end_rva"] = hex(stop)
+                self.assertEqual((failure["category"], failure["code"], failure["context"]),
+                                 ("invalid_input", code, context))
+                self.assertFalse(output.exists())
 
     def test_empty_range_at_valid_start(self):
         data = bytearray((FIXTURES / "arithmetic.exe").read_bytes())
@@ -250,6 +281,83 @@ class Lift(Case):
         os.mkfifo(fifo)
         self.invoke("lift", fifo, "--rva", "0", "--output", output, code=1)
         self.assertEqual(output.read_text(), "keep me")
+
+    def test_json_diagnostics(self):
+        good = FIXTURES / "add.exe"
+        corrupt = self.dir / "malformed.exe"
+        corrupt.write_bytes(b"not a PE")
+        missing = self.dir / "missing.exe"
+        output = self.dir / "result.ll"
+        invalid_output = self.dir / "absent" / "result.ll"
+        unsupported = self.copy("arithmetic.exe", 'encoded "name".exe')
+        data = bytearray(unsupported.read_bytes())
+        offset = Layout(data).file_offset(0x1000)
+        # The first MOV is accepted. PUSH at the next instruction is unsupported.
+        data[offset:offset + 7] = bytes.fromhex("48 89 c8 50 c3 cc cc")
+        unsupported.write_bytes(data)
+
+        for image, dest, start, expected in (
+            (corrupt, output, "0x1000", ("pe", "invalid_input", "INVALID_PE")),
+            (missing, output, "0x1000", ("input", "io", "INPUT_OPEN")),
+            (FIXTURES / "i386.exe", output, "0x1000", ("pe", "unsupported", "UNSUPPORTED_ARCHITECTURE")),
+            (good, output, "0x1001", ("entry", "invalid_input", "ENTRY_INVALID_START")),
+            (unsupported, output, "0x1000", ("lifting", "unsupported", "LIFT_UNSUPPORTED_INSTRUCTION")),
+            (good, invalid_output, "0x1000", ("publication", "io", "OUTPUT_CREATE")),
+        ):
+            with self.subTest(code=expected[-1]):
+                args = ("lift", image, "--rva", start, "--output", dest)
+                result = self.invoke(*args, "--diagnostics-format", "json", code=1)
+                self.assertEqual(result.stdout, b"")
+                self.assertTrue(result.stderr.endswith(b"\n"))
+                self.assertEqual(result.stderr.count(b"\n"), 1)
+                doc = json.loads(result.stderr.decode("utf-8"))
+                self.assertEqual(set(doc), {"schema_version", "stage", "category", "code", "message", "context"})
+                self.assertIs(type(doc["schema_version"]), int)
+                self.assertEqual(doc["schema_version"], 1)
+                self.assertTrue(doc["message"])
+                self.assertEqual((doc["stage"], doc["category"], doc["code"]), expected)
+                context = doc["context"]
+                self.assertEqual((context["input"], context["entry_rva"]), (str(image), start))
+                if image == unsupported:
+                    self.assertEqual((context["instruction_rva"], context["end_rva"], context["bytes"]),
+                                     ("0x1003", "0x1007", "50"))
+                    self.assertIn("PUSH", context["opcode"])
+                if image.name == "i386.exe":
+                    self.assertEqual(context["architecture"], "i386")
+                if expected[0] == "publication":
+                    self.assertEqual(context["output"], str(dest))
+                self.assertEqual(self.invoke(*args, code=1).stderr,
+                                 self.invoke(*args, "--diagnostics-format", "text", code=1).stderr)
+                self.assertFalse(dest.exists())
+
+        result = self.invoke("lift", good, "--rva", "0x1000", "--output", output,
+                             "--diagnostics-format", "json")
+        self.assertEqual((result.stdout, result.stderr), (b"", b""))
+        self.assertIn("forge_lifted_1000", output.read_text())
+
+    def test_json_usage_and_output_aliases(self):
+        image = self.copy("add.exe")
+        before = image.read_bytes()
+        hard = self.dir / "hard"
+        os.link(image, hard)
+        sym = self.dir / "sym"
+        sym.symlink_to(image)
+        for alias in (image, hard, sym):
+            args = ("lift", image, "--rva", "0x1001", "--output", alias)
+            default = self.invoke(*args, code=2)
+            requested = self.invoke(*args, "--diagnostics-format", "json", code=2)
+            self.assertEqual(requested.stderr, default.stderr)
+            self.assertTrue(requested.stderr.startswith(b"forge: --output must differ"))
+            self.assertEqual(alias.read_bytes(), before)
+        for args in (("lift", "--diagnostics-format", "JSON"),
+                     ("lift", "--diagnostics-format", "json", "--rva", "bad"),
+                     ("lift", "--diagnostics-format"),
+                     ("inspect", image, "--diagnostics-format", "json"),
+                     ("analyze", image, "--functions", "--diagnostics-format", "json")):
+            result = self.invoke(*args, code=2)
+            self.assertEqual(result.stdout, b"")
+            self.assertTrue(result.stderr.startswith(b"forge: "))
+            self.assertIn(b"Usage: forge", result.stderr)
 
     def test_reject_unsupported_and_unproven(self):
         original = (FIXTURES / "arithmetic.exe").read_bytes()

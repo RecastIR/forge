@@ -105,6 +105,37 @@ class StyleChecks(unittest.TestCase):
         self.assertIn('[readability-function-cognitive-complexity]', output)
         self.assertIn('clang-analyzer-core.NullDereference', output)
 
+    def test_constant_naming(self):
+        self.caller.write_text("""\
+struct Bounds {
+    const int origin;
+    const int Extent;
+    static constexpr int maxWidth = 16;
+};
+
+constexpr int defaultWidth = Bounds::maxWidth;
+const int DefaultHeight = defaultWidth;
+
+int measure(const int start, const int End) {
+    constexpr int UnitSize = 8;
+    constexpr int extraUnits = 1;
+    const int distance = End - start;
+    const int Size = distance * UnitSize;
+    return Size + extraUnits;
+}
+""")
+        output = self.run_command(*self.fixture_lint_command())
+        for kind, accepted, rejected in (
+                ('constant member', 'origin', 'Extent'),
+                ('constant parameter', 'start', 'End'),
+                ('local constant', 'distance', 'Size'),
+                ('constexpr variable', 'extraUnits', 'UnitSize')):
+            with self.subTest(kind=kind):
+                self.assertIn(f"invalid case style for {kind} '{rejected}' [readability-identifier-naming]", output)
+                self.assertNotIn(f"'{accepted}' [readability-identifier-naming]", output)
+        for name in ('maxWidth', 'defaultWidth', 'DefaultHeight'):
+            self.assertNotIn(f"'{name}' [readability-identifier-naming]", output)
+
     def test_invalid_lint_configuration_fails(self):
         command = self.fixture_lint_command()
         config = self.root / '.clang-tidy'
@@ -146,10 +177,10 @@ class StyleChecks(unittest.TestCase):
 namespace forge {
 namespace {
 void report() {
-const auto Range = findRuntimeFunctionContainingAddress(Analysis.ExceptionDirectory.RuntimeFunctions, Address);
+const auto range = findRuntimeFunctionContainingAddress(Analysis.ExceptionDirectory.RuntimeFunctions, Address);
 
-if (Range) {
-    printRange(Range);
+if (range) {
+    printRange(range);
 }
 
 
@@ -165,11 +196,11 @@ void finish() {}
 namespace forge {
     namespace {
         void report() {
-            const auto Range = findRuntimeFunctionContainingAddress(
+            const auto range = findRuntimeFunctionContainingAddress(
                 Analysis.ExceptionDirectory.RuntimeFunctions, Address);
 
-            if (Range) {
-                printRange(Range);
+            if (range) {
+                printRange(range);
             }
 
             if (Verbose) {

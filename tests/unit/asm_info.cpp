@@ -16,14 +16,14 @@ static_assert(!std::is_invocable_v<decltype(createAsmInfo), const Target &, cons
 int main() try {
     LLVMInitializeX86TargetInfo();
     LLVMInitializeX86TargetMC();
-    const Triple Guest("x86_64-pc-windows-msvc");
+    const Triple guest("x86_64-pc-windows-msvc");
     std::string error;
-    const auto *target = TargetRegistry::lookupTarget(Guest, error);
+    const auto *target = TargetRegistry::lookupTarget(guest, error);
     if (!target) {
         errs() << error << '\n';
         return 1;
     }
-    std::unique_ptr<MCRegisterInfo> registers(target->createMCRegInfo(Guest));
+    std::unique_ptr<MCRegisterInfo> registers(target->createMCRegInfo(guest));
     if (!registers) {
         errs() << "X86 register info unavailable\n";
         return 1;
@@ -31,7 +31,7 @@ int main() try {
 
     MCTargetOptions options;
     options.OutputAsmVariant = 1;
-    auto assembly = createAsmInfo(*target, *registers, Guest, options);
+    auto assembly = createAsmInfo(*target, *registers, guest, options);
     if (!assembly || &assembly->getTargetOptions() != &options) {
         errs() << "X86 assembly info must borrow the caller's target options\n";
         return 1;

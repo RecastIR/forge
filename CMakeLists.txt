@@ -13,17 +13,6 @@ foreach(action format format-check format-audit)
             -P "${CMAKE_CURRENT_SOURCE_DIR}/cmake/quality.cmake"
     WORKING_DIRECTORY "${CMAKE_CURRENT_SOURCE_DIR}" VERBATIM)
 endforeach()
-add_executable(forge
-  src/cli/main.cpp
-  src/cli/report.cpp
-  src/pe/dependencies.cpp
-  src/lift/lift.cpp)
-set_target_properties(forge PROPERTIES LINK_LIBRARIES_STRATEGY REORDER_FREELY)
-target_include_directories(forge PRIVATE src)
-target_include_directories(forge SYSTEM PRIVATE ${LLVM_INCLUDE_DIRS})
-target_link_libraries(forge PRIVATE LLVMTransformUtils LLVMCore
-  LLVMX86Disassembler LLVMX86Desc LLVMX86Info)
-
 option(FORGE_ENABLE_SANITIZERS "Build Forge with AddressSanitizer and UndefinedBehaviorSanitizer" OFF)
 if(FORGE_ENABLE_SANITIZERS)
   set(sanitizer_link_flags -fsanitize=address,undefined)
@@ -42,7 +31,6 @@ if(FORGE_ENABLE_SANITIZERS)
     endif()
   endfunction()
   check_sanitizers()
-  target_link_options(forge PRIVATE ${sanitizer_link_flags})
 endif()
 
 function(configure_forge_cxx target)
@@ -53,24 +41,27 @@ function(configure_forge_cxx target)
   endif()
   target_compile_options(${target} PRIVATE ${sanitizer_compile_flags})
 endfunction()
-add_library(forge_inspection OBJECT
-  src/pe/input.cpp src/pe/pe.cpp src/analysis/analysis.cpp)
-target_include_directories(forge_inspection PUBLIC src)
-target_include_directories(forge_inspection SYSTEM PUBLIC ${LLVM_INCLUDE_DIRS})
-target_link_libraries(forge_inspection PUBLIC LLVMDebugInfoDWARF LLVMObject)
-configure_forge_cxx(forge_inspection)
-add_library(forge_integer OBJECT src/lift/integer.cpp)
-target_include_directories(forge_integer PUBLIC src)
-target_include_directories(forge_integer SYSTEM PUBLIC ${LLVM_INCLUDE_DIRS})
-target_link_libraries(forge_integer PUBLIC LLVMCore)
+add_library(forge_core STATIC
+  src/diagnostic.cpp
+  src/pe/input.cpp src/pe/pe.cpp src/pe/dependencies.cpp
+  src/analysis/analysis.cpp
+  src/lift/integer.cpp src/lift/lift.cpp
+  src/output/publication.cpp)
+target_include_directories(forge_core PUBLIC src)
+target_include_directories(forge_core SYSTEM PUBLIC ${LLVM_INCLUDE_DIRS})
+target_link_libraries(forge_core PUBLIC LLVMDebugInfoDWARF LLVMObject LLVMTransformUtils LLVMCore
+  LLVMX86Disassembler LLVMX86Desc LLVMX86Info)
+target_link_options(forge_core INTERFACE ${sanitizer_link_flags})
 if(APPLE AND TARGET LTO)
-  # The release archive contains ThinLTO objects. Let Apple's linker read
-  # those objects with the matching LLVM bitcode reader.
-  target_link_options(forge_integer INTERFACE "LINKER:-lto_library,$<TARGET_FILE:LTO>")
-  target_link_options(forge_inspection INTERFACE "LINKER:-lto_library,$<TARGET_FILE:LTO>")
+  # The release archive contains ThinLTO objects. Use the matching LLVM bitcode reader.
+  target_link_options(forge_core INTERFACE "LINKER:-lto_library,$<TARGET_FILE:LTO>")
 endif()
-configure_forge_cxx(forge_integer)
-target_link_libraries(forge PRIVATE forge_integer forge_inspection)
+configure_forge_cxx(forge_core)
+
+add_executable(forge src/cli/main.cpp src/cli/report.cpp src/cli/analysis_report.cpp
+  src/cli/diagnostic.cpp)
+set_target_properties(forge PROPERTIES LINK_LIBRARIES_STRATEGY REORDER_FREELY)
+target_link_libraries(forge PRIVATE forge_core)
 configure_forge_cxx(forge)
 
 include(CTest)

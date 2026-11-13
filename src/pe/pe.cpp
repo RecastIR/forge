@@ -1,6 +1,8 @@
-#include "analysis/analysis.h"
+#include "image.h"
 
-#include "llvm/BinaryFormat/COFF.h"
+#include "diagnostic.h"
+
+#include "llvm/ADT/ArrayRef.h"
 #include "llvm/Object/COFF.h"
 #include "llvm/Support/JSON.h"
 #include "llvm/Support/Win64EH.h"
@@ -12,37 +14,45 @@
 #include <type_traits>
 
 namespace forge {
-
-    std::optional<MappedRange> mapRva(llvm::ArrayRef<Section> sections, llvm::StringRef file,
-                                      uint64_t rva, std::optional<uint32_t> size) {
-        for (const auto &s : sections) {
-            if (rva < s.rva) {
-                continue;
-            }
-            const uint64_t Delta = rva - s.rva;
-            const uint32_t Extent = std::min(s.virtualSize, s.rawSize);
-            if (Delta >= Extent) {
-                continue;
-            }
-            const uint32_t Available = Extent - static_cast<uint32_t>(Delta);
-            const uint32_t Length = size.value_or(Available);
-            const uint64_t Offset = uint64_t(s.fileOffset) + Delta;
-            if (Length > Available || Offset > file.size() || Length > file.size() - Offset) {
-                return std::nullopt;
-            }
-            return MappedRange{s, file.substr(Offset, Length), Offset};
-        }
-        return std::nullopt;
-    }
-
     namespace {
         using namespace llvm;
         using namespace llvm::object;
         using namespace llvm::support;
 
+        std::optional<MappedRange> mapFileRange(llvm::ArrayRef<Section> sections,
+                                                llvm::StringRef file, uint64_t rva,
+                                                std::optional<uint32_t> size = std::nullopt) {
+            for (const auto &s : sections) {
+                if (rva < s.rva) {
+                    continue;
+                }
+
+                const uint64_t delta = rva - s.rva;
+                const uint32_t extent = std::min(s.virtualSize, s.rawSize);
+
+                if (delta >= extent) {
+                    continue;
+                }
+
+                const uint32_t available = extent - static_cast<uint32_t>(delta);
+                const uint32_t length = size.value_or(available);
+                const uint64_t offset = uint64_t(s.fileOffset) + delta;
+
+                if (length > available || offset > file.size() || length > file.size() - offset) {
+                    return std::nullopt;
+                }
+
+                return MappedRange{s, file.substr(offset, length), offset};
+            }
+
+            return std::nullopt;
+        }
+
         [[noreturn]] void invalid(StringRef field, uint64_t offset, StringRef reason) {
-            throw InspectionError(field.str() + " at file offset " + hex(offset) + ": " +
+            InspectionError error(field.str() + " at file offset " + hex(offset) + ": " +
                                   reason.str());
+            error.context.fileOffset = offset;
+            throw error;
         }
 
         // Offsets in a View are relative to a single file-backed region. Read packed
@@ -83,12 +93,12 @@ namespace forge {
 
         // The caller's buffer backs both file and the owned COFF object for the lifetime
         // of this parser. inspect() returns metadata with its own storage.
-        class Image {
+        class ImageParser {
           public:
-            explicit Image(MemoryBufferRef buffer);
-            Module inspect(bool analysis = false);
+            explicit ImageParser(MemoryBufferRef buffer);
+            Module inspect(ParsePolicy policy);
 
-            const COFFObjectFile &coff() const { return *object; }
+            std::unique_ptr<COFFObjectFile> takeObject() && { return std::move(object); }
 
           private:
             View file;
@@ -108,18 +118,19 @@ namespace forge {
             void exports(Module &module);
             void relocations(Module &module);
             void tls(Module &module);
-            void exceptions(Module &module, bool recover);
+            void exceptions(Module &module, ParsePolicy policy);
         };
 
-        View Image::tail(uint64_t rva, StringRef label) const {
-            if (auto mapped = mapRva(sections, file.bytes, rva)) {
+        View ImageParser::tail(uint64_t rva, StringRef label) const {
+            if (auto mapped = mapFileRange(sections, file.bytes, rva)) {
                 return {mapped->bytes, mapped->fileOffset, label};
             }
             throw InspectionError(label.str() + " RVA " + hex(rva) +
                                   " is outside file-backed sections");
         }
 
-        Image::Image(MemoryBufferRef buffer) : file{buffer.getBuffer(), 0, "PE headers"} {
+        ImageParser::ImageParser(MemoryBufferRef buffer)
+            : file{buffer.getBuffer(), 0, "PE headers"} {
             auto dos = file.read<dos_header>();
             if (StringRef(dos.Magic, 2) != "MZ") {
                 invalid(file.label, 0, "expected an MZ executable");
@@ -129,18 +140,20 @@ namespace forge {
                 invalid(file.label, pe, "expected PE signature");
             }
 
-            const auto Coff = file.read<coff_file_header>(pe + 4);
-            if (Coff.Machine != COFF::IMAGE_FILE_MACHINE_AMD64) {
-                auto arch = machineName(Coff.Machine);
-                throw InspectionError("expected AMD64, found " + arch + " at file offset " +
+            const auto coffHeader = file.read<coff_file_header>(pe + 4);
+            if (coffHeader.Machine != COFF::IMAGE_FILE_MACHINE_AMD64) {
+                auto arch = machineName(coffHeader.Machine);
+                InspectionError error("expected AMD64, found " + arch + " at file offset " +
                                           hex(pe + 4),
-                                      "UNSUPPORTED_ARCHITECTURE", arch);
+                                      FailureCode::UnsupportedArchitecture, arch);
+                error.context.fileOffset = pe + 4;
+                throw error;
             }
-            if (!(Coff.Characteristics & COFF::IMAGE_FILE_EXECUTABLE_IMAGE)) {
+            if (!(coffHeader.Characteristics & COFF::IMAGE_FILE_EXECUTABLE_IMAGE)) {
                 invalid(file.label, pe, "expected an executable image");
             }
-            uint64_t opt = pe + 4 + sizeof(Coff);
-            View optional = file.slice(opt, Coff.SizeOfOptionalHeader);
+            uint64_t opt = pe + 4 + sizeof(coffHeader);
+            View optional = file.slice(opt, coffHeader.SizeOfOptionalHeader);
             if (optional.read<ulittle16_t>() != COFF::PE32Header::PE32_PLUS) {
                 invalid(file.label, opt, "expected PE32+ optional header");
             }
@@ -150,17 +163,17 @@ namespace forge {
             if (header.AddressOfEntryPoint && header.AddressOfEntryPoint >= header.SizeOfImage) {
                 invalid(file.label, opt, "entry point RVA exceeds SizeOfImage");
             }
-            if (!Coff.NumberOfSections || Coff.NumberOfSections > 96) {
+            if (!coffHeader.NumberOfSections || coffHeader.NumberOfSections > 96) {
                 invalid(file.label, pe, "expected 1 to 96 PE sections");
             }
-            uint64_t table = opt + Coff.SizeOfOptionalHeader;
+            uint64_t table = opt + coffHeader.SizeOfOptionalHeader;
             auto sectionHeaders =
-                file.slice(table, uint64_t(Coff.NumberOfSections) * sizeof(coff_section));
+                file.slice(table, uint64_t(coffHeader.NumberOfSections) * sizeof(coff_section));
             if (table + sectionHeaders.bytes.size() > header.SizeOfHeaders ||
                 header.SizeOfHeaders > file.bytes.size()) {
                 invalid(file.label, opt, "invalid SizeOfHeaders");
             }
-            for (unsigned i = 0; i < Coff.NumberOfSections; ++i) {
+            for (unsigned i = 0; i < coffHeader.NumberOfSections; ++i) {
                 auto s = sectionHeaders.read<coff_section>(i * sizeof(coff_section));
                 if (s.SizeOfRawData &&
                     (!s.PointerToRawData ||
@@ -196,14 +209,15 @@ namespace forge {
                                     s.PointerToRawData,
                                     s.SizeOfRawData});
             }
-            if (Coff.NumberOfSymbols && !Coff.PointerToSymbolTable) {
+            if (coffHeader.NumberOfSymbols && !coffHeader.PointerToSymbolTable) {
                 invalid("COFF symbol table", pe + 4, "missing file offset");
             }
-            if (Coff.PointerToSymbolTable) {
-                uint64_t strings = uint64_t(Coff.PointerToSymbolTable) +
-                                   uint64_t(Coff.NumberOfSymbols) * sizeof(coff_symbol16);
+            if (coffHeader.PointerToSymbolTable) {
+                uint64_t strings = uint64_t(coffHeader.PointerToSymbolTable) +
+                                   uint64_t(coffHeader.NumberOfSymbols) * sizeof(coff_symbol16);
                 if (strings > UINT32_MAX) {
-                    invalid("COFF symbol table", Coff.PointerToSymbolTable, "file offset overflow");
+                    invalid("COFF symbol table", coffHeader.PointerToSymbolTable,
+                            "file offset overflow");
                 }
                 uint32_t length = file.read<ulittle32_t>(strings);
                 auto tableBytes = file.slice(strings, length);
@@ -222,11 +236,13 @@ namespace forge {
                         tail(dir.RelativeVirtualAddress, "load configuration").slice(0, dir.Size);
                     uint32_t size = config.read<ulittle32_t>();
                     config.slice(0, size);
-                    constexpr size_t Chpe =
+                    constexpr size_t chpe =
                         offsetof(coff_load_configuration64, CHPEMetadataPointer);
-                    if (size >= Chpe + 8 && config.read<ulittle64_t>(Chpe)) {
-                        throw InspectionError("hybrid ARM64EC image; expected AMD64",
-                                              "UNSUPPORTED_ARCHITECTURE", "arm64ec");
+                    if (size >= chpe + 8 && config.read<ulittle64_t>(chpe)) {
+                        InspectionError error("hybrid ARM64EC image; expected AMD64",
+                                              FailureCode::UnsupportedArchitecture, "arm64ec");
+                        error.context.fileOffset = config.offset + chpe;
+                        throw error;
                     }
                 }
             }
@@ -237,7 +253,7 @@ namespace forge {
             object = std::move(*parsed);
         }
 
-        std::optional<View> Image::directory(unsigned index, StringRef label) const {
+        std::optional<View> ImageParser::directory(unsigned index, StringRef label) const {
             const auto *dir = object->getDataDirectory(index);
             if (!dir || (!dir->RelativeVirtualAddress && !dir->Size)) {
                 return std::nullopt;
@@ -249,14 +265,14 @@ namespace forge {
             return tail(dir->RelativeVirtualAddress, label).slice(0, dir->Size);
         }
 
-        void Image::count(size_t records, const View &where) {
+        void ImageParser::count(size_t records, const View &where) {
             if (records > remainingRecords) {
                 invalid(where.label, where.offset, "inspection record limit exceeded");
             }
             remainingRecords -= records;
         }
 
-        std::string Image::name(View data) {
+        std::string ImageParser::name(View data) {
             size_t length = data.bytes.take_front(remainingNameBytes + 1).find('\0');
             if (length == StringRef::npos) {
                 invalid(data.label, data.offset, "unterminated name or name budget exceeded");
@@ -269,7 +285,7 @@ namespace forge {
             return str.str();
         }
 
-        std::vector<Symbol> Image::symbols(uint32_t rva) {
+        std::vector<Symbol> ImageParser::symbols(uint32_t rva) {
             View data = tail(rva, "import lookup table");
             std::vector<Symbol> result;
             for (size_t pos = 0;; pos += 8) {
@@ -296,7 +312,7 @@ namespace forge {
             }
         }
 
-        void Image::imports(Module &module, bool delayed) {
+        void ImageParser::imports(Module &module, bool delayed) {
             auto dir = delayed ? directory(COFF::DELAY_IMPORT_DESCRIPTOR, "delay imports")
                                : directory(COFF::IMPORT_TABLE, "imports");
             if (!dir) {
@@ -336,7 +352,7 @@ namespace forge {
             }
         }
 
-        void Image::exports(Module &module) {
+        void ImageParser::exports(Module &module) {
             auto dir = directory(COFF::EXPORT_TABLE, "exports");
             if (!dir) {
                 return;
@@ -368,10 +384,10 @@ namespace forge {
             uint64_t base = object->getDataDirectory(COFF::EXPORT_TABLE)->RelativeVirtualAddress;
             for (uint64_t i = 0; i < entries; ++i) {
                 uint32_t rva = addresses.read<ulittle32_t>(i * 4);
-                const auto Alias =
+                const auto alias =
                     aliases.find(static_cast<uint32_t>(i)); // AddressTableEntries is 32-bit.
                 if (!rva) {
-                    if (Alias != aliases.end()) {
+                    if (alias != aliases.end()) {
                         invalid(addresses.label, addresses.offset + i * 4,
                                 "name refers to an unused ordinal");
                     }
@@ -386,8 +402,8 @@ namespace forge {
                     invalid(addresses.label, addresses.offset + i * 4, "ordinal overflow");
                 }
                 Export symbol{uint32_t(ordinal), rva, {}, {}};
-                if (Alias != aliases.end()) {
-                    symbol.names = std::move(Alias->second);
+                if (alias != aliases.end()) {
+                    symbol.names = std::move(alias->second);
                 }
                 if (rva >= base && rva - base < dir->bytes.size()) {
                     symbol.forwarder =
@@ -397,7 +413,7 @@ namespace forge {
             }
         }
 
-        void Image::relocations(Module &module) {
+        void ImageParser::relocations(Module &module) {
             auto dir = directory(COFF::BASE_RELOCATION_TABLE, "base relocations");
             if (!dir) {
                 return;
@@ -431,7 +447,7 @@ namespace forge {
             }
         }
 
-        void Image::tls(Module &module) {
+        void ImageParser::tls(Module &module) {
             auto dir = directory(COFF::TLS_TABLE, "TLS directory");
             if (!dir) {
                 return;
@@ -467,74 +483,106 @@ namespace forge {
             module.tls = std::move(result);
         }
 
-        void Image::exceptions(Module &module, bool recover) {
+        void ImageParser::exceptions(Module &module, ParsePolicy policy) {
             auto dir = directory(COFF::EXCEPTION_TABLE, "exception directory");
+
             if (!dir) {
                 return;
             }
+
             using Entry = Win64EH::RuntimeFunction;
-            if (!recover && dir->bytes.size() % sizeof(Entry)) {
+
+            if (policy == ParsePolicy::Inspection && dir->bytes.size() % sizeof(Entry)) {
                 invalid(dir->label, dir->offset, "partial AMD64 runtime function");
             }
+
             Exceptions result{
                 object->getDataDirectory(COFF::EXCEPTION_TABLE)->RelativeVirtualAddress,
                 uint32_t(dir->bytes.size()),
                 {}};
             count(dir->bytes.size() / sizeof(Entry), *dir);
+
             for (size_t i = 0; i + sizeof(Entry) <= dir->bytes.size(); i += sizeof(Entry)) {
                 auto e = dir->read<Entry>(i);
-                if (!recover &&
+
+                if (policy == ParsePolicy::Inspection &&
                     (e.StartAddress >= e.EndAddress || e.EndAddress > header.SizeOfImage ||
                      e.UnwindInfoOffset >= header.SizeOfImage)) {
                     invalid(dir->label, dir->offset + i,
                             "runtime function range or unwind RVA outside image");
                 }
+
                 result.functions.push_back({e.StartAddress, e.EndAddress, e.UnwindInfoOffset});
             }
+
             module.exceptions = std::move(result);
         }
 
-        Module Image::inspect(bool analysis) {
+        Module ImageParser::inspect(ParsePolicy policy) {
             Module module{};
+            module.machine = static_cast<COFF::MachineTypes>(object->getMachine());
             module.dll = object->getCharacteristics() & COFF::IMAGE_FILE_DLL;
             module.imageBase = object->getImageBase();
             module.entryPoint = header.AddressOfEntryPoint;
             size_t index = 0;
+
             for (const auto &section : object->sections()) {
                 auto n = section.getName();
+
                 if (!n) {
                     throw InspectionError("section name: " + toString(n.takeError()));
                 }
+
                 if (n->size() > remainingNameBytes) {
                     throw InspectionError("section name budget exceeded");
                 }
+
                 remainingNameBytes -= n->size();
+
                 if (!json::isUTF8(*n)) {
                     throw InspectionError("invalid UTF-8 section name");
                 }
+
                 sections[index++].name = n->str();
             }
-            if (!analysis) {
+
+            if (policy == ParsePolicy::Inspection) {
                 imports(module, false);
                 imports(module, true);
                 exports(module);
             }
+
             relocations(module);
             tls(module);
-            exceptions(module, analysis);
+            exceptions(module, policy);
             module.sections = std::move(sections);
             return module;
         }
     } // namespace
 
-    Module inspectPE(llvm::MemoryBufferRef buffer) { return Image(buffer).inspect(); }
-
-    Analysis analyzePE(llvm::MemoryBufferRef buffer, bool debugInfo) {
-        Image image(buffer);
-        auto result = discover(image.inspect(true), buffer.getBuffer());
-        if (debugInfo) {
-            enrichFunctions(result, image.coff());
+    ParsedImage::ParsedImage(const InputFile &input, ParsePolicy policy)
+        : identity(input.id()), openedPath(input.absolutePath()), buffer(input.read()) {
+        try {
+            ImageParser parser(buffer->getMemBufferRef());
+            metadata = parser.inspect(policy);
+            metadata.path = buffer->getBufferIdentifier().str();
+            coff = std::move(parser).takeObject();
+        } catch (InspectionError &error) {
+            error.context.input = buffer->getBufferIdentifier().str();
+            throw;
         }
-        return result;
+    }
+
+    ParsedImage::~ParsedImage() = default;
+
+    std::optional<MappedRange> ParsedImage::mapRva(uint64_t rva,
+                                                   std::optional<uint32_t> size) const {
+        return mapFileRange(metadata.sections, buffer->getBuffer(), rva, size);
+    }
+
+    const llvm::object::ObjectFile &ParsedImage::object() const { return *coff; }
+
+    Module inspectPE(const InputFile &input) {
+        return ParsedImage(input, ParsePolicy::Inspection).metadata;
     }
 } // namespace forge

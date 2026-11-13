@@ -1,16 +1,25 @@
 #include "analysis/analysis.h"
+#include "cli/report.h"
+#include "diagnostic.h"
+#include "lift/lift.h"
+#include "output/publication.h"
+#include "pe/dependencies.h"
 #include "pe/input.h"
+
+#include "llvm/IR/LLVMContext.h"
+#include "llvm/IR/Module.h"
 
 #include <charconv>
 #include <string_view>
 
 namespace {
     using namespace forge;
-    constexpr std::string_view Usage =
+    constexpr std::string_view usage =
         "Usage: forge inspect <image> [--dll-path <directory>]... [--format text|json] [--strict] "
         "[--verbose]\n"
         "       forge analyze <image> --functions [--format text|json] [--strict]\n"
-        "       forge lift <exe> --rva <rva> [--signature 'i64(i64,i64)'] --output <file.ll>\n";
+        "       forge lift <exe> --rva <rva> [--signature 'i64(i64,i64)'] --output <file.ll> "
+        "[--diagnostics-format text|json]\n";
 
     uint32_t parseRva(std::string_view value) {
         int base = 10;
@@ -18,44 +27,49 @@ namespace {
             value.remove_prefix(2);
             base = 16;
         }
+
         uint32_t rva;
         auto [end, ec] = std::from_chars(value.data(), value.data() + value.size(), rva, base);
         if (ec != std::errc{} || end != value.data() + value.size()) {
             throw std::invalid_argument("expected a 32-bit decimal or hexadecimal RVA");
         }
+
         return rva;
     }
 
-    int run(int argc, char **argv) {
-        const std::string_view Command = argc < 2 ? "" : argv[1];
-        if (Command == "--help") {
-            llvm::outs() << Usage;
-            return 0;
-        }
-        if (Command != "inspect" && Command != "analyze" && Command != "lift") {
-            throw std::invalid_argument("expected inspect, analyze, or lift");
+    bool parseJsonFormat(std::string_view option, std::string_view value) {
+        if (value != "text" && value != "json") {
+            throw std::invalid_argument(std::string(option) + " must be text or json");
         }
 
+        return value == "json";
+    }
+
+    struct Options {
+        std::string_view command;
         fs::path input, output;
         std::vector<fs::path> paths;
         std::optional<uint32_t> rva;
-        bool json = false, strict = false, verbose = false, functions = false, wrapper = false;
-        auto parseOption = [&](std::string_view arg, int &i) {
+        EntryMode entryMode = EntryMode::RegisterState;
+        bool json = false, strict = false, verbose = false, functions = false;
+        bool jsonDiagnostics = false;
+
+        void parseOption(std::string_view arg, int &i, int argc, char **argv) {
             auto value = [&]() -> std::string_view {
-                if (++i == argc || !*argv[i] || std::string_view(argv[i]).starts_with("--")) {
+                ++i;
+
+                if (i == argc || !*argv[i] || std::string_view(argv[i]).starts_with("--")) {
                     throw std::invalid_argument(std::string(arg) + " requires a value");
                 }
+
                 return argv[i];
             };
-            if (Command != "lift" && arg == "--strict") {
+
+            if (command != "lift" && arg == "--strict") {
                 strict = true;
-            } else if (Command != "lift" && arg == "--format") {
-                auto format = value();
-                if (format != "text" && format != "json") {
-                    throw std::invalid_argument("--format must be text or json");
-                }
-                json = format == "json";
-            } else if (Command == "inspect" && arg == "--dll-path") {
+            } else if (command != "lift" && arg == "--format") {
+                json = parseJsonFormat(arg, value());
+            } else if (command == "inspect" && arg == "--dll-path") {
                 fs::path path(value());
                 std::error_code ec;
                 auto dir = fs::canonical(path, ec);
@@ -63,80 +77,147 @@ namespace {
                     throw std::invalid_argument("--dll-path must name an existing directory: " +
                                                 path.string());
                 }
+
                 paths.push_back(std::move(dir));
-            } else if (Command == "inspect" && arg == "--verbose") {
+            } else if (command == "inspect" && arg == "--verbose") {
                 verbose = true;
-            } else if (Command == "analyze" && arg == "--functions") {
+            } else if (command == "analyze" && arg == "--functions") {
                 functions = true;
-            } else if (Command == "lift" && arg == "--rva") {
+            } else if (command == "lift" && arg == "--diagnostics-format") {
+                jsonDiagnostics = parseJsonFormat(arg, value());
+            } else if (command == "lift" && arg == "--rva") {
                 rva = parseRva(value());
-            } else if (Command == "lift" && arg == "--output") {
+            } else if (command == "lift" && arg == "--output") {
                 output = value();
-            } else if (Command == "lift" && arg == "--signature") {
+            } else if (command == "lift" && arg == "--signature") {
                 if (value() != "i64(i64,i64)") {
                     throw std::invalid_argument("unsupported signature; expected i64(i64,i64)");
                 }
-                wrapper = true;
+
+                entryMode = EntryMode::WindowsX64I64Pair;
             } else {
                 throw std::invalid_argument("unknown option: " + std::string(arg));
             }
-        };
+        }
+    };
+
+    int execute(const Options &options) {
+        const auto &input = options.input;
+        const bool lifting = options.command == "lift";
+        FailureCode unexpected = FailureCode::InputInternal;
+
+        try {
+            if (options.command == "inspect") {
+                auto report = inspect(input, options.paths);
+                printReport(report, options.json, options.verbose, llvm::outs());
+                printDiagnostics(report, llvm::errs());
+                return options.strict && report.strictFailure ? 3 : 0;
+            }
+
+            std::unique_ptr<ParsedImage> image;
+            {
+                InputFile file(input);
+                unexpected = FailureCode::PeInternal;
+                image = std::make_unique<ParsedImage>(file, ParsePolicy::FunctionAnalysis);
+            }
+
+            unexpected = FailureCode::AnalysisInternal;
+            AnalyzedImage analysis(std::move(image), lifting ? DebugInfo::Omit : DebugInfo::Enrich);
+
+            if (!lifting) {
+                printAnalysis(analysis, options.json, llvm::outs());
+                printFindings(analysis, input, llvm::errs());
+                return options.strict && !analysis.findings().empty() ? 3 : 0;
+            }
+
+            unexpected = FailureCode::PublicationInternal;
+            (void)checkedOutputDestination(analysis.image(), options.output);
+
+            unexpected = FailureCode::LiftingInternal;
+            llvm::LLVMContext context;
+            auto module = generateIR(analysis, {options.rva.value(), options.entryMode}, context);
+
+            unexpected = FailureCode::PublicationInternal;
+            publishIR(*module, analysis.image(), options.output);
+            return 0;
+        } catch (const InspectionError &error) {
+            if (error.kind == FailureCode::OutputAlias) {
+                throw std::invalid_argument(error.what());
+            }
+
+            if (options.jsonDiagnostics) {
+                printLiftDiagnostic(error, input, options.rva.value(), llvm::errs());
+            } else {
+                const auto prefix = failureKind(error.kind).legacy;
+                if (prefix != "forge") {
+                    llvm::errs() << input.string() << ": ";
+                }
+
+                llvm::errs() << prefix << ": " << error.what() << "\n";
+            }
+
+            return 1;
+        } catch (const std::exception &error) {
+            if (!options.jsonDiagnostics) {
+                throw;
+            }
+
+            InspectionError failure(error.what(), unexpected);
+
+            if (unexpected == FailureCode::PublicationInternal) {
+                failure.context.output = options.output;
+            }
+
+            printLiftDiagnostic(failure, input, options.rva.value(), llvm::errs());
+
+            return 1;
+        }
+    }
+
+    int run(int argc, char **argv) {
+        Options parsed;
+        parsed.command = argc < 2 ? "" : argv[1];
+        const auto command = parsed.command;
+
+        if (command == "--help") {
+            llvm::outs() << usage;
+            return 0;
+        }
+
+        if (command != "inspect" && command != "analyze" && command != "lift") {
+            throw std::invalid_argument("expected inspect, analyze, or lift");
+        }
+
         bool options = true;
         for (int i = 2; i < argc; ++i) {
             std::string_view arg = argv[i];
             if (options && arg == "--") {
                 options = false;
             } else if (options && arg == "--help") {
-                llvm::outs() << Usage;
+                llvm::outs() << usage;
                 return 0;
-            } else if (options && arg.starts_with("-")) {
-                parseOption(arg, i);
-            } else if (!input.empty()) {
-                throw std::invalid_argument(std::string(Command) + " takes one input image");
+            } else if (options && arg.starts_with('-')) {
+                parsed.parseOption(arg, i, argc, argv);
+            } else if (!parsed.input.empty()) {
+                throw std::invalid_argument(std::string(command) + " takes one input image");
             } else {
-                input = arg;
+                parsed.input = arg;
             }
         }
-        if (input.empty()) {
+
+        if (parsed.input.empty()) {
             throw std::invalid_argument("missing input image");
         }
-        if (Command == "analyze" && !functions) {
+
+        if (command == "analyze" && !parsed.functions) {
             throw std::invalid_argument("analyze requires --functions");
         }
-        if (Command == "lift" && (!rva || output.empty())) {
+
+        if (command == "lift" && (!parsed.rva || parsed.output.empty())) {
             throw std::invalid_argument("lift requires --rva and --output");
         }
-        try {
-            if (Command == "inspect") {
-                auto report = inspect(input, paths);
-                printReport(report, json, verbose, llvm::outs());
-                printDiagnostics(report, llvm::errs());
-                return strict && report.strictFailure ? 3 : 0;
-            }
-            auto buffer = InputFile(input).read();
-            auto analysis = analyzePE(buffer->getMemBufferRef(), Command == "analyze");
-            if (Command == "lift") {
-                std::error_code ec;
-                if (fs::equivalent(input, output, ec)) {
-                    throw std::invalid_argument("--output must differ from the input image");
-                }
-                lift(analysis, buffer->getMemBufferRef(), *rva, wrapper, output);
-                return 0;
-            }
-            printAnalysis(analysis, json, llvm::outs());
-            for (const auto &d : analysis.findings) {
-                llvm::errs() << input.string() << ": " << d.code << ": " << d.message
-                             << " (records";
-                for (auto i : d.records) {
-                    llvm::errs() << " " << i;
-                }
-                llvm::errs() << ")\n";
-            }
-            return strict && !analysis.findings.empty() ? 3 : 0;
-        } catch (const InspectionError &e) {
-            llvm::errs() << input.string() << ": " << e.code << ": " << e.what() << "\n";
-            return 1;
-        }
+
+        return execute(parsed);
     }
 } // namespace
 
@@ -144,7 +225,7 @@ int main(int argc, char **argv) {
     try {
         return run(argc, argv);
     } catch (const std::invalid_argument &e) {
-        llvm::errs() << "forge: " << e.what() << "\n" << Usage;
+        llvm::errs() << "forge: " << e.what() << "\n" << usage;
         return 2;
     } catch (const std::exception &e) {
         llvm::errs() << "forge: " << e.what() << "\n";

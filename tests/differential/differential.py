@@ -13,6 +13,7 @@ import sys
 import tempfile
 
 from comparison import describe, differences
+from lift_diagnostics import SelectedFunction, parse_diagnostic
 from manifests import FIXTURE_ID, SUITE, field, load_catalog, unique_keys
 
 sys.path.insert(0, str(SUITE / "reference"))
@@ -85,18 +86,42 @@ def resolve_export(inspection, analysis, name):
     if (field(inspection, "schema_version", int) != 1 or field(analysis, "schema_version", int) != 1
             or inspection["inspection"] != {"status": "completed", "root_module": 0}):
         raise ValueError("unsupported or incomplete Forge analysis report")
-    exports = [entry for entry in inspection["modules"][0]["exports"] if name in entry["names"]]
+    module = inspection["modules"][0]
+    if module["machine"] != "AMD64" or module["image_kind"] not in ("dll", "exe"):
+        raise ValueError("expected an inspected AMD64 executable image")
+    exports = [entry for entry in module["exports"] if name in entry["names"]]
     if len(exports) != 1 or "forwarder" in exports[0]:
         raise ValueError(f"expected one local export named {name}, found {exports!r}")
     rva = int(exports[0]["rva"], 16)
     rows = [row for row in analysis["functions"] if int(row["start_rva"], 16) == rva]
     if not rows:
-        raise Unsupported(f"export {name} at {rva:#x} has no discovered function range")
-    if len(rows) != 1 or rows[0]["status"] not in ("valid", "unsupported") or "overlap_diagnostic" in rows[0]:
+        raise ValueError(f"export {name} at {rva:#x} has no discovered function range")
+    if len(rows) != 1 or "overlap_diagnostic" in rows[0]:
         raise ValueError(f"ambiguous or invalid function range for {name} at {rva:#x}")
-    if rows[0]["liftable"] is not True:
-        raise Unsupported(f"export {name} at {rva:#x} is ineligible for lifting: {rows[0]}")
-    return hex(rva)
+    if (rows[0]["liftable"] is not True or rows[0]["status"] != "valid"
+            or rows[0].get("chained_fragment") or "unwind_version" in rows[0]):
+        raise ValueError(f"export {name} at {rva:#x} is ineligible for lifting: {rows[0]}")
+    end = int(field(rows[0], "end_rva", str), 16)
+    if not 0 <= rva < end <= 0xffffffff:
+        raise ValueError("invalid discovered function extent")
+    offsets = []
+    for section in field(module, "sections", list):
+        start = int(field(section, "rva", str), 16)
+        extent = min(field(section, "virtual_size", int), field(section, "raw_size", int))
+        if start <= rva and end <= start + extent and field(section, "permissions", str).endswith("x"):
+            offsets.append(field(section, "file_offset", int) + rva - start)
+    if len(offsets) != 1 or offsets[0] < 0:
+        raise ValueError("function range requires one executable file-backed section")
+
+    # PE base relocations can start before the selected function and still touch it.
+    def overlaps(reloc):
+        address = int(field(reloc, "rva", str), 16)
+        width = {0: 0, 1: 2, 2: 2, 3: 4, 4: 2}.get(field(reloc, "type", int), 8)
+        return width > 0 and address < end and address + width > rva
+
+    relocated = any(overlaps(reloc) for block in field(module, "relocations", list)
+                    for reloc in field(block, "entries", list))
+    return SelectedFunction(rva, end, offsets[0], module["image_kind"], relocated)
 
 
 def analyze(forge, image, symbol, work):
@@ -107,19 +132,34 @@ def analyze(forge, image, symbol, work):
     return resolve_export(read_json(inspect_path), read_json(analysis_path), symbol)
 
 
-def lift(forge, image, case, rva, ir):
+def lift(forge, image, case, selected, ir):
+    if os.path.lexists(ir):
+        raise ValueError(f"lift needs a fresh output path: {ir}")
+    work = ir.parent.parent
+    log, stdout = work / "lifting.log", work / "lifting.stdout"
+    args = [forge, "lift", image, "--rva", hex(selected.start), "--signature", case["signature"],
+            "--output", ir, "--diagnostics-format", "json"]
+    with stdout.open("wb") as output, log.open("wb") as errors:
+        status = native.command_status(args, output, errors)
+
+    if stdout.stat().st_size:
+        raise ValueError(f"forge lift exited {status} with unexpected stdout ({stdout.name})")
+    if status == 0:
+        if log.stat().st_size:
+            raise ValueError(f"forge lift exited 0 with unexpected diagnostics ({log.name})")
+        if ir.is_symlink() or not ir.is_file() or not ir.stat().st_size:
+            raise ValueError(f"forge lift exited 0 without producing IR: {ir}")
+        return
+    if status != 1 or os.path.lexists(ir):
+        raise ValueError(f"unexpected forge lift status {status} or output after failure ({log.name})")
     try:
-        native.command([forge, "lift", image, "--rva", rva, "--signature", case["signature"],
-                        "--output", ir], ir.parent.parent / "lifting.log")
+        diagnostic = parse_diagnostic(log.read_bytes(), image, selected, ir)
     except ValueError as error:
-        # The CLI also reports file errors and verifier failures. Only explicit capability
-        # diagnostics issued by the lifter identify a capability error.
-        if re.search(r": LIFT_ERROR: 0x[\da-fA-F]+: .*(?:unsupported |native wrapper requires "
-                     r"undefined|backward edge|segment-relative LEA|condition flags require|"
-                     r"function bytes overlap base relocation|return with undefined|"
-                     r"experimental lift limit)", str(error)):
-            raise Unsupported(str(error)) from error
-        raise
+        raise ValueError(f"invalid forge lift diagnostic ({log.name}): {error}") from error
+    detail = f"{diagnostic['stage']}/{diagnostic['code']}: {diagnostic['message']} ({log.name})"
+    if diagnostic["category"] == "unsupported":
+        raise Unsupported(detail)
+    raise ValueError(detail)
 
 
 def native_differences(wanted, actual, harness, args):
@@ -196,16 +236,16 @@ def run_case(manifest, case, config, binaries, references, forge, work):
 
         stage = "analysis"
         report["forge_sha256"] = sha256(forge.read_bytes())
-        rva = analyze(forge, image, case["export"], work)
-        report["function_rva"] = rva
+        selected = analyze(forge, image, case["export"], work)
+        report["function_rva"] = hex(selected.start)
         stages[stage] = "passed"
 
         stage = "lifting"
         if wanted.exit_code:
-            raise Unsupported(f"function harness cannot convey Windows termination status {wanted.exit_code}")
+            raise ValueError(f"function harness cannot convey Windows termination status {wanted.exit_code}")
         ir = work / CANONICAL_IR
         ir.parent.mkdir()
-        lift(forge, image, case, rva, ir)
+        lift(forge, image, case, selected, ir)
         identity = {key: report[key] for key in ("fixture_id", "build_config", "binary_sha256", "run_id")}
         identity["canonical_ir_sha256"] = file_sha256(ir)
         stages[stage] = "passed"

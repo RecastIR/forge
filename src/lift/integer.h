@@ -52,7 +52,7 @@ namespace forge::x86 {
 
     enum Flag : unsigned { CF, PF, AF, ZF, SF, OF, FlagCount };
 
-    inline constexpr std::array<llvm::StringLiteral, FlagCount> FlagNames{"CF", "PF", "AF",
+    inline constexpr std::array<llvm::StringLiteral, FlagCount> flagNames{"CF", "PF", "AF",
                                                                           "ZF", "SF", "OF"};
     // A null entry means the flag lacks a definition valid for every possible execution.
     using Flags = std::array<llvm::Value *, FlagCount>;
