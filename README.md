@@ -23,10 +23,16 @@ Add new production code to the component that owns it. Create `runtime/` when ge
 
 ## Build and run
 
-The verified baseline is Apple Silicon, Apple Clang with C++20, CMake 3.20 or later, and Homebrew LLVM 17.0.6. Tests also use Python 3.9+, LLVM Clang, `llvm-mc`, `llvm-dlltool`, `lld-link`, `llvm-readobj`, `opt`, and `llc`.
+Forge uses Apple Silicon, Apple Clang with C++20, CMake, and a stable **LLVM 23.x** installation. CI pins **23.1.5**. The test suite also uses Python 3.9+, LLVM Clang, `llvm-mc`, `llvm-dlltool`, `lld-link`, `llvm-readobj`, `opt`, and `llc`. Use the complete [LLVM release archive for macOS ARM64](https://github.com/llvm/llvm-project/releases/tag/llvmorg-23.1.5) to obtain these tools together.
 
 ```sh
-brew install cmake llvm@17
+# From a directory containing the release archive, extract to a new directory.
+echo '503de30ef90311e0b143623801b19af2250adac6d69faed65ad0051170202e3b  LLVM-23.1.5-macOS-ARM64.tar.zst' | shasum -a 256 -c -
+mkdir -p "$HOME/toolchains/llvm-23.1.5"
+zstd --long=30 -dc LLVM-23.1.5-macOS-ARM64.tar.zst | tar -xf - --strip-components=1 -C "$HOME/toolchains/llvm-23.1.5"
+export LLVM_CONFIG="$HOME/toolchains/llvm-23.1.5/bin/llvm-config"
+export LLVM_DIR="$("$LLVM_CONFIG" --cmakedir)"
+# In the Forge checkout:
 make
 build/forge inspect path/to/game.exe
 build/forge inspect path/to/game.exe --verbose
@@ -34,7 +40,9 @@ build/forge inspect path/to/game.exe --dll-path ./bin --dll-path ./plugins --for
 build/forge inspect path/to/game.exe --strict --format json > report.json
 ```
 
-`make` configures and builds Forge in `build/`. On first configuration, CMake looks for Homebrew's `llvm@17`. To select another installation, run `make LLVM_DIR=/path/to/lib/cmake/llvm`. CMake remembers that selection and rediscovers the fixture tools when you change it. For a CLI-only build, use `make BUILD_TESTING=OFF`. Use `BUILD_TESTING=ON` to re-enable the tests.
+`make` configures and builds Forge in `build/`. Set `LLVM_DIR` to the directory containing `LLVMConfig.cmake`, or select its `bin/llvm-config` with `LLVM_CONFIG`. If both are set they must select the same installation. Export your selection when using separate Make, quality, and differential commands. Automatic discovery checks Homebrew’s versioned and unversioned LLVM prefixes on macOS and then the directories on `PATH` for a stable 23.x release. Configuration prints the package version, directory, and paths to the tools needed by that build. For a CLI-only build, use `make BUILD_TESTING=OFF`. Use `BUILD_TESTING=ON` to re-enable the tests.
+
+For a checkout with an LLVM 17 cache, use `make test BUILD_DIR=build-llvm23 CONFIG=Debug`. For the full workflow, which uses fixed directory names, start from a clean checkout or move the old build, lint and sanitizer directories aside after saving any PE and reference artifacts. `make clean` retains the old selection.
 
 Set `BUILD_DIR` to choose an out-of-source build directory. With Unix Makefiles, `CONFIG=Release` sets the cached build type and later calls reuse it. With Xcode, pass `CONFIG` on each invocation to select the configuration for that command. Its default is `Debug`.
 
@@ -48,7 +56,7 @@ make clean BUILD_DIR=build-xcode CONFIG=Release
 
 Run `./tools/test-forge.sh --all` on Apple Silicon for the complete native, Wine, and differential regression workflow. Stage commands, dependencies, CI artifacts, and the coverage policy are in the [regression guide](tests/differential/README.md#regression-ci-and-local-reproduction).
 
-Install Apple's developer tools with `xcode-select --install`. The Homebrew LLVM package in the build instructions also provides `clang-format`, `clang-tidy`, and `llvm-config`. Formatting and linting are opt-in locally. The GitHub Actions workflow checks formatting, runs clang-tidy, and tests Debug and sanitizer builds on macOS 26 ARM64 for pull requests and pushes to `main`. It uses LLVM 17.0.6 and a Python environment with Unicorn 2.1.4 for the function-level oracle.
+Install Apple's developer tools with `xcode-select --install`. The LLVM release package also provides `clang-format`, `clang-tidy`, and `llvm-config`. Formatting and linting are opt-in locally. The GitHub Actions workflow checks formatting, runs clang-tidy, and tests Debug and sanitizer builds on macOS 26 ARM64 for pull requests and pushes to `main`. It uses LLVM 23.1.5 and a Python environment with Unicorn 2.1.4 for the function-level oracle.
 
 ```sh
 make format-check   # Verify Forge, harness, and Windows fixture formatting
@@ -58,7 +66,7 @@ make test CONFIG=Debug
 make sanitize       # Run CTest in a separate Debug build with ASan and UBSan
 ```
 
-`make lint` configures `<BUILD_DIR>-lint/` with Unix Makefiles and refreshes its `compile_commands.json` on each invocation. On macOS it pairs the selected LLVM compiler and clang-tidy with the macOS SDK. This also works alongside an Xcode build. Discovery uses `llvm-config` on `PATH`, then Homebrew's unversioned LLVM or the newest installed versioned formula. Set `LLVM_CONFIG` to choose the tools and `LLVM_DIR` to select a different LLVM library package.
+`make lint` configures `<BUILD_DIR>-lint/` with Unix Makefiles and refreshes its `compile_commands.json` on each invocation. On macOS it pairs the selected LLVM compiler and clang-tidy with the macOS SDK. This also works alongside an Xcode build. All quality targets use the same LLVM selection as the build. The native build uses Apple’s compiler, SDK and linker. When linking LLVM libraries, the Apple linker loads the selected package’s libLTO to read its ThinLTO bitcode.
 
 ```sh
 make lint LLVM_CONFIG=/path/to/bin/llvm-config
@@ -66,7 +74,7 @@ make configure CMAKE_ARGS=-DCMAKE_EXPORT_COMPILE_COMMANDS=ON
 make lint LINT_DATABASE=build/compile_commands.json
 ```
 
-The last two commands regenerate and use a Unix Makefiles or Ninja build's own database. Choose a clang-tidy version compatible with that build's compiler and C++ headers. An external database must include the harness and every Forge translation unit. Analyzer findings and selected bug-prone checks fail lint. Other diagnostics are advisory.
+The last two commands regenerate and use a Unix Makefiles or Ninja build's own database. An external database must include the harness and every Forge translation unit. Lint requires Python 3 and uses a temporary clang-tidy overlay for four expressions in LLVM’s operand-storage headers. LLVM allocates these operands before its C++ objects, which the bounds checker models as separate allocations. The overlay annotates only those upstream expressions for that check. Analyzer findings and selected bug-prone checks fail lint. Other diagnostics are advisory.
 
 ## Dependency policy
 
@@ -134,7 +142,7 @@ The following example builds a Windows EXE from `tests/fixtures/add.c`. Clang co
 
 ```sh
 make test
-llvm_bin="$(brew --prefix llvm@17)/bin"
+llvm_bin="$("$LLVM_CONFIG" --bindir)"
 build/forge analyze build/fixtures/add.exe --functions
 build/forge lift build/fixtures/add.exe --rva 0x1000 \
   --signature 'i64(i64,i64)' --output build/add.ll
@@ -147,7 +155,7 @@ printf 'a 14\nffffffffffffffff 1\n' | build/add-harness
 
 The object reports `Mach-O arm64`. The harness prints `1e` and `0` for 10 + 20 and −1 + 1.
 
-Both IR interfaces retain the internal `forge_lifted_<hex RVA>` function through optimization. Its pointer addresses seven 64-bit slots in this order — RAX, RCX, RDX, R8, R9, R10, R11. Reads use their incoming values. Writes update those slots. Condition flags are local to each lifted invocation and start undefined. Plain `ret` ends the isolated call. Guest stack state, return addresses, and flags across calls are outside this interface.
+Both IR interfaces retain the internal `forge_lifted_<hex RVA>` function through optimization. Its state pointer requires four-byte alignment and addresses seven 64-bit slots in this order — RAX, RCX, RDX, R8, R9, R10, R11. Reads use their incoming values. Writes update those slots. Condition flags are local to each lifted invocation and start undefined. Plain `ret` ends the isolated call. Guest stack state, return addresses, and flags across calls are outside this interface.
 
 The sole supported signature adds `extern "C" int64_t forge_lifted(int64_t, int64_t)`. The caller declares this contract. The wrapper places its native arguments in the RCX and RDX slots, calls the lifted body, and returns RAX. On every incoming path, a read requires the bits it observes to be defined. Returning requires all 64 bits of RAX. Forge verifies the module, writes and closes a sibling temporary file, then publishes it with one rename. A failed lift preserves an existing output file.
 
@@ -167,11 +175,11 @@ The supported operand-size prefix selects verified 16-bit forms. Other legacy pr
 
 ### Lifting approach
 
-Forge uses LLVM 17 MC for instruction decoding, an explicit translation for each supported form, and LLVM's AArch64 backend via `llc`. The same installed toolchain builds on Apple Silicon, verifies the IR, and produces Mach-O objects. The opcode names and operand layouts follow LLVM 17.0.6. Upgrading LLVM requires rerunning the decoder and behavioral tests.
+Forge uses LLVM 23 MC for instruction decoding, an explicit translation for each supported form, and LLVM's AArch64 backend via `llc`. The same installed toolchain builds on Apple Silicon, verifies the IR, and produces Mach-O objects. The opcode names and operand layouts follow LLVM 23. Upgrading LLVM requires rerunning the decoder and behavioral tests.
 
 The [binary lifting evaluation](docs/binary-lifting-evaluation.md) compares six projects, follows a Windows x64 carry-flag fixture through Remill and Forge, and explains the recommendation to keep Forge’s LLVM lifter and reuse upstream test and recovery techniques.
 
-RetDec lifts x86-64 for decompilation and documents macOS support. Its modified LLVM 8 dependency and limited maintenance make direct integration into Forge's LLVM 17 ARM64 build a larger undertaking. Native Apple Silicon integration and executable equivalence were unverified for that option. [RetDec](https://github.com/avast/retdec) · [RetDec LLVM fork](https://github.com/avast/llvm)
+RetDec lifts x86-64 for decompilation and documents macOS support. Its modified LLVM 8 dependency and limited maintenance make direct integration into the LLVM 17 ARM64 build used in the evaluation a larger undertaking. Native Apple Silicon integration and executable equivalence were unverified for that option. [RetDec](https://github.com/avast/retdec) · [RetDec LLVM fork](https://github.com/avast/llvm)
 
 ### Verification and fastgron
 

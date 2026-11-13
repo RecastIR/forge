@@ -115,7 +115,7 @@ The SDK-free parser and lifter samples live in `tests/fixtures/`. The existing `
 
 ## Compare a lifted function with Wine
 
-On Apple Silicon, build Forge with LLVM 17. Prepare matching Windows binaries and references with the commands above, or extract the successful Linux job’s `windows-x64-inputs` artifact into `build/`. The native comparison runs offline using those files.
+On Apple Silicon, build Forge with LLVM 23 and export the LLVM selection from the [build instructions](../../README.md#build-and-run) for the harness configurations. Prepare matching Windows binaries and references with the commands above, or extract the successful Linux job’s `windows-x64-inputs` artifact into `build/`. The native comparison runs offline using those files.
 
 ```sh
 make CONFIG=Debug
@@ -168,20 +168,20 @@ Use `python3 -B tests/differential/test_differential.py` for the Wine-free compa
 
 ## Regression CI and local reproduction
 
-From a clean Apple Silicon checkout, install Xcode, LLVM 17.0.6, CMake 3.21+ (for CTest JUnit), and a Docker engine capable of running Linux amd64 containers. Select a Python environment with the pinned Unicorn oracle.
+From a clean Apple Silicon checkout, install Xcode, the LLVM 23 distribution, CMake 3.21+ (for CTest JUnit), and a Docker engine capable of running Linux amd64 containers. Select a Python environment with the pinned Unicorn oracle.
 
 ```sh
 python3.12 -m venv /tmp/forge-oracle
 /tmp/forge-oracle/bin/python -m pip install --only-binary=:all: unicorn==2.1.4
 export CMAKE_ARGS="-DPython3_EXECUTABLE=/tmp/forge-oracle/bin/python"
-export LLVM_CONFIG="$(brew --prefix llvm@17)/bin/llvm-config"
+export LLVM_CONFIG="$HOME/toolchains/llvm-23.1.5/bin/llvm-config"
 export LLVM_DIR="$("$LLVM_CONFIG" --cmakedir)"
 ./tools/test-forge.sh --all
 ```
 
 The stage commands also work individually. Run `--native` for formatting, clang-tidy, Debug CTest, and ASan/UBSan CTest. This stage requires the native and Unicorn tests to execute and needs no Docker. Run `--references` to build both PE configurations twice, inspect them, capture Wine behavior, and exercise the real capture boundaries. Run `--differential` after those stages, or after extracting the matching CI inputs. It consumes the existing exports, checks every reference, runs both configurations and the negative integrations, and writes local coverage. Use the individual fixture commands above to investigate a failure. A single-fixture run replaces that configuration’s suite index. Rerun the full differential stage to produce complete evidence.
 
-On PRs into `main` and pushes to `main`, `windows-fixtures` on Linux amd64 and `macos` on macOS 26 arm64 run in parallel. The former publishes validated PEs, checksums, per-configuration toolchain/reproducibility records, and captured references. The latter archives the two tested Forge executables. The `differential` job downloads those same-run artifacts on macOS 26 arm64, uses sanitized Forge with Xcode for Debug and ordinary Forge with the default generator for Release to lift and compile the selected functions, and runs the harnesses. Linux `regression-gate` checks prerequisite stage outcomes and the digests of the two tested Forge executables, reopens the exports and references, and compares the saved native observations again. Hosted references require an amd64 Docker host. Local reports record the actual backend and are labeled local.
+On PRs into `main` and pushes to `main`, `windows-fixtures` on Linux amd64 and `macos` on macOS 26 arm64 run in parallel. The former publishes validated PEs, checksums, per-configuration toolchain/reproducibility records, and captured references. Both macOS jobs verify the pinned LLVM 23.1.5 release archive by SHA-256 before extraction. The native job archives its two tested Forge executables. The Linux producer uses its separate MinGW and Wine pins. The `differential` job downloads those same-run artifacts on macOS 26 arm64, uses sanitized Forge with Xcode for Debug and ordinary Forge with the default generator for Release to lift and compile the selected functions, and runs the harnesses. Linux `regression-gate` checks prerequisite stage outcomes and the digests of the two tested Forge executables, reopens the exports and references, and compares the saved native observations again. Hosted references require an amd64 Docker host. Local reports record the actual backend and are labeled local.
 
 The gate publishes a job summary and schema-v1 `build/coverage/coverage.json`. Each row identifies its configuration, target, scope, reference and case report. Read the category totals and passing scopes separately for Debug and Release. A missing prerequisite, case report, or successful execution fails the gate. The JSON and diagnostic artifacts are available from the workflow run for seven days. Extract `macos-arm64-differential` under `build/differential/` to follow report paths. The native harness in the downloaded diagnostics can be made executable with `chmod +x`. Failed Windows captures are kept separately in `windows-diagnostics` and are ineligible as CI reference inputs.
 

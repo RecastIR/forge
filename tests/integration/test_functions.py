@@ -211,6 +211,17 @@ class Discovery(Case):
 
 
 class Lift(Case):
+    def test_signatureless_state_alignment(self):
+        output = self.dir / "state.ll"
+        self.invoke("lift", FIXTURES / "arithmetic.exe", "--rva", "0x1000", "--output", output)
+        module = output.read_text()
+        self.assertIn('target triple = "arm64-apple-macosx11.0.0"', module)
+        for instruction in ("load i64", "store i64"):
+            accesses = [line for line in module.splitlines() if instruction in line]
+            self.assertTrue(accesses, instruction)
+            for line in accesses:
+                self.assertIn(", align 4", line)
+
     def test_usage_and_invalid_rva(self):
         exe = FIXTURES / "arithmetic.exe"
         output = self.dir/"existing.ll"

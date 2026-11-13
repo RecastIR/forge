@@ -1,0 +1,39 @@
+name: Install Forge LLVM
+description: Verify and extract the pinned LLVM distribution on Apple Silicon
+runs:
+  using: composite
+  steps:
+    - id: release
+      shell: bash
+      run: |
+        echo 'archive=LLVM-23.1.5-macOS-ARM64.tar.zst' >> "$GITHUB_OUTPUT"
+        echo 'sha256=503de30ef90311e0b143623801b19af2250adac6d69faed65ad0051170202e3b' >> "$GITHUB_OUTPUT"
+    - uses: actions/cache@v4
+      with:
+        path: ${{ runner.temp }}/${{ steps.release.outputs.archive }}
+        key: forge-${{ steps.release.outputs.archive }}-${{ steps.release.outputs.sha256 }}
+    - shell: bash
+      env:
+        ARCHIVE: ${{ steps.release.outputs.archive }}
+        SHA256: ${{ steps.release.outputs.sha256 }}
+      run: |
+        set -euo pipefail
+        test "$(uname -sm)" = 'Darwin arm64'
+        cd "$RUNNER_TEMP"
+        if [[ ! -f "$ARCHIVE" ]]; then
+          curl --fail --location --retry 3 --output "$ARCHIVE" \
+            "https://github.com/llvm/llvm-project/releases/download/llvmorg-23.1.5/$ARCHIVE"
+        fi
+        echo "$SHA256  $ARCHIVE" | shasum -a 256 -c -
+        mkdir -p forge-llvm
+        zstd --long=30 -dc "$ARCHIVE" | tar -xf - --strip-components=1 -C forge-llvm
+        config="$RUNNER_TEMP/forge-llvm/bin/llvm-config"
+        test "$("$config" --version)" = '23.1.5'
+        bin="$("$config" --bindir)"
+        for tool in opt llc llvm-mc clang clang-format clang-tidy lld-link llvm-readobj; do
+          version="$("$bin/$tool" --version)"
+          grep -Eq '(^|[^0-9.])23\.1\.5([^0-9.]|$)' <<< "$version"
+        done
+        test -x "$bin/llvm-dlltool"
+        echo "LLVM_CONFIG=$config" >> "$GITHUB_ENV"
+        echo "LLVM_DIR=$("$config" --cmakedir)" >> "$GITHUB_ENV"

@@ -5,6 +5,7 @@ from pathlib import Path
 import platform
 import operator
 import random
+import re
 import struct
 import subprocess
 import sys
@@ -29,7 +30,12 @@ def check_ir(path, rva, wrapper):
     module = path.read_text()
     internal = f"define internal void @forge_lifted_{rva:x}("
     check(internal in module, f"{path.name} missing {internal}")
-    check(("define i64 @forge_lifted(" in module) == wrapper, f"{path.name} wrapper={wrapper}")
+    # O2 can infer return attributes such as noundef and range.
+    definitions = [line for line in module.splitlines() if line.startswith("define ") and " @forge_lifted(" in line]
+    check(len(definitions) == int(wrapper), f"{path.name} wrapper={wrapper}")
+    if wrapper:
+        signature = r"^define (?:(?:noundef|range\(i64 -?\d+, -?\d+\)) )*i64 @forge_lifted\(i64 %\w+, i64 %\w+\)"
+        check(re.match(signature, definitions[0]), definitions[0])
 
 
 def report(image):

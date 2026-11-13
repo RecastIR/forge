@@ -8,16 +8,16 @@ import sys
 import tempfile
 import unittest
 
-SOURCE, CMAKE, LLVM_DIR = map(Path, sys.argv[1:])
+SOURCE, CMAKE, LLVM_DIR, LLVM_BIN = map(Path, sys.argv[1:])
 
 
 class BuildConfig(unittest.TestCase):
     def setUp(self):
         tmp = tempfile.TemporaryDirectory()
         self.addCleanup(tmp.cleanup)
-        self.tmp = Path(tmp.name)
+        self.tmp = Path(tmp.name).resolve()
         self.env = dict(os.environ, CMAKE_GENERATOR="Unix Makefiles")
-        for key in ("MAKEFLAGS", "MFLAGS", "MAKEOVERRIDES", "LLVM_DIR", "CMAKE_ARGS", "CONFIG",
+        for key in ("MAKEFLAGS", "MFLAGS", "MAKEOVERRIDES", "LLVM_DIR", "LLVM_CONFIG", "CMAKE_ARGS", "CONFIG",
                     "BUILD_TESTING", "SANITIZE", "CMAKE_GENERATOR_PLATFORM", "CMAKE_GENERATOR_TOOLSET"):
             self.env.pop(key, None)
         self.env["PATH"] = str(CMAKE.parent) + os.pathsep + self.env["PATH"]
@@ -61,6 +61,68 @@ class BuildConfig(unittest.TestCase):
         self.assertEqual(cache["LLVM_DIR"], str(LLVM_DIR))
         self.assertEqual(cache["llvm-readobj"], readobj)
 
+    def run_configure(self, *options, env=None):
+        return subprocess.run([CMAKE, "-S", SOURCE, "-B", self.tmp / "configure", *options],
+                              env=env or self.env, capture_output=True, text=True)
+
+    def test_config_selector_and_invalid_explicit_package(self):
+        selected = self.run_configure("-DBUILD_TESTING=OFF", f"-DLLVM_CONFIG={LLVM_BIN / 'llvm-config'}")
+        self.assertEqual(selected.returncode, 0, selected.stderr)
+        self.assertIn(f"at {LLVM_DIR}", selected.stdout)
+        failed = self.run_configure(f"-DLLVM_DIR={self.tmp / 'absent'}")
+        self.assertNotEqual(failed.returncode, 0)
+        self.assertIn("Invalid LLVM_DIR", " ".join(failed.stderr.split()))
+
+    def test_rejects_unsupported_package(self):
+        package = self.tmp / "old"
+        package.mkdir()
+        (package / "LLVMConfig.cmake").write_text('set(LLVM_PACKAGE_VERSION "17.0.6")\n')
+        failed = self.run_configure(f"-DLLVM_DIR={package}")
+        self.assertNotEqual(failed.returncode, 0)
+        self.assertIn("requires stable LLVM 23.x", failed.stderr)
+        self.assertIn("17.0.6", failed.stderr)
+
+    def test_conflicting_selectors(self):
+        other = self.tmp / "other"
+        other.mkdir()
+        (other / "LLVMConfig.cmake").touch()
+        env = dict(self.env, LLVM_CONFIG=str(LLVM_BIN / "llvm-config"))
+        for command in ([CMAKE, "-S", SOURCE, "-B", self.tmp / "configure", f"-DLLVM_DIR={other}"],
+                        ["make", "format-check", f"LLVM_DIR={other}"]):
+            with self.subTest(command=command[0]):
+                failed = subprocess.run(command, env=env, cwd=SOURCE, capture_output=True, text=True)
+                self.assertNotEqual(failed.returncode, 0)
+                self.assertIn("Conflicting LLVM_DIR", " ".join(failed.stderr.split()))
+
+    def test_rejects_unrelated_explicit_tool(self):
+        decoy = self.tmp / "opt"
+        decoy.write_text("#!/bin/sh\nexit 0\n")
+        decoy.chmod(0o755)
+        failed = self.run_configure(f"-DLLVM_DIR={LLVM_DIR}", f"-Dopt:FILEPATH={decoy}")
+        self.assertNotEqual(failed.returncode, 0)
+        self.assertIn("Conflicting opt", " ".join(failed.stderr.split()))
+
+    def test_missing_differential_tool_ignores_path(self):
+        if sys.platform != "darwin":
+            self.skipTest("the differential harness configures on macOS")
+        # Wrap the real package. Advertise a tool directory containing only
+        # llvm-config, with the genuine opt available as a tempting PATH fallback.
+        package = self.tmp / "package"
+        package.mkdir()
+        tools = self.tmp / "bin"
+        tools.mkdir()
+        (package / "LLVMConfig.cmake").write_text(
+            f"include([[{LLVM_DIR}/LLVMConfig.cmake]])\nset(LLVM_TOOLS_BINARY_DIR [[{tools}]])\n")
+        config = tools / "llvm-config"
+        config.write_text(f'#!/bin/sh\nif [ "$1" = --bindir ]; then dirname "$0"; '
+                          f'else exec "{LLVM_BIN / "llvm-config"}" "$@"; fi\n')
+        config.chmod(0o755)
+        env = dict(self.env, PATH=str(LLVM_BIN) + os.pathsep + self.env["PATH"])
+        failed = self.run_configure(f"-DLLVM_DIR={package}", "-DBUILD_TESTING=OFF",
+                                    f"-DFORGE_DIFFERENTIAL_IR={self.tmp / 'lift.ll'}", env=env)
+        self.assertNotEqual(failed.returncode, 0)
+        self.assertIn("Missing required LLVM tool 'opt'", " ".join(failed.stderr.split()))
+
     def test_lint_requires_real_commands_in_external_database(self):
         build = self.tmp / "analysis build"
         subprocess.run([CMAKE, "-S", SOURCE, "-B", build, f"-DLLVM_DIR={LLVM_DIR}",
@@ -78,7 +140,8 @@ class BuildConfig(unittest.TestCase):
 
         # Exercise the wrapper even on machines without clang-tidy.
         config = self.tmp / "llvm-config"
-        config.write_text('#!/bin/sh\ndirname "$0"\n')
+        config.write_text(f'#!/bin/sh\nif [ "$1" = --bindir ]; then dirname "$0"; '
+                          f'else exec "{LLVM_BIN / "llvm-config"}" "$@"; fi\n')
         config.chmod(0o755)
         tidy = self.tmp / "clang-tidy"
         tidy.write_text('#!/bin/sh\nprintf "%s\\n" "$@" > "$0.args"\n')
@@ -89,7 +152,8 @@ class BuildConfig(unittest.TestCase):
         self.assertEqual(args[:2], ["-p", str(build)])
         expected = [str(p) for folder in ("src", "tests/support", "tests/unit")
                     for p in (SOURCE / folder).rglob("*.cpp")]
-        self.assertCountEqual(args[2:], expected)
+        self.assertTrue(args[-1].startswith("--vfsoverlay="))
+        self.assertCountEqual(args[2:-1], expected)
         self.assertEqual(database.read_bytes(), contents)
 
         for missing in (harness, SOURCE / "src/pe/pe.cpp", SOURCE / "tests/unit/integer.cpp"):
