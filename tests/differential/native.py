@@ -41,15 +41,19 @@ def kill_group(process):
         os.killpg(process.pid, signal.SIGKILL)
 
 
+def command_status(args, stdout, stderr, *, timeout=180):
+    with subprocess.Popen(args, stdout=stdout, stderr=stderr, start_new_session=True) as process:
+        try:
+            return process.wait(timeout=timeout)
+        finally:
+            # Descendants can retain an output descriptor after their leader exits.
+            kill_group(process)
+            process.wait()
+
+
 def command(args, log, stdout=None, *, timeout=180):
     with log.open("ab") as errors, (stdout.open("wb") if stdout else nullcontext(errors)) as output:
-        with subprocess.Popen(args, stdout=output, stderr=errors, start_new_session=True) as process:
-            try:
-                status = process.wait(timeout=timeout)
-            except BaseException:
-                kill_group(process)
-                process.wait()
-                raise
+        status = command_status(args, output, errors, timeout=timeout)
     if status:
         with log.open("rb") as stream:
             stream.seek(max(0, log.stat().st_size - 4096))

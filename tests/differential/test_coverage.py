@@ -23,11 +23,11 @@ class CoverageTests(ArtifactSetup):
         for config in diff.CONFIGS:
             self.assertEqual(self.run_config(config), 0)
 
-    def run_config(self, config, *, build=None, execute=None, failure=None):
+    def run_config(self, config, *, build=None, execute=None, lift=None, failure=None):
         with contextlib.ExitStack() as stack:
             for ctx in (patch.dict(os.environ, FORGE_TEST_RUN_ID="current"),
-                        patch.object(diff, "analyze", return_value="0x10"),
-                        patch.object(diff, "lift", self.lift_fixture),
+                        patch.object(diff, "analyze", return_value=self.selected),
+                        patch.object(diff, "lift", lift or self.lift_fixture),
                         patch.object(diff.native, "build", build or self.build_fixture),
                         patch.object(diff.native, "execute", execute or self.execute_fixture),
                         patch.object(diff.platform, "system", return_value="Darwin"),
@@ -223,6 +223,24 @@ class CoverageTests(ArtifactSetup):
                 if isinstance(failure, diff.native.ExecutionFailure):
                     for variant in diff.VARIANTS:
                         self.assertEqual(row["variants"][variant]["execution_outcome"], failure.outcome)
+
+    def test_lift_diagnostic_classification_reaches_gate(self):
+        for code, category in (("LIFT_UNSUPPORTED_INSTRUCTION", "unsupported_lifting_capability"),
+                               ("LIFT_FUNCTION_SIZE", "lifting_failure")):
+            def reject(args, output, errors):
+                context = dict(input=str(args[2]), entry_rva=hex(self.selected.start))
+                diagnostic = dict(schema_version=1, stage="lifting", category="unsupported",
+                                  code=code, message="test diagnostic", context=context)
+                errors.write((json.dumps(diagnostic) + "\n").encode())
+                return 1
+
+            with self.subTest(code=code), patch.object(diff.native, "command_status", side_effect=reject):
+                self.assertEqual(self.run_config("release", lift=diff.lift), 1)
+                result = diff.read_json(self.output / "release/unit/enabled/result.json")
+                self.assertEqual(result["failure_categories"], [category])
+                self.assertEqual(result["stages"]["lifting"], "failed")
+                self.assertEqual(result["stages"]["native_execution"], "not_run")
+                self.assertEqual(self.report()["gate"], "failed")
 
     def test_reference_only_requires_a_trusted_reference(self):
         folder = self.references / "release/unit/uncovered"

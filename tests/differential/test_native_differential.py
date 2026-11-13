@@ -34,6 +34,29 @@ class NativeDifferentialTests(unittest.TestCase):
         with patch.object(diff.native, "build", compile_copy):
             return self.negative(name, category, fixture=fixture)
 
+    def test_real_unsupported_instruction_diagnostic(self):
+        manifest = next(m for m in diff.load_catalog() if m.case["id"] == CASE)
+        with tempfile.TemporaryDirectory() as tmp:
+            work = Path(tmp).resolve()
+            image = work / manifest.case["binary"]
+            data = bytearray((diff.BINARIES / "debug" / image.name).read_bytes())
+            image.write_bytes(data)
+            entry = diff.analyze(diff.DEFAULT_FORGE, image, "add_i64", work)
+            length = entry.end - entry.start
+            # PUSH RAX, RET and padding preserve every PE table and the discovered extent.
+            self.assertGreaterEqual(length, 2)
+            data[entry.file_offset:entry.file_offset + length] = b"\x50\xc3".ljust(length, b"\xcc")
+            image.write_bytes(data)
+            selected = diff.analyze(diff.DEFAULT_FORGE, image, "add_i64", work)
+            ir = work / diff.CANONICAL_IR
+            ir.parent.mkdir()
+            with self.assertRaisesRegex(diff.Unsupported, "LIFT_UNSUPPORTED_INSTRUCTION"):
+                diff.lift(diff.DEFAULT_FORGE, image, {"signature": "i64(i64,i64)"}, selected, ir)
+            failure = diff.read_json(work / "lifting.log")
+            self.assertEqual((failure["context"]["instruction_rva"], failure["context"]["file_offset"],
+                              failure["context"]["bytes"]), (hex(selected.start), entry.file_offset, "50"))
+            self.assertFalse(ir.exists())
+
     def test_changed_return(self):
         def change_return(source):
             changed, count = re.subn(r"^  ret i64 (%\w+)$",

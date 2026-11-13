@@ -1,7 +1,9 @@
-#include "pe/input.h"
+#include "diagnostic.h"
+#include "pe/image.h"
 
 #include "llvm/ADT/ScopeExit.h"
 #include "llvm/ADT/SmallString.h"
+#include "llvm/Support/raw_ostream.h"
 
 #include <cerrno>
 #include <cstddef>
@@ -16,6 +18,11 @@ namespace {
     static_assert(!std::is_copy_constructible_v<InputFile> &&
                   !std::is_move_constructible_v<InputFile> &&
                   !std::is_copy_assignable_v<InputFile> && !std::is_move_assignable_v<InputFile>);
+
+    static_assert(!std::is_copy_constructible_v<ParsedImage> &&
+                  !std::is_move_constructible_v<ParsedImage> &&
+                  !std::is_copy_assignable_v<ParsedImage> &&
+                  !std::is_move_assignable_v<ParsedImage>);
 
     void check(bool condition, const char *message) {
         if (!condition) {
@@ -34,6 +41,7 @@ namespace {
     void checkRetainedInput(const fs::path &path, llvm::StringRef original, bool truncate) {
         writeBytes(path, original, std::ios::trunc);
         auto buffer = InputFile(path).read();
+        ParsedImage image(InputFile(path), ParsePolicy::Inspection);
 
         if (truncate) {
             // Fail safely on a mapping regression before truncation could invalidate its pages.
@@ -46,8 +54,8 @@ namespace {
 
         check(buffer->getBufferIdentifier() == path.native(), "lost input buffer identifier");
         check(buffer->getBuffer() == original, "retained bytes changed with the file");
-        const auto module = inspectPE(buffer->getMemBufferRef());
-        const auto entry = mapRva(module.sections, buffer->getBuffer(), module.entryPoint, 1);
+        const auto &module = image.module();
+        const auto entry = image.mapRva(module.entryPoint, 1);
         check(module.entryPoint == 0x1000 && entry && entry->section.name == ".text" &&
                   entry->bytes == "\xc3",
               "original PE entry instruction unavailable");
@@ -68,7 +76,8 @@ namespace {
             InputFile input(path.parent_path());
             throw std::runtime_error("accepted a directory as input");
         } catch (const InspectionError &error) {
-            check(error.code == "READ_ERROR", "wrong error for directory");
+            check(error.kind == FailureCode::InputOpen && error.context.input == path.parent_path(),
+                  "wrong error for directory");
         }
 
         check(::fcntl(fd, F_GETFD) == -1 && errno == EBADF, "failed constructor leaked its fd");
@@ -81,7 +90,8 @@ namespace {
             input.read();
             throw std::runtime_error("accepted a premature EOF");
         } catch (const InspectionError &error) {
-            check(error.code == "READ_ERROR", "wrong error for premature EOF");
+            check(error.kind == FailureCode::InputRead && error.context.input == path,
+                  "wrong error for premature EOF");
             check(llvm::StringRef(error.what()).contains("unexpected end"), "missing EOF reason");
         }
 

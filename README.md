@@ -4,22 +4,29 @@ Forge inspects Windows PE32+ AMD64 executables and DLLs on macOS. It reports the
 
 ## Repository layout
 
-The root CMake project builds one executable, `forge`. Its headers are private to the project.
+The root CMake project builds the `forge` CLI on a private `forge_core` library. Core contract tests link the same production code. All headers are internal to the repository.
 
 | Location | Responsibility |
 | --- | --- |
-| `src/cli/` | Command dispatch, argument validation, and inspection report rendering |
+| `src/cli/` | Command dispatch, argument validation, report and diagnostic rendering, and exit status |
 | `src/pe/` | File input, PE parsing, image metadata, and DLL dependency resolution |
-| `src/analysis/` | Function discovery, debug information, and analysis reports |
+| `src/analysis/` | Function discovery, range validation, findings, and optional debug enrichment |
 | `src/lift/` | Translation of supported function instructions to LLVM IR |
+| `src/output/` | Publication of completed LLVM modules |
 | `cmake/` | Formatting and static-analysis commands |
 | `tests/integration/` | Build, CLI, code generation, and native execution suites and their Python helpers |
 | `tests/fixtures/` | SDK-free PE fixture sources and their generator |
-| `tests/unit/` | Isolated checks of integer and flag lowering and LLVM target setup |
+| `tests/unit/` | Core contracts for input lifetime, lifting, verification, publication, integer semantics, and LLVM target setup |
 | `tests/support/` | C++ harness for calling a lifted function from a test |
 | `tests/differential/` | Windows x64 fixtures, manifests, cross-build tooling, and Wine reference capture |
 
 Add new production code to the component that owns it. Create `runtime/` when generated code first needs a shared native implementation. Register tests in `tests/CMakeLists.txt`. Build the whole-executable fixtures with `./tools/build-windows-fixtures.sh --all`, then capture their Wine references with `./tools/run-windows-references.sh --all`. On Apple Silicon, compare enabled lifted functions with `./tools/run-differential.sh --all --config debug` or `--config release`. See the [fixture guide](tests/differential/README.md).
+
+### Image ownership and stage contracts
+
+`InputFile` validates the opened descriptor and copies its bytes into an owned buffer. `ParsedImage` keeps the physical file identity, that snapshot, its borrowing LLVM COFF object, and the validated PE metadata together. A checked RVA mapping borrows both a section and bytes for the lifetime of the image. The CLI releases the descriptor after acquisition. Replacing the file on disk after that point cannot change what discovery or lifting sees.
+
+Dependency inspection reads import and export tables and retains detached module metadata in its report. Function analysis validates the file-backed extents of the directories it consumes. It skips the import, delay-import and export directories, reads relocations and TLS, and turns recoverable exception-record defects into findings. An `AnalyzedImage` owns its parsed image and the discovered ranges. The analysis command asks for optional DWARF enrichment. The lifter uses the same checked ranges and bytes without opening the path again.
 
 ## Build and run
 
@@ -175,6 +182,36 @@ The sole supported signature adds `extern "C" int64_t forge_lifted(int64_t, int6
 Register and applicable immediate arithmetic forms use LLVM MC's decoded operands. Forge tracks each flag independently and merges incoming definitions at forward joins. A consumer whose required flag lacks a definition on any incoming path fails during lifting, with its RVA, opcode, bytes and flag name. This proof is conservative for CL shifts. For example, SETO after a CL shift is rejected because a possible count exceeds one. An overwritten or unused undefined flag is harmless.
 
 The supported operand-size prefix selects verified 16-bit forms. Other legacy prefixes, nonvolatile register parents, guest memory, stack operations, RIP-relative addressing, calls, loops, indirect branches, division, other multiply forms, rotates, and SIMD remain unsupported. Lifting requires an exact discovered start in a PE32+ AMD64 EXE, a linearly decodable range of at most 64 KiB, and code bytes free of base relocations. [Intel instruction reference](https://cdrdv2-public.intel.com/671110/325383-sdm-vol-2abcd.pdf)
+
+### Lifting interface and targets
+
+`generateIR(analyzedImage, request, context)` takes an exact discovered start RVA and an entry mode, `RegisterState` or `WindowsX64I64Pair`. It validates the selected range, unwind and relocation constraints, translates the function, verifies the LLVM module, and returns exclusive ownership of that module. Declare the caller-owned `LLVMContext` before the returned module so the context survives its destruction. Publication serializes the completed module to a sibling temporary, checks writing and closing, and replaces the destination by rename. Publication protects the input directory entry as opened and the captured physical file identity, including when a caller changes working directories. Diagnostics retain the supplied path spelling.
+
+The PE machine identifies the guest. Today's decoder uses `x86_64-pc-windows-msvc`, discovery understands AMD64 unwind metadata, and the wrapper uses the Windows x64 register convention. The output module independently selects `arm64-apple-macosx11.0.0` and its data layout. RVAs are 32-bit image-relative quantities, guest virtual addresses and file offsets retain their own widths, and LLVM pointers belong to the generated program. Future x86 work would need PE32 validation and address handling, an appropriate discovery mechanism, 32-bit decoding and state, and a defined guest calling convention. AMD64 is the only implemented guest.
+
+### Lift diagnostics
+
+`forge lift … --diagnostics-format json` writes one UTF-8 JSON object followed by LF to stderr for a handled execution failure (exit 1). Success leaves both streams empty. The default `text` format retains the human diagnostic. Invalid arguments, including an output alias, produce text and usage with exit 2 in either mode. Inspection and analysis keep their existing report formats.
+
+```json
+{"schema_version":1,"stage":"lifting","category":"unsupported","code":"LIFT_UNSUPPORTED_INSTRUCTION","message":"0x1003: PUSH64r [50]: unsupported instruction or operand form","context":{"input":"example.exe","entry_rva":"0x1000","end_rva":"0x1007","instruction_rva":"0x1003","opcode":"PUSH64r","bytes":"50","file_offset":1027}}
+```
+
+The version is the integer `1`. The stage, category, code, and human-readable message are strings. Every lift diagnostic carries a context object with the input path as supplied and the requested `entry_rva`. Optional fields include the exclusive `end_rva`, failing `instruction_rva`, LLVM MC `opcode`, and lowercase hex `bytes` (the available prefix for a decode error). RVAs are lowercase hexadecimal strings with a `0x` prefix. A `file_offset` is an integer byte offset. Unsupported guest diagnostics identify the detected `architecture`; publication failures include `output`. Paths and messages are rendered as valid UTF-8. Consumers classify the stage, category and code together.
+
+| Stage | Category | Codes and meaning |
+| --- | --- | --- |
+| `input` | `io` | `INPUT_OPEN` for opening or validating the descriptor, `INPUT_READ` for acquiring the snapshot |
+| `pe` | `invalid_input` | `INVALID_PE` for malformed or unmappable container metadata |
+| `pe` | `unsupported` | `UNSUPPORTED_ARCHITECTURE` for the PE machine or hybrid image |
+| `entry` | `invalid_input` | `ENTRY_INVALID_START` for missing, invalid or ambiguous starts, `ENTRY_UNMAPPED_CODE` for a unique, non-overlapping exact record whose code bytes lack file backing |
+| `entry` | `unsupported` | `ENTRY_DLL`, `ENTRY_UNWIND_VERSION`, `ENTRY_CHAINED_FRAGMENT`, `ENTRY_RELOCATION_OVERLAP` |
+| `lifting` | `invalid_input` | `LIFT_INVALID_ENCODING` for undecodable or truncated instructions |
+| `lifting` | `unsupported` | `LIFT_FUNCTION_SIZE`, `LIFT_UNSUPPORTED_INSTRUCTION` (including operand forms), `LIFT_UNSUPPORTED_REGISTER`, `LIFT_UNSUPPORTED_PREFIX`, `LIFT_UNSUPPORTED_CONTROL_FLOW`, `LIFT_UNDEFINED_REGISTER`, `LIFT_UNDEFINED_FLAG` |
+| `lifting` | `internal` | `LIFT_BACKEND_SETUP` for LLVM decoder setup |
+| `verification` | `internal` | `IR_VERIFICATION_FAILED` for LLVM's rejection of generated IR |
+| `publication` | `io` | `OUTPUT_CREATE`, `OUTPUT_DESCRIPTOR`, `OUTPUT_WRITE`, `OUTPUT_CLOSE`, `OUTPUT_REPLACE` identify the failed operation |
+| Respective stage | `internal` | `INPUT_INTERNAL`, `PE_INTERNAL`, `ANALYSIS_INTERNAL`, `ENTRY_INTERNAL`, `LIFTING_INTERNAL`, `VERIFICATION_INTERNAL`, `PUBLICATION_INTERNAL` cover unexpected handled exceptions |
 
 ### Lifting approach
 
