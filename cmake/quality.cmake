@@ -1,33 +1,34 @@
 cmake_minimum_required(VERSION 3.20)
 file(REAL_PATH "${CMAKE_CURRENT_LIST_DIR}/.." root)
-file(GLOB_RECURSE sources "${root}/src/*.cpp" "${root}/tests/support/*.cpp" "${root}/tests/unit/*.cpp")
 
 include("${CMAKE_CURRENT_LIST_DIR}/llvm.cmake")
 if(ACTION STREQUAL "lint")
   forge_llvm_tool(clang-tidy)
   set(executable "${clang-tidy}")
-else()
+elseif(ACTION MATCHES "^format(-check|-audit)?$")
   forge_llvm_tool(clang-format)
   set(executable "${clang-format}")
+else()
+  message(FATAL_ERROR "Unknown quality command: ${ACTION}")
 endif()
-
+execute_process(COMMAND "${executable}" --version OUTPUT_VARIABLE banner COMMAND_ERROR_IS_FATAL ANY)
+if(NOT banner MATCHES "version 23[.]1[.]5([ \r\n]|$)")
+  message(FATAL_ERROR "Forge quality checks require ${executable} version 23.1.5. Select the CI release with LLVM_CONFIG or LLVM_DIR. Found: ${banner}")
+endif()
+find_program(python NAMES python3 REQUIRED)
+set(style "${CMAKE_CURRENT_LIST_DIR}/style.py")
 if(NOT ACTION STREQUAL "lint")
-  file(GLOB_RECURSE fixture_sources "${root}/tests/differential/fixtures/*.c"
-    "${root}/tests/differential/fixtures/*.cpp" "${root}/tests/differential/fixtures/*.h"
-    "${root}/tests/differential/reference/*.c")
-  file(GLOB_RECURSE headers "${root}/src/*.h" "${root}/tests/support/*.h")
-  if(ACTION STREQUAL "format")
-    set(flags -i)
-  elseif(ACTION STREQUAL "format-check")
-    set(flags --dry-run --Werror)
-  else()
-    message(FATAL_ERROR "Unknown quality command: ${ACTION}")
-  endif()
-  execute_process(COMMAND "${executable}" ${flags} ${sources} ${headers} ${fixture_sources}
-    COMMAND_ERROR_IS_FATAL ANY)
+  execute_process(COMMAND "${python}" -B "${style}" "${ACTION}" "${executable}"
+    WORKING_DIRECTORY "${root}" COMMAND_ERROR_IS_FATAL ANY)
   return()
 endif()
 
+execute_process(COMMAND "${executable}" --verify-config "--config-file=${root}/.clang-tidy"
+  WORKING_DIRECTORY "${root}" COMMAND_ERROR_IS_FATAL ANY)
+execute_process(COMMAND "${python}" -B "${style}" native-sources
+  WORKING_DIRECTORY "${root}" OUTPUT_VARIABLE source_list OUTPUT_STRIP_TRAILING_WHITESPACE
+  COMMAND_ERROR_IS_FATAL ANY)
+string(REPLACE "\n" ";" sources "${source_list}")
 if(NOT LINT_DATABASE)
   forge_llvm_tool(clang)
   forge_llvm_tool(clang++)
@@ -75,7 +76,6 @@ if(missing)
   list(JOIN missing "\n  " names)
   message(FATAL_ERROR "Missing first-party compile commands in ${database}:\n  ${names}\n${regenerate}")
 endif()
-find_program(python NAMES python3 REQUIRED)
 forge_config_query(--includedir llvm_include)
-execute_process(COMMAND "${python}" "${CMAKE_CURRENT_LIST_DIR}/lint.py" "${llvm_include}"
-  "${executable}" -p "${directory}" ${sources} COMMAND_ERROR_IS_FATAL ANY)
+execute_process(COMMAND "${python}" -B "${CMAKE_CURRENT_LIST_DIR}/lint.py" "${llvm_include}"
+  "${executable}" -p "${directory}" ${sources} WORKING_DIRECTORY "${root}" COMMAND_ERROR_IS_FATAL ANY)

@@ -10,11 +10,13 @@ static void advance(unsigned index) {
     total += bias * ++calls;
 }
 
-int main(int argc, char** argv) {
-    if (!open_binary_streams() || argc != 2)
+int main(int argc, char **argv) {
+    if (!open_binary_streams() || argc != 2) {
         return 2;
-    for (const char* c = argv[1]; *c; ++c)
+    }
+    for (const char *c = argv[1]; *c; ++c) {
         advance((unsigned char)*c);
+    }
     printf("bias=%u total=%u\n", bias, total);
     return 0;
 }

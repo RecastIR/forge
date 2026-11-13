@@ -15,7 +15,7 @@ The root CMake project builds one executable, `forge`. Its headers are private t
 | `cmake/` | Formatting and static-analysis commands |
 | `tests/integration/` | Build, CLI, code generation, and native execution suites and their Python helpers |
 | `tests/fixtures/` | SDK-free PE fixture sources and their generator |
-| `tests/unit/` | Isolated checks of the integer and flag lowering |
+| `tests/unit/` | Isolated checks of integer and flag lowering and LLVM target setup |
 | `tests/support/` | C++ harness for calling a lifted function from a test |
 | `tests/differential/` | Windows x64 fixtures, manifests, cross-build tooling, and Wine reference capture |
 
@@ -58,10 +58,13 @@ Run `./tools/test-forge.sh --all` on Apple Silicon for the complete native, Wine
 
 Install Apple's developer tools with `xcode-select --install`. The LLVM release package also provides `clang-format`, `clang-tidy`, and `llvm-config`. Formatting and linting are opt-in locally. The GitHub Actions workflow checks formatting, runs clang-tidy, and tests Debug and sanitizer builds on macOS 26 ARM64 for pull requests and pushes to `main`. It uses LLVM 23.1.5 and a Python environment with Unicorn 2.1.4 for the function-level oracle.
 
+Forge uses four-space indentation and checks formatting and braces across its C and C++ sources. For naming, readability, IDE setup, and lint scope, see the [C++ style guide](docs/cpp-style.md).
+
 ```sh
-make format-check   # Verify Forge, harness, and Windows fixture formatting
-make format         # Apply the same formatting
-make lint           # Analyze Forge and the native C++ test harness
+make format-check   # Check all owned files for formatting and fixtures for braces
+make format         # Apply formatting across the same tree
+make format-audit   # Run the whole-tree check without writing
+make lint           # Check native safety and braces, report whole-function and changed-line advisories
 make test CONFIG=Debug
 make sanitize       # Run CTest in a separate Debug build with ASan and UBSan
 ```
@@ -74,7 +77,7 @@ make configure CMAKE_ARGS=-DCMAKE_EXPORT_COMPILE_COMMANDS=ON
 make lint LINT_DATABASE=build/compile_commands.json
 ```
 
-The last two commands regenerate and use a Unix Makefiles or Ninja build's own database. An external database must include the harness and every Forge translation unit. Lint requires Python 3 and uses a temporary clang-tidy overlay for four expressions in LLVM’s operand-storage headers. LLVM allocates these operands before its C++ objects, which the bounds checker models as separate allocations. The overlay annotates only those upstream expressions for that check. Analyzer findings and selected bug-prone checks fail lint. Other diagnostics are advisory.
+The last two commands regenerate and use a Unix Makefiles or Ninja build's own database. An external database must include the harness, unit tests, and every Forge translation unit. Lint requires Python 3 and uses a temporary clang-tidy overlay for four expressions in LLVM’s operand-storage headers. LLVM allocates these operands before its C++ objects, which the bounds checker models as separate allocations. The overlay annotates only those upstream expressions for that check. The style guide lists blocking and advisory diagnostics.
 
 ## Dependency policy
 
@@ -153,7 +156,7 @@ xcrun clang++ -arch arm64 -std=c++20 tests/support/native_harness.cpp build/add.
 printf 'a 14\nffffffffffffffff 1\n' | build/add-harness
 ```
 
-The object reports `Mach-O arm64`. The harness prints `1e` and `0` for 10 + 20 and −1 + 1.
+The object reports `Mach-O arm64`. The harness prints `1e` and `0` for 10 + 20 and −1 + 1. It accepts empty input and reports failure for an incomplete pair or an input or output error.
 
 Both IR interfaces retain the internal `forge_lifted_<hex RVA>` function through optimization. Its state pointer requires four-byte alignment and addresses seven 64-bit slots in this order — RAX, RCX, RDX, R8, R9, R10, R11. Reads use their incoming values. Writes update those slots. Condition flags are local to each lifted invocation and start undefined. Plain `ret` ends the isolated call. Guest stack state, return addresses, and flags across calls are outside this interface.
 

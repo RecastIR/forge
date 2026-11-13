@@ -4,6 +4,7 @@ import json
 from pathlib import Path
 import platform
 import operator
+import os
 import random
 import re
 import struct
@@ -129,6 +130,24 @@ def original_results(image, rva, vectors):
     return results
 
 
+def check_harness_input(exe, directory):
+    empty = subprocess.run([exe], input=b"", capture_output=True, timeout=45)
+    check((empty.returncode, empty.stdout, empty.stderr) == (0, b"", b""), ("empty input", empty))
+    check(run(exe, input=b"1 2") == b"3\n", "complete pair at EOF")
+    for tail in (b"4", b"4 ", b"0x"):
+        partial = subprocess.run([exe], input=b"1 2\n" + tail, capture_output=True, timeout=45)
+        check((partial.returncode, partial.stdout, partial.stderr) == (1, b"3\n", b""),
+              ("incomplete pair at EOF", tail, partial))
+
+    fd = os.open(directory, os.O_RDONLY)
+    try:
+        unreadable = subprocess.run([exe], stdin=fd, capture_output=True, timeout=45)
+    finally:
+        os.close(fd)
+    check((unreadable.returncode, unreadable.stdout, unreadable.stderr) == (1, b"", b""),
+          ("unreadable input", unreadable))
+
+
 def main():
     if MODE != "codegen" and (platform.system(), platform.machine()) != ("Darwin", "arm64"):
         print("Native execution requires an Apple Silicon host.")
@@ -172,6 +191,8 @@ def main():
                 if MODE == "codegen":
                     continue
                 run(*HARNESS_LINKER, HARNESS_OBJECT, obj, "-o", exe)
+                if MODE == "native" and name == "C addition" and source == ir:
+                    check_harness_input(exe, work)
                 actual = [int(s, 16) for s in run(exe, input=stdin, text=True).splitlines()]
                 check(len(actual) == len(expected), (name, source.name, len(actual), len(expected)))
                 for pair, got, want in zip(vectors, actual, expected):

@@ -2,8 +2,9 @@
 #include <windows.h>
 
 int main(void) {
-    if (!open_binary_streams())
+    if (!open_binary_streams()) {
         return 2;
+    }
     const int process = GetCurrentProcessId() != 0;
     const int module = GetModuleHandleW(NULL) != NULL;
     const DWORD marker = 0x4152;

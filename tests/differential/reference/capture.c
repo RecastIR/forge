@@ -7,22 +7,22 @@
 struct stream {
     HANDLE input;
     HANDLE child;
-    const char* filename;
+    const char *filename;
     size_t limit;
 };
 
-static void win_error(const char* operation) {
+static void win_error(const char *operation) {
     DWORD error = GetLastError();
     fprintf(stderr, "%s failed (Win32 %lu)\n", operation, error);
     ExitProcess(1);
 }
 
-static void capture_error(const char* message, const char* file) {
+static void capture_error(const char *message, const char *file) {
     fprintf(stderr, "%s: %s\n", message, file);
     ExitProcess(1);
 }
 
-static HANDLE open_stream(struct stream* stream, SECURITY_ATTRIBUTES* inherit) {
+static HANDLE open_stream(struct stream *stream, SECURITY_ATTRIBUTES *inherit) {
     if (!CreatePipe(&stream->input, &stream->child, inherit, 0) ||
         !SetHandleInformation(stream->input, HANDLE_FLAG_INHERIT, 0)) {
         win_error("create stream pipe");
@@ -30,9 +30,9 @@ static HANDLE open_stream(struct stream* stream, SECURITY_ATTRIBUTES* inherit) {
     return stream->child;
 }
 
-static DWORD WINAPI drain(void* arg) {
-    struct stream* stream = arg;
-    FILE* out = fopen(stream->filename, "wb");
+static DWORD WINAPI drain(void *arg) {
+    struct stream *stream = arg;
+    FILE *out = fopen(stream->filename, "wb");
     if (!out) {
         capture_error("cannot open capture", stream->filename);
     }
@@ -61,15 +61,15 @@ static DWORD WINAPI drain(void* arg) {
     return 0;
 }
 
-static void record(const char* filename, const void* data, size_t length) {
-    FILE* file = fopen(filename, "wb");
+static void record(const char *filename, const void *data, size_t length) {
+    FILE *file = fopen(filename, "wb");
     if (!file || fwrite(data, 1, length, file) != length || fclose(file) != 0) {
         capture_error("cannot write capture record", filename);
     }
 }
 
 static void loader_failure(DWORD status) {
-    const char* category = (status == 0xc0000135 || status == ERROR_MOD_NOT_FOUND)
+    const char *category = (status == 0xc0000135 || status == ERROR_MOD_NOT_FOUND)
                                ? "missing Windows runtime dependency"
                                : "Windows loader startup failure";
     fprintf(stderr, "%s (0x%08lx)\n", category, status);
@@ -78,7 +78,7 @@ static void loader_failure(DWORD status) {
 
 // Wine 8 raises ntdll!DbgBreakPoint after resolving imports and initializing DLLs.
 // A process that dies before this point has no observed program exit status.
-static void wait_for_loader(PROCESS_INFORMATION* process) {
+static void wait_for_loader(PROCESS_INFORMATION *process) {
     FARPROC breakpoint = GetProcAddress(GetModuleHandleW(L"ntdll.dll"), "DbgBreakPoint");
     if (!breakpoint) {
         win_error("locate loader breakpoint");
@@ -105,10 +105,10 @@ static void wait_for_loader(PROCESS_INFORMATION* process) {
             loader_failure(event.u.ExitProcess.dwExitCode);
             break;
         case EXCEPTION_DEBUG_EVENT: {
-            const EXCEPTION_DEBUG_INFO* info = &event.u.Exception;
+            const EXCEPTION_DEBUG_INFO *info = &event.u.Exception;
             ready = info->dwFirstChance && event.dwThreadId == process->dwThreadId &&
                     info->ExceptionRecord.ExceptionCode == EXCEPTION_BREAKPOINT &&
-                    info->ExceptionRecord.ExceptionAddress == (void*)breakpoint;
+                    info->ExceptionRecord.ExceptionAddress == (void *)breakpoint;
             disposition = ready ? DBG_CONTINUE : DBG_EXCEPTION_NOT_HANDLED;
             break;
         }
@@ -133,13 +133,13 @@ static void wait_for_loader(PROCESS_INFORMATION* process) {
     }
 }
 
-int wmain(int argc, wchar_t** argv) {
+int wmain(int argc, wchar_t **argv) {
     if (argc != 3) {
         return 1;
     }
     // The guest supervisor has already quoted the argv vector as UTF-16LE.
     static wchar_t command[32768];
-    FILE* input = fopen("command.bin", "rb");
+    FILE *input = fopen("command.bin", "rb");
     if (!input) {
         capture_error("cannot open command", "command.bin");
     }

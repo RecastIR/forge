@@ -1,8 +1,10 @@
 """Exercise discovery and lift diagnostics through their CLI entry points."""
 import json
 import os
+from pathlib import Path
 import resource
 import signal
+import stat
 import struct
 import sys
 import unicodedata
@@ -19,11 +21,15 @@ class Discovery(Case):
 
     def test_metadata_and_gaps(self):
         # Missing imports leave root-only analysis usable.
-        r = self.analyze(self.copy("metadata.exe"), "--strict")
+        image = self.copy("metadata.exe")
+        r = self.analyze(image, "--strict")
         f, = r["functions"]
         self.assertTrue(f["contains_tls_callback"] and f["contains_entry_point"])
         self.assertEqual((f["size"], f["source"], f["status"]), (9, "exception_directory", "valid"))
         self.assertEqual(r["unknown_executable_ranges"], [])
+        self.assertEqual(self.invoke("analyze", image, "--functions", "--strict").stdout,
+                         b"Functions (1), source: PE exception directory\n"
+                         b"  0x1000..0x1009 (9 bytes) unwind 0x210c valid records 0 entry TLS callback\n")
         r = self.analyze(FIXTURES / "minimal.exe", "--strict")
         self.assertEqual(r["functions"], [])
         self.assertEqual(r["unknown_executable_ranges"], [{"start_rva": "0x1000", "end_rva": "0x1001"}])
@@ -45,7 +51,10 @@ class Discovery(Case):
         f, = self.analyze(FIXTURES / "inlined.exe", "--strict")["functions"]
         self.assertEqual(f["name"], "entry")
         self.assertEqual(f["location"]["file"].split("/")[-1], "inlined.c")
-        self.assertEqual(f["location"]["line"], 6)  # call site in entry, helper body is line 2
+        source = Path(__file__).resolve().parents[1] / "fixtures/inlined.c"
+        call_line, = (i for i, line in enumerate(source.read_text().splitlines(), 1)
+                      if "return step(a) + b;" in line)
+        self.assertEqual(f["location"]["line"], call_line)
 
     def test_unicode_section_columns(self):
         image = FIXTURES / "unicode.exe"
@@ -315,7 +324,7 @@ class Lift(Case):
         self.assertEqual(output.read_bytes(), b"old contents")
         self.assertEqual(list(self.dir.glob("*.tmp-*")), [])
 
-        self.invoke(*args)
+        self.invoke(*args, preexec_fn=lambda: os.close(0))
         self.assertIn("define internal void @forge_lifted_1000(", output.read_text())
         self.assertEqual(previous.read_bytes(), b"old contents")
         output.unlink()
@@ -325,6 +334,37 @@ class Lift(Case):
         p = self.invoke(*args, code=1)
         self.assertIn(b"OUTPUT_ERROR", p.stderr)
         self.assertEqual(sentinel.read_bytes(), b"keep")
+        self.assertEqual(list(self.dir.glob("*.tmp-*")), [])
+
+    def assert_published_at(self, output):
+        self.invoke("lift", FIXTURES / "add.exe", "--rva", "0x1000", "--output", output,
+                    umask=0o027)
+        self.assertEqual(list(output.parent.iterdir()), [output])
+        self.assertIn("define internal void @forge_lifted_1000(", output.read_text())
+        self.assertEqual(stat.S_IMODE(output.stat().st_mode), 0o640)
+
+    def test_publication_in_percent_directory(self):
+        parent = self.dir / "100%"
+        parent.mkdir()
+        self.assert_published_at(parent / "function.ll")
+
+    def test_publication_at_name_max(self):
+        name_max = os.pathconf(self.dir, "PC_NAME_MAX")
+        self.assertGreater(name_max, 1)
+        self.assert_published_at(self.dir / ("." + "x" * (name_max - 1)))
+
+    def test_publication_descriptor_transfer_failure(self):
+        output = self.dir / "function.ll"
+        output.write_bytes(b"old contents")
+
+        def only_stdin_slot_available():
+            os.close(0)
+            resource.setrlimit(resource.RLIMIT_NOFILE, (3, resource.getrlimit(resource.RLIMIT_NOFILE)[1]))
+
+        p = self.invoke("lift", FIXTURES / "add.exe", "--rva", "0x1000", "--output", output,
+                        code=1, preexec_fn=only_stdin_slot_available)
+        self.assertIn(b"OUTPUT_ERROR", p.stderr)
+        self.assertEqual(output.read_bytes(), b"old contents")
         self.assertEqual(list(self.dir.glob("*.tmp-*")), [])
 
     def test_relocation_overlaps_instruction(self):
