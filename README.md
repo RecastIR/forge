@@ -15,7 +15,7 @@ The root CMake project builds one executable, `forge`. Its headers are private t
 | `cmake/` | Formatting and static-analysis commands |
 | `tests/integration/` | Build, CLI, code generation, and native execution suites and their Python helpers |
 | `tests/fixtures/` | SDK-free PE fixture sources and their generator |
-| `tests/unit/` | Isolated checks of the integer and flag lowering |
+| `tests/unit/` | Isolated checks of integer and flag lowering and LLVM target setup |
 | `tests/support/` | C++ harness for calling a lifted function from a test |
 | `tests/differential/` | Windows x64 fixtures, manifests, cross-build tooling, and Wine reference capture |
 

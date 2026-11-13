@@ -1,11 +1,11 @@
 #include "analysis/analysis.h"
+#include "lift/asm_info.h"
 #include "lift/integer.h"
 
 #include "llvm/ADT/SmallString.h"
 #include "llvm/IR/IRBuilder.h"
 #include "llvm/IR/Module.h"
 #include "llvm/IR/Verifier.h"
-#include "llvm/MC/MCAsmInfo.h"
 #include "llvm/MC/MCContext.h"
 #include "llvm/MC/MCDisassembler/MCDisassembler.h"
 #include "llvm/MC/MCInst.h"
@@ -479,8 +479,9 @@ void lift(const Analysis &a, MemoryBufferRef buffer, uint32_t rva, bool wrapper,
     std::unique_ptr<MCRegisterInfo> regs(target->createMCRegInfo(triple));
     std::unique_ptr<MCInstrInfo> instructions(target->createMCInstrInfo());
     std::unique_ptr<MCSubtargetInfo> sub(target->createMCSubtargetInfo(triple, "generic", ""));
-    std::unique_ptr<MCAsmInfo> assembly(target->createMCAsmInfo(*regs, triple, MCTargetOptions()));
-    MCContext mc(triple, *assembly, *regs, *sub);
+    const MCTargetOptions Options;
+    auto Assembly = x86::createAsmInfo(*target, *regs, triple, Options);
+    MCContext mc(triple, *Assembly, *regs, *sub);
     std::unique_ptr<MCDisassembler> dis(target->createMCDisassembler(*sub, mc));
     auto steps = decode(code->bytes, rva, *dis, *instructions);
     LLVMContext context;
