@@ -1,5 +1,10 @@
 BasedOnStyle: LLVM
 IndentWidth: 4
+ContinuationIndentWidth: 4
+UseTab: Never
+NamespaceIndentation: All
+MaxEmptyLinesToKeep: 1
+SeparateDefinitionBlocks: Always
 ColumnLimit: 100
 DerivePointerAlignment: false
 PointerAlignment: Right

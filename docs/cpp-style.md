@@ -2,6 +2,31 @@
 
 Forge uses C++20 and the LLVM formatting preset with four-space indentation, a 100-column limit, attached braces, case-sensitive include sorting, and right-aligned pointers and references (`Type *Value`, `Type &Value`). Use braces for every `if`, `else`, `for`, `while`, and `do` body, including early returns. Write consecutive alternatives as `else if` chains. [LLVM coding standards](https://llvm.org/docs/CodingStandards.html)
 
+## Indentation and vertical spacing
+
+Use spaces for indentation. Indent the contents of every namespace, including anonymous namespaces, by one four-space level. The continuation indent is also four spaces. Clang-format aligns wrapped arguments under the first argument when the LLVM style calls for alignment.
+
+Within a block, leave exactly one blank line between a complete control-flow statement and each neighboring statement. This applies to `if`, `switch`, loops, and `try`/`catch`, including two independent control-flow statements in succession or a loop followed by a `return`. Keep an `if`/`else if`/`else` chain together, each `catch` attached to its `try`, and a `do` attached to its terminating `while`. Omit blank lines immediately after the opening brace and immediately before the closing brace.
+
+Use one blank line between logical phases such as preparation, validation, processing, and output. Group declarations that prepare the same result and output statements that write one part of a report. Place the break before a leading explanatory comment so the comment stays with its statement.
+
+```cpp
+Out << " records";
+
+// Keep the order recorded in the exception directory.
+for (auto Index : Function.Indices) {
+    Out << " " << Index;
+}
+
+if (Function.Entry) {
+    Out << " entry";
+}
+```
+
+Apply these paragraph breaks to statements. Preserve the contents of string literals, raw strings, and macro definitions, and follow the existing layout of preprocessor directives and `switch` labels.
+
+Clang-format enforces indentation and spaces, inserts blank lines between definition blocks with `SeparateDefinitionBlocks`, and trims consecutive blank lines to one with `MaxEmptyLinesToKeep`. Reviewers check each function body for missing breaks around control flow and between logical phases.
+
 ## Naming
 
 | Kind | Form | Example |
@@ -47,7 +72,7 @@ Clang-tidy flags cognitive complexity above **25** and explains which branches a
 
 Every new abstraction, ownership relationship, cache, or parallel representation must solve a concrete current problem. Keep one authoritative representation of state. If a derived representation earns its place, identify its source and when it is updated or invalidated. Name a helper for the operation it performs or the invariant it establishes. Keep steps together when splitting them would force the reader to chase trivial helpers. Logical phases can be visible within one function.
 
-Keep related statements together and separate distinct phases with a blank line. Name intermediate values that clarify a decision, width conversion, or chain of calls. Leave simple predicates together. Avoid nested ternaries, assignments hidden in conditions, unrelated operations in one expression, and template machinery that obscures the algorithm. A comment should explain an invariant or a design choice that the code alone cannot convey.
+Name intermediate values that clarify a decision, width conversion, or chain of calls. Leave simple predicates together. Avoid nested ternaries, assignments hidden in conditions, unrelated operations in one expression, and template machinery that obscures the algorithm. A comment should explain an invariant or a design choice that the code alone cannot convey.
 
 ### Preserving behavior during cleanup
 
@@ -67,7 +92,9 @@ Splitting the guard makes the pointer check visible.
 if (!dir) {
     return std::nullopt;
 }
+
 const bool EmptyEntry = !dir->RelativeVirtualAddress && !dir->Size;
+
 if (EmptyEntry) {
     return std::nullopt;
 }

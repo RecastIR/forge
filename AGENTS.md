@@ -107,6 +107,8 @@ Before declaring work complete, inspect the diff as though reviewing someone els
 - **Semantic fidelity:** Could the transformation silently change program behavior? Are source facts, inferences, and overrides distinguishable?
 - **Architecture:** Does the code preserve stage boundaries and repository conventions?
 - **Readability:** Can a reader follow the logical phases without unpacking dense expressions or jumping through trivial helpers?
+- Review vertical spacing explicitly. Separate independent control-flow statements and logical phases according to the C++ style guide. A successful formatter run does not establish that function bodies have readable paragraph structure. [Indentation and vertical spacing](docs/cpp-style.md#indentation-and-vertical-spacing)
+- Never remove useful blank lines, compress statements, or introduce trivial helpers merely to reduce function-length metrics. Function length is a review signal, not a reason to make code denser.
 - **Ownership:** Who owns each new resource, and which values borrow from it? Could an early return, move, container mutation, or IR mutation invalidate a borrow?
 - **Behavior preservation:** Did cleanup change a guard, evaluation order, side effect, destruction point, or error path? In lifting code, did it change a width, conversion, register, or flag update?
 - **Complexity and reuse:** What current problem does each new abstraction or stored value solve? Could an existing representation or mechanism serve it? How is derived state kept valid?

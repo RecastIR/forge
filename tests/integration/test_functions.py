@@ -20,11 +20,15 @@ class Discovery(Case):
 
     def test_metadata_and_gaps(self):
         # Missing imports leave root-only analysis usable.
-        r = self.analyze(self.copy("metadata.exe"), "--strict")
+        image = self.copy("metadata.exe")
+        r = self.analyze(image, "--strict")
         f, = r["functions"]
         self.assertTrue(f["contains_tls_callback"] and f["contains_entry_point"])
         self.assertEqual((f["size"], f["source"], f["status"]), (9, "exception_directory", "valid"))
         self.assertEqual(r["unknown_executable_ranges"], [])
+        self.assertEqual(self.invoke("analyze", image, "--functions", "--strict").stdout,
+                         b"Functions (1), source: PE exception directory\n"
+                         b"  0x1000..0x1009 (9 bytes) unwind 0x210c valid records 0 entry TLS callback\n")
         r = self.analyze(FIXTURES / "minimal.exe", "--strict")
         self.assertEqual(r["functions"], [])
         self.assertEqual(r["unknown_executable_ranges"], [{"start_rva": "0x1000", "end_rva": "0x1001"}])

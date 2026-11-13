@@ -6,7 +6,9 @@ class Operation {
 
   protected:
     explicit Operation(unsigned &trace) : events(trace) { record(1); }
+
     ~Operation() { record(4); }
+
     // Each digit records an event on the same object, including destruction after dispatch.
     __attribute__((noinline)) void record(unsigned digit) { events = events * 10 + digit; }
 
@@ -17,14 +19,18 @@ class Operation {
 class Add : public Operation {
   public:
     explicit Add(unsigned &trace) : Operation(trace) { record(2); }
+
     ~Add() { record(5); }
+
     unsigned apply(unsigned value) const override { return value + 7; }
 };
 
 class Double : public Operation {
   public:
     explicit Double(unsigned &trace) : Operation(trace) { record(3); }
+
     ~Double() { record(6); }
+
     unsigned apply(unsigned value) const override { return 2 * value; }
 };
 

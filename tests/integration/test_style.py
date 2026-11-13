@@ -30,9 +30,9 @@ class StyleChecks(unittest.TestCase):
         self.file = self.root / 'src/legacy.cpp'
         self.file.write_text(FORMATTED)
         self.header = self.root / 'src/model.h'
-        self.header.write_text('#pragma once\ninline int value() { return 3; }\n')
+        self.header.write_text('#pragma once\n\ninline int value() { return 3; }\n')
         self.caller = self.root / 'src/sample.cpp'
-        self.caller.write_text('#include "model.h"\nint readValue() { return value(); }\n')
+        self.caller.write_text('#include "model.h"\n\nint readValue() { return value(); }\n')
         self.run_command('git', 'init', '-q')
         self.run_command('git', 'add', '.')
         self.run_command('git', '-c', 'user.name=Test', '-c', 'user.email=test@localhost',
@@ -140,6 +140,51 @@ class StyleChecks(unittest.TestCase):
                 self.run_command(*command, 'format', env=env)
                 self.assertEqual(self.run_command('git', 'diff'), changes)
                 self.run_command(*command, 'format-check', env=env)
+
+    def test_namespace_indentation_and_paragraphs(self):
+        self.file.write_bytes(b"""\
+namespace forge {
+namespace {
+void report() {
+const auto Range = findRuntimeFunctionContainingAddress(Analysis.ExceptionDirectory.RuntimeFunctions, Address);
+
+if (Range) {
+    printRange(Range);
+}
+
+
+if (Verbose) {
+    printDetails();
+}
+}
+void finish() {}
+} // namespace
+} // namespace forge
+""")
+        expected = b"""\
+namespace forge {
+    namespace {
+        void report() {
+            const auto Range = findRuntimeFunctionContainingAddress(
+                Analysis.ExceptionDirectory.RuntimeFunctions, Address);
+
+            if (Range) {
+                printRange(Range);
+            }
+
+            if (Verbose) {
+                printDetails();
+            }
+        }
+
+        void finish() {}
+    } // namespace
+} // namespace forge
+"""
+        self.run_command('make', 'format')
+        self.assertEqual(self.file.read_bytes(), expected)
+        self.run_command('make', 'format')
+        self.assertEqual(self.file.read_bytes(), expected)
 
     def test_file_selection(self):
         renamed = self.root / 'src/renamed file.cpp'
