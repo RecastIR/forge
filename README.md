@@ -169,7 +169,7 @@ The supported operand-size prefix selects verified 16-bit forms. Other legacy pr
 
 Forge uses LLVM 17 MC for instruction decoding, an explicit translation for each supported form, and LLVM's AArch64 backend via `llc`. The same installed toolchain builds on Apple Silicon, verifies the IR, and produces Mach-O objects. The opcode names and operand layouts follow LLVM 17.0.6. Upgrading LLVM requires rerunning the decoder and behavioral tests.
 
-Remill provides maintained x86-64 semantics and tests LLVM 17 and newer in CI, with macOS builds in its Nix matrix. Using its IR for this native interface would also require adapting its state, memory, and control-flow intrinsics. Its broader instruction coverage is relevant when Forge grows beyond register-only functions. [Remill build matrix](https://github.com/lifting-bits/remill/blob/master/.github/workflows/build.yml) · [Remill intrinsics](https://github.com/lifting-bits/remill/blob/master/docs/INTRINSICS.md)
+The [binary lifting evaluation](docs/binary-lifting-evaluation.md) compares six projects, follows a Windows x64 carry-flag fixture through Remill and Forge, and explains the recommendation to keep Forge’s LLVM lifter and reuse upstream test and recovery techniques.
 
 RetDec lifts x86-64 for decompilation and documents macOS support. Its modified LLVM 8 dependency and limited maintenance make direct integration into Forge's LLVM 17 ARM64 build a larger undertaking. Native Apple Silicon integration and executable equivalence were unverified for that option. [RetDec](https://github.com/avast/retdec) · [RetDec LLVM fork](https://github.com/avast/llvm)
 
