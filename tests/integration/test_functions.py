@@ -4,6 +4,7 @@ import os
 from pathlib import Path
 import resource
 import signal
+import stat
 import struct
 import sys
 import unicodedata
@@ -334,6 +335,23 @@ class Lift(Case):
         self.assertIn(b"OUTPUT_ERROR", p.stderr)
         self.assertEqual(sentinel.read_bytes(), b"keep")
         self.assertEqual(list(self.dir.glob("*.tmp-*")), [])
+
+    def assert_published_at(self, output):
+        self.invoke("lift", FIXTURES / "add.exe", "--rva", "0x1000", "--output", output,
+                    umask=0o027)
+        self.assertEqual(list(output.parent.iterdir()), [output])
+        self.assertIn("define internal void @forge_lifted_1000(", output.read_text())
+        self.assertEqual(stat.S_IMODE(output.stat().st_mode), 0o640)
+
+    def test_publication_in_percent_directory(self):
+        parent = self.dir / "100%"
+        parent.mkdir()
+        self.assert_published_at(parent / "function.ll")
+
+    def test_publication_at_name_max(self):
+        name_max = os.pathconf(self.dir, "PC_NAME_MAX")
+        self.assertGreater(name_max, 1)
+        self.assert_published_at(self.dir / ("." + "x" * (name_max - 1)))
 
     def test_publication_descriptor_transfer_failure(self):
         output = self.dir / "function.ll"

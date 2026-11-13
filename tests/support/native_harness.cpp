@@ -1,5 +1,6 @@
 #include <bit>
 #include <cstdint>
+#include <cstdio>
 #include <iostream>
 
 extern "C" std::int64_t forge_lifted(std::int64_t, std::int64_t);
@@ -19,5 +20,7 @@ int main() {
         std::cout << std::hex << std::bit_cast<std::uint64_t>(Result) << '\n';
     }
 
-    return std::cin.eof() && !std::cin.bad() && std::cout.flush() ? 0 : 1;
+    // A stdio read error can also set eofbit on the synchronized C++ stream.
+    const bool CleanEof = std::cin.eof() && !std::cin.bad() && std::ferror(stdin) == 0;
+    return CleanEof && std::cout.flush() ? 0 : 1;
 }

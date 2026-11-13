@@ -156,7 +156,7 @@ xcrun clang++ -arch arm64 -std=c++20 tests/support/native_harness.cpp build/add.
 printf 'a 14\nffffffffffffffff 1\n' | build/add-harness
 ```
 
-The object reports `Mach-O arm64`. The harness prints `1e` and `0` for 10 + 20 and −1 + 1.
+The object reports `Mach-O arm64`. The harness prints `1e` and `0` for 10 + 20 and −1 + 1. It accepts empty input and reports failure for an incomplete pair or an input or output error.
 
 Both IR interfaces retain the internal `forge_lifted_<hex RVA>` function through optimization. Its state pointer requires four-byte alignment and addresses seven 64-bit slots in this order — RAX, RCX, RDX, R8, R9, R10, R11. Reads use their incoming values. Writes update those slots. Condition flags are local to each lifted invocation and start undefined. Plain `ret` ends the isolated call. Guest stack state, return addresses, and flags across calls are outside this interface.
 

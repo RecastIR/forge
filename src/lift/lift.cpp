@@ -432,18 +432,41 @@ namespace forge {
             }
         }
 
-        void publish(const llvm::Module &module, const fs::path &path) {
-            SmallString<128> temporary;
-            int fd;
+        int createSiblingTemporary(const fs::path &output, fs::path &temporary) {
+            const auto Parent = output.parent_path();
+            // Use the opposite dot prefix so even an absent destination cannot be the temporary.
+            const StringRef Model = output.filename().native().starts_with('.')
+                                        ? "forge.tmp-%%%%%%%%"
+                                        : ".forge.tmp-%%%%%%%%";
+            SmallString<32> name;
 
-            if (auto ec = sys::fs::createUniqueFile(path.string() + ".tmp-%%%%%%", fd, temporary)) {
-                throw InspectionError(ec.message(), "OUTPUT_ERROR");
+            for (unsigned attempt = 0; attempt < 128; ++attempt) {
+                sys::fs::createUniquePath(Model, name, /*MakeAbsolute=*/false);
+                temporary = Parent / name.c_str();
+                int fd;
+                const auto Error =
+                    sys::fs::openFileForWrite(temporary.native(), fd, sys::fs::CD_CreateNew);
+
+                if (!Error) {
+                    return fd;
+                }
+
+                if (Error != std::errc::file_exists) {
+                    throw InspectionError(Error.message(), "OUTPUT_ERROR");
+                }
             }
 
+            throw InspectionError("could not create a unique sibling temporary file",
+                                  "OUTPUT_ERROR");
+        }
+
+        void publish(const llvm::Module &module, const fs::path &path) {
+            fs::path temporary;
+            int fd = createSiblingTemporary(path, temporary);
             llvm::scope_exit discardOnFailure([&] {
                 // Preserve the acquisition error while rolling back the unpublished file.
                 (void)sys::fs::closeFile(fd);
-                (void)sys::fs::remove(temporary);
+                (void)sys::fs::remove(temporary.native());
             });
 
             // LLVM reserves descriptors 0–2 even if open() reused a closed standard stream.
@@ -463,7 +486,7 @@ namespace forge {
                 }
             }
 
-            ToolOutputFile file(temporary, fd);
+            ToolOutputFile file(temporary.native(), fd);
             discardOnFailure.release();
             auto &stream = file.os();
             module.print(stream, nullptr);
@@ -475,7 +498,7 @@ namespace forge {
                 throw InspectionError(error.message(), "OUTPUT_ERROR");
             }
 
-            if (auto ec = sys::fs::rename(temporary, path.native())) {
+            if (auto ec = sys::fs::rename(temporary.native(), path.native())) {
                 throw InspectionError(ec.message(), "OUTPUT_ERROR");
             }
 

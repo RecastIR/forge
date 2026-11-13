@@ -4,6 +4,7 @@
 #include "llvm/ADT/SmallString.h"
 
 #include <cerrno>
+#include <cstddef>
 #include <fcntl.h>
 #include <fstream>
 #include <type_traits>
@@ -107,7 +108,10 @@ int main(int argc, char **argv) try {
     auto fixture = llvm::MemoryBuffer::getFile(argv[1]);
     check(static_cast<bool>(fixture), "could not load fixture");
     auto bytes = (*fixture)->getBuffer().str();
-    bytes.append(2 * 1024 * 1024 + 17, 'P');
+    constexpr std::size_t MiB = std::size_t{1024} * 1024;
+    bytes.append(MiB, 'A');
+    bytes.append(MiB, 'B');
+    bytes.append(17, 'C');
 
     llvm::SmallString<128> temporary;
 
