@@ -58,10 +58,14 @@ if(APPLE AND TARGET LTO)
 endif()
 configure_forge_cxx(forge_core)
 
+add_library(cli11 INTERFACE)
+add_library(CLI11::CLI11 ALIAS cli11)
+target_include_directories(cli11 SYSTEM INTERFACE "${CMAKE_CURRENT_SOURCE_DIR}/third_party/cli11")
+
 add_executable(forge src/cli/main.cpp src/cli/report.cpp src/cli/analysis_report.cpp
   src/cli/diagnostic.cpp)
 set_target_properties(forge PROPERTIES LINK_LIBRARIES_STRATEGY REORDER_FREELY)
-target_link_libraries(forge PRIVATE forge_core)
+target_link_libraries(forge PRIVATE forge_core CLI11::CLI11)
 configure_forge_cxx(forge)
 
 include(CTest)

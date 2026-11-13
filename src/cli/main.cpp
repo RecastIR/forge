@@ -9,17 +9,14 @@
 #include "llvm/IR/LLVMContext.h"
 #include "llvm/IR/Module.h"
 
+#include <CLI11.hpp>
+
+#include <algorithm>
 #include <charconv>
 #include <string_view>
 
 namespace {
     using namespace forge;
-    constexpr std::string_view usage =
-        "Usage: forge inspect <image> [--dll-path <directory>]... [--format text|json] [--strict] "
-        "[--verbose]\n"
-        "       forge analyze <image> --functions [--format text|json] [--strict]\n"
-        "       forge lift <exe> --rva <rva> [--signature 'i64(i64,i64)'] --output <file.ll> "
-        "[--diagnostics-format text|json]\n";
 
     uint32_t parseRva(std::string_view value) {
         int base = 10;
@@ -37,69 +34,164 @@ namespace {
         return rva;
     }
 
-    bool parseJsonFormat(std::string_view option, std::string_view value) {
-        if (value != "text" && value != "json") {
-            throw std::invalid_argument(std::string(option) + " must be text or json");
-        }
-
-        return value == "json";
-    }
-
     struct Options {
-        std::string_view command;
+        std::string command;
         fs::path input, output;
         std::vector<fs::path> paths;
-        std::optional<uint32_t> rva;
+        uint32_t rva = 0;
         EntryMode entryMode = EntryMode::RegisterState;
-        bool json = false, strict = false, verbose = false, functions = false;
-        bool jsonDiagnostics = false;
-
-        void parseOption(std::string_view arg, int &i, int argc, char **argv) {
-            auto value = [&]() -> std::string_view {
-                ++i;
-
-                if (i == argc || !*argv[i] || std::string_view(argv[i]).starts_with("--")) {
-                    throw std::invalid_argument(std::string(arg) + " requires a value");
-                }
-
-                return argv[i];
-            };
-
-            if (command != "lift" && arg == "--strict") {
-                strict = true;
-            } else if (command != "lift" && arg == "--format") {
-                json = parseJsonFormat(arg, value());
-            } else if (command == "inspect" && arg == "--dll-path") {
-                fs::path path(value());
-                std::error_code ec;
-                auto dir = fs::canonical(path, ec);
-                if (ec || !fs::is_directory(dir, ec)) {
-                    throw std::invalid_argument("--dll-path must name an existing directory: " +
-                                                path.string());
-                }
-
-                paths.push_back(std::move(dir));
-            } else if (command == "inspect" && arg == "--verbose") {
-                verbose = true;
-            } else if (command == "analyze" && arg == "--functions") {
-                functions = true;
-            } else if (command == "lift" && arg == "--diagnostics-format") {
-                jsonDiagnostics = parseJsonFormat(arg, value());
-            } else if (command == "lift" && arg == "--rva") {
-                rva = parseRva(value());
-            } else if (command == "lift" && arg == "--output") {
-                output = value();
-            } else if (command == "lift" && arg == "--signature") {
-                if (value() != "i64(i64,i64)") {
-                    throw std::invalid_argument("unsupported signature; expected i64(i64,i64)");
-                }
-
-                entryMode = EntryMode::WindowsX64I64Pair;
-            } else {
-                throw std::invalid_argument("unknown option: " + std::string(arg));
-            }
-        }
+        bool json = false, strict = false, verbose = false, jsonDiagnostics = false;
     };
+
+    void addFormat(CLI::App &command, const char *name, bool &json, const char *description) {
+        command
+            .add_option_function<std::string>(
+                name, [&json](const std::string &format) { json = format == "json"; }, description)
+            ->check(CLI::IsMember({"text", "json"}))
+            ->trigger_on_parse();
+    }
+
+    void configureCli(CLI::App &app, Options &options) {
+        app.require_subcommand(1, 1);
+        app.allow_windows_style_options(false);
+        auto *inspectCommand =
+            app.add_subcommand("inspect", "Inspect PE metadata and dependencies.");
+        auto *analyzeCommand = app.add_subcommand("analyze", "Discover functions in a PE image.");
+        auto *liftCommand = app.add_subcommand("lift", "Lift a discovered function to LLVM IR.");
+
+        for (auto *command : {inspectCommand, analyzeCommand, liftCommand}) {
+            command
+                ->add_option<fs::path, std::string>(command == liftCommand ? "exe" : "image",
+                                                    options.input, "Input PE image.")
+                ->required();
+        }
+
+        for (auto *command : {inspectCommand, analyzeCommand}) {
+            addFormat(*command, "--format", options.json, "Report format (default: text).");
+            command->add_flag("--strict", options.strict, "Return exit 3 on strict findings.");
+        }
+
+        inspectCommand->add_flag("--verbose", options.verbose,
+                                 "Include details in the text report.");
+        inspectCommand
+            ->add_option_function<std::string>(
+                "--dll-path",
+                [&options](const std::string &path) {
+                    std::error_code ec;
+                    auto dir = fs::canonical(path, ec);
+                    if (ec || !fs::is_directory(dir, ec)) {
+                        throw CLI::ValidationError("--dll-path",
+                                                   "expected an existing directory: " + path);
+                    }
+
+                    options.paths.push_back(std::move(dir));
+                },
+                "Add a DLL search directory (repeatable, in search order).")
+            ->type_name("DIR")
+            ->trigger_on_parse();
+
+        analyzeCommand->add_flag("--functions", "List discovered functions.")->required();
+        liftCommand
+            ->add_option_function<std::string>(
+                "--rva", [&options](const std::string &value) { options.rva = parseRva(value); },
+                "Function start as a decimal or hexadecimal RVA.")
+            ->type_name("RVA")
+            ->required()
+            ->trigger_on_parse();
+        liftCommand
+            ->add_option<fs::path, std::string>("--output", options.output,
+                                                "Destination LLVM IR file.")
+            ->type_name("FILE")
+            ->required()
+            ->trigger_on_parse();
+        liftCommand
+            ->add_option_function<std::string>(
+                "--signature",
+                [&options](const std::string &) {
+                    options.entryMode = EntryMode::WindowsX64I64Pair;
+                },
+                "Wrap the function with this signature (default: register state).")
+            ->check(CLI::IsMember({"i64(i64,i64)"}))
+            ->trigger_on_parse();
+        addFormat(*liftCommand, "--diagnostics-format", options.jsonDiagnostics,
+                  "Execution diagnostic format (default: text).");
+    }
+
+    std::string literalArgument(std::string arg) {
+        // CLI11 decodes doubled brackets even in scalar arguments. Escape bracketed
+        // argv strings with its matching encoder to keep file names byte-for-byte.
+        CLI::detail::handle_secondary_array(arg);
+        return arg;
+    }
+
+    std::vector<std::string> cliArguments(const CLI::App &app, int argc, char **argv) {
+        if (argc < 2) {
+            return {};
+        }
+
+        std::string name(argv[1]);
+        if (app.get_help_ptr()->check_name(name)) {
+            return {name};
+        }
+
+        const auto *command = app.get_subcommand_no_throw(name);
+        if (!command) {
+            throw CLI::ExtrasError({name});
+        }
+
+        // CLI11 splits attached values and treats ++ as a subcommand terminator.
+        // Check the original option spelling and pass the input literally after --.
+        std::vector<std::string> args{name};
+        std::string input;
+        bool literal = false;
+        for (int i = 2; i < argc; ++i) {
+            std::string arg(argv[i]);
+            if (!literal && arg == "--") {
+                literal = true;
+                continue;
+            }
+
+            const bool positional = literal || !arg.starts_with('-');
+            if (positional && !input.empty()) {
+                throw CLI::ExtrasError({arg});
+            }
+
+            if (positional) {
+                input = std::move(arg);
+                continue;
+            }
+
+            const auto *option = command->get_option_no_throw(arg);
+            if (!option) {
+                throw CLI::ExtrasError({arg});
+            }
+
+            args.push_back(arg);
+            if (option == command->get_help_ptr()) {
+                break;
+            }
+
+            if (option->get_items_expected_max() == 0) {
+                continue;
+            }
+
+            ++i;
+            if (i == argc || !*argv[i] || std::string_view(argv[i]).starts_with("--")) {
+                throw CLI::ValidationError(arg, "requires a value");
+            }
+
+            args.push_back(literalArgument(argv[i]));
+        }
+
+        if (!input.empty()) {
+            args.emplace_back("--");
+            args.push_back(literalArgument(std::move(input)));
+        }
+
+        // CLI11 expects its vector of arguments in reverse order.
+        std::reverse(args.begin(), args.end());
+        return args;
+    }
 
     int execute(const Options &options) {
         const auto &input = options.input;
@@ -135,7 +227,7 @@ namespace {
 
             unexpected = FailureCode::LiftingInternal;
             llvm::LLVMContext context;
-            auto module = generateIR(analysis, {options.rva.value(), options.entryMode}, context);
+            auto module = generateIR(analysis, {options.rva, options.entryMode}, context);
 
             unexpected = FailureCode::PublicationInternal;
             publishIR(*module, analysis.image(), options.output);
@@ -146,7 +238,7 @@ namespace {
             }
 
             if (options.jsonDiagnostics) {
-                printLiftDiagnostic(error, input, options.rva.value(), llvm::errs());
+                printLiftDiagnostic(error, input, options.rva, llvm::errs());
             } else {
                 const auto prefix = failureKind(error.kind).legacy;
                 if (prefix != "forge") {
@@ -168,7 +260,7 @@ namespace {
                 failure.context.output = options.output;
             }
 
-            printLiftDiagnostic(failure, input, options.rva.value(), llvm::errs());
+            printLiftDiagnostic(failure, input, options.rva, llvm::errs());
 
             return 1;
         }
@@ -176,57 +268,29 @@ namespace {
 
     int run(int argc, char **argv) {
         Options parsed;
-        parsed.command = argc < 2 ? "" : argv[1];
-        const auto command = parsed.command;
+        CLI::App app("Inspect, analyze, and lift Windows PE images.", "forge");
+        configureCli(app, parsed);
 
-        if (command == "--help") {
-            llvm::outs() << usage;
+        try {
+            app.parse(cliArguments(app, argc, argv));
+            parsed.command = app.get_subcommands().front()->get_name();
+            return execute(parsed);
+        } catch (const CLI::CallForHelp &) {
+            llvm::outs() << app.help("Usage:");
             return 0;
+        } catch (const CLI::ParseError &error) {
+            llvm::errs() << "forge: " << error.what() << "\n" << app.help("Usage:");
+        } catch (const std::invalid_argument &error) {
+            llvm::errs() << "forge: " << error.what() << "\n" << app.help("Usage:");
         }
 
-        if (command != "inspect" && command != "analyze" && command != "lift") {
-            throw std::invalid_argument("expected inspect, analyze, or lift");
-        }
-
-        bool options = true;
-        for (int i = 2; i < argc; ++i) {
-            std::string_view arg = argv[i];
-            if (options && arg == "--") {
-                options = false;
-            } else if (options && arg == "--help") {
-                llvm::outs() << usage;
-                return 0;
-            } else if (options && arg.starts_with('-')) {
-                parsed.parseOption(arg, i, argc, argv);
-            } else if (!parsed.input.empty()) {
-                throw std::invalid_argument(std::string(command) + " takes one input image");
-            } else {
-                parsed.input = arg;
-            }
-        }
-
-        if (parsed.input.empty()) {
-            throw std::invalid_argument("missing input image");
-        }
-
-        if (command == "analyze" && !parsed.functions) {
-            throw std::invalid_argument("analyze requires --functions");
-        }
-
-        if (command == "lift" && (!parsed.rva || parsed.output.empty())) {
-            throw std::invalid_argument("lift requires --rva and --output");
-        }
-
-        return execute(parsed);
+        return 2;
     }
 } // namespace
 
 int main(int argc, char **argv) {
     try {
         return run(argc, argv);
-    } catch (const std::invalid_argument &e) {
-        llvm::errs() << "forge: " << e.what() << "\n" << usage;
-        return 2;
     } catch (const std::exception &e) {
         llvm::errs() << "forge: " << e.what() << "\n";
         return 1;

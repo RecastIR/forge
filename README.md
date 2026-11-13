@@ -32,6 +32,8 @@ Dependency inspection reads import and export tables and retains detached module
 
 Forge uses Apple Silicon, Apple Clang with C++20, CMake, and a stable **LLVM 23.x** installation. CI pins **23.1.5**. The test suite also uses Python 3.9+, LLVM Clang, `llvm-mc`, `llvm-dlltool`, `lld-link`, `llvm-readobj`, `opt`, and `llc`. Use the complete [LLVM release archive for macOS ARM64](https://github.com/llvm/llvm-project/releases/tag/llvmorg-23.1.5) to obtain these tools together.
 
+The Forge CLI uses CLI11 v2.7.2. The official `CLI11.hpp` release asset and its license are checked into `third_party/cli11/`. The header's SHA-256 is `ffa9a30da295c5858fb5f91f9f45771bab09471d7010a34c7c68c857a330dd76`. CMake exposes it as the header-only interface target `CLI11::CLI11`, linked privately to `forge`. Builds use the checked-in header offline. [Upstream release and assets](https://github.com/CLIUtils/CLI11/releases/tag/v2.7.2)
+
 ```sh
 # From a directory containing the release archive, extract to a new directory.
 echo '503de30ef90311e0b143623801b19af2250adac6d69faed65ad0051170202e3b  LLVM-23.1.5-macOS-ARM64.tar.zst' | shasum -a 256 -c -
@@ -58,6 +60,20 @@ CMAKE_GENERATOR=Xcode make test BUILD_DIR=build-xcode CONFIG=Release
 make fixtures BUILD_DIR=build-xcode CONFIG=Release
 make clean BUILD_DIR=build-xcode CONFIG=Release
 ```
+
+## Command-line compatibility
+
+Run `forge --help` or `forge -h` for the command list. Use either spelling after a command for its own arguments, for example `forge lift -h`. Help prints to stdout and exits 0. The short alias and command-specific help replace the previous shared usage listing.
+
+| Command | Arguments and defaults | Output and status |
+| --- | --- | --- |
+| `inspect <image>` | Repeat `--dll-path <directory>` for existing directories in search order. `--format` accepts `text` (default) or `json`. `--verbose` and `--strict` default off. | Reports go to stdout and diagnostics to stderr. Verbose adds detail to text. Exit 0 on completion, or 3 for required dependency failures under strict mode. |
+| `analyze <image> --functions` | `--functions` is required. `--format` accepts `text` (default) or `json`. `--strict` defaults off. | The function report goes to stdout and findings to stderr. Exit 0 on completion, or 3 for findings under strict mode. |
+| `lift <exe> --rva <rva> --output <file>` | Use an unsigned 32-bit decimal RVA or hexadecimal with `0x` or `0X`. The default entry mode uses register state. The optional `--signature` accepts `i64(i64,i64)`. `--diagnostics-format` accepts `text` (default) or `json`. | Success writes the IR file, leaves both streams empty, and exits 0. Handled execution failures exit 1. JSON diagnostics contain one object followed by LF on stderr. An output that aliases the input is a text usage error in either mode. |
+
+Each command takes one input. Options may appear on either side of it. Use `--` before a filename beginning with a dash. Pass option values as separate, nonempty arguments. Values beginning with `--` are rejected. Repeated flags are idempotent. Each occurrence of a scalar option must be valid, and the last value takes effect. Usage errors print text and usage to stderr and exit 2. Input read and PE errors exit 1.
+
+After `make CONFIG=Debug`, run `ctest --test-dir build -C Debug -R '^cli$' --output-on-failure` to generate the PE fixtures and run the executable-level compatibility tests.
 
 ## Development checks
 
