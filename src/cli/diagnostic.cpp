@@ -5,6 +5,16 @@
 #include "llvm/Support/JSON.h"
 
 namespace forge {
+    void printFailure(const InspectionError &error, const fs::path &input, llvm::raw_ostream &err) {
+        const auto prefix = failureKind(error.kind).legacy;
+
+        if (prefix != "forge") {
+            err << input.string() << ": ";
+        }
+
+        err << prefix << ": " << error.what() << '\n';
+    }
+
     void printLiftDiagnostic(const InspectionError &error, const fs::path &input, uint32_t entryRva,
                              llvm::raw_ostream &out) {
         const auto &kind = failureKind(error.kind);

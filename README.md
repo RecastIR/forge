@@ -8,7 +8,8 @@ The root CMake project builds the `forge` CLI on a private `forge_core` library.
 
 | Location | Responsibility |
 | --- | --- |
-| `src/cli/` | Command dispatch, argument validation, report and diagnostic rendering, and exit status |
+| `src/cli/` | Application entry point, argument compatibility, shared analysis input, and report and diagnostic rendering |
+| `src/cli/commands/` | Typed options, CLI11 registration, and execution for inspect, analyze, and lift |
 | `src/pe/` | File input, PE parsing, image metadata, and DLL dependency resolution |
 | `src/analysis/` | Function discovery, range validation, findings, and optional debug enrichment |
 | `src/lift/` | Translation of supported function instructions to LLVM IR |
@@ -16,7 +17,7 @@ The root CMake project builds the `forge` CLI on a private `forge_core` library.
 | `cmake/` | Formatting and static-analysis commands |
 | `tests/integration/` | Build, CLI, code generation, and native execution suites and their Python helpers |
 | `tests/fixtures/` | SDK-free PE fixture sources and their generator |
-| `tests/unit/` | Core contracts for input lifetime, lifting, verification, publication, integer semantics, and LLVM target setup |
+| `tests/unit/` | Core contracts for input lifetime, lifting, verification, publication, integer semantics, and LLVM target setup, plus parser-free lift command coverage |
 | `tests/support/` | C++ harness for calling a lifted function from a test |
 | `tests/differential/` | Windows x64 fixtures, manifests, cross-build tooling, and Wine reference capture |
 
@@ -74,6 +75,8 @@ Run `forge --help` or `forge -h` for the command list. Use either spelling after
 Each command takes one input. Options may appear on either side of it. Use `--` before a filename beginning with a dash. Pass option values as separate, nonempty arguments. Values beginning with `--` are rejected. Repeated flags are idempotent. Each occurrence of a scalar option must be valid, and the last value takes effect. Usage errors print text and usage to stderr and exit 2. Input read and PE errors exit 1.
 
 After `make CONFIG=Debug`, run `ctest --test-dir build -C Debug -R '^cli$' --output-on-failure` to generate the PE fixtures and run the executable-level compatibility tests.
+
+For command registration, callback lifetimes, and executor tests, see [Adding a CLI command](docs/design-guide.md#adding-a-cli-command).
 
 ## Development checks
 

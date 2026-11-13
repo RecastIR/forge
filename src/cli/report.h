@@ -10,11 +10,17 @@ namespace forge {
     struct InspectionError;
     struct Report;
 
+    struct ReportOptions {
+        bool json = false, strict = false;
+    };
+
     void printReport(const Report &report, bool json, bool verbose, llvm::raw_ostream &out);
     void printDiagnostics(const Report &report, llvm::raw_ostream &err);
     void printAnalysis(const AnalyzedImage &analysis, bool json, llvm::raw_ostream &out);
     void printFindings(const AnalyzedImage &analysis, const std::filesystem::path &input,
                        llvm::raw_ostream &err);
+    void printFailure(const InspectionError &error, const std::filesystem::path &input,
+                      llvm::raw_ostream &err);
     void printLiftDiagnostic(const InspectionError &error, const std::filesystem::path &input,
                              uint32_t entryRva, llvm::raw_ostream &out);
 } // namespace forge

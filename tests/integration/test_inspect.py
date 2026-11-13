@@ -424,6 +424,21 @@ class CLI(Case):
         self.assertEqual(missing.stdout, b"")
         self.assertIn(b"READ_ERROR", missing.stderr)
 
+    def test_lift_dispatch_waits_for_validation(self):
+        output = self.dir / "already.ll"
+        output.write_bytes(b"keep")
+        args = ("lift", FIXTURES / "add.exe", "--rva", "4096", "--output", output)
+        help_text = self.invoke("lift", "--help").stdout
+
+        help_result = self.invoke(*args, "--help")
+        self.assertEqual((help_result.stdout, help_result.stderr), (help_text, b""))
+        self.assertEqual(output.read_bytes(), b"keep")
+
+        failed = self.invoke(*args, "--diagnostics-format", "yaml", code=2)
+        message = b"forge: --diagnostics-format: yaml not in {text,json}\n"
+        self.assertEqual((failed.stdout, failed.stderr), (b"", message + help_text))
+        self.assertEqual(output.read_bytes(), b"keep")
+
     def test_complete_reports(self):
         image = self.copy("minimal.exe")
         # Complete pre-migration reports, including whitespace and final LF.
