@@ -44,5 +44,9 @@ CheckOptions:
   readability-identifier-naming.MemberCase: camelBack
   readability-identifier-naming.ClassMemberCase: camelBack
   readability-identifier-naming.ConstantCase: CamelCase
+  readability-identifier-naming.LocalConstantCase: camelBack
+  readability-identifier-naming.ConstantParameterCase: camelBack
+  readability-identifier-naming.ConstantMemberCase: camelBack
+  readability-identifier-naming.ConstexprVariableCase: camelBack
   readability-identifier-naming.EnumConstantCase: CamelCase
   readability-identifier-naming.MacroDefinitionCase: UPPER_CASE

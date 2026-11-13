@@ -19,10 +19,10 @@ namespace forge {
         }
 
         llvm::scope_exit closeOnFailure([&] { (void)llvm::sys::fs::closeFile(fd); });
-        const auto Error = llvm::sys::fs::status(fd, status);
+        const auto error = llvm::sys::fs::status(fd, status);
 
-        if (Error || !llvm::sys::fs::is_regular_file(status)) {
-            throw InspectionError(Error ? Error.message() : "expected a regular file",
+        if (error || !llvm::sys::fs::is_regular_file(status)) {
+            throw InspectionError(error ? error.message() : "expected a regular file",
                                   "READ_ERROR");
         }
 
@@ -32,26 +32,26 @@ namespace forge {
     InputFile::~InputFile() { (void)llvm::sys::fs::closeFile(fd); }
 
     std::unique_ptr<llvm::MemoryBuffer> InputFile::read() const {
-        const uint64_t Size = status.getSize();
+        const uint64_t size = status.getSize();
 
-        if (!std::in_range<std::ptrdiff_t>(Size)) {
+        if (!std::in_range<std::ptrdiff_t>(size)) {
             throw InspectionError("input exceeds addressable buffer size", "READ_ERROR");
         }
 
         // LLVM checks the complete allocation including the identifier, terminator and alignment.
-        auto buffer = llvm::WritableMemoryBuffer::getNewUninitMemBuffer(static_cast<size_t>(Size),
+        auto buffer = llvm::WritableMemoryBuffer::getNewUninitMemBuffer(static_cast<size_t>(size),
                                                                         path.native());
 
         if (!buffer) {
             throw InspectionError("cannot allocate input buffer", "READ_ERROR");
         }
 
-        constexpr size_t ChunkSize = size_t{1024} * 1024;
+        constexpr size_t chunkSize = size_t{1024} * 1024;
         auto remaining = buffer->getBuffer();
 
         while (!remaining.empty()) {
-            auto count = llvm::sys::fs::readNativeFileSlice(fd, remaining.take_front(ChunkSize),
-                                                            Size - remaining.size());
+            auto count = llvm::sys::fs::readNativeFileSlice(fd, remaining.take_front(chunkSize),
+                                                            size - remaining.size());
 
             if (!count) {
                 throw InspectionError(llvm::toString(count.takeError()), "READ_ERROR");

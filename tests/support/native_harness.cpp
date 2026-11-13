@@ -15,12 +15,12 @@ int main() {
             return 1;
         }
 
-        const auto Result =
+        const auto result =
             forge_lifted(std::bit_cast<std::int64_t>(a), std::bit_cast<std::int64_t>(b));
-        std::cout << std::hex << std::bit_cast<std::uint64_t>(Result) << '\n';
+        std::cout << std::hex << std::bit_cast<std::uint64_t>(result) << '\n';
     }
 
     // A stdio read error can also set eofbit on the synchronized C++ stream.
-    const bool CleanEof = std::cin.eof() && !std::cin.bad() && std::ferror(stdin) == 0;
-    return CleanEof && std::cout.flush() ? 0 : 1;
+    const bool cleanEof = std::cin.eof() && !std::cin.bad() && std::ferror(stdin) == 0;
+    return cleanEof && std::cout.flush() ? 0 : 1;
 }

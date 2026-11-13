@@ -46,23 +46,23 @@ namespace {
 
         check(buffer->getBufferIdentifier() == path.native(), "lost input buffer identifier");
         check(buffer->getBuffer() == original, "retained bytes changed with the file");
-        const auto Module = inspectPE(buffer->getMemBufferRef());
-        const auto Entry = mapRva(Module.sections, buffer->getBuffer(), Module.entryPoint, 1);
-        check(Module.entryPoint == 0x1000 && Entry && Entry->section.name == ".text" &&
-                  Entry->bytes == "\xc3",
+        const auto module = inspectPE(buffer->getMemBufferRef());
+        const auto entry = mapRva(module.sections, buffer->getBuffer(), module.entryPoint, 1);
+        check(module.entryPoint == 0x1000 && entry && entry->section.name == ".text" &&
+                  entry->bytes == "\xc3",
               "original PE entry instruction unavailable");
     }
 
     int nextDescriptor() {
-        const int Fd = ::dup(STDERR_FILENO);
-        check(Fd >= 0, "cannot probe the next file descriptor");
-        check(::close(Fd) == 0, "cannot release probe descriptor");
-        return Fd;
+        const int fd = ::dup(STDERR_FILENO);
+        check(fd >= 0, "cannot probe the next file descriptor");
+        check(::close(fd) == 0, "cannot release probe descriptor");
+        return fd;
     }
 
     void checkReadFailures(const fs::path &path) {
         // In this single-threaded test the next open gets the probed descriptor.
-        const int Fd = nextDescriptor();
+        const int fd = nextDescriptor();
 
         try {
             InputFile input(path.parent_path());
@@ -71,12 +71,12 @@ namespace {
             check(error.code == "READ_ERROR", "wrong error for directory");
         }
 
-        check(::fcntl(Fd, F_GETFD) == -1 && errno == EBADF, "failed constructor leaked its fd");
+        check(::fcntl(fd, F_GETFD) == -1 && errno == EBADF, "failed constructor leaked its fd");
         writeBytes(path, "original length", std::ios::trunc);
 
         try {
             InputFile input(path);
-            check(::fcntl(Fd, F_GETFD) >= 0, "input did not acquire expected fd");
+            check(::fcntl(fd, F_GETFD) >= 0, "input did not acquire expected fd");
             fs::resize_file(path, 3);
             input.read();
             throw std::runtime_error("accepted a premature EOF");
@@ -85,7 +85,7 @@ namespace {
             check(llvm::StringRef(error.what()).contains("unexpected end"), "missing EOF reason");
         }
 
-        check(::fcntl(Fd, F_GETFD) == -1 && errno == EBADF, "read failure leaked its fd");
+        check(::fcntl(fd, F_GETFD) == -1 && errno == EBADF, "read failure leaked its fd");
     }
 
     void checkRepeatedRead(const fs::path &path) {
@@ -108,9 +108,9 @@ int main(int argc, char **argv) try {
     auto fixture = llvm::MemoryBuffer::getFile(argv[1]);
     check(static_cast<bool>(fixture), "could not load fixture");
     auto bytes = (*fixture)->getBuffer().str();
-    constexpr std::size_t MiB = std::size_t{1024} * 1024;
-    bytes.append(MiB, 'A');
-    bytes.append(MiB, 'B');
+    constexpr std::size_t mebibyte = std::size_t{1024} * 1024;
+    bytes.append(mebibyte, 'A');
+    bytes.append(mebibyte, 'B');
     bytes.append(17, 'C');
 
     llvm::SmallString<128> temporary;
@@ -120,12 +120,12 @@ int main(int argc, char **argv) try {
     }
 
     llvm::scope_exit cleanup([&] { (void)llvm::sys::fs::remove_directories(temporary); });
-    const forge::fs::path Directory(temporary.c_str());
-    const auto Path = Directory / "input.exe";
-    checkRetainedInput(Path, bytes, false);
-    checkRetainedInput(Path, bytes, true);
-    checkReadFailures(Path);
-    checkRepeatedRead(Path);
+    const forge::fs::path directory(temporary.c_str());
+    const auto path = directory / "input.exe";
+    checkRetainedInput(path, bytes, false);
+    checkRetainedInput(path, bytes, true);
+    checkReadFailures(path);
+    checkRepeatedRead(path);
 } catch (const std::exception &error) {
     llvm::errs() << "input lifetime: " << error.what() << '\n';
     return 1;

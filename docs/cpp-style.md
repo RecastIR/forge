@@ -33,11 +33,15 @@ Clang-format enforces indentation and spaces, inserts blank lines between defini
 | --- | --- | --- |
 | Types, classes, enums, and aliases | PascalCase | `IntegerInstruction` |
 | Functions and methods | Lower camel case | `resultFlags` |
-| Local variables, parameters, and data members (including static members) | Lower camel case | `operandWidth` |
-| Constants and enumerators | PascalCase | `MaxOperandWidth` |
+| Local variables, parameters, and non-static data members, including `const` | Lower camel case | `operandWidth` |
+| Non-const static data members | Lower camel case | `instanceCount` |
+| `constexpr` variables at any scope | Lower camel case | `maxOperandWidth` |
+| Non-`constexpr` constants at namespace scope or declared as static data members, and enumerators | PascalCase | `FlagCount` |
 | Macros | Uppercase with underscores | `FORGE_TEST_CASE` |
 
-The constant rule applies to `constexpr` variables and to locals that hold a `const` value, including values computed at runtime. For example, use `const auto Result = compute();` and `const Section *section` (the pointer can change).
+Use `const auto result = compute();` for a local constant and `constexpr auto maxOperandWidth = 64;` for a compile-time limit. The latter keeps its spelling at namespace scope and as a static data member.
+
+In `const Section *section`, the pointer can change. It follows the ordinary variable naming rule.
 
 Use `.cpp` for C++ implementations and `.h` for headers. Spell out names unless a term such as `IR`, `RVA`, or `CF` is established in the surrounding domain. Preserve spellings required by LLVM overrides, C linkage, ABI entry points, and other integration contracts. C fixtures share formatting and brace rules. Their C identifiers retain their own conventions.
 
@@ -105,14 +109,14 @@ if (!dir) {
     return std::nullopt;
 }
 
-const bool EmptyEntry = !dir->RelativeVirtualAddress && !dir->Size;
+const bool emptyEntry = !dir->RelativeVirtualAddress && !dir->Size;
 
-if (EmptyEntry) {
+if (emptyEntry) {
     return std::nullopt;
 }
 ```
 
-Computing `EmptyEntry` before the null check would dereference a missing directory. With either form, exactly one zero field reaches the existing incomplete-entry error. Two populated fields proceed to the checked RVA mapping and slice. [PE parser](../src/pe/pe.cpp)
+Computing `emptyEntry` before the null check would dereference a missing directory. With either form, exactly one zero field reaches the existing incomplete-entry error. Two populated fields proceed to the checked RVA mapping and slice. [PE parser](../src/pe/pe.cpp)
 
 In a lifter, distinguish guest instruction semantics, LLVM IR construction, state and control flow, and diagnostics. Review integer widths, signedness, truncation, extension, and updates to guest registers and flags. For example, a 32-bit register write zeroes the upper half, while a 16-bit write preserves the surrounding bits. Explain non-obvious memory behavior and flag availability at control-flow joins.
 
@@ -126,9 +130,9 @@ Naming the x86 rule makes it easier to review the IR operands. Both forms zero-e
 
 ```cpp
 // x86 uses six count bits for 64-bit operands and five for the other supported widths.
-const unsigned CountMask = width == 64 ? 63 : 31;
+const unsigned countMask = width == 64 ? 63 : 31;
 auto *wideCount = ir.CreateZExt(count, ir.getInt64Ty());
-auto *maskedCount = ir.CreateAnd(wideCount, CountMask);
+auto *maskedCount = ir.CreateAnd(wideCount, countMask);
 ```
 
 ## Running the checks

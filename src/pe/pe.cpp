@@ -19,18 +19,18 @@ namespace forge {
             if (rva < s.rva) {
                 continue;
             }
-            const uint64_t Delta = rva - s.rva;
-            const uint32_t Extent = std::min(s.virtualSize, s.rawSize);
-            if (Delta >= Extent) {
+            const uint64_t delta = rva - s.rva;
+            const uint32_t extent = std::min(s.virtualSize, s.rawSize);
+            if (delta >= extent) {
                 continue;
             }
-            const uint32_t Available = Extent - static_cast<uint32_t>(Delta);
-            const uint32_t Length = size.value_or(Available);
-            const uint64_t Offset = uint64_t(s.fileOffset) + Delta;
-            if (Length > Available || Offset > file.size() || Length > file.size() - Offset) {
+            const uint32_t available = extent - static_cast<uint32_t>(delta);
+            const uint32_t length = size.value_or(available);
+            const uint64_t offset = uint64_t(s.fileOffset) + delta;
+            if (length > available || offset > file.size() || length > file.size() - offset) {
                 return std::nullopt;
             }
-            return MappedRange{s, file.substr(Offset, Length), Offset};
+            return MappedRange{s, file.substr(offset, length), offset};
         }
         return std::nullopt;
     }
@@ -129,18 +129,18 @@ namespace forge {
                 invalid(file.label, pe, "expected PE signature");
             }
 
-            const auto Coff = file.read<coff_file_header>(pe + 4);
-            if (Coff.Machine != COFF::IMAGE_FILE_MACHINE_AMD64) {
-                auto arch = machineName(Coff.Machine);
+            const auto coffHeader = file.read<coff_file_header>(pe + 4);
+            if (coffHeader.Machine != COFF::IMAGE_FILE_MACHINE_AMD64) {
+                auto arch = machineName(coffHeader.Machine);
                 throw InspectionError("expected AMD64, found " + arch + " at file offset " +
                                           hex(pe + 4),
                                       "UNSUPPORTED_ARCHITECTURE", arch);
             }
-            if (!(Coff.Characteristics & COFF::IMAGE_FILE_EXECUTABLE_IMAGE)) {
+            if (!(coffHeader.Characteristics & COFF::IMAGE_FILE_EXECUTABLE_IMAGE)) {
                 invalid(file.label, pe, "expected an executable image");
             }
-            uint64_t opt = pe + 4 + sizeof(Coff);
-            View optional = file.slice(opt, Coff.SizeOfOptionalHeader);
+            uint64_t opt = pe + 4 + sizeof(coffHeader);
+            View optional = file.slice(opt, coffHeader.SizeOfOptionalHeader);
             if (optional.read<ulittle16_t>() != COFF::PE32Header::PE32_PLUS) {
                 invalid(file.label, opt, "expected PE32+ optional header");
             }
@@ -150,17 +150,17 @@ namespace forge {
             if (header.AddressOfEntryPoint && header.AddressOfEntryPoint >= header.SizeOfImage) {
                 invalid(file.label, opt, "entry point RVA exceeds SizeOfImage");
             }
-            if (!Coff.NumberOfSections || Coff.NumberOfSections > 96) {
+            if (!coffHeader.NumberOfSections || coffHeader.NumberOfSections > 96) {
                 invalid(file.label, pe, "expected 1 to 96 PE sections");
             }
-            uint64_t table = opt + Coff.SizeOfOptionalHeader;
+            uint64_t table = opt + coffHeader.SizeOfOptionalHeader;
             auto sectionHeaders =
-                file.slice(table, uint64_t(Coff.NumberOfSections) * sizeof(coff_section));
+                file.slice(table, uint64_t(coffHeader.NumberOfSections) * sizeof(coff_section));
             if (table + sectionHeaders.bytes.size() > header.SizeOfHeaders ||
                 header.SizeOfHeaders > file.bytes.size()) {
                 invalid(file.label, opt, "invalid SizeOfHeaders");
             }
-            for (unsigned i = 0; i < Coff.NumberOfSections; ++i) {
+            for (unsigned i = 0; i < coffHeader.NumberOfSections; ++i) {
                 auto s = sectionHeaders.read<coff_section>(i * sizeof(coff_section));
                 if (s.SizeOfRawData &&
                     (!s.PointerToRawData ||
@@ -196,14 +196,15 @@ namespace forge {
                                     s.PointerToRawData,
                                     s.SizeOfRawData});
             }
-            if (Coff.NumberOfSymbols && !Coff.PointerToSymbolTable) {
+            if (coffHeader.NumberOfSymbols && !coffHeader.PointerToSymbolTable) {
                 invalid("COFF symbol table", pe + 4, "missing file offset");
             }
-            if (Coff.PointerToSymbolTable) {
-                uint64_t strings = uint64_t(Coff.PointerToSymbolTable) +
-                                   uint64_t(Coff.NumberOfSymbols) * sizeof(coff_symbol16);
+            if (coffHeader.PointerToSymbolTable) {
+                uint64_t strings = uint64_t(coffHeader.PointerToSymbolTable) +
+                                   uint64_t(coffHeader.NumberOfSymbols) * sizeof(coff_symbol16);
                 if (strings > UINT32_MAX) {
-                    invalid("COFF symbol table", Coff.PointerToSymbolTable, "file offset overflow");
+                    invalid("COFF symbol table", coffHeader.PointerToSymbolTable,
+                            "file offset overflow");
                 }
                 uint32_t length = file.read<ulittle32_t>(strings);
                 auto tableBytes = file.slice(strings, length);
@@ -222,9 +223,9 @@ namespace forge {
                         tail(dir.RelativeVirtualAddress, "load configuration").slice(0, dir.Size);
                     uint32_t size = config.read<ulittle32_t>();
                     config.slice(0, size);
-                    constexpr size_t Chpe =
+                    constexpr size_t chpe =
                         offsetof(coff_load_configuration64, CHPEMetadataPointer);
-                    if (size >= Chpe + 8 && config.read<ulittle64_t>(Chpe)) {
+                    if (size >= chpe + 8 && config.read<ulittle64_t>(chpe)) {
                         throw InspectionError("hybrid ARM64EC image; expected AMD64",
                                               "UNSUPPORTED_ARCHITECTURE", "arm64ec");
                     }
@@ -368,10 +369,10 @@ namespace forge {
             uint64_t base = object->getDataDirectory(COFF::EXPORT_TABLE)->RelativeVirtualAddress;
             for (uint64_t i = 0; i < entries; ++i) {
                 uint32_t rva = addresses.read<ulittle32_t>(i * 4);
-                const auto Alias =
+                const auto alias =
                     aliases.find(static_cast<uint32_t>(i)); // AddressTableEntries is 32-bit.
                 if (!rva) {
-                    if (Alias != aliases.end()) {
+                    if (alias != aliases.end()) {
                         invalid(addresses.label, addresses.offset + i * 4,
                                 "name refers to an unused ordinal");
                     }
@@ -386,8 +387,8 @@ namespace forge {
                     invalid(addresses.label, addresses.offset + i * 4, "ordinal overflow");
                 }
                 Export symbol{uint32_t(ordinal), rva, {}, {}};
-                if (Alias != aliases.end()) {
-                    symbol.names = std::move(Alias->second);
+                if (alias != aliases.end()) {
+                    symbol.names = std::move(alias->second);
                 }
                 if (rva >= base && rva - base < dir->bytes.size()) {
                     symbol.forwarder =

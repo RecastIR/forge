@@ -91,17 +91,17 @@ namespace forge {
             return steps;
         }
 
-        constexpr std::array<StringLiteral, 7> WideRegs{"RAX", "RCX", "RDX", "R8",
+        constexpr std::array<StringLiteral, 7> wideRegs{"RAX", "RCX", "RDX", "R8",
                                                         "R9",  "R10", "R11"};
-        constexpr std::array<StringLiteral, 7> LowRegs{"EAX", "ECX",  "EDX", "R8D",
+        constexpr std::array<StringLiteral, 7> lowRegs{"EAX", "ECX",  "EDX", "R8D",
                                                        "R9D", "R10D", "R11D"};
-        constexpr std::array<StringLiteral, 7> Words{"AX",  "CX",   "DX",  "R8W",
+        constexpr std::array<StringLiteral, 7> words{"AX",  "CX",   "DX",  "R8W",
                                                      "R9W", "R10W", "R11W"};
-        constexpr std::array<StringLiteral, 7> LowBytes{"AL",  "CL",   "DL",  "R8B",
+        constexpr std::array<StringLiteral, 7> lowBytes{"AL",  "CL",   "DL",  "R8B",
                                                         "R9B", "R10B", "R11B"};
-        constexpr std::array<StringLiteral, 3> HighBytes{"AH", "CH", "DH"};
+        constexpr std::array<StringLiteral, 3> highBytes{"AH", "CH", "DH"};
         // The signatureless ABI accepts a four-byte-aligned register array.
-        constexpr auto RegisterStateAlignment = Align::Constant<4>();
+        constexpr auto registerStateAlignment = Align::Constant<4>();
 
         struct RegisterView {
             unsigned index, width, offset = 0;
@@ -109,7 +109,7 @@ namespace forge {
             uint64_t mask() const { return maskTrailingOnes<uint64_t>(width) << offset; }
         };
 
-        using Defined = std::array<uint64_t, WideRegs.size()>;
+        using Defined = std::array<uint64_t, wideRegs.size()>;
 
         struct Incoming {
             BasicBlock *block;
@@ -133,8 +133,8 @@ namespace forge {
                 } else {
                     auto *phi =
                         ir.CreatePHI(ir.getInt1Ty(), static_cast<unsigned>(predecessors.size()));
-                    for (const auto &[Source, IncomingFlags] : predecessors) {
-                        phi->addIncoming(IncomingFlags[f], Source);
+                    for (const auto &[source, incomingFlags] : predecessors) {
+                        phi->addIncoming(incomingFlags[f], source);
                     }
                     flags[f] = phi;
                 }
@@ -151,7 +151,7 @@ namespace forge {
                                         "forge_lifted_" + utohexstr(rva, true), module);
                 impl->getArg(0)->setName("state");
                 appendToUsed(module, {impl});
-                stateType = ArrayType::get(ir.getInt64Ty(), WideRegs.size());
+                stateType = ArrayType::get(ir.getInt64Ty(), wideRegs.size());
                 if (wrapper) {
                     auto *nativeType = FunctionType::get(ir.getInt64Ty(),
                                                          {ir.getInt64Ty(), ir.getInt64Ty()}, false);
@@ -200,18 +200,18 @@ namespace forge {
                 s.reject("expected a general-purpose register");
             }
             auto name = StringRef(regs.getName(op.getReg()));
-            const auto &names = width == 64   ? WideRegs
-                                : width == 32 ? LowRegs
-                                : width == 16 ? Words
-                                              : LowBytes;
+            const auto &names = width == 64   ? wideRegs
+                                : width == 32 ? lowRegs
+                                : width == 16 ? words
+                                              : lowBytes;
             auto it = llvm::find(names, name);
             if (it != names.end()) {
                 return {static_cast<unsigned>(it - names.begin()), width};
             }
             if (width == 8) {
-                auto high = llvm::find(HighBytes, name);
-                if (high != HighBytes.end()) {
-                    return {static_cast<unsigned>(high - HighBytes.begin()), 8, 8};
+                auto high = llvm::find(highBytes, name);
+                if (high != highBytes.end()) {
+                    return {static_cast<unsigned>(high - highBytes.begin()), 8, 8};
                 }
             }
             s.reject("unsupported register " + name);
@@ -219,10 +219,10 @@ namespace forge {
 
         Value *Translator::read(const Step &s, RegisterView view) {
             if ((defined[view.index] & view.mask()) != view.mask()) {
-                s.reject("native wrapper requires undefined incoming " + WideRegs[view.index]);
+                s.reject("native wrapper requires undefined incoming " + wideRegs[view.index]);
             }
             Value *v = ir.CreateAlignedLoad(ir.getInt64Ty(), slot(impl->getArg(0), view.index),
-                                            RegisterStateAlignment);
+                                            registerStateAlignment);
             if (view.offset) {
                 v = ir.CreateLShr(v, view.offset);
             }
@@ -240,19 +240,19 @@ namespace forge {
             auto *ptr = slot(impl->getArg(0), view.index);
             auto *result = ir.CreateZExtOrBitCast(v, ir.getInt64Ty());
             if (view.width < 32) {
-                auto *parent = ir.CreateAlignedLoad(ir.getInt64Ty(), ptr, RegisterStateAlignment);
+                auto *parent = ir.CreateAlignedLoad(ir.getInt64Ty(), ptr, registerStateAlignment);
                 result = ir.CreateOr(ir.CreateAnd(parent, ~view.mask()),
                                      ir.CreateShl(result, view.offset));
                 defined[view.index] |= view.mask();
             } else {
                 defined[view.index] = UINT64_MAX;
             }
-            ir.CreateAlignedStore(result, ptr, RegisterStateAlignment);
+            ir.CreateAlignedStore(result, ptr, registerStateAlignment);
         }
 
         Value *Translator::require(const Step &s, x86::Flag flag) const {
             if (!semantics.flags[flag]) {
-                s.reject("unsupported use of undefined condition flags: " + x86::FlagNames[flag]);
+                s.reject("unsupported use of undefined condition flags: " + x86::flagNames[flag]);
             }
             return semantics.flags[flag];
         }
@@ -433,26 +433,26 @@ namespace forge {
         }
 
         int createSiblingTemporary(const fs::path &output, fs::path &temporary) {
-            const auto Parent = output.parent_path();
+            const auto parent = output.parent_path();
             // Use the opposite dot prefix so even an absent destination cannot be the temporary.
-            const StringRef Model = output.filename().native().starts_with('.')
+            const StringRef model = output.filename().native().starts_with('.')
                                         ? "forge.tmp-%%%%%%%%"
                                         : ".forge.tmp-%%%%%%%%";
             SmallString<32> name;
 
             for (unsigned attempt = 0; attempt < 128; ++attempt) {
-                sys::fs::createUniquePath(Model, name, /*MakeAbsolute=*/false);
-                temporary = Parent / name.c_str();
+                sys::fs::createUniquePath(model, name, /*MakeAbsolute=*/false);
+                temporary = parent / name.c_str();
                 int fd;
-                const auto Error =
+                const auto error =
                     sys::fs::openFileForWrite(temporary.native(), fd, sys::fs::CD_CreateNew);
 
-                if (!Error) {
+                if (!error) {
                     return fd;
                 }
 
-                if (Error != std::errc::file_exists) {
-                    throw InspectionError(Error.message(), "OUTPUT_ERROR");
+                if (error != std::errc::file_exists) {
+                    throw InspectionError(error.message(), "OUTPUT_ERROR");
                 }
             }
 
@@ -471,18 +471,18 @@ namespace forge {
 
             // LLVM reserves descriptors 0–2 even if open() reused a closed standard stream.
             if (fd <= STDERR_FILENO) {
-                const int Duplicate =
+                const int duplicate =
                     sys::RetryAfterSignal(-1, ::fcntl, fd, F_DUPFD_CLOEXEC, STDERR_FILENO + 1);
 
-                if (Duplicate < 0) {
+                if (duplicate < 0) {
                     throw InspectionError(sys::StrError(), "OUTPUT_ERROR");
                 }
 
-                const auto Error = sys::fs::closeFile(fd);
-                fd = Duplicate;
+                const auto error = sys::fs::closeFile(fd);
+                fd = duplicate;
 
-                if (Error) {
-                    throw InspectionError(Error.message(), "OUTPUT_ERROR");
+                if (error) {
+                    throw InspectionError(error.message(), "OUTPUT_ERROR");
                 }
             }
 
@@ -520,8 +520,8 @@ namespace forge {
         if (it == a.functions.end() || it->record.begin != rva) {
             fail(rva, "expected an exact, valid, unambiguous discovered function start");
         }
-        if (const auto Version = it->unsupportedUnwindVersion) {
-            fail(rva, "unsupported unwind version " + Twine(*Version));
+        if (const auto version = it->unsupportedUnwindVersion) {
+            fail(rva, "unsupported unwind version " + Twine(*version));
         }
         if (it->chainedFragment) {
             fail(rva, "chained unwind fragment has no independent function entry");
@@ -557,8 +557,8 @@ namespace forge {
         std::unique_ptr<MCRegisterInfo> regs(target->createMCRegInfo(triple));
         std::unique_ptr<MCInstrInfo> instructions(target->createMCInstrInfo());
         std::unique_ptr<MCSubtargetInfo> sub(target->createMCSubtargetInfo(triple, "generic", ""));
-        const MCTargetOptions Options;
-        auto assembly = x86::createAsmInfo(*target, *regs, triple, Options);
+        const MCTargetOptions options;
+        auto assembly = x86::createAsmInfo(*target, *regs, triple, options);
         MCContext mc(triple, *assembly, *regs, *sub);
         std::unique_ptr<MCDisassembler> dis(target->createMCDisassembler(*sub, mc));
         auto steps = decode(code->bytes, rva, *dis, *instructions);
