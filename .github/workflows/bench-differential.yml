@@ -16,13 +16,8 @@ env:
   FORGE_TEST_RUN_ID: ${{ github.run_id }}-${{ github.run_attempt }}-8404da144b5b28bd61ba5d396ab0aee6b5a2f51f
 
 jobs:
-  single:
-    runs-on: macos-26
-    strategy:
-      fail-fast: false
-      max-parallel: 1
-      matrix:
-        workers: [1, 2, 4]
+  snapshot:
+    runs-on: ubuntu-24.04
     steps:
       - &experiment
         uses: actions/checkout@v6
@@ -34,30 +29,61 @@ jobs:
         with:
           ref: ${{ env.CANDIDATE_SHA }}
           path: candidate
-      - &llvm
-        uses: ./candidate/.github/actions/llvm
-      - &executables
-        uses: actions/download-artifact@v4
+      - uses: actions/download-artifact@v4
         with:
           run-id: ${{ env.CANDIDATE_RUN }}
           github-token: ${{ github.token }}
           pattern: tested-macos-arm64-*
           merge-multiple: true
           path: candidate/build/tested
-      - &extract
-        name: Extract the candidate's tested executables
-        working-directory: candidate
-        run: |
-          test "$(git rev-parse HEAD)" = "$CANDIDATE_SHA"
-          for preset in dev sanitize; do tar -xzf "build/tested/tested-$preset.tgz"; done
-          shasum -a 256 build/dev/forge build/sanitize/forge
-      - &inputs
-        uses: actions/download-artifact@v4
+      - uses: actions/download-artifact@v4
         with:
           run-id: ${{ env.CANDIDATE_RUN }}
           github-token: ${{ github.token }}
           name: windows-x64-inputs
           path: candidate/build
+      - name: Freeze the candidate executables and reference inputs for all trials
+        working-directory: candidate
+        run: |
+          for preset in dev sanitize; do test -s "build/tested/tested-$preset.tgz"; done
+          test -s build/fixtures/windows-x64/release/SHA256SUMS
+          test -s build/differential/reference/windows-x64/wine/debug/arithmetic/add_i64/result.json
+          tar -C build -czf bench-inputs.tgz tested fixtures differential/reference
+          shasum -a 256 bench-inputs.tgz
+      - uses: actions/upload-artifact@v4
+        with:
+          name: candidate-inputs
+          path: candidate/bench-inputs.tgz
+          if-no-files-found: error
+          retention-days: 7
+
+  single:
+    needs: snapshot
+    runs-on: macos-26
+    strategy:
+      fail-fast: false
+      max-parallel: 1
+      matrix:
+        workers: [1, 2, 4]
+    steps:
+      - *experiment
+      - *candidate
+      - &llvm
+        uses: ./candidate/.github/actions/llvm
+      - &inputs
+        uses: actions/download-artifact@v4
+        with:
+          name: candidate-inputs
+          path: candidate
+      - &extract
+        name: Extract the candidate's tested executables
+        working-directory: candidate
+        run: |
+          test "$(git rev-parse HEAD)" = "$CANDIDATE_SHA"
+          mkdir -p build
+          tar -C build -xzf bench-inputs.tgz
+          for preset in dev sanitize; do tar -xzf "build/tested/tested-$preset.tgz"; done
+          shasum -a 256 build/dev/forge build/sanitize/forge
       - name: Run both complete configurations and the real negative suite
         working-directory: candidate
         run: python3 -B ../experiment/.github/bench/differential.py run --workers ${{ matrix.workers }} --shards 1 --shard 0
@@ -77,9 +103,8 @@ jobs:
     steps:
       - *experiment
       - *candidate
-      - *executables
-      - *extract
       - *inputs
+      - *extract
       - uses: actions/download-artifact@v4
         with:
           pattern: single-*
@@ -122,9 +147,8 @@ jobs:
     steps:
       - *experiment
       - *candidate
-      - *executables
-      - *extract
       - *inputs
+      - *extract
       - uses: actions/download-artifact@v4
         with:
           name: single-${{ matrix.workers }}
@@ -144,9 +168,8 @@ jobs:
       - *experiment
       - *candidate
       - *llvm
-      - *executables
-      - *extract
       - *inputs
+      - *extract
       - name: Run disjoint fixture configurations and once-per-runner-set negatives
         working-directory: candidate
         env:
@@ -167,9 +190,8 @@ jobs:
     steps:
       - *experiment
       - *candidate
-      - *executables
-      - *extract
       - *inputs
+      - *extract
       - uses: actions/download-artifact@v4
         with:
           name: reference-observations
