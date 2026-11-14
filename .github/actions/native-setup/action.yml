@@ -47,21 +47,27 @@ runs:
       with:
         path: ${{ runner.temp }}/forge-packages.tgz
         key: forge-conan-v2-${{ runner.arch }}-${{ steps.toolchain.outputs.id }}-${{ hashFiles('conanfile.py', 'conan.lock', 'conan/profiles/**', 'requirements-build.txt', 'CMakePresets.json', 'cmake/workflow.py', '.github/actions/llvm/action.yml') }}
-    - name: Generate the requested preset integrations
+    - name: Unpack the locked Conan packages
+      if: steps.packages.outputs.cache-hit == 'true'
+      shell: bash
+      run: conan cache restore "$RUNNER_TEMP/forge-packages.tgz"
+    - name: Generate the locked preset integrations
       env:
         CACHE_HIT: ${{ steps.packages.outputs.cache-hit }}
         PRESETS: ${{ inputs.presets }}
       shell: bash
       run: |
-        archive="$RUNNER_TEMP/forge-packages.tgz"
-        if [[ "$CACHE_HIT" == true ]]; then
-          conan cache restore "$archive"
-          for preset in $PRESETS; do make provision PRESET="$preset" CACHE_ONLY=1; done
-        else
-          # Both native CTest suites exercise all presets with remote access disabled.
-          for preset in dev release sanitize lint xcode; do make provision PRESET="$preset"; done
-          conan cache save '*:*' --no-source --file "$archive"
+        cache_only=1
+        if [[ "$CACHE_HIT" != true ]]; then
+          # Both native suites exercise all presets with the network disabled.
+          PRESETS='dev release sanitize lint xcode'
+          cache_only=0
         fi
+        for preset in $PRESETS; do make provision PRESET="$preset" CACHE_ONLY="$cache_only"; done
+    - name: Archive the locked Conan packages
+      if: steps.packages.outputs.cache-hit != 'true'
+      shell: bash
+      run: conan cache save '*:*' --no-source --file "$RUNNER_TEMP/forge-packages.tgz"
     - name: Enable the runner-local ThinLTO object cache
       if: env.FORGE_CI_THINLTO_CACHE == 'true'
       shell: bash
