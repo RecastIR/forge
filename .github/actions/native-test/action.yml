@@ -43,7 +43,7 @@ runs:
         retention-days: 7
         overwrite: true
     - name: Summarize compiler cache usage
-      if: ${{ !cancelled() && env.FORGE_CI_CCACHE == 'true' && env.CCACHE_DIR }}
+      if: ${{ !cancelled() && env.CCACHE_DIR }}
       shell: bash
       run: ccache --show-stats | tee -a "$GITHUB_STEP_SUMMARY"
     - name: Preserve failed native configuration and test logs

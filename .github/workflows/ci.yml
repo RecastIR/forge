@@ -15,8 +15,6 @@ permissions:
   contents: read
 
 env:
-  FORGE_CI_CCACHE: 'true'
-  FORGE_CI_THINLTO_CACHE: 'true'
   CMAKE_BUILD_PARALLEL_LEVEL: '3'
   FORGE_TEST_RUN_ID: ${{ github.run_id }}-${{ github.run_attempt }}-${{ github.sha }}
 

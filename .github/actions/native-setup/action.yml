@@ -69,13 +69,12 @@ runs:
       shell: bash
       run: conan cache save '*:*' --no-source --file "$RUNNER_TEMP/forge-packages.tgz"
     - name: Enable the runner-local ThinLTO object cache
-      if: env.FORGE_CI_THINLTO_CACHE == 'true'
       shell: bash
       run: |
         mkdir -p "$RUNNER_TEMP/forge-lto"
         echo "LDFLAGS=-Wl,-cache_path_lto,$RUNNER_TEMP/forge-lto" >> "$GITHUB_ENV"
     - name: Install pinned ccache
-      if: env.FORGE_CI_CCACHE == 'true' && inputs.compiler-cache == 'true'
+      if: inputs.compiler-cache == 'true'
       shell: bash
       run: |
         cd "$RUNNER_TEMP"
@@ -92,7 +91,7 @@ runs:
         echo 'CCACHE_MAXSIZE=256M' >> "$GITHUB_ENV"
         echo 'CCACHE_COMPILERCHECK=content' >> "$GITHUB_ENV"
     - name: Restore compiled objects
-      if: env.FORGE_CI_CCACHE == 'true' && inputs.compiler-cache == 'true'
+      if: inputs.compiler-cache == 'true'
       uses: actions/cache@v4
       with:
         path: ${{ runner.temp }}/forge-ccache
@@ -100,6 +99,6 @@ runs:
         restore-keys: |
           forge-ccache-v1-${{ inputs.presets }}-${{ steps.toolchain.outputs.id }}-${{ hashFiles('.github/actions/native-setup/action.yml', '.github/actions/llvm/action.yml', 'conan.lock', 'conanfile.py', 'conan/profiles/**', 'CMakePresets.json') }}-
     - name: Reset counters for this build
-      if: env.FORGE_CI_CCACHE == 'true' && inputs.compiler-cache == 'true'
+      if: inputs.compiler-cache == 'true'
       shell: bash
       run: ccache --zero-stats
