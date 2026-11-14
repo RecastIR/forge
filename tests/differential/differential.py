@@ -1,5 +1,8 @@
 """Compare function-level native executions with validated Windows observations."""
 import argparse
+from collections import Counter
+from concurrent.futures import ThreadPoolExecutor, as_completed
+from contextlib import contextmanager
 import fcntl
 import json
 import os
@@ -11,6 +14,7 @@ import signal
 import subprocess
 import sys
 import tempfile
+import time
 
 from comparison import describe, differences
 from lift_diagnostics import SelectedFunction, parse_diagnostic
@@ -173,24 +177,35 @@ def native_differences(wanted, actual, harness, args):
     return mismatches
 
 
-def run_variant(ir, harness, args, wanted, work, identity, variant):
+@contextmanager
+def timed(timings, phase):
+    start = time.monotonic()
+    try:
+        yield
+    finally:
+        timings[phase] += time.monotonic() - start
+
+
+def run_variant(ir, harness, args, wanted, work, identity, variant, timings):
     stages = dict.fromkeys(NATIVE_STAGES, "not_run")
     report = dict(identity, variant=variant, stages=stages)
     stage = "native_compilation"
     try:
-        work.mkdir()
+        work.mkdir(exist_ok=True)
         executable, compiler_input = native.build(ir, harness, work, identity["build_config"], variant)
         report["compiler_ir_sha256"] = file_sha256(compiler_input)
         stages[stage] = "passed"
 
         stage = "native_execution"
-        actual = native.execute(executable, args, work)
+        with timed(timings, stage):
+            actual = native.execute(executable, args, work)
         report["native_exit_code"] = actual.exit_code
         report["execution_outcome"] = "completed"
         stages[stage] = "passed"
 
         stage = "comparison"
-        mismatches = native_differences(wanted, actual, harness, args)
+        with timed(timings, stage):
+            mismatches = native_differences(wanted, actual, harness, args)
         if mismatches:
             report.update(status="behavioral_failure", differences=mismatches,
                           failure_categories=[e["field"] + "_mismatch" for e in mismatches])
@@ -208,7 +223,7 @@ def run_variant(ir, harness, args, wanted, work, identity, variant):
     return report
 
 
-def run_case(manifest, case, config, binaries, references, forge, work):
+def run_case(manifest, case, config, binaries, references, forge, work, timings):
     report = dict(schema_version=1, fixture_id=manifest.case["id"], build_config=config,
                   status="uncovered", scope=None)
     enabled = case is not None and "blocked_reason" not in case
@@ -220,13 +235,14 @@ def run_case(manifest, case, config, binaries, references, forge, work):
     stage = "reference_validation"
     stages = report["stages"]
     try:
-        directory(binaries, config)
-        if enabled:
-            image, digest = snapshot(binaries, config, manifest.case["binary"], work)
-        else:
-            _, digest = verified_export(binaries, config, manifest.case["binary"])
-        report["binary_sha256"] = digest
-        wanted, report["reference"] = reference(references, manifest, config, digest)
+        with timed(timings, stage):
+            directory(binaries, config)
+            if enabled:
+                image, digest = snapshot(binaries, config, manifest.case["binary"], work)
+            else:
+                _, digest = verified_export(binaries, config, manifest.case["binary"])
+            report["binary_sha256"] = digest
+            wanted, report["reference"] = reference(references, manifest, config, digest)
         stages[stage] = "passed"
 
         if not enabled:
@@ -235,8 +251,9 @@ def run_case(manifest, case, config, binaries, references, forge, work):
             return report
 
         stage = "analysis"
-        report["forge_sha256"] = sha256(forge.read_bytes())
-        selected = analyze(forge, image, case["export"], work)
+        with timed(timings, stage):
+            report["forge_sha256"] = sha256(forge.read_bytes())
+            selected = analyze(forge, image, case["export"], work)
         report["function_rva"] = hex(selected.start)
         stages[stage] = "passed"
 
@@ -244,8 +261,9 @@ def run_case(manifest, case, config, binaries, references, forge, work):
         if wanted.exit_code:
             raise ValueError(f"function harness cannot convey Windows termination status {wanted.exit_code}")
         ir = work / CANONICAL_IR
-        ir.parent.mkdir()
-        lift(forge, image, case, selected, ir)
+        ir.parent.mkdir(exist_ok=True)
+        with timed(timings, stage):
+            lift(forge, image, case, selected, ir)
         identity = {key: report[key] for key in ("fixture_id", "build_config", "binary_sha256", "run_id")}
         identity["canonical_ir_sha256"] = file_sha256(ir)
         stages[stage] = "passed"
@@ -254,7 +272,7 @@ def run_case(manifest, case, config, binaries, references, forge, work):
         for variant in VARIANTS:
             variant_work = work / variant
             variants[variant] = run_variant(ir, case["harness"], manifest.case["args"], wanted,
-                                            variant_work, identity, variant)
+                                            variant_work, identity, variant, timings)
         report["variants"] = variants
         for name in NATIVE_STAGES:
             states = [r["stages"][name] for r in variants.values()]
@@ -294,10 +312,57 @@ def contains_path(parent, path):
     return False
 
 
+def run_selection(selected, definitions, config, binaries, references, forge, folder, jobs, full_suite, step_summary):
+    workers = min(jobs, len(selected))
+    stop = native.ActiveProcesses()
+    started = time.monotonic()
+
+    def run_group(index):
+        group = selected[index::workers]
+        cases = [definitions[m.case["id"], config] for m in group
+                 if (m.case["id"], config) in definitions and "blocked_reason" not in definitions[m.case["id"], config]]
+        timings = Counter()
+        compiler = native.SuiteBuild(folder / "cmake-workers" / str(index + 1), config, folder, cases, stop, timings)
+        token = native.current_worker.set(compiler if full_suite else None)
+        try:
+            for manifest in group:
+                name = manifest.case["id"]
+                work = folder / name
+                work.mkdir(parents=True, exist_ok=True)
+                result = run_case(manifest, definitions.get((name, config)), config, binaries, references,
+                                  forge, work, timings)
+                write_json(work / "result.json", result)
+            return timings
+        finally:
+            native.current_worker.reset(token)
+
+    if workers == 1:
+        timings = run_group(0)
+    else:
+        timings = Counter()
+        with ThreadPoolExecutor(max_workers=workers) as pool:
+            try:
+                futures = [pool.submit(run_group, i) for i in range(workers)]
+                for future in as_completed(futures):
+                    timings.update(future.result())
+            except BaseException:
+                stop.cancel()
+                raise
+    elapsed = time.monotonic() - started
+    details = ", ".join(f"{name}={value:.2f}s" for name, value in sorted(timings.items()))
+    line = f"Differential {config}: {elapsed:.2f}s wall, {workers} worker(s). {details} (summed across workers)."
+    print(line)
+    if full_suite and step_summary:
+        with Path(step_summary).open("a") as stream:
+            print(f"- {line}", file=stream)
+
+
 def run(config, fixture=None, *, binaries=BINARIES, references=REFERENCES, output=OUTPUT,
-        forge=DEFAULT_FORGE, suite=SUITE):
+        forge=DEFAULT_FORGE, suite=SUITE, jobs=1, step_summary=None):
     if config not in ("debug", "release") or (fixture is not None and not FIXTURE_ID.fullmatch(fixture)):
         raise ValueError("invalid configuration or fixture ID")
+    if jobs < 1:
+        raise ValueError("jobs must be positive")
     folder = output / config
     output.mkdir(parents=True, exist_ok=True)
     with (output / ("." + config + ".lock")).open("a+b") as lock:
@@ -325,12 +390,10 @@ def run(config, fixture=None, *, binaries=BINARIES, references=REFERENCES, outpu
             selected = [m for m in catalog if fixture is None or m.case["id"] == fixture]
             if not selected:
                 raise ValueError(f"unknown fixture {fixture!r}")
+            run_selection(selected, cases, config, binaries, references, forge, folder, jobs, fixture is None, step_summary)
             for manifest in selected:
                 name = manifest.case["id"]
-                work = folder / name
-                work.mkdir(parents=True)
-                result = run_case(manifest, cases.get((name, config)), config, binaries, references, forge, work)
-                write_json(work / "result.json", result)
+                result = read_json(folder / name / "result.json")
                 status = result["status"]
                 summary["cases"].append(dict(fixture_id=name, status=status, scope=result["scope"],
                                              report=name + "/result.json"))
@@ -372,6 +435,7 @@ def main(argv=None):
     group = parser.add_mutually_exclusive_group(required=True)
     group.add_argument("--all", action="store_true")
     group.add_argument("--fixture", metavar="CATEGORY/NAME")
+    parser.add_argument("--jobs", type=int, default=1, metavar="N", help="maximum concurrent fixture workers")
     parser.add_argument("--config", required=True, choices=("debug", "release"))
     parser.add_argument("--reference-root", type=Path, default=REFERENCES)
     parser.add_argument("--binary-root", type=Path, default=BINARIES)
@@ -379,7 +443,8 @@ def main(argv=None):
                         help="Forge executable (default: dev/forge under the build root)")
     options = parser.parse_args(argv)
     return run(options.config, options.fixture, references=options.reference_root,
-               binaries=options.binary_root, forge=options.forge.resolve())
+               binaries=options.binary_root, forge=options.forge.resolve(), jobs=options.jobs,
+               step_summary=os.environ.get("GITHUB_STEP_SUMMARY"))
 
 
 if __name__ == "__main__":

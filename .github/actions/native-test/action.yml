@@ -1,0 +1,60 @@
+name: Test a native Forge configuration
+description: Build and run all CTests offline and publish the exact tested executable
+inputs:
+  preset:
+    description: dev or sanitize
+    required: true
+outputs:
+  stages:
+    description: Required stage outcomes
+    value: ${{ toJSON(steps.verify.outputs) }}
+  sha256:
+    description: SHA-256 of the tested executable
+    value: ${{ steps.package.outputs.sha256 }}
+runs:
+  using: composite
+  steps:
+    - uses: ./.github/actions/native-setup
+      with:
+        presets: ${{ inputs.preset }}
+        compiler-cache: 'true'
+    - name: Build and verify the native preset offline
+      id: verify
+      env:
+        PRESET: ${{ inputs.preset }}
+      shell: bash
+      run: |
+        /usr/bin/sandbox-exec -p '(version 1)(allow default)(deny network-outbound (remote ip "*:*"))' \
+          ./tools/test-forge.sh "--native-$PRESET"
+    - name: Package the tested executable
+      id: package
+      env:
+        PRESET: ${{ inputs.preset }}
+      shell: bash
+      run: |
+        binary="build/$PRESET/forge"
+        tar -czf "$RUNNER_TEMP/tested-$PRESET.tgz" "$binary"
+        echo "sha256=$(shasum -a 256 "$binary" | cut -d' ' -f1)" >> "$GITHUB_OUTPUT"
+    - uses: actions/upload-artifact@v4
+      with:
+        name: tested-macos-arm64-${{ inputs.preset }}
+        path: ${{ runner.temp }}/tested-${{ inputs.preset }}.tgz
+        if-no-files-found: error
+        retention-days: 7
+        overwrite: true
+    - name: Summarize compiler cache usage
+      if: ${{ !cancelled() && env.CCACHE_DIR }}
+      shell: bash
+      run: ccache --show-stats | tee -a "$GITHUB_STEP_SUMMARY"
+    - name: Preserve failed native configuration and test logs
+      if: failure()
+      uses: actions/upload-artifact@v4
+      with:
+        name: native-diagnostics-${{ inputs.preset }}
+        path: |
+          build/*/required-tests.xml
+          build/*/Testing/Temporary/*.log
+          build/*/CMakeFiles/CMakeConfigureLog.yaml
+        if-no-files-found: warn
+        retention-days: 7
+        overwrite: true

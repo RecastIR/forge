@@ -1,5 +1,6 @@
 """Exercise the CI gate with real publication formats and controlled executions."""
 import contextlib
+import copy
 import io
 import json
 import os
@@ -15,6 +16,8 @@ from test_differential import ArtifactSetup
 class CoverageTests(ArtifactSetup):
     def setUp(self):
         super().setUp()
+        self.revision = "a" * 40
+        self.run_id = "42-1-" + self.revision
         self.prepare_exports("release")
         self.output = self.root / "out"
         self.baseline = self.suite / "coverage-baseline.json"
@@ -25,7 +28,7 @@ class CoverageTests(ArtifactSetup):
 
     def run_config(self, config, *, build=None, execute=None, lift=None, failure=None):
         with contextlib.ExitStack() as stack:
-            for ctx in (patch.dict(os.environ, FORGE_TEST_RUN_ID="current"),
+            for ctx in (patch.dict(os.environ, FORGE_TEST_RUN_ID=self.run_id),
                         patch.object(diff, "analyze", return_value=self.selected),
                         patch.object(diff, "lift", lift or self.lift_fixture),
                         patch.object(diff.native, "build", build or self.build_fixture),
@@ -40,9 +43,23 @@ class CoverageTests(ArtifactSetup):
                             output=self.output, forge=self.forge, suite=self.suite)
 
     def report(self, jobs=None, **kwargs):
-        return coverage.aggregate("current", "revision", jobs or dict.fromkeys(coverage.JOBS, "success"),
+        return coverage.aggregate(self.run_id, self.revision, jobs or dict.fromkeys(coverage.JOB_STAGES, "success"),
                                   suite_root=self.suite, binaries=self.binaries, references=self.references,
                                   output=self.output, **kwargs)
+
+    def needs(self):
+        needs = {job: {"result": "success", "outputs": {"stages": json.dumps(dict.fromkeys(stages, "success"))}}
+                 for job, stages in coverage.JOB_STAGES.items()}
+        digest = diff.sha256(self.forge.read_bytes())
+        needs["macos-sanitize"]["outputs"]["debug_forge"] = digest
+        needs["macos-dev"]["outputs"]["release_forge"] = digest
+        needs["differential"]["outputs"]["evidence_run_id"] = self.run_id
+        return needs
+
+    def hosted(self, needs, current_run=None):
+        return coverage.hosted_report(json.dumps(needs), current_run or self.run_id, self.revision,
+                                      suite_root=self.suite, binaries=self.binaries,
+                                      references=self.references, output=self.output)
 
     def test_actual_matrix(self):
         report = self.report()
@@ -54,19 +71,86 @@ class CoverageTests(ArtifactSetup):
         for outcome in ("skipped", "failure", "cancelled"):
             self.assertEqual(self.report({"macos": outcome})["gate"], "failed")
 
-    def test_green_job_cannot_hide_a_skipped_step_or_substituted_forge(self):
-        report = self.report()
-        needs = {job: {"outputs": {"stages": json.dumps(dict.fromkeys(stages, "success"))}}
-                 for job, stages in coverage.JOB_STAGES.items()}
-        coverage.verify_job_stages(report, needs)
-        self.assertEqual(report["gate"], "passed")
-        needs["macos"]["outputs"]["stages"] = '{"formatting":"success"}'
-        coverage.verify_job_stages(report, needs)
+    def test_required_jobs_fail_closed(self):
+        valid = self.needs()
+        self.assertEqual(self.hosted(valid)["gate"], "passed")
+        for job in coverage.JOB_STAGES:
+            for outcome in ("skipped", "failure", "cancelled", "missing"):
+                with self.subTest(job=job, outcome=outcome):
+                    needs = copy.deepcopy(valid)
+                    if outcome == "missing":
+                        del needs[job]
+                    else:
+                        needs[job]["result"] = outcome
+                    report = self.hosted(needs)
+                    self.assertEqual(report["gate"], "failed")
+                    self.assertIn(f"{job}: {outcome}", report["errors"])
+
+    def test_green_jobs_require_complete_stage_outputs(self):
+        valid = self.needs()
+        for job, required in coverage.JOB_STAGES.items():
+            for stage in required:
+                with self.subTest(job=job, stage=stage):
+                    needs = copy.deepcopy(valid)
+                    stages = json.loads(needs[job]["outputs"]["stages"])
+                    del stages[stage]
+                    needs[job]["outputs"]["stages"] = json.dumps(stages)
+                    report = self.hosted(needs)
+                    self.assertEqual(report["gate"], "failed")
+                    self.assertEqual(report["job_stages"][job][stage], "not_run")
+        for outputs in (None, [], {}, {"stages": "invalid"}, {"stages": "[]"},
+                        {"stages": '{"lint":"skipped","lint":"success"}'}):
+            with self.subTest(outputs=outputs):
+                needs = copy.deepcopy(valid)
+                needs["macos-presets"]["outputs"] = outputs
+                self.assertEqual(self.hosted(needs)["gate"], "failed")
+
+    def test_both_tested_binaries_are_required(self):
+        for config, job in (("debug", "macos-sanitize"), ("release", "macos-dev")):
+            for value in (None, "invalid", "0" * 64):
+                with self.subTest(config=config, value=value):
+                    needs = self.needs()
+                    key = config + "_forge"
+                    if value is None:
+                        del needs[job]["outputs"][key]
+                    else:
+                        needs[job]["outputs"][key] = value
+                    report = self.hosted(needs)
+                    self.assertEqual(report["gate"], "failed")
+                    self.assertEqual(report["configurations"][config]["counts"]["error"], 1)
+                    row = next(r for r in report["cases"] if r["status"] == "error")
+                    self.assertIn("Forge executable differs", row["reason"])
+
+        needs = self.needs()
+        self.forge.write_bytes(b"sanitized Forge")
+        self.assertEqual(self.run_config("debug"), 0)
+        needs["macos-sanitize"]["outputs"]["debug_forge"] = diff.sha256(self.forge.read_bytes())
+        self.assertEqual(self.hosted(needs)["gate"], "passed")
+        dev = needs["macos-dev"]["outputs"]
+        sanitize = needs["macos-sanitize"]["outputs"]
+        dev["release_forge"], sanitize["debug_forge"] = sanitize["debug_forge"], dev["release_forge"]
+        report = self.hosted(needs)
         self.assertEqual(report["gate"], "failed")
-        self.assertEqual(report["job_stages"]["macos"]["sanitize"], "not_run")
-        report = self.report(forge_digests=dict.fromkeys(diff.CONFIGS, "0" * 64))
-        self.assertEqual(report["gate"], "failed")
-        self.assertEqual(report["configurations"]["debug"]["counts"]["error"], 1)
+        for config in diff.CONFIGS:
+            self.assertEqual(report["configurations"][config]["counts"]["error"], 1)
+
+    def test_partial_rerun_requires_the_differential_jobs_actual_evidence(self):
+        valid = self.needs()
+        current = "42-2-" + self.revision
+        self.assertEqual(self.hosted(valid, current)["gate"], "passed")
+        for run_id in (None, "previous", "41-1-" + self.revision, "42-0-" + self.revision,
+                       "42-3-" + self.revision, "42-1-" + "b" * 40, current):
+            with self.subTest(run_id=run_id):
+                needs = copy.deepcopy(valid)
+                if run_id is None:
+                    del needs["differential"]["outputs"]["evidence_run_id"]
+                else:
+                    needs["differential"]["outputs"]["evidence_run_id"] = run_id
+                report = self.hosted(needs, current)
+                self.assertEqual(report["gate"], "failed")
+                self.assertTrue(any("evidence run ID" in error or "fresh, full differential suite" in error
+                                    for error in report["errors"]))
+        self.assertEqual(self.hosted(valid, "42-2-" + "b" * 40)["gate"], "failed")
 
     def test_membership_and_freshness(self):
         suite = self.output / "release/suite.json"
@@ -142,7 +226,7 @@ class CoverageTests(ArtifactSetup):
         record["variants"]["baseline"]["run_id"] = "previous"
         diff.write_json(folder / "result.json", record)
         self.assertEqual(self.report()["gate"], "failed")
-        record["variants"]["baseline"]["run_id"] = "current"
+        record["variants"]["baseline"]["run_id"] = self.run_id
         diff.write_json(folder / "result.json", record)
         (folder / "o2/stdout.bin").unlink()
         self.assertEqual(self.report()["gate"], "failed")

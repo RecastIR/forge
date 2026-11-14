@@ -11,6 +11,7 @@ import signal
 import subprocess
 import sys
 import tempfile
+import threading
 import unittest
 from unittest.mock import patch
 
@@ -194,11 +195,11 @@ class ArtifactTests(ArtifactSetup):
                 os.fstat(fd)
             self.assertEqual(closed.exception.errno, errno.EBADF)
 
-    def invoke(self, selection=None, *, forge=None):
+    def invoke(self, selection=None, *, forge=None, jobs=1):
         output = self.root / "output"
         with contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(io.StringIO()):
             status = diff.run(self.config, selection, binaries=self.binaries, references=self.references,
-                              output=output, forge=self.forge if forge is None else forge, suite=self.suite)
+                              output=output, forge=self.forge if forge is None else forge, suite=self.suite, jobs=jobs)
         return status, diff.read_json(output / self.config / "suite.json")
 
     def test_statuses_and_stale_pass_rejection(self):
@@ -240,6 +241,35 @@ class ArtifactTests(ArtifactSetup):
         self.assertEqual((status, suite["passed"]), (1, 0))
         self.assertEqual(diff.read_json(report)["failure_categories"], ["reference_validation_failure"])
         self.assertFalse((report.parent / "generated").exists())
+
+    def test_parallel_failure_keeps_catalog_order_and_other_results(self):
+        last = threading.Event()
+        completion = []
+
+        def run_case(manifest, *args):
+            name = manifest.case["id"]
+            if name == "unit/enabled":
+                self.assertTrue(last.wait(5))
+                completion.append(name)
+                return dict(status="infrastructure_failure", scope="function")
+            completion.append(name)
+            last.set()
+            return dict(status="uncovered", scope=None)
+
+        with patch.object(diff, "run_case", side_effect=run_case):
+            status, suite = self.invoke(jobs=2)
+        self.assertEqual(status, 1)
+        self.assertEqual(completion, ["unit/uncovered", "unit/enabled"])
+        self.assertEqual([row["fixture_id"] for row in suite["cases"]], list(reversed(completion)))
+        self.assertEqual(suite["uncovered"], 1)
+        for name in completion:
+            self.assertTrue((self.root / "output/debug" / name / "result.json").is_file())
+
+    def test_invalid_worker_count_keeps_previous_evidence(self):
+        _, suite = self.invoke()
+        with self.assertRaisesRegex(ValueError, "jobs"):
+            self.invoke(jobs=0)
+        self.assertEqual(suite, diff.read_json(self.root / "output/debug/suite.json"))
 
     def test_zero_coverage(self):
         status, suite = self.invoke("unit/uncovered")
@@ -607,6 +637,36 @@ with (work / 'ready').open('w') as locked:
                 with (work / "ready").open() as lock:
                     fcntl.flock(lock, fcntl.LOCK_SH)
                     self.assertFalse((work / "late").exists())
+
+    def test_shared_graph_rejects_other_inputs_before_building(self):
+        tree = self.work / "cmake-workers/1"
+        case = self.work / "unit/name"
+        work = case / "baseline"
+        work.mkdir(parents=True)
+        ir = case / diff.CANONICAL_IR
+        harness = "decimal_pairs"
+        worker = diff.native.SuiteBuild(tree, "debug", self.work, [dict(fixture_id="unit/name", harness=harness)],
+                                        diff.native.ActiveProcesses(), {})
+        for args in ((ir, harness, work, "release", "baseline"),
+                     (ir, "other_harness", work, "debug", "baseline"),
+                     (ir, harness, work, "debug", "o2"),
+                     (self.work / "different.ll", harness, work, "debug", "baseline")):
+            with self.subTest(args=args), self.assertRaises(ValueError):
+                worker.build(*args)
+        self.assertFalse(tree.exists())
+
+    def test_cancelled_workers_reap_active_and_racing_launches(self):
+        processes = diff.native.ActiveProcesses()
+        worker = diff.native.SuiteBuild(self.work, "debug", self.work, [], processes, {})
+        token = diff.native.current_worker.set(worker)
+        self.addCleanup(diff.native.current_worker.reset, token)
+        with diff.native.supervised([sys.executable, "-c", "import time; time.sleep(60)"]) as active:
+            processes.cancel()
+            self.assertEqual(active.wait(timeout=5), -signal.SIGKILL)
+        with self.assertRaises(KeyboardInterrupt), diff.native.supervised(
+                [sys.executable, "-c", "import time; time.sleep(60)"]):
+            self.fail("a cancelled worker launched a new command")
+        self.assertFalse(processes.processes)
 
     def test_normal_exit_stops_descendant_writers(self):
         parent = """

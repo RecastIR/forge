@@ -10,8 +10,8 @@ runs:
         echo 'sha256=503de30ef90311e0b143623801b19af2250adac6d69faed65ad0051170202e3b' >> "$GITHUB_OUTPUT"
     - uses: actions/cache@v4
       with:
-        path: ${{ runner.temp }}/${{ steps.release.outputs.archive }}
-        key: forge-${{ steps.release.outputs.archive }}-${{ steps.release.outputs.sha256 }}
+        path: ${{ runner.temp }}/forge-llvm-archive
+        key: forge-archive-v2-${{ steps.release.outputs.archive }}-${{ steps.release.outputs.sha256 }}
     - shell: bash
       env:
         ARCHIVE: ${{ steps.release.outputs.archive }}
@@ -19,14 +19,15 @@ runs:
       run: |
         set -euo pipefail
         test "$(uname -sm)" = 'Darwin arm64'
-        cd "$RUNNER_TEMP"
+        mkdir -p "$RUNNER_TEMP/forge-llvm-archive"
+        cd "$RUNNER_TEMP/forge-llvm-archive"
         if [[ ! -f "$ARCHIVE" ]]; then
           curl --fail --location --retry 3 --output "$ARCHIVE" \
             "https://github.com/llvm/llvm-project/releases/download/llvmorg-23.1.5/$ARCHIVE"
         fi
         echo "$SHA256  $ARCHIVE" | shasum -a 256 -c -
-        mkdir -p forge-llvm
-        zstd --long=30 -dc "$ARCHIVE" | tar -xf - --strip-components=1 -C forge-llvm
+        mkdir -p "$RUNNER_TEMP/forge-llvm"
+        zstd --long=30 -dc "$ARCHIVE" | tar -xf - --strip-components=1 -C "$RUNNER_TEMP/forge-llvm"
         config="$RUNNER_TEMP/forge-llvm/bin/llvm-config"
         test "$("$config" --version)" = '23.1.5'
         bin="$("$config" --bindir)"

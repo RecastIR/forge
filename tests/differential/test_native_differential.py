@@ -154,6 +154,35 @@ class NativeDifferentialTests(unittest.TestCase):
                 if generator == "Xcode":
                     self.assertIn("_forge_lifted", link_map.read_text())
 
+    def test_suite_build_isolates_native_link_failures(self):
+        catalog = diff.load_catalog()
+        selected = [m for m in catalog if m.case["id"] in (CASE, WEIGHTED)]
+        definitions = diff.case_definitions(catalog, diff.SUITE / "cases.json")
+        original = diff.lift
+
+        def broken_wrapper(forge, image, case, entry, ir):
+            original(forge, image, case, entry, ir)
+            if case["fixture_id"] == CASE:
+                source = ir.read_text()
+                self.assertIn("@forge_lifted(", source)
+                ir.write_text(source.replace("@forge_lifted(", "@missing_wrapper("))
+
+        with tempfile.TemporaryDirectory(dir=self.tmp) as tmp:
+            output = Path(tmp).resolve()
+            with patch.object(diff, "lift", broken_wrapper), patch.object(diff, "load_catalog", return_value=selected), \
+                    patch.object(diff, "case_definitions", return_value=definitions):
+                self.assertEqual(diff.run("release", output=output, forge=self.forge), 1)
+            suite = diff.read_json(output / "release/suite.json")
+            self.assertEqual((suite["passed"], suite["executed"]), (1, 1))
+            folder = output / "release"
+            failed = diff.read_json(folder / CASE / "result.json")
+            passed = diff.read_json(folder / WEIGHTED / "result.json")
+            self.assertEqual(set(failed["variants"]), set(diff.VARIANTS))
+            for variant in diff.VARIANTS:
+                self.assertIn("native linking failed", failed["variants"][variant]["diagnostic"])
+                self.assertEqual(passed["variants"][variant]["status"], "passed")
+            self.assertEqual(len(list((folder / "cmake-workers").rglob("CMakeCache.txt"))), 1)
+
     def test_weighted_repeatability(self):
         with tempfile.TemporaryDirectory(dir=self.tmp) as tmp:
             observations = []
