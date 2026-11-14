@@ -312,7 +312,7 @@ def contains_path(parent, path):
     return False
 
 
-def run_selection(selected, definitions, config, binaries, references, forge, folder, jobs, full_suite):
+def run_selection(selected, definitions, config, binaries, references, forge, folder, jobs, full_suite, step_summary):
     workers = min(jobs, len(selected))
     stop = native.ActiveProcesses()
     started = time.monotonic()
@@ -352,13 +352,13 @@ def run_selection(selected, definitions, config, binaries, references, forge, fo
     details = ", ".join(f"{name}={value:.2f}s" for name, value in sorted(timings.items()))
     line = f"Differential {config}: {elapsed:.2f}s wall, {workers} worker(s). {details} (summed across workers)."
     print(line)
-    if full_suite and os.environ.get("GITHUB_STEP_SUMMARY"):
-        with Path(os.environ["GITHUB_STEP_SUMMARY"]).open("a") as stream:
+    if full_suite and step_summary:
+        with Path(step_summary).open("a") as stream:
             print(f"- {line}", file=stream)
 
 
 def run(config, fixture=None, *, binaries=BINARIES, references=REFERENCES, output=OUTPUT,
-        forge=DEFAULT_FORGE, suite=SUITE, jobs=1):
+        forge=DEFAULT_FORGE, suite=SUITE, jobs=1, step_summary=None):
     if config not in ("debug", "release") or (fixture is not None and not FIXTURE_ID.fullmatch(fixture)):
         raise ValueError("invalid configuration or fixture ID")
     if jobs < 1:
@@ -390,7 +390,7 @@ def run(config, fixture=None, *, binaries=BINARIES, references=REFERENCES, outpu
             selected = [m for m in catalog if fixture is None or m.case["id"] == fixture]
             if not selected:
                 raise ValueError(f"unknown fixture {fixture!r}")
-            run_selection(selected, cases, config, binaries, references, forge, folder, jobs, fixture is None)
+            run_selection(selected, cases, config, binaries, references, forge, folder, jobs, fixture is None, step_summary)
             for manifest in selected:
                 name = manifest.case["id"]
                 result = read_json(folder / name / "result.json")
@@ -443,7 +443,8 @@ def main(argv=None):
                         help="Forge executable (default: dev/forge under the build root)")
     options = parser.parse_args(argv)
     return run(options.config, options.fixture, references=options.reference_root,
-               binaries=options.binary_root, forge=options.forge.resolve(), jobs=options.jobs)
+               binaries=options.binary_root, forge=options.forge.resolve(), jobs=options.jobs,
+               step_summary=os.environ.get("GITHUB_STEP_SUMMARY"))
 
 
 if __name__ == "__main__":

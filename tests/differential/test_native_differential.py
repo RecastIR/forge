@@ -170,8 +170,7 @@ class NativeDifferentialTests(unittest.TestCase):
         with tempfile.TemporaryDirectory(dir=self.tmp) as tmp:
             output = Path(tmp).resolve()
             with patch.object(diff, "lift", broken_wrapper), patch.object(diff, "load_catalog", return_value=selected), \
-                    patch.object(diff, "case_definitions", return_value=definitions), \
-                    patch.dict(os.environ, GITHUB_STEP_SUMMARY=""):
+                    patch.object(diff, "case_definitions", return_value=definitions):
                 self.assertEqual(diff.run("release", output=output, forge=self.forge), 1)
             suite = diff.read_json(output / "release/suite.json")
             self.assertEqual((suite["passed"], suite["executed"]), (1, 1))

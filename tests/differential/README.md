@@ -164,7 +164,7 @@ A validated `unsupported` diagnostic on exit 1 fails an enabled case with `unsup
 | Analysis failure | Inspect `inspect.json`, `analysis.json` and their logs for missing, forwarded or ambiguous exports and conflicting ranges. |
 | Unsupported instruction in an enabled case | Check the selected range and the opcode/RVA in `lifting.log`. This stage error fails the suite. |
 | Lifting failure | Inspect `lifting.log` for verifier or IR publication errors. |
-| Native compilation failure | The diagnostic identifies configuration, object compilation, or linking. The labelled phase in `compilation.log` contains the underlying CMake, LLVM, compiler, or linker output. |
+| Native compilation failure | The diagnostic identifies configuration, object compilation, or linking. Open the variant’s `compilation.log` for the failing command. On a full run it also points to the responsible worker’s `configuration.log`. |
 | Native execution failure | Inspect the captured bytes and diagnostic for launch errors, signals, harness exit, the 10-second deadline or the 1 MiB per-stream limit. The supervisor runs with closed stdin in a fresh directory and terminates the process group on failure. |
 | Behavioral failure | The report lists every differing field. For stream differences it includes both lengths, the first differing byte offset and escaped byte context. For decimal-pair stdout it also identifies the operands for the first differing expected line. Extra bytes after the last line have no associated pair. For exit-code differences it includes both semantic values. |
 | Uncovered | The manifest has no enabled function-level case. Selecting only uncovered fixtures fails with zero executions. |
