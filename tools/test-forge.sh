@@ -36,6 +36,7 @@ case "$1" in
     test "$(uname -sm)" = 'Darwin arm64' || { echo "Full native tests require macOS arm64." >&2; exit 1; }
     stage formatting make format-check
     stage lint make lint
+    export FORGE_TEST_PROVISIONING=1
     for preset in dev sanitize; do
         result="$BUILD_ROOT/$preset/required-tests.xml"
         # A fresh result is necessary even when reusing a configured build tree.

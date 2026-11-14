@@ -51,44 +51,91 @@ def preset_settings(name, presets):
     return generator, values
 
 
+def same_directory(left, right):
+    return left == right or (left.is_dir() and right.is_dir() and left.samefile(right))
+
+
 def read_identity(directory):
     cache = directory / "CMakeCache.txt"
     configured = {}
+    toolchain = directory / TOOLCHAIN
+    folder = toolchain.parent
+    if cache.is_symlink() or folder.is_symlink() or toolchain.is_symlink():
+        raise ValueError(f"Expected a configuration-owned cache and toolchain in {directory}. Use a fresh BUILD_DIR.")
+    if folder.exists() and not folder.is_dir():
+        raise ValueError(f"Expected a configuration-owned Conan directory at {folder}. Use a fresh BUILD_DIR.")
     if cache.exists():
         configured = dict(re.findall(r"^(\w+):\w+=(.*)$", cache.read_text(), re.M))
-        if Path(configured.get("CMAKE_HOME_DIRECTORY", "")) != SOURCE:
-            raise ValueError(f"{directory} has an unmanaged or unrelated CMake cache. Select a fresh BUILD_DIR.")
-    generated = {}
-    toolchain = directory / TOOLCHAIN
-    cached_path = directory / configured.get("CMAKE_TOOLCHAIN_FILE", "")
-    if configured and cached_path.resolve() != toolchain.resolve():
-        raise ValueError(f"{directory} has an unrelated toolchain or unmanaged CMake cache. Select a fresh BUILD_DIR.")
-    recorded = configured.get("FORGE_CONFIGURED_PRESET") or configured.get("FORGE_CONAN_PRESET")
-    profile = configured.get("FORGE_CONFIGURED_PROFILE_ID") or configured.get("FORGE_CONAN_PROFILE_ID")
-    if toolchain.parent.is_symlink() or toolchain.is_symlink():
-        raise ValueError(f"Expected a configuration-owned Conan directory at {toolchain.parent}. Use a fresh BUILD_DIR.")
+        for key, location in (("CMAKE_HOME_DIRECTORY", SOURCE), ("CMAKE_CACHEFILE_DIR", directory)):
+            recorded = Path(configured.get(key, ""))
+            if not recorded.is_absolute() or not same_directory(recorded, location):
+                raise ValueError(f"{cache} records {key}={recorded}, expected {location}. "
+                                 "Use the original build directory or a fresh BUILD_DIR.")
+        if not (configured.get("FORGE_CONFIGURED_PRESET") or configured.get("FORGE_CONAN_PRESET") or
+                (configured.get("FORGE_PRESET") and not configured.get("CMAKE_PROJECT_NAME"))):
+            raise ValueError(f"{cache} lacks a recorded workflow. Select a fresh BUILD_DIR.")
+        cached_toolchain = directory / configured.get("CMAKE_TOOLCHAIN_FILE", "")
+        if cached_toolchain.resolve() != toolchain.resolve():
+            raise ValueError(f"{cache} selects an unrelated toolchain {cached_toolchain}. Use a fresh BUILD_DIR.")
+
     if toolchain.exists():
-        generated = dict(re.findall(r'^set\(FORGE_CONAN_(\w+) "?([^" ]+)"? CACHE ',
-                                    toolchain.read_text(), re.M))
-        if not all(generated.get(key) for key in ("PRESET", "PROFILE_ID", "WITH_CLI")):
+        identity = {key: value.strip('"') for key, value in
+                    re.findall(r'^set\(FORGE_CONAN_(\w+) ("[^"\n]*"|[^\s)]+) CACHE ', toolchain.read_text(), re.M)}
+        if not all(identity.get(key) for key in ("PRESET", "PROFILE_ID", "WITH_CLI", "GENERATOR", "BUILD_TYPE")):
             raise ValueError(f"Incomplete Conan workflow information in {toolchain}. Provision a fresh BUILD_DIR.")
-    if configured and not recorded:
-        # A preset invoked before provisioning stops before project() and records
-        # just its request. Allow the exact remediation printed by CMake.
-        requested_preset = configured.get("FORGE_PRESET")
-        if not requested_preset or configured.get("CMAKE_PROJECT_NAME"):
-            raise ValueError(f"{directory} lacks a recorded workflow. Select a fresh BUILD_DIR.")
-        recorded = requested_preset
-    if generated and recorded and (generated["PRESET"] != recorded or
-                                   (profile and generated["PROFILE_ID"] != profile)):
-        raise ValueError(f"The CMake cache and Conan integration in {directory} disagree. Select a fresh BUILD_DIR.")
-    if not generated and recorded:
-        generated["PRESET"] = recorded
-        if profile:
-            generated.update(PROFILE_ID=profile, WITH_CLI=configured.get("FORGE_BUILD_CLI", "ON"))
-    if not generated and (directory / "conan").exists():
-        raise ValueError(f"Incomplete Conan integration in {directory}. Provision a fresh BUILD_DIR.")
-    return generated
+    elif all(configured.get(key) for key in ("FORGE_CONFIGURED_PRESET", "FORGE_CONFIGURED_PROFILE_ID",
+                                             "FORGE_CONAN_WITH_CLI")):
+        # A successfully configured cache can identify its missing toolchain for reprovisioning.
+        identity = dict(PRESET=configured["FORGE_CONFIGURED_PRESET"], PROFILE_ID=configured["FORGE_CONFIGURED_PROFILE_ID"],
+                        WITH_CLI=configured["FORGE_CONAN_WITH_CLI"])
+    else:
+        if folder.exists() and any(folder.iterdir()):
+            raise ValueError(f"Cannot establish ownership of existing files in {folder}. Use a fresh BUILD_DIR.")
+        identity = {}
+        if configured:
+            # A preset stopped before project() records the requested name only.
+            if configured.get("CMAKE_PROJECT_NAME") or not configured.get("FORGE_PRESET"):
+                raise ValueError(f"Incomplete workflow information in {cache}. Select a fresh BUILD_DIR.")
+            identity["PRESET"] = configured["FORGE_PRESET"]
+    return identity, configured
+
+
+def validate_identity(directory, identity, cache, name, generator, configs):
+    if not identity:
+        return
+    if identity["PRESET"] != name:
+        raise ValueError(f"{directory} belongs to PRESET={identity['PRESET']}, requested {name}. "
+                         "Select a matching preset or a different BUILD_DIR.")
+    if identity.get("GENERATOR", generator) != generator or identity.get("BUILD_TYPE", configs[0]) not in configs:
+        raise ValueError(f"The Conan toolchain in {directory} disagrees with PRESET={name}. Select a fresh BUILD_DIR.")
+    if not cache:
+        return
+
+    completed = bool(cache.get("FORGE_CONFIGURED_PRESET"))
+    expected = {"CMAKE_GENERATOR": generator}
+    if len(configs) == 1:
+        expected["CMAKE_BUILD_TYPE"] = configs[0]
+    elif set(cache.get("CMAKE_CONFIGURATION_TYPES", "").split(";")) != set(configs):
+        raise ValueError(f"CMAKE_CONFIGURATION_TYPES in {directory} disagrees with PRESET={name}. Use a fresh BUILD_DIR.")
+
+    for key in ("FORGE_PRESET", "FORGE_CONFIGURED_PRESET", "FORGE_CONAN_PRESET"):
+        if key in cache:
+            expected[key] = name
+    for key in ("FORGE_CONFIGURED_PROFILE_ID", "FORGE_CONAN_PROFILE_ID"):
+        if completed or key in cache:
+            expected[key] = identity.get("PROFILE_ID")
+    for key, value in expected.items():
+        if cache.get(key) != value:
+            raise ValueError(f"{key}={cache.get(key)!r} in {directory} conflicts with {value!r}. Use a fresh BUILD_DIR.")
+
+    cli = enabled(identity.get("WITH_CLI") or ENV.get("WITH_CLI") or "ON")
+    for key, value in (("FORGE_BUILD_CLI", cli), ("FORGE_CONAN_WITH_CLI", cli),
+                       ("FORGE_ENABLE_SANITIZERS", name == "sanitize")):
+        if key not in cache and not completed:
+            continue
+        # Completed caches must have explicit values for all three settings.
+        if key not in cache or enabled(cache[key]) != value:
+            raise ValueError(f"{key} in {directory} conflicts with its provisioned workflow. Use a fresh BUILD_DIR.")
 
 
 def requested(action, recorded, presets):
@@ -113,8 +160,6 @@ def requested(action, recorded, presets):
     configs = values.get("CMAKE_CONFIGURATION_TYPES", values.get("CMAKE_BUILD_TYPE")).split(";")
     if config and config not in configs:
         raise ValueError(f"PRESET={name} supports CONFIG={' or '.join(configs)}, got {config}. Select a matching preset or BUILD_DIR.")
-    if recorded and name != recorded:
-        raise ValueError(f"This BUILD_DIR belongs to PRESET={recorded}, requested {name}. Select a different BUILD_DIR.")
     if ENV.get("SANITIZE") and enabled(ENV["SANITIZE"]) != bool(values.get("FORGE_ENABLE_SANITIZERS")):
         raise ValueError(f"SANITIZE conflicts with PRESET={name}. Use PRESET=sanitize for instrumentation.")
     return name, generator, configs
@@ -191,9 +236,11 @@ def workflow(action, name, configs, directory, identity):
         raise ValueError("CMAKE_ARGS cannot replace the source, binary directory, preset, or cache. "
                          "Use PRESET, BUILD_DIR, or BUILD_ROOT to select a configuration.")
     owned = ("CMAKE_TOOLCHAIN_FILE", "CMAKE_GENERATOR", "CMAKE_BUILD_TYPE", "CMAKE_CONFIGURATION_TYPES",
+             "CMAKE_HOME_DIRECTORY", "CMAKE_CACHEFILE_DIR", "FORGE_BUILD_CLI", "FORGE_ENABLE_SANITIZERS",
              "FORGE_PRESET", "FORGE_BUILD_ROOT", "FORGE_CONFIGURED_", "FORGE_CONAN_")
     if any(arg.removeprefix("-D").startswith(owned) for arg in args):
-        raise ValueError("Select the workflow and dependency toolchain through PRESET, CONFIG and make provision.")
+        raise ValueError("Use PRESET or CONFIG to choose the workflow, PRESET=sanitize for sanitizers, "
+                         "and WITH_CLI during make provision to select the CLI.")
     for key in ("LLVM_DIR", "LLVM_CONFIG", "BUILD_TESTING"):
         if ENV.get(key):
             args.append(f"-D{key}={ENV[key]}")
@@ -217,12 +264,16 @@ def workflow(action, name, configs, directory, identity):
 def main(action):
     presets = {p["name"]: p for p in json.loads((SOURCE / "CMakePresets.json").read_text())["configurePresets"]}
     exact = ENV.get("BUILD_DIR")
-    directory = Path(exact).resolve() if exact else ROOT / requested(action, None, presets)[0]
-    if directory in (SOURCE, SOURCE / "build", ROOT):
+    selection = None if exact else requested(action, None, presets)
+    directory = Path(exact).resolve() if exact else (ROOT / selection[0]).resolve()
+    if any(same_directory(directory, root) for root in (SOURCE, SOURCE / "build", ROOT)):
         raise ValueError(f"{directory} is the source or output root. Select a configuration directory, "
                          "for example make provision PRESET=dev followed by make configure PRESET=dev.")
-    if action == "lint" and ENV.get("LINT_DATABASE"):
-        requested(action, read_identity(directory).get("PRESET") if exact else None, presets)
+    external_lint = action == "lint" and ENV.get("LINT_DATABASE")
+    if external_lint:
+        identity, cache = read_identity(directory) if exact else ({}, {})
+        selection = selection or requested(action, identity.get("PRESET"), presets)
+        validate_identity(directory, identity, cache, *selection)
         run("cmake", "-DACTION=lint", "-DLINT_DATABASE=" + ENV["LINT_DATABASE"], "-P", "cmake/quality.cmake")
         return
     if action == "provision" and (ROOT / "CMakeCache.txt").exists():
@@ -233,20 +284,21 @@ def main(action):
             requested(action, None, presets)
         return
     if action == "update-lock":
-        name, generator, configs = requested(action, None, presets)
+        name, generator, configs = selection or requested(action, None, presets)
         provision(action, name, generator, configs, directory, {})
         return
     if action == "provision":
         directory.mkdir(parents=True, exist_ok=True)
     if not directory.is_dir():
-        name = requested(action, None, presets)[0]
+        name = (selection or requested(action, None, presets))[0]
         raise ValueError(f"Run make provision PRESET={name} BUILD_DIR={shlex.quote(str(directory))} first.")
     descriptor = os.open(directory, os.O_RDONLY)
     try:
         # Serialize selection with generation/configuration at this exact location.
         fcntl.flock(descriptor, fcntl.LOCK_EX)
-        identity = read_identity(directory)
-        name, generator, configs = requested(action, identity.get("PRESET"), presets)
+        identity, cache = read_identity(directory)
+        name, generator, configs = selection or requested(action, identity.get("PRESET"), presets)
+        validate_identity(directory, identity, cache, name, generator, configs)
         if action == "provision":
             provision(action, name, generator, configs, directory, identity)
         else:

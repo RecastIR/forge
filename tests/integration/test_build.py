@@ -92,7 +92,9 @@ class BuildConfig(BuildCase):
         targets = self.invoke(CMAKE, "--build", build, "--target", "help").split()
         self.assertNotIn("forge", targets)
         self.assertIn("forge_core", targets)
-        self.invoke(CMAKE, "--build", build, "--target", "forge_native_harness", "--parallel", "4")
+        self.invoke(CMAKE, "--build", build, "--target", "forge_native_harness", "lift_command", "--parallel", "4")
+        self.invoke(CMAKE.parent / "ctest", "--test-dir", build, "-R", "^lift_command$", "--output-on-failure",
+                    "--no-tests=error")
         result = self.invoke(CMAKE.parent / "ctest", "--test-dir", build, "--show-only=json-v1")
         names = {test["name"] for test in json.loads(result)["tests"]}
         self.assertTrue({"fixtures", "input_lifetime", "lift_contract", "lift_command", "build_config"} <= names)
@@ -157,28 +159,40 @@ class BuildConfig(BuildCase):
 
     @unittest.skipUnless(WITH_CLI == "1", "requires a provisioned CLI")
     def test_fresh_cli_and_external_database(self):
+        # Model an LLVM installation that exports a shared include root containing another CLI11.
+        package = self.tmp / "llvm package"
+        headers = package / "include" / "CLI"
+        headers.mkdir(parents=True)
+        (headers / "CLI.hpp").write_text('#error "Global CLI11 header loaded"\n')
+        (package / "LLVMConfig.cmake").write_text(
+            f"include([[{LLVM_DIR}/LLVMConfig.cmake]])\nlist(APPEND LLVM_INCLUDE_DIRS [[{headers.parent}]])\n")
+        options = [f"-DLLVM_DIR={package}", f"-DCMAKE_TOOLCHAIN_FILE={TOOLCHAIN}", "-DBUILD_TESTING=OFF"]
         if GENERATOR == "Xcode":
             # Xcode does not export compile_commands.json. Its lint workflow uses the lint preset.
             build = self.tmp / "ide build"
-            self.invoke(CMAKE, "-G", GENERATOR, "-S", SOURCE, "-B", build, f"-DLLVM_DIR={LLVM_DIR}",
-                        f"-DCMAKE_TOOLCHAIN_FILE={TOOLCHAIN}", "-DBUILD_TESTING=OFF")
+            self.invoke(CMAKE, "-G", GENERATOR, "-S", SOURCE, "-B", build, *options)
             self.invoke(CMAKE, "--build", build, "--config", CONFIG, "--target", "forge", "--parallel", "4")
             self.assertTrue((build / CONFIG / "forge").is_file())
             return
         build = self.tmp / "analysis build"
-        subprocess.run([CMAKE, "-S", SOURCE, "-B", build, f"-DLLVM_DIR={LLVM_DIR}", f"-DCMAKE_BUILD_TYPE={CONFIG}",
-                        f"-DCMAKE_TOOLCHAIN_FILE={TOOLCHAIN}",
-                        "-DBUILD_TESTING=OFF", "-DCMAKE_EXPORT_COMPILE_COMMANDS=ON"],
-                       env=self.env, check=True)
+        self.invoke(CMAKE, "-S", SOURCE, "-B", build, *options, f"-DCMAKE_BUILD_TYPE={CONFIG}",
+                    "-DCMAKE_EXPORT_COMPILE_COMMANDS=ON")
         database = build / "compile_commands.json"
         contents = database.read_bytes()
         entries = json.loads(contents)
         harness = SOURCE / "tests/support/native_harness.cpp"
         self.assertIn(str(harness), [e["file"] for e in entries])
         self.assertIn(str(SOURCE / "tests/unit/integer.cpp"), [e["file"] for e in entries])
-        subprocess.run([CMAKE, "--build", build, "--parallel", "4"], env=self.env, check=True)
+        self.invoke(CMAKE, "--build", build, "--parallel", "4")
         self.assertTrue((build / "forge").is_file())
         self.assertFalse((build / "tests/integer_semantics").exists())
+        if read_cache(build)["FORGE_CONAN_PRESET"] == "sanitize":
+            parsing = next(e for e in entries if e["file"] == str(SOURCE / "src/cli/parsing.cpp"))
+            self.assertIn("-fsanitize=address,undefined", parsing["command"])
+            self.assertIn("-fsanitize=address,undefined", (build / "CMakeFiles/forge.dir/link.txt").read_text())
+            failed = self.invoke(CMAKE, "-S", SOURCE, "-B", self.tmp / "unsanitized", *options,
+                                 f"-DCMAKE_BUILD_TYPE={CONFIG}", "-DFORGE_ENABLE_SANITIZERS=OFF", success=False)
+            self.assertIn("FORGE_ENABLE_SANITIZERS conflicts", failed)
 
         # Exercise the wrapper even on machines without clang-tidy.
         config = self.tmp / "llvm-config"
@@ -248,27 +262,46 @@ class Provisioning(BuildCase):
         exact = f"BUILD_DIR={tree}"
         output = self.invoke(CMAKE, "--preset", "sanitize", "-B", tree, success=False)
         self.assertIn("make provision PRESET=sanitize", " ".join(output.split()))
+        (tree / "conan").mkdir()
+        foreign_config = tree / "conan/CLI11Config.cmake"
+        foreign_config.write_text("existing local configuration")
+        output = self.invoke("make", "provision", exact, "CACHE_ONLY=1", success=False)
+        self.assertIn(str(foreign_config.parent), output)
+        self.assertEqual(foreign_config.read_text(), "existing local configuration")
+        self.assertEqual(list(foreign_config.parent.iterdir()), [foreign_config])
+        foreign_config.unlink()
         self.invoke("make", "provision", exact, "CACHE_ONLY=1")
         self.invoke("make", "configure", exact, f"LLVM_DIR={LLVM_DIR}")
         self.assertEqual(read_cache(tree)["FORGE_CONFIGURED_PRESET"], "sanitize")
 
         original = (tree / "CMakeCache.txt").read_bytes()
         other = self.tmp / "another directory"
-        for option in ("CONFIG=Debug", "PRESET=dev", f'CMAKE_ARGS=-B "{other}"'):
-            self.invoke("make", "configure", exact, option, success=False)
-        self.assertEqual(original, (tree / "CMakeCache.txt").read_bytes())
+        for option in ("CONFIG=Debug", "PRESET=dev", f'CMAKE_ARGS=-B "{other}"',
+                       "CMAKE_ARGS=-DFORGE_BUILD_CLI=OFF", "CMAKE_ARGS=-D FORGE_BUILD_CLI:BOOL=OFF",
+                       "CMAKE_ARGS=-DFORGE_ENABLE_SANITIZERS:BOOL=OFF", "CMAKE_ARGS=-D FORGE_ENABLE_SANITIZERS=OFF"):
+            with self.subTest(option=option):
+                self.invoke("make", "configure", exact, option, success=False)
+                self.assertEqual(original, (tree / "CMakeCache.txt").read_bytes())
         self.assertFalse(other.exists())
+        self.invoke("make", "configure", exact)
 
         note = tree / "conan" / "local-note.txt"
         note.write_text("retained")
+        (tree / "conan/conan_toolchain.cmake").unlink()
         self.invoke("make", "provision", exact, "CACHE_ONLY=1")
         self.assertEqual(note.read_text(), "retained")
         self.invoke("make", "clean", f"BUILD_DIR={other}")
         self.assertFalse(other.exists())
 
     def test_cached_llvm_and_build_type(self):
-        build = self.tmp / "external release"
+        root = self.tmp / "external output"
+        build = root / "dev"
         self.invoke("make", "provision", f"BUILD_DIR={build}", "PRESET=release", "CACHE_ONLY=1")
+        for action in ("provision", "configure", "clean"):
+            with self.subTest(action=action):
+                output = self.invoke("make", action, f"BUILD_ROOT={root}", "CACHE_ONLY=1", success=False)
+                self.assertIn("PRESET=release", output)
+                self.assertFalse((build / "CMakeCache.txt").exists())
         package = self.tmp / "llvm package"
         package.mkdir()
         (package / "LLVMConfig.cmake").write_text(f"include([[{LLVM_DIR}/LLVMConfig.cmake]])\n")
@@ -277,7 +310,8 @@ class Provisioning(BuildCase):
             self.invoke("make", "configure", f"BUILD_DIR={build}", *options)
             return read_cache(build)
 
-        cache = configure(f"LLVM_DIR={package}", "CONFIG=Release")
+        cache = configure(f"LLVM_DIR={package}")
+        self.assertEqual(cache["FORGE_CONFIGURED_PRESET"], "release")
         readobj = cache["llvm-readobj"]
         pinned = self.tmp / "pinned-readobj"
         pinned.symlink_to(readobj)
@@ -293,6 +327,18 @@ class Provisioning(BuildCase):
                 args = ["PRESET=dev"] if action == "configure" else []
                 self.invoke("make", action, f"BUILD_DIR={build}", *args, success=False)
                 self.assertEqual(read_cache(build)["FORGE_CONFIGURED_PRESET"], "release")
+
+        # Direct CMake configuration can leave a conflicting cache even when it fails.
+        self.invoke(CMAKE, "--preset", "release", "-B", build, "-DFORGE_BUILD_CLI=OFF", success=False)
+        cache_file = build / "CMakeCache.txt"
+        toolchain = build / "conan/conan_toolchain.cmake"
+        poisoned = cache_file.read_bytes()
+        before = toolchain.stat().st_mtime_ns
+        for action in ("provision", "configure", "clean"):
+            output = self.invoke("make", action, f"BUILD_DIR={build}", "CACHE_ONLY=1", success=False)
+            self.assertIn("FORGE_BUILD_CLI", output)
+            self.assertEqual(cache_file.read_bytes(), poisoned)
+            self.assertEqual(toolchain.stat().st_mtime_ns, before)
 
     def test_named_configurations_in_clean_checkout(self):
         src = self.tmp / "clean checkout"
@@ -328,6 +374,13 @@ class Provisioning(BuildCase):
                                  build / name / "conan/conan_toolchain.cmake")
                 if name == "xcode":
                     self.assertEqual(cache["CMAKE_GENERATOR"], "Xcode")
+                    # CMakeDeps loads per-configuration data with a glob. All other configs still exist.
+                    generators = build / name / "conan"
+                    release_data, = generators.glob("CLI11-release-*-data.cmake")
+                    release_data.unlink()
+                    failed = self.invoke(CMAKE, "--preset", name, cwd=src, success=False)
+                    self.assertIn("Missing CLI11 integration for Release", " ".join(failed.split()))
+                    self.assertIn("make provision PRESET=xcode", " ".join(failed.split()))
                 else:
                     self.assertEqual(cache["CMAKE_BUILD_TYPE"], "Release" if name == "release" else "Debug")
                 self.assertEqual(cache["FORGE_ENABLE_SANITIZERS"] in ("ON", "TRUE", "1"), name == "sanitize")
@@ -336,6 +389,22 @@ class Provisioning(BuildCase):
                     self.assertFalse((build / name / "forge").exists())
         self.assertFalse((build / "CMakeCache.txt").exists())
         self.assertFalse(list(src.glob("build-*")))
+
+        ctest = (CMAKE.parent / "ctest", "--preset", "dev", "-R", "^build_provisioning$", "--output-on-failure")
+        bin_dir = self.tmp / "test tools"
+        bin_dir.mkdir()
+        sentinel = bin_dir / "conan"
+        sentinel.write_text('#!/bin/sh\necho called >> "$0.calls"\nexit 1\n')
+        sentinel.chmod(0o755)
+        env = dict(self.env, PATH=str(bin_dir) + os.pathsep + self.env["PATH"])
+        env.pop("FORGE_TEST_PROVISIONING", None)
+        self.assertIn("Skipped", self.invoke(*ctest, cwd=src, env=env))
+        self.assertFalse((bin_dir / "conan.calls").exists())
+
+        sentinel.unlink()
+        env.update(FORGE_TEST_PROVISIONING="1", PATH=str(bin_dir))
+        output = self.invoke(*ctest, cwd=src, env=env, success=False)
+        self.assertIn("require Conan on PATH", output)
 
         legacy = build / "CMakeCache.txt"
         legacy.write_text("old developer build, keep until deliberately retired\n")
@@ -351,6 +420,12 @@ class Provisioning(BuildCase):
         self.assertTrue(list((build / "dev").glob(object_pattern)))
         release_objects = list((build / "release").glob(object_pattern))
         self.assertTrue(release_objects)
+        copied = self.tmp / "copied dev"
+        shutil.copytree(build / "dev", copied, symlinks=True)
+        output = self.invoke("make", "clean", f"BUILD_DIR={copied}", cwd=src, success=False)
+        self.assertIn("CMAKE_CACHEFILE_DIR", output)
+        self.assertTrue(list((build / "dev").glob(object_pattern)))
+        self.assertTrue(list(copied.glob(object_pattern)))
         self.invoke("make", "clean", "PRESET=dev", cwd=src)
         self.assertFalse(list((build / "dev").glob(object_pattern)))
         self.assertTrue(all(path.is_file() for path in release_objects))
@@ -359,7 +434,10 @@ class Provisioning(BuildCase):
 
 
 if __name__ == "__main__":
-    if MODE == "provisioning" and not shutil.which("conan"):
-        print("The cache-only provisioning checks require Conan on PATH.")
-        sys.exit(77)
+    if MODE == "provisioning":
+        if os.environ.get("FORGE_TEST_PROVISIONING") != "1":
+            print("Set FORGE_TEST_PROVISIONING=1 to run the cache-only provisioning checks.")
+            sys.exit(77)
+        if not shutil.which("conan"):
+            sys.exit("The cache-only provisioning checks require Conan on PATH. Activate the pinned build environment.")
     unittest.main(argv=[sys.argv[0], {"build": "BuildConfig", "provisioning": "Provisioning"}[MODE]])

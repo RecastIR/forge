@@ -29,7 +29,6 @@ if(FORGE_PRESET STREQUAL "lint")
             -P "${CMAKE_CURRENT_SOURCE_DIR}/cmake/quality.cmake"
     WORKING_DIRECTORY "${CMAKE_CURRENT_SOURCE_DIR}" VERBATIM)
 endif()
-option(FORGE_ENABLE_SANITIZERS "Build Forge with AddressSanitizer and UndefinedBehaviorSanitizer" OFF)
 if(FORGE_ENABLE_SANITIZERS)
   set(sanitizer_link_flags -fsanitize=address,undefined)
   set(sanitizer_compile_flags ${sanitizer_link_flags} -fno-sanitize-recover=all -fno-omit-frame-pointer)
@@ -75,17 +74,14 @@ endif()
 configure_forge_cxx(forge_core)
 
 if(FORGE_BUILD_CLI)
-  # Use only the CLI11 config generated for this toolchain, including when a
-  # different CLI11_DIR was supplied on the command line or cached previously.
-  set(CLI11_DIR "${FORGE_CONAN_DIRECTORY}")
-  find_package(CLI11 REQUIRED CONFIG PATHS "${CLI11_DIR}" NO_DEFAULT_PATH NO_CMAKE_FIND_ROOT_PATH)
   add_executable(forge
     src/cli/main.cpp src/cli/parsing.cpp src/cli/analysis_input.cpp
     src/cli/commands/inspect.cpp src/cli/commands/analyze.cpp
     src/cli/commands/lift.cpp src/cli/commands/lift_execution.cpp
     src/cli/report.cpp src/cli/analysis_report.cpp src/cli/diagnostic.cpp)
   set_target_properties(forge PROPERTIES LINK_LIBRARIES_STRATEGY REORDER_FREELY)
-  target_link_libraries(forge PRIVATE forge_core CLI11::CLI11)
+  # LLVM can expose a global include directory containing a different CLI11.
+  target_link_libraries(forge PRIVATE CLI11::CLI11 forge_core)
   configure_forge_cxx(forge)
 endif()
 

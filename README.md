@@ -59,7 +59,7 @@ build/dev/forge inspect path/to/game.exe --dll-path ./bin --dll-path ./plugins -
 
 ### Configurations and dependency updates
 
-The checked-in `CMakePresets.json` defines the workflows. Conan writes generated presets only inside each selected configuration’s `conan/` directory. A developer’s root `CMakeUserPresets.json` stays private. List the configurations before provisioning with `cmake --list-presets`. After provisioning, `cmake --preset dev`, `cmake --build --preset dev`, and `ctest --preset dev` run directly. Native build and test commands consume generated files without installing packages.
+The checked-in `CMakePresets.json` defines the workflows. Conan writes generated presets only inside each selected configuration’s `conan/` directory. A developer’s root `CMakeUserPresets.json` stays private. List the configurations before provisioning with `cmake --list-presets`. After provisioning, `cmake --preset dev`, `cmake --build --preset dev`, and `ctest --preset dev` run directly using the generated integration and cached headers. Ordinary CTest skips the Conan provisioning regression. To run it explicitly, activate the pinned build environment and use `FORGE_TEST_PROVISIONING=1 ctest --preset dev -R '^build_provisioning$'`. The full native gate enables it automatically.
 
 | Workflow | Provision | Use | Output |
 | --- | --- | --- | --- |
@@ -88,6 +88,8 @@ make clean BUILD_DIR="/tmp/asan check"
 ```
 
 With an exact directory and no selector, generic configure, build, test, and clean commands reuse its recorded workflow. A fresh selection defaults to `dev`. `CONFIG=Release` selects the single-configuration release workflow, or the Release build of an explicitly selected Xcode project. Select `PRESET=sanitize` explicitly when passing `CONFIG=Debug` to a generic command for a sanitizer directory. Reuse requires compatible profiles and settings. Select a fresh directory for a different workflow. `make clean` removes compiled targets from the selected configuration and retains its cache and dependency integration.
+
+If configure stops for a missing toolchain on the first run, use the printed provisioning command. A populated `conan/` directory requires a matching toolchain or a cache recording the original managed configuration. If its ownership is unclear, preserve its contents and provision a fresh `BUILD_DIR`. For a copied or moved build, use the original directory recorded in `CMAKE_CACHEFILE_DIR`, or provision and configure a fresh directory at the intended location.
 
 Older checkouts may contain a CMake cache directly in `build/`. Run `find . -maxdepth 2 -name CMakeCache.txt -print` to identify old top-level caches. Keep any wanted PEs, Wine references, and reports before retiring those generated files deliberately. Start new builds in the named subdirectories. Relocating a configured cache retains absolute paths to its former location. The nested workflows can run alongside the old files.
 

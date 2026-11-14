@@ -60,9 +60,12 @@ jobs:
             ./tools/test-forge.sh --native
       - name: Exercise Release and Xcode presets
         run: |
-          for preset in release xcode; do
-            make test PRESET="$preset" CTEST_ARGS="-R ^cli$"
+          make test PRESET=release CTEST_ARGS='-R ^cli$$'
+          for config in Debug Release; do
+            make test PRESET=xcode CONFIG="$config" CTEST_ARGS='-R ^cli$$'
           done
+          test -x build/xcode/Debug/forge
+          test -x build/xcode/Release/forge
       - name: Check the build layout and source tree
         run: |
           test ! -f build/CMakeCache.txt

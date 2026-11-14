@@ -18,6 +18,9 @@ TASK3_PUBLISHER = "1+sha256.4820c6fea7bcac32962ed3e13ae4254b9eb2f95270855c734e8d
 # Task 4 publisher before extracting verified_export and recording failure diagnostics.
 TASK4_PUBLISHER = "1+sha256.daa8437a1f0dfe26c4eaee5e0df7df52fdb331db71e46a05c57bb4253c413b5e"
 
+# ef0b8da built the pinned Wine image during capture. The v1 observation checks were identical.
+PRE_CONAN_PUBLISHER = "1+sha256.9ed4d6519816d3404fc547c0310f8e8aeeb422b8742d54101f39b6b89d10200b"
+
 
 def directory(root, relative):
     if root.is_symlink():
@@ -75,7 +78,7 @@ def reference(root, manifest, config, binary_hash):
     for key, wanted in required.items():
         if field(meta, key, type(wanted)) != wanted:
             raise ValueError(f"reference {key} mismatch (expected {wanted!r}, found {meta[key]!r})")
-    if field(meta, "runner_version", str) not in (runner_version(), TASK3_PUBLISHER, TASK4_PUBLISHER):
+    if field(meta, "runner_version", str) not in (runner_version(), TASK3_PUBLISHER, TASK4_PUBLISHER, PRE_CONAN_PUBLISHER):
         raise ValueError("unrecognized Wine runner_version")
     for key in ("wine_version", "docker_host_arch"):
         if not field(meta, key, str).strip():
