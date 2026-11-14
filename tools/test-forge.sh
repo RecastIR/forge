@@ -57,6 +57,7 @@ PY
 --references)
     docker info >/dev/null || { echo "Start a Docker engine with Linux amd64 support for the pinned MinGW and Wine images." >&2; exit 1; }
     python3 -B "$suite/manifests.py"
+    python3 -B "$suite/test_fixture_shape.py"
     stage build ./tools/build-windows-fixtures.sh --all
     stage capture ./tools/run-windows-references.sh --all
     stage wine_tests python3 -B "$suite/reference/test_wine.py" ;;

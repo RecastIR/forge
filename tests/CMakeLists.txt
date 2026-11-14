@@ -81,6 +81,8 @@ add_test(NAME windows_fixture_manifests COMMAND "${Python3_EXECUTABLE}" -B
   "${CMAKE_CURRENT_SOURCE_DIR}/differential/manifests.py")
 add_test(NAME windows_fixture_manifest_validation COMMAND "${Python3_EXECUTABLE}" -B
   "${CMAKE_CURRENT_SOURCE_DIR}/differential/test_manifests.py")
+add_test(NAME windows_fixture_shape COMMAND "${Python3_EXECUTABLE}" -B
+  "${CMAKE_CURRENT_SOURCE_DIR}/differential/test_fixture_shape.py")
 add_test(NAME windows_reference_runner COMMAND "${Python3_EXECUTABLE}" -B
   "${CMAKE_CURRENT_SOURCE_DIR}/differential/reference/test_runner.py")
 add_test(NAME windows_differential_runner COMMAND "${Python3_EXECUTABLE}" -B

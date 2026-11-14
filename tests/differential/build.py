@@ -73,19 +73,143 @@ INTEGER_WITNESSES = {
 }
 
 
-def check_integer_leaf(path):
+def leaf_instructions(output, symbol):
+    heading = re.search(rf"^([0-9a-f]+) <{re.escape(symbol)}>:$", output, re.MULTILINE)
+    if heading is None:
+        raise ValueError(f"missing disassembly for {symbol}")
+    # PE objdump can include adjacent symbols even with --disassemble=<symbol>.
+    body = re.split(r"^(?:[0-9a-f]+ <[^>]+>:|Disassembly of section )", output[heading.end():],
+                    maxsplit=1, flags=re.MULTILINE)[0]
+    instructions = {}
+    for address, text in re.findall(r"^[ \t]*([0-9a-f]+):[ \t]*([^\n]+)", body, re.MULTILINE):
+        address = int(address, 16)
+        if instructions and address <= next(reversed(instructions)):
+            raise ValueError("duplicate or unordered instruction address")
+        instructions[address] = " ".join(text.split())
+    if not instructions or next(iter(instructions)) != int(heading[1], 16):
+        raise ValueError("missing leaf entry instruction")
+    return instructions
+
+
+def reachable_leaf(instructions):
+    # This is a fixture-shape oracle over objdump output, independent of Forge's decoder.
+    conditions = {"jo", "jno", "jb", "jae", "je", "jne", "jbe", "ja", "js", "jns",
+                  "jp", "jnp", "jl", "jge", "jle", "jg"}
+    ordinary = {"mov", "movabs", "movzx", "movsx", "movsxd", "lea", "add", "sub", "xor",
+                "and", "or", "test", "cmp", "shl", "shr", "sar", "inc", "dec", "not", "neg", "imul"}
+    addresses = list(instructions)
+    following = dict(zip(addresses, addresses[1:]))
+    graph = {}
+    pending = [addresses[0]]
+    while pending:
+        address = pending.pop()
+        if address in graph:
+            continue
+        text = instructions[address]
+        opcode, _, operands = text.partition(" ")
+        successors = []
+        if opcode == "ret" and not operands:
+            graph[address] = successors
+            continue
+        if opcode == "jmp" or opcode in conditions:
+            target = re.fullmatch(r"([0-9a-f]+)(?: <[^>]+>)?", operands)
+            if target is None or int(target[1], 16) not in instructions:
+                raise ValueError(f"invalid direct target at {address:x}: {text}")
+            successors.append(int(target[1], 16))
+        elif opcode not in ordinary:
+            raise ValueError(f"unsupported instruction or transfer at {address:x}: {text}")
+        if opcode != "jmp":
+            if address not in following:
+                raise ValueError(f"fallthrough outside leaf at {address:x}")
+            successors.append(following[address])
+        graph[address] = successors
+        pending.extend(successors)
+    return graph
+
+
+def natural_loops(graph):
+    entry = next(iter(graph))
+    predecessors = {address: set() for address in graph}
+    for source, targets in graph.items():
+        for target in targets:
+            predecessors[target].add(source)
+    dominators = {address: set(graph) for address in graph}
+    dominators[entry] = {entry}
+    changed = True
+    while changed:
+        changed = False
+        for address in graph:
+            if address == entry:
+                continue
+            incoming = set.intersection(*(dominators[p] for p in predecessors[address])) | {address}
+            if incoming != dominators[address]:
+                dominators[address] = incoming
+                changed = True
+
+    loops = {}
+    for source, targets in graph.items():
+        for header in targets:
+            if header not in dominators[source]:
+                continue
+            body = {header, source}
+            pending = [source] if source != header else []
+            while pending:
+                for predecessor in predecessors[pending.pop()]:
+                    if predecessor not in body:
+                        body.add(predecessor)
+                        pending.append(predecessor)
+            # Multiple latches with the same header still form one loop.
+            loops.setdefault(header, set()).update(body)
+    return loops, predecessors
+
+
+def check_nested_exits(instructions):
+    graph = reachable_leaf(instructions)
+    returns = {address for address, targets in graph.items() if not targets}
+    if len(returns) < 2:
+        raise ValueError("expected at least two reachable returns")
+    loops, predecessors = natural_loops(graph)
+    for outer in loops.values():
+        # Find exit destinations that can reach a return without reentering the outer loop.
+        returning = returns - outer
+        pending = list(returning)
+        while pending:
+            for predecessor in predecessors[pending.pop()] - outer - returning:
+                returning.add(predecessor)
+                pending.append(predecessor)
+        for inner in loops.values():
+            if not inner < outer:
+                continue
+            enclosing = outer - inner
+            inner_targets = {target for source in inner for target in graph[source]}
+            inner_exits = inner_targets & returning
+            # A peeled inner iteration may branch to the same early return; it cannot
+            # witness an outer early exit. Require distinct outer decisions and exits.
+            outer_exits = [(source, target) for source in enclosing for target in graph[source]
+                           if target in returning and target not in inner_exits]
+            if (inner_targets & enclosing and inner_exits and
+                    len({source for source, _ in outer_exits}) >= 2 and
+                    len({target for _, target in outer_exits}) >= 2):
+                return
+    raise ValueError("expected nested natural loops with inner continuation and early exits at both levels")
+
+
+def check_leaf(path):
     witnesses = INTEGER_WITNESSES.get(path.stem)
-    if witnesses is None:
+    if witnesses is None and path.stem != "cfg_nested_exits":
         return
     output = subprocess.check_output(["x86_64-w64-mingw32-objdump", "-d", "--no-show-raw-insn",
                                       "-Mintel", "--disassemble=" + path.stem, path], text=True)
-    instructions = [" ".join(line.split()) for line in
-                    re.findall(r"^\s*[0-9a-f]+:\s*([^\n]+)", output, re.MULTILINE)]
     try:
-        body = iter(instructions[:instructions.index("ret")])
-        for witness in witnesses:
-            if not any(inst.startswith(witness) for inst in body):
-                raise ValueError(f"missing {witness!r}")
+        instructions = leaf_instructions(output, path.stem)
+        if path.stem == "cfg_nested_exits":
+            check_nested_exits(instructions)
+        if witnesses is not None:
+            texts = list(instructions.values())
+            body = iter(texts[:texts.index("ret")])
+            for witness in witnesses:
+                if not any(inst.startswith(witness) for inst in body):
+                    raise ValueError(f"missing {witness!r}")
     except ValueError as error:
         raise ValueError(f"{path}: {path.stem} instruction contract: {error}\n{output}") from error
 
@@ -137,7 +261,7 @@ def build(config, cases, output):
                 other = hashlib.sha256((second / binary).read_bytes()).hexdigest()
                 raise ValueError(f"{config}/{binary}: clean builds differ: {hashlib.sha256(data).hexdigest()} vs {other}")
             inspect_pe(path, fixture_id)
-            check_integer_leaf(path)
+            check_leaf(path)
             checksums.append(f"{hashlib.sha256(data).hexdigest()}  {binary}\n")
             shutil.copy2(path, staged / binary)
         (staged / "SHA256SUMS").write_text("".join(checksums), encoding="ascii")
