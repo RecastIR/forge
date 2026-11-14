@@ -6,8 +6,8 @@ import subprocess
 import tempfile
 import unittest
 
-from docker_wine import build_image, execute
-from run import BINARIES, REFERENCES, SUITE, load_catalog, sha256
+from docker_wine import execute
+from run import BINARIES, REFERENCES, SUITE, load_catalog, reference_environment, sha256
 from artifacts import reference
 
 
@@ -37,12 +37,12 @@ class WineTests(unittest.TestCase):
             self.assertEqual((combined / "stderr.bin").read_bytes(), b"runner-error\n")
 
     def test_capture_boundaries(self):
-        image = build_image(SUITE)["container_image_id"]
+        image = reference_environment(SUITE)["container_image_id"]
         with tempfile.TemporaryDirectory() as tmp:
             directory = Path(tmp)
             binary = directory / "probe.exe"
             source = Path(__file__).with_name("test_probe.c").resolve()
-            subprocess.run(["docker", "run", "--rm", "--platform", "linux/amd64", "--network", "none",
+            subprocess.run(["docker", "run", "--pull", "never", "--rm", "--platform", "linux/amd64", "--network", "none",
                             "--user", f"{os.getuid()}:{os.getgid()}", "-v", f"{directory}:/output",
                             "-v", f"{source}:/input/test.c:ro", "--entrypoint", "x86_64-w64-mingw32-gcc-win32",
                             image, "-std=c11", "-Wall", "-Wextra", "-Werror", "-municode", "-static",

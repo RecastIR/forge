@@ -128,13 +128,19 @@ class ArtifactTests(ArtifactSetup):
         return reference(self.references, self.manifest, self.config, self.digest)
 
     def test_reference_identity(self):
-        for version in (runner_version(), TASK3_PUBLISHER):
+        # Fingerprint recorded in preserved references from before the Conan migration.
+        previous = "1+sha256.9ed4d6519816d3404fc547c0310f8e8aeeb422b8742d54101f39b6b89d10200b"
+        for version in (runner_version(), TASK3_PUBLISHER, previous):
             meta = diff.read_json(self.record)
             diff.write_json(self.record, dict(meta, runner_version=version))
             observed, identity = self.reference()
             self.assertEqual(observed, self.wanted)
             self.assertEqual(identity["runner_version"], version)
             self.assertEqual(identity["result_sha256"], sha256(self.record.read_bytes()))
+
+        (self.folder / "stdout.bin").write_bytes(b"changed legacy stream")
+        with self.assertRaisesRegex(ValueError, "SHA-256 mismatch"):
+            self.reference()
 
     def test_invalid_metadata(self):
         meta = diff.read_json(self.record)

@@ -135,7 +135,8 @@ For changes affecting these lifetimes or access guarantees, include a brief **Me
 
 - Follow the [repository layout](README.md#repository-layout) when adding production code, test support, and suites. Keep one root CMake project and register tests in `tests/CMakeLists.txt`.
 - Follow [Adding a CLI command](docs/design-guide.md#adding-a-cli-command) for typed options, final callbacks, shared renderers, and command tests. Keep CLI11 private to the `forge` executable.
-- From the root, use `make` to build and `make test CONFIG=Debug` to build and run CTest. Use `make format-check`, `make lint`, and `make sanitize` for the other CI checks. Keep moved C++ sources and headers covered by the quality tools.
+- Provision the selected preset with `make provision PRESET=<name>`. From the root, use `make` to build and `make test CONFIG=Debug` to build and run CTest. Use `make format-check`, `make lint`, and `make sanitize` for the other CI checks. Keep moved C++ sources and headers covered by the quality tools.
+- Reuse the established build configurations. Do not create permanent root-level `build-*` directories or task-numbered build configurations. Use disposable directories beneath the build temporary root when a genuinely clean configuration is required. Do not add implicit dependency downloads to builds or tests.
 - Preserve the function-level Unicorn test under its existing CTest name, `differential`. Follow the [whole-executable test design](tests/differential/README.md) when adding Windows reference cases.
 
 More specific `AGENTS.md` files in subdirectories may refine these rules for a component but must not silently weaken correctness, testing, documentation, or self-review requirements. The repository's actual build scripts and CI configuration are authoritative for command names and supported environments.

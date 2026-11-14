@@ -2,7 +2,7 @@
 
 #include "cli/report.h"
 
-#include <CLI11.hpp>
+#include <CLI/CLI.hpp>
 
 #include <filesystem>
 #include <string>

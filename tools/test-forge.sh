@@ -5,6 +5,11 @@ repo=$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)
 cd "$repo"
 test "$#" = 1 || { echo "usage: $0 --all | --native | --references | --differential" >&2; exit 2; }
 suite=tests/differential
+case ${BUILD_ROOT:-build} in
+    /*) ;;
+    *) BUILD_ROOT="$repo/${BUILD_ROOT:-build}" ;;
+esac
+export BUILD_ROOT
 export FORGE_TEST_RUN_ID="${FORGE_TEST_RUN_ID:-$(python3 -c 'import uuid; print(uuid.uuid4())')}"
 stage() {
     name=$1
@@ -21,9 +26,9 @@ stage() {
 
 run_differential() (
     status=0
-    CMAKE_GENERATOR=Xcode stage debug ./tools/run-differential.sh --all --config debug --forge build-sanitize/forge || status=1
-    stage release ./tools/run-differential.sh --all --config release || status=1
-    stage negative_tests python3 -B "$suite/test_native_differential.py" || status=1
+    CMAKE_GENERATOR=Xcode stage debug ./tools/run-differential.sh --all --config debug --forge "$BUILD_ROOT/sanitize/forge" || status=1
+    stage release ./tools/run-differential.sh --all --config release --forge "$BUILD_ROOT/dev/forge" || status=1
+    stage negative_tests python3 -B "$suite/test_native_differential.py" --forge "$BUILD_ROOT/dev/forge" || status=1
     exit "$status"
 )
 case "$1" in
@@ -31,23 +36,22 @@ case "$1" in
     test "$(uname -sm)" = 'Darwin arm64' || { echo "Full native tests require macOS arm64." >&2; exit 1; }
     stage formatting make format-check
     stage lint make lint
-    for tree in build build-sanitize; do
-        result="$repo/$tree/required-tests.xml"
+    export FORGE_TEST_PROVISIONING=1
+    for preset in dev sanitize; do
+        result="$BUILD_ROOT/$preset/required-tests.xml"
         # A fresh result is necessary even when reusing a configured build tree.
         if test -f "$result"; then unlink "$result"; fi
-        if test "$tree" = build; then
-            stage debug make test BUILD_DIR=build CONFIG=Debug BUILD_TESTING=ON CTEST_ARGS="--output-junit \"$result\""
-        else
-            stage sanitize make sanitize BUILD_DIR=build BUILD_TESTING=ON CTEST_ARGS="--output-junit \"$result\""
-        fi
-        stage "${tree}_oracles" python3 - "$result" <<'PY'
+        name=$preset
+        if test "$name" = dev; then name=debug; fi
+        stage "$name" make test PRESET="$preset" BUILD_TESTING=ON CTEST_ARGS="--output-junit \"$result\""
+        stage "${preset}_oracles" python3 - "$result" <<'PY'
 import sys
 from xml.etree import ElementTree
 tests = ElementTree.parse(sys.argv[1]).findall(".//testcase")
-for name in ("native", "differential"):
+for name in ("native", "differential", "build_provisioning"):
     found = [t for t in tests if t.get("name") == name]
     if len(found) != 1 or found[0].get("status") != "run" or len(found[0].findall("skipped")):
-        sys.exit(f"Required CTest {name} did not execute. Select a Python interpreter with Unicorn 2.1.4 via CMAKE_ARGS.")
+        sys.exit(f"Required CTest {name} did not execute. Activate the documented build-tools environment before running the native gate.")
 PY
     done ;;
 --references)

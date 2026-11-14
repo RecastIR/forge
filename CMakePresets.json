@@ -1,0 +1,66 @@
+{
+  "version": 2,
+  "configurePresets": [
+    {
+      "name": "base",
+      "hidden": true,
+      "binaryDir": "${sourceDir}/build/${presetName}",
+      "cacheVariables": {
+        "FORGE_PRESET": "${presetName}",
+        "FORGE_BUILD_ROOT": "${sourceDir}/build",
+        "CMAKE_TOOLCHAIN_FILE": "conan/conan_toolchain.cmake"
+      }
+    },
+    {
+      "name": "single",
+      "hidden": true,
+      "inherits": "base",
+      "generator": "Unix Makefiles",
+      "cacheVariables": { "CMAKE_BUILD_TYPE": "Debug" }
+    },
+    { "name": "dev", "inherits": "single" },
+    {
+      "name": "release",
+      "inherits": "single",
+      "cacheVariables": { "CMAKE_BUILD_TYPE": "Release" }
+    },
+    {
+      "name": "sanitize",
+      "inherits": "single",
+      "cacheVariables": { "FORGE_ENABLE_SANITIZERS": true }
+    },
+    {
+      "name": "lint",
+      "inherits": "single",
+      "cacheVariables": {
+        "CMAKE_EXPORT_COMPILE_COMMANDS": true,
+        "BUILD_TESTING": false
+      }
+    },
+    {
+      "name": "xcode",
+      "inherits": "base",
+      "generator": "Xcode",
+      "cacheVariables": { "CMAKE_CONFIGURATION_TYPES": "Debug;Release;RelWithDebInfo;MinSizeRel" }
+    }
+  ],
+  "buildPresets": [
+    { "name": "dev", "configurePreset": "dev" },
+    { "name": "release", "configurePreset": "release" },
+    { "name": "sanitize", "configurePreset": "sanitize" },
+    { "name": "lint", "configurePreset": "lint", "targets": ["lint"] },
+    { "name": "xcode", "configurePreset": "xcode", "configuration": "Debug" }
+  ],
+  "testPresets": [
+    {
+      "name": "tests",
+      "hidden": true,
+      "output": { "outputOnFailure": true },
+      "execution": { "noTestsAction": "error" }
+    },
+    { "name": "dev", "inherits": "tests", "configurePreset": "dev" },
+    { "name": "release", "inherits": "tests", "configurePreset": "release" },
+    { "name": "sanitize", "inherits": "tests", "configurePreset": "sanitize" },
+    { "name": "xcode", "inherits": "tests", "configurePreset": "xcode", "configuration": "Debug" }
+  ]
+}

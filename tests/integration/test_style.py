@@ -9,21 +9,23 @@ import tempfile
 import unittest
 
 
-SOURCE, LLVM_BIN = (Path(arg).resolve() for arg in sys.argv[1:])
+SOURCE, LLVM_BIN, TMP_ROOT = (Path(arg).resolve() for arg in sys.argv[1:])
 FORMATTED = 'int example() {\n    int Old = 3;\n    int Value = 4;\n    return Old + Value;\n}\n'
 
 
 class StyleChecks(unittest.TestCase):
     def setUp(self):
-        temp = tempfile.TemporaryDirectory()
+        TMP_ROOT.mkdir(parents=True, exist_ok=True)
+        temp = tempfile.TemporaryDirectory(dir=TMP_ROOT, prefix='style checks ')
         self.addCleanup(temp.cleanup)
         self.root = Path(temp.name).resolve() / 'src' / 'forge'
         self.root.mkdir(parents=True)
         self.env = dict(os.environ, LLVM_CONFIG=str(LLVM_BIN / 'llvm-config'), GIT_CONFIG_NOSYSTEM='1',
                         GIT_CONFIG_GLOBAL=os.devnull)
-        for key in ('LLVM_DIR', 'FORGE_STYLE_BASE', 'CMAKE_ARGS', 'MAKEFLAGS', 'MFLAGS', 'MAKEOVERRIDES'):
+        for key in ('LLVM_DIR', 'FORGE_STYLE_BASE', 'CMAKE_ARGS', 'MAKEFLAGS', 'MFLAGS', 'MAKEOVERRIDES',
+                    'BUILD_DIR', 'BUILD_ROOT', 'PRESET', 'CONFIG', 'CMAKE_TOOLCHAIN_FILE'):
             self.env.pop(key, None)
-        for file in ('CMakeLists.txt', 'Makefile', '.clang-format', '.clang-tidy', '.gitignore'):
+        for file in ('CMakeLists.txt', 'CMakePresets.json', 'Makefile', '.clang-format', '.clang-tidy', '.gitignore'):
             shutil.copyfile(SOURCE / file, self.root / file)
         shutil.copytree(SOURCE / 'cmake', self.root / 'cmake')
         (self.root / 'src').mkdir()
@@ -151,8 +153,8 @@ int measure(const int start, const int End) {
 
     def test_whole_tree_formatting_and_entry_points(self):
         shutil.copytree(SOURCE / 'src', self.root / 'src', dirs_exist_ok=True)
-        self.run_command('cmake', '-S', '.', '-B', 'build', '-DBUILD_TESTING=OFF')
-        target = ('cmake', '--build', 'build', '--target')
+        self.run_command('cmake', '-S', '.', '-B', 'build/dev', '-DFORGE_BUILD_CLI=OFF', '-DBUILD_TESTING=OFF')
+        target = ('cmake', '--build', 'build/dev', '--target')
         bad = FORMATTED.replace('    int Value', '  int Value')
         self.file.write_text(bad)
         self.run_command('git', '-c', 'user.name=Test', '-c', 'user.email=test@localhost',
@@ -248,7 +250,8 @@ namespace forge {
             tool = tools / name
             tool.write_text('#!/bin/sh\necho "LLVM version 23.1.50"\n')
             tool.chmod(0o755)
-            output = self.run_command('make', action, f'LLVM_CONFIG={config}', success=False)
+            output = self.run_command('make', action, f'LLVM_CONFIG={config}',
+                                      f'LINT_DATABASE={self.root / "compile_commands.json"}', success=False)
             self.assertIn('23.1.5', output)
             self.assertIn('23.1.50', output)
 

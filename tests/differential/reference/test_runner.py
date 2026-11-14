@@ -11,9 +11,34 @@ from unittest.mock import patch
 import docker_wine
 from protocol import Capture, READY, STREAM_LIMIT, decode
 import run
+import fixture_images
 
 
 class CaptureTests(unittest.TestCase):
+    def test_prepared_image_is_local_and_matches_inputs(self):
+        def inspect(args, **kwargs):
+            self.assertEqual(args[:3], ["docker", "image", "inspect"])
+            return subprocess.CompletedProcess(args, 1, stdout="", stderr="image absent")
+
+        with patch.object(subprocess, "run", side_effect=inspect):
+            with self.assertRaisesRegex(ValueError, "make provision-fixtures"):
+                fixture_images.local_image(run.SUITE, "reference")
+
+        with tempfile.TemporaryDirectory() as tmp:
+            suite = Path(tmp)
+            for name in ("toolchain/Dockerfile", "reference/capture.c", "build.py", "manifests.py",
+                         "reference/guest.py", "reference/protocol.py"):
+                path = suite / name
+                path.parent.mkdir(exist_ok=True)
+                path.write_text(name)
+            compiler = fixture_images.image_tag(suite, "toolchain")
+            wine = fixture_images.image_tag(suite, "reference")
+            (suite / "reference/capture.c").write_text("updated capture")
+            self.assertNotEqual(fixture_images.image_tag(suite, "reference"), wine)
+            self.assertEqual(fixture_images.image_tag(suite, "toolchain"), compiler)
+            (suite / "toolchain/Dockerfile").write_text("updated toolchain")
+            self.assertNotEqual(fixture_images.image_tag(suite, "toolchain"), compiler)
+
     def test_stream_mismatches(self):
         expected = dict(exit_code=4660, stdout="résult\n", stderr="end\n")
         observation = Capture(52, "résult\r\n".encode(), b"end\n\xff", "wine-test")
@@ -88,7 +113,7 @@ class PublicationTests(unittest.TestCase):
         self.binary.write_bytes(b"test image")
         self.hash = run.sha256(self.binary.read_bytes())
         (config / "SHA256SUMS").write_text(f"{self.hash}  b.exe\n")
-        image = patch.object(run, "build_image", return_value=dict(container_image_id="sha256:test"))
+        image = patch.object(run, "reference_environment", return_value=dict(container_image_id="sha256:test"))
         image.start()
         self.addCleanup(image.stop)
         execution = patch.object(run, "execute", return_value=Capture(4660, b"", b"err\n", "wine-test"))

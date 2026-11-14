@@ -22,7 +22,7 @@ from run import BINARIES, BUILD, REFERENCES, interrupt, sha256, snapshot, verifi
 import native
 
 OUTPUT = BUILD / "differential/windows-x64"
-DEFAULT_FORGE = BUILD / "forge"
+DEFAULT_FORGE = BUILD / "dev/forge"
 STAGES = ("reference_validation", "analysis", "lifting", "native_compilation",
           "native_execution", "comparison")
 VARIANTS = ("baseline", "o2")
@@ -376,7 +376,7 @@ def main(argv=None):
     parser.add_argument("--reference-root", type=Path, default=REFERENCES)
     parser.add_argument("--binary-root", type=Path, default=BINARIES)
     parser.add_argument("--forge", type=Path, default=DEFAULT_FORGE, metavar="PATH",
-                        help="Forge executable (default: repository build/forge)")
+                        help="Forge executable (default: dev/forge under the build root)")
     options = parser.parse_args(argv)
     return run(options.config, options.fixture, references=options.reference_root,
                binaries=options.binary_root, forge=options.forge.resolve())
