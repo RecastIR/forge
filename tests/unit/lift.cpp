@@ -7,10 +7,12 @@
 #include "llvm/ADT/SmallString.h"
 #include "llvm/IR/BasicBlock.h"
 #include "llvm/IR/Function.h"
+#include "llvm/IR/Instructions.h"
 #include "llvm/IR/Module.h"
 #include "llvm/IR/Verifier.h"
 
 #include <fstream>
+#include <map>
 #include <string_view>
 #include <type_traits>
 
@@ -132,6 +134,46 @@ namespace {
         check(fs::file_size(other / "app.exe") > 0, "unrelated relative output missing");
     }
 
+    void checkControlFlow(const fs::path &fixture) {
+        AnalyzedImage analysis(
+            std::make_unique<ParsedImage>(InputFile(fixture), ParsePolicy::FunctionAnalysis),
+            DebugInfo::Omit);
+        llvm::LLVMContext context;
+        auto module = generateIR(analysis, {0x1000, EntryMode::WindowsX64I64Pair}, context);
+        const auto &body = *module->getFunction("forge_lifted_1000");
+        // Synthetic entry, setup, header, sign test, two latches, two returns.
+        const std::map<std::string, std::vector<std::string>> expected{
+            {"entry", {"rva_1000"}},
+            {"rva_1000", {"rva_1017", "rva_1007"}},
+            {"rva_1007", {"rva_1016", "rva_100d"}},
+            {"rva_100d", {"rva_1011", "rva_100f"}},
+            {"rva_100f", {"rva_1007"}},
+            {"rva_1011", {"rva_1007"}},
+            {"rva_1016", {}},
+            {"rva_1017", {}}};
+        std::map<std::string, std::vector<std::string>> edges;
+        for (const auto &block : body) {
+            auto &targets = edges[block.getName().str()];
+            const auto *term = block.getTerminator();
+            check(term != nullptr, "guest block lacks a terminator");
+            for (unsigned i = 0; i < term->getNumSuccessors(); ++i) {
+                targets.push_back(term->getSuccessor(i)->getName().str());
+            }
+
+            if (targets.empty()) {
+                check(llvm::isa<llvm::ReturnInst>(term), "expected a guest return site");
+            }
+
+            if (block.getName() == "rva_1007") {
+                const auto &carry = llvm::cast<llvm::PHINode>(block.front());
+                check(carry.getName().starts_with("CF") && carry.getNumIncomingValues() == 3,
+                      "loop header lost its entry carry or a backedge");
+            }
+        }
+
+        check(edges == expected, "incorrect basic-block boundaries or successors");
+    }
+
     void checkVerifierFailure(llvm::LLVMContext &context, const fs::path &source) {
         llvm::Module module("invalid", context);
         auto *type = llvm::FunctionType::get(llvm::Type::getVoidTy(context), false);
@@ -154,7 +196,8 @@ namespace {
 } // namespace
 
 int main(int argc, char **argv) try {
-    check(argc == 2, "expected the add.exe fixture");
+    check(argc == 3, "expected add.exe and cfg.exe fixtures");
+    checkControlFlow(argv[2]);
     llvm::SmallString<128> temporary;
 
     if (auto error = llvm::sys::fs::createUniqueDirectory("forge-lift", temporary)) {

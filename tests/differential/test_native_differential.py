@@ -198,6 +198,25 @@ class NativeDifferentialTests(unittest.TestCase):
                                       for file in ("stdout.bin", "stderr.bin")]))
             self.assertEqual(observations[0], observations[1])
 
+    def test_nonterminating_lifted_loop(self):
+        # Force the taken backedge of the existing guest loop in the baseline IR.
+        def close_loop(source):
+            latch = re.compile(r"^rva_([0-9a-f]+):[^\n]*\n(?:  [^\n]*\n)*?"
+                               r"  br i1 (%\w+), label %rva_([0-9a-f]+), label %rva_([0-9a-f]+)$",
+                               re.MULTILINE)
+            backedges = [match for match in latch.finditer(source)
+                         if int(match[3], 16) <= int(match[1], 16) < int(match[4], 16)]
+            self.assertEqual(len(backedges), 1)
+            start, end = backedges[0].span(2)
+            return source[:start] + "true" + source[end:]
+
+        execute = diff.native.execute
+        with patch.object(diff.native, "execute", lambda exe, args, work: execute(exe, args, work, timeout=1)):
+            report = self.modified_ir("control_flow/counted_sum", "closed-loop", "native_execution_failure",
+                                      close_loop, only="baseline")
+        self.assertEqual(report["variants"]["baseline"]["execution_outcome"], "timeout")
+        self.assertEqual(report["variants"]["o2"]["status"], "passed")
+
     def test_harness_failure(self):
         execute = diff.native.execute
         with patch.object(diff.native, "execute", lambda exe, args, work: execute(exe, ["invalid", "1"], work)):

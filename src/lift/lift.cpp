@@ -3,6 +3,7 @@
 #include "analysis/analysis.h"
 #include "diagnostic.h"
 #include "lift/asm_info.h"
+#include "lift/cfg.h"
 #include "lift/integer.h"
 
 #include "llvm/IR/IRBuilder.h"
@@ -20,6 +21,7 @@
 
 #include <algorithm>
 #include <array>
+#include <deque>
 #include <map>
 #include <mutex>
 
@@ -31,78 +33,7 @@ namespace forge {
             return InspectionError(hex(rva) + ": " + why.str(), kind);
         }
 
-        struct Step {
-            uint32_t rva, next;
-            MCInst inst;
-            StringRef opcode; // Borrows the MC instruction-name table.
-            StringRef bytes;  // Borrows the input buffer through translation.
-
-            [[noreturn]] void reject(FailureCode kind, const Twine &reason) const {
-                const auto encoded = toHex(bytes, true);
-                auto failure = atRva(kind, rva, opcode + " [" + encoded + "]: " + reason);
-                failure.context.instructionRva = rva;
-                failure.context.opcode = opcode.str();
-                failure.context.bytes = encoded;
-
-                throw failure;
-            }
-        };
-
-        bool legacyPrefix(uint8_t b) {
-            switch (b) {
-            case 0xf0:
-            case 0xf2:
-            case 0xf3:
-            case 0x2e:
-            case 0x36:
-            case 0x3e:
-            case 0x26:
-            case 0x64:
-            case 0x65:
-            case 0x66:
-            case 0x67:
-                return true;
-            default:
-                return false;
-            }
-        }
-
-        std::vector<Step> decode(StringRef bytes, uint32_t begin, const MCDisassembler &dis,
-                                 const MCInstrInfo &instructions) {
-            // Establish boundaries even across skipped code. Only reachable instructions are
-            // lowered.
-            if (bytes.size() > size_t{64} * 1024) {
-                throw atRva(FailureCode::FunctionSize, begin,
-                            "experimental lift limit is 64 KiB per function");
-            }
-
-            std::vector<Step> steps;
-            for (size_t pos = 0; pos < bytes.size();) {
-                auto tail = bytes.drop_front(pos);
-                uint32_t rva = begin + static_cast<uint32_t>(pos);
-                uint64_t size = 0;
-                MCInst inst;
-
-                if (dis.getInstruction(inst, size, arrayRefFromStringRef(tail), rva, nulls()) !=
-                        MCDisassembler::Success ||
-                    !size || size > tail.size()) {
-                    const auto encoded = toHex(tail.take_front(15), true);
-                    auto failure = atRva(FailureCode::InvalidInstruction, rva,
-                                         "invalid or truncated x86 instruction [" + encoded + "]");
-                    failure.context.instructionRva = rva;
-                    failure.context.bytes = encoded;
-
-                    throw failure;
-                }
-
-                auto opcode = instructions.getName(inst.getOpcode());
-                steps.push_back(
-                    {rva, uint32_t(rva + size), std::move(inst), opcode, tail.take_front(size)});
-                pos += size;
-            }
-
-            return steps;
-        }
+        using x86::Step;
 
         constexpr std::array<StringLiteral, 7> wideRegs{"RAX", "RCX", "RDX", "R8",
                                                         "R9",  "R10", "R11"};
@@ -119,46 +50,98 @@ namespace forge {
         struct RegisterView {
             unsigned index, width, offset = 0;
 
+            uint64_t writeMask() const { return width >= 32 ? UINT64_MAX : mask(); }
+
             uint64_t mask() const { return maskTrailingOnes<uint64_t>(width) << offset; }
         };
 
         using Defined = std::array<uint64_t, wideRegs.size()>;
 
-        struct Incoming {
-            BasicBlock *block;
-            Defined defined;
-            std::vector<std::pair<BasicBlock *, x86::Flags>> predecessors;
+        struct Availability {
+            Defined registers{};
+            x86::FlagSet flags;
+
+            bool intersect(const Availability &other) {
+                auto before = *this;
+                flags &= other.flags;
+                for (size_t i = 0; i < registers.size(); ++i) {
+                    registers[i] &= other.registers[i];
+                }
+
+                return registers != before.registers || flags != before.flags;
+            }
         };
 
-        // All predecessors are known when a reachable forward target is visited.
-        x86::Flags mergeFlags(IRBuilder<> &ir, const Incoming &incoming) {
-            const auto &predecessors = incoming.predecessors;
-            x86::Flags flags{};
+        struct BlockState {
+            Defined writes{};
+            x86::FlagEffect flags{{}, x86::FlagSet().set()};
+            Availability incoming;
+            BasicBlock *irBlock = nullptr;
+            std::array<PHINode *, x86::FlagCount> phis{};
+            x86::Flags outgoing{};
+            bool queued = false;
 
-            for (unsigned f = 0; f < x86::FlagCount && !predecessors.empty(); ++f) {
-                auto *first = predecessors.front().second[f];
-
-                if (!first ||
-                    llvm::any_of(predecessors, [&](const auto &p) { return !p.second[f]; })) {
-                    continue;
+            Availability transfer() const {
+                auto result = incoming;
+                result.flags = flags.apply(result.flags);
+                for (size_t i = 0; i < writes.size(); ++i) {
+                    result.registers[i] |= writes[i];
                 }
 
-                if (llvm::all_of(predecessors,
-                                 [&](const auto &p) { return p.second[f] == first; })) {
-                    flags[f] = first;
-                } else {
-                    auto *phi =
-                        ir.CreatePHI(ir.getInt1Ty(), static_cast<unsigned>(predecessors.size()));
+                return result;
+            }
+        };
 
-                    for (const auto &[source, incomingFlags] : predecessors) {
-                        phi->addIncoming(incomingFlags[f], source);
-                    }
+        using BlockStates = std::map<uint32_t, BlockState>;
 
-                    flags[f] = phi;
-                }
+        // Start at the lattice top. Each intersection only removes available bits.
+        // Visit every reachable block once so even a block with unchanged inputs
+        // propagates its own flag invalidations.
+        void proveAvailability(const x86::ControlFlowGraph &graph, BlockStates &states,
+                               EntryMode mode) {
+            std::deque<uint32_t> pending;
+            for (auto &[addr, state] : states) {
+                state.incoming.registers.fill(UINT64_MAX);
+                state.incoming.flags.set();
+                state.queued = true;
+                pending.push_back(addr);
             }
 
-            return flags;
+            auto &entry = states.begin()->second.incoming;
+            entry.flags.reset();
+            if (mode == EntryMode::WindowsX64I64Pair) {
+                entry.registers.fill(0);
+                entry.registers[1] = entry.registers[2] = UINT64_MAX;
+            }
+
+            while (!pending.empty()) {
+                const auto addr = pending.front();
+                pending.pop_front();
+                auto &source = states.at(addr);
+                source.queued = false;
+                const auto out = source.transfer();
+
+                for (auto target : graph.at(addr).successors) {
+                    auto &dest = states.at(target);
+                    if (dest.incoming.intersect(out) && !dest.queued) {
+                        dest.queued = true;
+                        pending.push_back(target);
+                    }
+                }
+            }
+        }
+
+        std::optional<uint8_t> shiftCount(const Step &s, x86::Form form) {
+            if (form == x86::Form::ShiftOne) {
+                return 1U;
+            }
+
+            if (form == x86::Form::ShiftImmediate) {
+                return static_cast<uint8_t>(
+                    s.inst.getOperand(s.inst.getNumOperands() - 1).getImm());
+            }
+
+            return {};
         }
 
         class Translator {
@@ -190,7 +173,7 @@ namespace forge {
                 }
             }
 
-            void translate(const std::vector<Step> &steps);
+            void translate(const x86::ControlFlowGraph &graph);
 
           private:
             IRBuilder<> ir;
@@ -213,7 +196,12 @@ namespace forge {
             Value *condition(const Step &s);
             void integer(const Step &s, const x86::IntegerInstruction &instruction);
             void lower(const Step &s);
-            void lea(const Step &s);
+            void lea(const Step &s, RegisterView dest);
+            RegisterView destination(const Step &s,
+                                     const x86::IntegerInstruction &instruction) const;
+            std::optional<RegisterView> resultRegister(const Step &s) const;
+            void summarize(const Step &s, BlockState &state) const;
+            void emitBlock(const x86::GuestBlock &block, const BlockStates &states);
         };
 
         RegisterView Translator::reg(const Step &s, const MCOperand &op, unsigned width) const {
@@ -273,11 +261,9 @@ namespace forge {
                 auto *parent = ir.CreateAlignedLoad(ir.getInt64Ty(), ptr, registerStateAlignment);
                 result = ir.CreateOr(ir.CreateAnd(parent, ~view.mask()),
                                      ir.CreateShl(result, view.offset));
-                defined[view.index] |= view.mask();
-            } else {
-                defined[view.index] = UINT64_MAX;
             }
 
+            defined[view.index] |= view.writeMask();
             ir.CreateAlignedStore(result, ptr, registerStateAlignment);
         }
 
@@ -301,8 +287,7 @@ namespace forge {
                                        [&](x86::Flag f) { return require(s, f); });
         }
 
-        void Translator::lea(const Step &s) {
-            unsigned width = s.opcode == "LEA64r" ? 64 : 32;
+        void Translator::lea(const Step &s, RegisterView dest) {
             const auto &i = s.inst;
 
             if (i.getOperand(5).getReg() != 0) {
@@ -324,8 +309,58 @@ namespace forge {
                 result = ir.CreateAdd(result, term);
             }
 
-            write(reg(s, i.getOperand(0), width),
-                  ir.CreateTruncOrBitCast(result, ir.getIntNTy(width)));
+            write(dest, ir.CreateTruncOrBitCast(result, ir.getIntNTy(dest.width)));
+        }
+
+        RegisterView Translator::destination(const Step &s,
+                                             const x86::IntegerInstruction &instruction) const {
+            if (instruction.form == x86::Form::Accumulator) {
+                return {0, instruction.width};
+            }
+
+            return reg(s, s.inst.getOperand(0), instruction.width);
+        }
+
+        std::optional<RegisterView> Translator::resultRegister(const Step &s) const {
+            if (s.opcode == "LAHF") {
+                return RegisterView{0, 8, 8};
+            }
+
+            unsigned width = 0;
+            if (s.opcode == "LEA64r" || s.opcode == "CMOV64rr") {
+                width = 64;
+            } else if (s.opcode == "LEA64_32r" || s.opcode == "CMOV32rr") {
+                width = 32;
+            } else if (s.opcode == "CMOV16rr") {
+                width = 16;
+            } else if (s.opcode == "SETCCr") {
+                width = 8;
+            } else {
+                return {};
+            }
+
+            return reg(s, s.inst.getOperand(0), width);
+        }
+
+        void Translator::summarize(const Step &s, BlockState &state) const {
+            RegisterView dest{};
+            if (auto instruction = x86::integerInstruction(s.opcode)) {
+                auto effect = x86::flagEffect(instruction->op, instruction->width,
+                                              shiftCount(s, instruction->form));
+                state.flags.generated = effect.apply(state.flags.generated);
+                state.flags.carried &= effect.carried;
+                if (instruction->op == x86::Op::Cmp || instruction->op == x86::Op::Test) {
+                    return;
+                }
+
+                dest = destination(s, *instruction);
+            } else if (auto result = resultRegister(s)) {
+                dest = *result;
+            } else {
+                return;
+            }
+
+            state.writes[dest.index] |= dest.writeMask();
         }
 
         void Translator::integer(const Step &s, const x86::IntegerInstruction &instruction) {
@@ -333,8 +368,7 @@ namespace forge {
             using x86::Op;
             auto [op, form, width, sourceWidth] = instruction;
             const auto &i = s.inst;
-            auto dest =
-                form == Form::Accumulator ? RegisterView{0, width} : reg(s, i.getOperand(0), width);
+            auto dest = destination(s, instruction);
             const auto &last = i.getOperand(i.getNumOperands() - 1);
 
             if (op == Op::Mov || form == Form::Extend) {
@@ -345,11 +379,8 @@ namespace forge {
             }
 
             if (form == Form::ShiftCL || form == Form::ShiftOne || form == Form::ShiftImmediate) {
-                auto *count =
-                    form == Form::ShiftCL
-                        ? read(s, {1, 8})
-                        : ir.getInt8(form == Form::ShiftOne ? 1
-                                                            : static_cast<uint8_t>(last.getImm()));
+                auto fixed = shiftCount(s, form);
+                auto *count = fixed ? ir.getInt8(*fixed) : read(s, {1, 8});
                 write(dest, semantics.shift(op, read(s, dest), count));
 
                 return;
@@ -377,15 +408,25 @@ namespace forge {
         }
 
         void Translator::lower(const Step &s) {
+            if (auto instruction = x86::integerInstruction(s.opcode)) {
+                integer(s, *instruction);
+                return;
+            }
+
+            auto result = resultRegister(s);
+            if (!result) {
+                s.reject(FailureCode::UnsupportedInstruction,
+                         "unsupported instruction or operand form");
+            }
+
+            const auto dest = *result;
             if (s.opcode == "LEA64r" || s.opcode == "LEA64_32r") {
-                lea(s);
+                lea(s, dest);
             } else if (s.opcode == "SETCCr") {
-                write(reg(s, s.inst.getOperand(0), 8), ir.CreateZExt(condition(s), ir.getInt8Ty()));
+                write(dest, ir.CreateZExt(condition(s), ir.getInt8Ty()));
             } else if (s.opcode == "CMOV16rr" || s.opcode == "CMOV32rr" || s.opcode == "CMOV64rr") {
-                unsigned width = s.opcode == "CMOV16rr" ? 16 : s.opcode == "CMOV32rr" ? 32 : 64;
-                auto dest = reg(s, s.inst.getOperand(0), width);
                 auto *old = read(s, dest);
-                auto *src = value(s, s.inst.getOperand(2), width);
+                auto *src = value(s, s.inst.getOperand(2), dest.width);
 
                 write(dest, ir.CreateSelect(condition(s), src, old));
             } else if (s.opcode == "LAHF") {
@@ -400,106 +441,104 @@ namespace forge {
                         byte, ir.CreateShl(ir.CreateZExt(require(s, flag), ir.getInt8Ty()), bit));
                 }
 
-                write({0, 8, 8}, byte);
-            } else if (auto instruction = x86::integerInstruction(s.opcode)) {
-                integer(s, *instruction);
+                write(dest, byte);
             } else {
-                s.reject(FailureCode::UnsupportedInstruction,
-                         "unsupported instruction or operand form");
+                llvm_unreachable("unhandled result-register instruction");
             }
         }
 
-        void Translator::translate(const std::vector<Step> &steps) {
-            std::map<uint32_t, Incoming> incoming;
-            auto block = [&](uint32_t addr) {
-                return BasicBlock::Create(ir.getContext(), "rva_" + utohexstr(addr, true), impl);
-            };
-
-            Defined entry{};
-            if (mode == EntryMode::RegisterState) {
-                entry.fill(UINT64_MAX);
+        void Translator::emitBlock(const x86::GuestBlock &block, const BlockStates &states) {
+            const auto &last = block.steps.back();
+            auto body = ArrayRef(block.steps);
+            if (block.exit != x86::Flow::Fallthrough && block.exit != x86::Flow::FallOff) {
+                body = body.drop_back();
             }
 
-            entry[1] = entry[2] = UINT64_MAX;
-            incoming.emplace(steps.front().rva, Incoming{block(steps.front().rva), entry, {}});
-            for (const Step &s : steps) {
-                auto it = incoming.find(s.rva);
-                if (it == incoming.end()) {
-                    continue;
+            for (const auto &s : body) {
+                lower(s);
+            }
+
+            switch (block.exit) {
+            case x86::Flow::Return:
+                if (mode == EntryMode::WindowsX64I64Pair && defined[0] != UINT64_MAX) {
+                    last.reject(FailureCode::UndefinedRegister, "return with undefined RAX");
                 }
 
-                ir.SetInsertPoint(it->second.block);
-                defined = it->second.defined;
-                semantics.flags = mergeFlags(ir, it->second);
-                auto edge = [&](int64_t address) {
-                    if (address <= s.rva || address >= steps.back().next) {
-                        s.reject(FailureCode::UnsupportedControlFlow,
-                                 "backward edge or control flow outside function to " +
-                                     hex(static_cast<uint64_t>(address)));
-                    }
+                ir.CreateRetVoid();
+                break;
+            case x86::Flow::Conditional:
+                ir.CreateCondBr(condition(last), states.at(block.successors[0]).irBlock,
+                                states.at(block.successors[1]).irBlock);
+                break;
+            case x86::Flow::Fallthrough:
+            case x86::Flow::Jump:
+                ir.CreateBr(states.at(block.successors.front()).irBlock);
+                break;
+            case x86::Flow::FallOff:
+                last.reject(FailureCode::UnsupportedControlFlow,
+                            "fallthrough outside function to " + hex(last.next), last.next);
+            }
+        }
 
-                    auto target = std::lower_bound(
-                        steps.begin(), steps.end(), address,
-                        [](const Step &step, int64_t addr) { return step.rva < addr; });
-
-                    if (target == steps.end() || target->rva != address) {
-                        s.reject(FailureCode::UnsupportedControlFlow,
-                                 "branch enters an instruction at " +
-                                     hex(static_cast<uint64_t>(address)));
-                    }
-
-                    auto [dest, added] = incoming.try_emplace(target->rva);
-
-                    if (added) {
-                        dest->second = {block(target->rva), defined, {}};
-                    } else {
-                        for (size_t j = 0; j < defined.size(); ++j) {
-                            dest->second.defined[j] &= defined[j];
+        void connectFlags(const x86::ControlFlowGraph &graph, const BlockStates &states) {
+            for (const auto &[addr, block] : graph) {
+                const auto &source = states.at(addr);
+                for (auto dest : block.successors) {
+                    const auto &phis = states.at(dest).phis;
+                    for (unsigned f = 0; f < x86::FlagCount; ++f) {
+                        if (phis[f]) {
+                            assert(source.outgoing[f] &&
+                                   "availability disagrees with flag lowering");
+                            phis[f]->addIncoming(source.outgoing[f], source.irBlock);
                         }
                     }
-
-                    dest->second.predecessors.emplace_back(ir.GetInsertBlock(), semantics.flags);
-
-                    return dest->second.block;
-                };
-
-                auto encoding = arrayRefFromStringRef(s.bytes);
-                if (encoding.front() == 0x66) {
-                    auto instruction = x86::integerInstruction(s.opcode);
-
-                    if ((!instruction || instruction->width != 16) && s.opcode != "CMOV16rr") {
-                        s.reject(FailureCode::UnsupportedPrefix, "unsupported instruction prefix");
-                    }
-
-                    encoding = encoding.drop_front();
-                }
-
-                if (!encoding.empty() && (encoding.front() & 0xf0) == 0x40) {
-                    encoding = encoding.drop_front();
-                }
-
-                if (encoding.empty() || legacyPrefix(encoding.front()) ||
-                    (encoding.front() & 0xf0) == 0x40) {
-                    s.reject(FailureCode::UnsupportedPrefix, "unsupported instruction prefix");
-                }
-
-                if (s.opcode == "RET64") {
-                    if (mode == EntryMode::WindowsX64I64Pair && defined[0] != UINT64_MAX) {
-                        s.reject(FailureCode::UndefinedRegister, "return with undefined RAX");
-                    }
-
-                    ir.CreateRetVoid();
-                } else if (s.opcode == "JMP_1" || s.opcode == "JMP_4") {
-                    ir.CreateBr(edge(int64_t(s.next) + s.inst.getOperand(0).getImm()));
-                } else if (s.opcode == "JCC_1" || s.opcode == "JCC_4") {
-                    auto *cond = condition(s);
-                    auto *taken = edge(int64_t(s.next) + s.inst.getOperand(0).getImm());
-                    ir.CreateCondBr(cond, taken, edge(s.next));
-                } else {
-                    lower(s);
-                    ir.CreateBr(edge(s.next));
                 }
             }
+        }
+
+        void Translator::translate(const x86::ControlFlowGraph &graph) {
+            BlockStates states;
+            auto *entry = BasicBlock::Create(ir.getContext(), "entry", impl);
+            for (const auto &[addr, block] : graph) {
+                auto &state = states[addr];
+                state.irBlock =
+                    BasicBlock::Create(ir.getContext(), "rva_" + utohexstr(addr, true), impl);
+                try {
+                    for (const auto &s : block.steps) {
+                        summarize(s, state);
+                    }
+                } catch (InspectionError &failure) {
+                    failure.context.blockRva = addr;
+                    throw;
+                }
+            }
+
+            proveAvailability(graph, states, mode);
+            ir.SetInsertPoint(entry);
+            ir.CreateBr(states.begin()->second.irBlock);
+            for (const auto &[addr, block] : graph) {
+                auto &state = states.at(addr);
+                ir.SetInsertPoint(state.irBlock);
+                defined = state.incoming.registers;
+                semantics.flags = {};
+                for (unsigned f = 0; f < x86::FlagCount; ++f) {
+                    if (state.incoming.flags[f]) {
+                        state.phis[f] = ir.CreatePHI(ir.getInt1Ty(), 0, x86::flagNames[f]);
+                        semantics.flags[f] = state.phis[f];
+                    }
+                }
+
+                try {
+                    emitBlock(block, states);
+                } catch (InspectionError &failure) {
+                    failure.context.blockRva = addr;
+                    throw;
+                }
+
+                state.outgoing = semantics.flags;
+            }
+
+            connectFlags(graph, states);
         }
 
         struct ValidatedEntry {
@@ -636,12 +675,12 @@ namespace forge {
                 throw atRva(FailureCode::BackendSetup, rva, "AMD64 disassembler unavailable");
             }
 
-            const auto steps = decode(entry.code.bytes, rva, *dis, *instructions);
+            const auto graph = x86::discoverCFG(entry.code.bytes, rva, *dis, *instructions);
             auto module = std::make_unique<llvm::Module>("forge_" + utohexstr(rva, true), context);
             const Triple outputTriple("arm64-apple-macosx11.0.0");
             module->setTargetTriple(outputTriple);
             module->setDataLayout(outputTriple.computeDataLayout());
-            Translator(*module, rva, entry.request.mode, *regs).translate(steps);
+            Translator(*module, rva, entry.request.mode, *regs).translate(graph);
             return module;
         }
     } // namespace

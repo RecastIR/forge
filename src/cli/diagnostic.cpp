@@ -1,5 +1,6 @@
 #include "diagnostic.h"
 #include "cli/report.h"
+#include "lift/lift.h"
 #include "pe/image.h"
 
 #include "llvm/Support/JSON.h"
@@ -15,14 +16,24 @@ namespace forge {
         err << prefix << ": " << error.what() << '\n';
     }
 
-    void printLiftDiagnostic(const InspectionError &error, const fs::path &input, uint32_t entryRva,
-                             llvm::raw_ostream &out) {
+    void printLiftDiagnostic(const InspectionError &error, const fs::path &input,
+                             LiftRequest request, llvm::raw_ostream &out) {
         const auto &kind = failureKind(error.kind);
         const auto &context = error.context;
         // Loading and publication can fail before the core operation sees the requested RVA.
         const auto &source = context.input.empty() ? input : context.input;
         llvm::json::Object fields{{"input", llvm::json::fixUTF8(source.native())},
-                                  {"entry_rva", hex(context.entryRva.value_or(entryRva))}};
+                                  {"entry_rva", hex(context.entryRva.value_or(request.startRva))}};
+
+        fields["signature"] =
+            request.mode == EntryMode::RegisterState ? "register-state" : "i64(i64,i64)";
+        if (context.blockRva) {
+            fields["block_rva"] = hex(*context.blockRva);
+        }
+
+        if (context.branchTarget) {
+            fields["branch_target"] = *context.branchTarget;
+        }
 
         if (!context.output.empty()) {
             fields["output"] = llvm::json::fixUTF8(context.output.native());

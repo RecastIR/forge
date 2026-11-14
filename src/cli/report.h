@@ -9,6 +9,7 @@ namespace forge {
     class AnalyzedImage;
     struct InspectionError;
     struct Report;
+    struct LiftRequest;
 
     struct ReportOptions {
         bool json = false, strict = false;
@@ -22,5 +23,5 @@ namespace forge {
     void printFailure(const InspectionError &error, const std::filesystem::path &input,
                       llvm::raw_ostream &err);
     void printLiftDiagnostic(const InspectionError &error, const std::filesystem::path &input,
-                             uint32_t entryRva, llvm::raw_ostream &out);
+                             LiftRequest request, llvm::raw_ostream &out);
 } // namespace forge

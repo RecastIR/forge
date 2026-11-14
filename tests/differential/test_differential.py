@@ -406,7 +406,8 @@ class LiftDiagnosticTests(unittest.TestCase):
         self.diagnostic = dict(schema_version=1, stage="lifting", category="unsupported",
                                code="LIFT_UNSUPPORTED_INSTRUCTION", message="explanation",
                                context=dict(input=str(self.image), entry_rva=self.rva, end_rva="0x15",
-                                            instruction_rva="0x11", opcode="PUSH64r", bytes="55"))
+                                            instruction_rva="0x11", opcode="PUSH64r", bytes="55",
+                                            signature="i64(i64,i64)", block_rva="0x10"))
         self.raw = self.encode(self.diagnostic)
 
     @staticmethod
@@ -467,9 +468,22 @@ class LiftDiagnosticTests(unittest.TestCase):
                 context(instruction_rva="0x15"), context(end_rva="0x10"), context(end_rva=0x14),
                 context(instruction_rva="0x100000000"), context(opcode=3), context(architecture=""),
                 context(bytes="xyz"), context(file_offset=True), context(file_offset=-1),
-                context(unknown="field")):
+                context(signature="register-state"), context(block_rva="0x12"),
+                context(block_rva="0xf"), context(branch_target=15), context(unknown="field")):
             with self.subTest(raw=raw), self.assertRaises(ValueError):
                 lift_diagnostics.parse_diagnostic(raw, self.image, self.selected, self.ir)
+
+    def test_control_flow_diagnostic_target(self):
+        self.image.write_bytes(b"MZ\xeb\x80")
+        context = dict(self.diagnostic["context"], instruction_rva=self.rva, opcode="JMP_1",
+                       bytes="eb80", branch_target=-110)
+        record = dict(self.diagnostic, code="LIFT_UNSUPPORTED_CONTROL_FLOW", context=context)
+        self.assertEqual(lift_diagnostics.parse_diagnostic(self.encode(record), self.image,
+                         self.selected, self.ir)["context"]["branch_target"], -110)
+        for target in (True, "0xffffffff", -(1 << 32), 1 << 33):
+            with self.subTest(target=target), self.assertRaises(ValueError):
+                invalid = dict(record, context=dict(context, branch_target=target))
+                lift_diagnostics.parse_diagnostic(self.encode(invalid), self.image, self.selected, self.ir)
 
     def test_context_agrees_with_code_and_source(self):
         request = dict(input=str(self.image), entry_rva=self.rva)

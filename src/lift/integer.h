@@ -4,6 +4,7 @@
 #include "llvm/IR/IRBuilder.h"
 
 #include <array>
+#include <bitset>
 #include <optional>
 
 namespace forge::x86 {
@@ -56,6 +57,19 @@ namespace forge::x86 {
                                                                           "ZF", "SF", "OF"};
     // A null entry means the flag lacks a definition valid for every possible execution.
     using Flags = std::array<llvm::Value *, FlagCount>;
+
+    using FlagSet = std::bitset<FlagCount>;
+
+    // Availability after an operation is generated | (incoming & carried).
+    // A variable-count shift can carry availability while changing the bit value.
+    struct FlagEffect {
+        FlagSet generated;
+        FlagSet carried;
+
+        FlagSet apply(FlagSet incoming) const { return generated | (incoming & carried); }
+    };
+
+    FlagEffect flagEffect(Op op, unsigned width, std::optional<unsigned> count = {});
 
     class IntegerSemantics {
       public:

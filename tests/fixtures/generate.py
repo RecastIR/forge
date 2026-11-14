@@ -64,6 +64,7 @@ def generate(output, mc, link, dlltool, clang):
             run(link, "/nodefaultlib", "/timestamp:0", "/debug:dwarf", "/entry:entry", "/subsystem:console",
                 f"/out:{name}.exe", f"{name}.obj")
             (output / f"{name}.exe").write_bytes((work / f"{name}.exe").read_bytes())
+        image("cfg.exe", (sources / "cfg.s").read_text())
         image("chained.exe", (sources / "chained.s").read_text())
         image("unicode.exe", stub + '.section ".donnée","dr"\n.byte 1\n.section ".界区","dr"\n.byte 1\n')
         image("arithmetic.exe", (sources / "arithmetic.s").read_text(),

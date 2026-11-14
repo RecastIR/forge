@@ -57,7 +57,21 @@ def context_rva(context, name):
 
 
 def validate_context(context, stage, category, code, image, selected, ir):
-    allowed = {"input", "entry_rva"}
+    allowed = {"input", "entry_rva", "signature"}
+    if "signature" in context and field(context, "signature", str) != "i64(i64,i64)":
+        raise ValueError("diagnostic signature disagrees with the function harness")
+    if code in INSTRUCTION_FAILURES or code == "LIFT_INVALID_ENCODING":
+        allowed.add("block_rva")
+        if "block_rva" in context:
+            start = context_rva(context, "block_rva")
+            if not selected.start <= start <= context_rva(context, "instruction_rva"):
+                raise ValueError("basic block disagrees with the instruction location")
+    if code == "LIFT_UNSUPPORTED_CONTROL_FLOW":
+        allowed.add("branch_target")
+        if "branch_target" in context:
+            target = field(context, "branch_target", int)
+            if not -(1 << 31) <= target < (1 << 32) + (1 << 31):
+                raise ValueError("invalid direct branch destination")
     if stage in ("pe", "entry", "lifting", "verification"):
         allowed.add("file_offset")
     if stage in ("entry", "lifting", "verification"):

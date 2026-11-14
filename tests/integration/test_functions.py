@@ -165,7 +165,7 @@ class Discovery(Case):
                     self.assertIn(b"expected an exact, valid, unambiguous", self.invoke(*args, code=1).stderr)
                     diagnostic = json.loads(self.invoke(*args, "--diagnostics-format", "json", code=1).stderr)
                     self.assertEqual(diagnostic["code"], "ENTRY_INVALID_START")
-                    self.assertEqual(diagnostic["context"], dict(input=str(image), entry_rva=hex(first[0])))
+                    self.assertEqual(diagnostic["context"], dict(input=str(image), entry_rva=hex(first[0]), signature="register-state"))
                 self.invoke("lift", image, "--rva", hex(third[0]), "--output", self.dir/"ok.ll")
                 self.assertTrue(all(f["status"] == "valid" for f in functions if int(f["start_rva"],16) >= third[0]))
 
@@ -189,7 +189,7 @@ class Discovery(Case):
                 self.assertEqual(self.invoke(*args, code=1).stderr,
                                  f"{image}: LIFT_ERROR: {requested:#x}: {reason}\n".encode())
                 failure = json.loads(self.invoke(*args, "--diagnostics-format", "json", code=1).stderr)
-                context = dict(input=str(image), entry_rva=hex(requested))
+                context = dict(input=str(image), entry_rva=hex(requested), signature="register-state")
                 if code == "ENTRY_UNMAPPED_CODE":
                     context["end_rva"] = hex(stop)
                 self.assertEqual((failure["category"], failure["code"], failure["context"]),
@@ -370,7 +370,7 @@ class Lift(Case):
                 ("48 89 e0 c3", "RSP"), ("48 8d 05 00 00 00 00", "RIP"),
                 ("f3 c3", "prefix"), ("48 48 89 c8 c3", "prefix"),
                 ("ff d0 c3", "unsupported"), ("ff e0", "unsupported"),
-                ("b8 01 00 00 00 31 c0", "outside"), ("eb fe", "backward"), ("eb 05", "outside"), ("eb 01 48 89 c8 c3", "enters an instruction"),
+                ("b8 01 00 00 00 31 c0", "outside"), ("eb 05", "outside"), ("74 01 48 89 c8 c3", "enters an instruction"),
                 ("75 02 31 c0 c3", "flags"), ("e8 00 00 00 00", "unsupported"),
                 ("4c 89 c0 c3", "undefined incoming R8"), ("c3", "undefined RAX"),
                 ("48 29 c8 c3", "undefined incoming RAX"), ("44 29 c1 c3", "undefined incoming R8"),
@@ -397,6 +397,64 @@ class Lift(Case):
                 self.assertIn(b"LIFT_ERROR: 0x100", p.stderr)
                 self.assertEqual(output.read_text(), "sentinel")
         self.assertFalse(list(self.dir.glob("*.tmp-*")))
+
+    def test_cyclic_state_and_reachability(self):
+        original = (FIXTURES / "cfg.exe").read_bytes()
+        layout = Layout(original)
+        record = layout.file_offset(layout.directory(3)[0])
+        entry = 0x1000
+        image, output = self.dir / "graph.exe", self.dir / "graph.ll"
+
+        def lift(code, failure=None):
+            body = bytes.fromhex(code)
+            data = bytearray(original)
+            pos = layout.file_offset(entry)
+            data[pos:pos + len(body)] = body
+            struct.pack_into("<I", data, record + 4, entry + len(body))
+            image.write_bytes(data)
+            args = ("lift", image, "--rva", hex(entry), "--signature", "i64(i64,i64)",
+                    "--diagnostics-format", "json", "--output", output)
+            result = self.invoke(*args, code=1 if failure else 0)
+            if failure:
+                diagnostic = json.loads(result.stderr)
+                self.assertEqual(diagnostic["code"], failure)
+                context = diagnostic["context"]
+                self.assertEqual(context["signature"], "i64(i64,i64)")
+                self.assertLessEqual(int(context["block_rva"], 16), int(context["instruction_rva"], 16))
+                return context
+            return output.read_text()
+
+        # A skipped prefix does not impose another instruction interpretation.
+        for code in ("eb 01 48 89 c8 c3", "89 c8 c3 0f", "eb fe", "e9 fb ff ff ff",
+                     "ff c9 0f 85 f8 ff ff ff 89 c8 c3", "ff c9 75 fc 89 c8 c3",
+                     "39 d1 74 00 0f 94 c0 0f b6 c0 c3"):
+            with self.subTest(code=code):
+                lift(code)
+
+        # First arrival cannot borrow RAX or CF from a later iteration.
+        for code, diagnostic in (
+                ("48 01 c8 48 89 d0 eb f8", "LIFT_UNDEFINED_REGISTER"),
+                ("11 d1 eb fc", "LIFT_UNDEFINED_FLAG"),
+                # Carry valid on entry, invalidated by a narrow shift only on the backedge.
+                ("39 d1 72 05 c0 e1 08 eb f9 89 c8 c3", "LIFT_UNDEFINED_FLAG"),
+                # Only one path defines AH, so AX cannot be read at the join.
+                ("39 d1 74 04 88 cc eb 02 88 c8 0f b7 c0 c3", "LIFT_UNDEFINED_REGISTER")):
+            with self.subTest(code=code):
+                lift(code, diagnostic)
+
+        # Discover a target inside an instruction before and after the containing decode.
+        for code, origin, target in (
+                ("39 d1 74 01 48 89 c8 c3", 2, 5),
+                ("48 89 c8 eb fc", 3, 1),
+                ("39 d1 74 05 eb 04 0f 0f 0f 48 89 c8 c3", 4, 10),
+                ("e9 00 00 00 80", 0, 5 - (1 << 31)),
+                ("eb 00", 0, 2)):
+            with self.subTest(code=code):
+                context = lift(code, "LIFT_UNSUPPORTED_CONTROL_FLOW")
+                self.assertEqual((context["instruction_rva"], context["branch_target"]),
+                                 (hex(entry + origin), entry + target))
+        self.assertEqual(lift("eb 01 cc 0f", "LIFT_INVALID_ENCODING")["bytes"], "0f")
+        self.assertEqual(lift("ff e0", "LIFT_UNSUPPORTED_CONTROL_FLOW")["bytes"], "ffe0")
 
     def test_flag_missing_at_forward_join(self):
         image = FIXTURES / "arithmetic.exe"
