@@ -10,6 +10,7 @@ import shutil
 import subprocess
 import sys
 import tempfile
+import time
 
 
 SOURCE = Path(__file__).resolve().parents[1]
@@ -17,10 +18,18 @@ ROOT = Path(os.environ.get("BUILD_ROOT") or SOURCE / "build").resolve()
 PROFILES = SOURCE / "conan/profiles"
 TOOLCHAIN = Path("conan/conan_toolchain.cmake")
 ENV = os.environ
+# Nested CTest processes exercise the build wrapper themselves. Report only the requested outer run.
+TIMING_SUMMARY = ENV.pop("FORGE_CI_TIMING_SUMMARY", None)
 
 
-def run(*args):
-    subprocess.run(args, cwd=SOURCE, check=True)
+def run(*args, timing=None):
+    start = time.monotonic()
+    try:
+        subprocess.run(args, cwd=SOURCE, check=True)
+    finally:
+        if timing and TIMING_SUMMARY:
+            with Path(TIMING_SUMMARY).open("a") as summary:
+                print(f"- {timing} took {time.monotonic() - start:.1f}s", file=summary)
 
 
 def output(*args):
@@ -244,21 +253,24 @@ def workflow(action, name, configs, directory, identity):
     for key in ("LLVM_DIR", "LLVM_CONFIG", "BUILD_TESTING"):
         if ENV.get(key):
             args.append(f"-D{key}={ENV[key]}")
-    run("cmake", "--preset", name, "-B", directory, *args, f"-DFORGE_BUILD_ROOT={ROOT}")
+    run("cmake", "--preset", name, "-B", directory, *args, f"-DFORGE_BUILD_ROOT={ROOT}",
+        timing=f"{name} {config} CMake configure")
     if action == "configure":
         return
     standard = directory == SOURCE / "build" / name
     build = ["cmake", "--build", "--preset", name] if standard else ["cmake", "--build", directory]
     if name == "lint" and action in ("build", "lint"):
-        run(*build, "--target", "lint")
+        run(*build, "--target", "lint", timing="clang-tidy")
         return
     if action != "fixtures":
-        run(*build, "--config", config, "--parallel")
+        # An explicit bare --parallel overrides CMAKE_BUILD_PARALLEL_LEVEL for Makefiles.
+        parallel = [] if ENV.get("CMAKE_BUILD_PARALLEL_LEVEL") else ["--parallel"]
+        run(*build, "--config", config, *parallel, timing=f"{name} {config} build")
     if action in ("test", "sanitize", "fixtures"):
         test = ["ctest", "--preset", name] if standard else [
             "ctest", "--test-dir", directory, "--output-on-failure", "--no-tests=error"]
         args = ["-R", "^fixtures$"] if action == "fixtures" else shlex.split(ENV.get("CTEST_ARGS", ""))
-        run(*test, "-C", config, *args)
+        run(*test, "-C", config, *args, timing=f"{name} {config} CTest")
 
 
 def main(action):

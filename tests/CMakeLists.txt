@@ -3,53 +3,78 @@ configure_forge_cxx(forge_native_harness)
 if(APPLE)
   set_target_properties(forge_native_harness PROPERTIES OSX_ARCHITECTURES arm64)
 endif()
-if(DEFINED FORGE_DIFFERENTIAL_IR OR CMAKE_EXPORT_COMPILE_COMMANDS)
+if(DEFINED FORGE_DIFFERENTIAL_IR OR DEFINED FORGE_DIFFERENTIAL_CASES OR CMAKE_EXPORT_COMPILE_COMMANDS)
   add_library(decimal_pairs OBJECT EXCLUDE_FROM_ALL support/decimal_pairs.cpp)
   configure_forge_cxx(decimal_pairs)
   if(APPLE)
     set_target_properties(decimal_pairs PROPERTIES OSX_ARCHITECTURES arm64)
   endif()
 endif()
-if(DEFINED FORGE_DIFFERENTIAL_IR)
+if(DEFINED FORGE_DIFFERENTIAL_IR OR DEFINED FORGE_DIFFERENTIAL_CASES)
   if(NOT APPLE)
     message(FATAL_ERROR "Differential harness compilation requires macOS")
   endif()
   forge_llvm_tool(opt)
   forge_llvm_tool(llc)
-  set(object "${CMAKE_CURRENT_BINARY_DIR}/lifted.o")
-  if(NOT DEFINED FORGE_DIFFERENTIAL_VARIANT)
-    set(FORGE_DIFFERENTIAL_VARIANT baseline)
-  endif()
-  set(input_ir "${FORGE_DIFFERENTIAL_IR}")
-  if(FORGE_DIFFERENTIAL_VARIANT STREQUAL "o2")
-    set(input_ir "${CMAKE_CURRENT_BINARY_DIR}/optimized.ll")
-    get_filename_component(ir_directory "${FORGE_DIFFERENTIAL_IR}" DIRECTORY)
-    get_filename_component(ir_name "${FORGE_DIFFERENTIAL_IR}" NAME)
-    add_custom_command(OUTPUT "${input_ir}"
-      COMMAND "${opt}" -passes=verify -disable-output "${ir_name}"
-      COMMAND "${opt}" "-passes=default<O2>" -S "${ir_name}" -o "${input_ir}"
-      WORKING_DIRECTORY "${ir_directory}"
-      DEPENDS "${FORGE_DIFFERENTIAL_IR}" VERBATIM)
-  elseif(NOT FORGE_DIFFERENTIAL_VARIANT STREQUAL "baseline")
-    message(FATAL_ERROR "Select baseline or o2 for the differential IR variant")
-  endif()
-  add_custom_command(OUTPUT "${object}"
-    COMMAND "${opt}" -passes=verify -disable-output "${input_ir}"
-    COMMAND "${llc}" -filetype=obj "${input_ir}" -o "${object}"
-    DEPENDS "${input_ir}" VERBATIM)
-  add_custom_target(differential_decimal_pairs_objects DEPENDS "${object}")
-  add_dependencies(differential_decimal_pairs_objects decimal_pairs)
-  add_executable(differential_decimal_pairs EXCLUDE_FROM_ALL $<TARGET_OBJECTS:decimal_pairs>)
+
+  function(add_differential_variant target harness ir variant output)
+    set(object "${output}/tests/lifted.o")
+    set(input_ir "${ir}")
+    if(variant STREQUAL "o2")
+      set(input_ir "${output}/tests/optimized.ll")
+      get_filename_component(ir_directory "${ir}" DIRECTORY)
+      get_filename_component(ir_name "${ir}" NAME)
+      add_custom_command(OUTPUT "${input_ir}"
+        COMMAND "${CMAKE_COMMAND}" -E make_directory "${output}/tests"
+        COMMAND "${opt}" -passes=verify -disable-output "${ir_name}"
+        COMMAND "${opt}" "-passes=default<O2>" -S "${ir_name}" -o "${input_ir}"
+        WORKING_DIRECTORY "${ir_directory}"
+        DEPENDS "${ir}" VERBATIM)
+    elseif(NOT variant STREQUAL "baseline")
+      message(FATAL_ERROR "Select baseline or o2 for the differential IR variant")
+    endif()
+    add_custom_command(OUTPUT "${object}"
+      COMMAND "${CMAKE_COMMAND}" -E make_directory "${output}/tests"
+      COMMAND "${opt}" -passes=verify -disable-output "${input_ir}"
+      COMMAND "${llc}" -filetype=obj "${input_ir}" -o "${object}"
+      DEPENDS "${input_ir}" VERBATIM)
+    add_custom_target(${target}_objects DEPENDS "${object}")
+    add_dependencies(${target}_objects ${harness})
+    add_executable(${target} EXCLUDE_FROM_ALL $<TARGET_OBJECTS:${harness}>)
+    if(XCODE)
+      target_sources(${target} PRIVATE "${CMAKE_CURRENT_BINARY_DIR}/differential_link.cpp")
+    endif()
+    add_dependencies(${target} ${target}_objects)
+    target_link_libraries(${target} PRIVATE "${object}")
+    target_link_options(${target} PRIVATE ${sanitizer_link_flags})
+    set_target_properties(${target} PROPERTIES OSX_ARCHITECTURES arm64
+      OUTPUT_NAME "differential_${harness}" RUNTIME_OUTPUT_DIRECTORY "$<1:${output}/bin>")
+  endfunction()
+
   if(XCODE)
-    set(xcode_source "${CMAKE_CURRENT_BINARY_DIR}/decimal_pairs_link.cpp")
-    file(GENERATE OUTPUT "${xcode_source}" CONTENT "// Xcode needs a compilable source to link an executable.\n")
-    target_sources(differential_decimal_pairs PRIVATE "${xcode_source}")
+    # Xcode needs a compilable source to link an executable.
+    file(GENERATE OUTPUT "${CMAKE_CURRENT_BINARY_DIR}/differential_link.cpp" CONTENT "// Xcode link source.\n")
   endif()
-  add_dependencies(differential_decimal_pairs differential_decimal_pairs_objects)
-  target_link_libraries(differential_decimal_pairs PRIVATE "${object}")
-  target_link_options(differential_decimal_pairs PRIVATE ${sanitizer_link_flags})
-  set_target_properties(differential_decimal_pairs PROPERTIES OSX_ARCHITECTURES arm64
-    RUNTIME_OUTPUT_DIRECTORY "$<1:${CMAKE_BINARY_DIR}/bin>")
+  if(DEFINED FORGE_DIFFERENTIAL_CASES)
+    foreach(entry IN LISTS FORGE_DIFFERENTIAL_CASES)
+      if(NOT entry MATCHES "^([a-z][a-z0-9_]*)/([a-z][a-z0-9_]*):([a-z][a-z0-9_]*)$")
+        message(FATAL_ERROR "Invalid differential case: ${entry}")
+      endif()
+      set(case_dir "${FORGE_DIFFERENTIAL_OUTPUT}/${CMAKE_MATCH_1}/${CMAKE_MATCH_2}")
+      set(harness "${CMAKE_MATCH_3}")
+      set(target_prefix "diff-${CMAKE_MATCH_1}-${CMAKE_MATCH_2}")
+      foreach(variant baseline o2)
+        add_differential_variant("${target_prefix}-${variant}" "${harness}" "${case_dir}/generated/lifted.ll"
+          "${variant}" "${case_dir}/${variant}/native")
+      endforeach()
+    endforeach()
+  else()
+    if(NOT DEFINED FORGE_DIFFERENTIAL_VARIANT)
+      set(FORGE_DIFFERENTIAL_VARIANT baseline)
+    endif()
+    add_differential_variant(differential_decimal_pairs decimal_pairs "${FORGE_DIFFERENTIAL_IR}"
+      "${FORGE_DIFFERENTIAL_VARIANT}" "${CMAKE_BINARY_DIR}")
+  endif()
 endif()
 if(BUILD_TESTING OR CMAKE_EXPORT_COMPILE_COMMANDS)
   add_executable(integer_semantics unit/integer.cpp)

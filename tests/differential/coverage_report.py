@@ -11,15 +11,19 @@ import sys
 import differential as diff
 from artifacts import directory, file_sha256, read_file, reference
 from comparison import Observation, describe, differences
-from manifests import field
+from manifests import field, unique_keys
 from protocol import STREAM_LIMIT
 from run import verified_export
 
 STATUSES = ("passed", "failed", "error", "reference_only", "blocked")
-JOB_STAGES = {"macos": ("formatting", "lint", "debug", "dev_oracles", "sanitize", "sanitize_oracles"),
-              "windows-fixtures": ("build", "capture", "wine_tests"),
-              "differential": ("debug", "release", "negative_tests")}
-JOBS = tuple(JOB_STAGES)
+JOB_STAGES = {
+    "macos-dev": ("debug", "dev_oracles"),
+    "macos-sanitize": ("sanitize", "sanitize_oracles"),
+    "macos-presets": ("formatting", "lint", "release", "xcode_debug", "xcode_release", "layout"),
+    "windows-fixtures": ("build", "capture", "wine_tests"),
+    "differential": ("debug", "release", "negative_tests"),
+}
+FORGE_PRODUCERS = {"debug": "macos-sanitize", "release": "macos-dev"}
 INVALID = (ValueError, OSError, KeyError, TypeError)
 
 
@@ -157,9 +161,10 @@ def inspect_result(row, case, record, entry, folder, wanted, run_id, expected_fo
 
 
 def aggregate(run_id, revision, jobs, *, suite_root=diff.SUITE, binaries=diff.BINARIES,
-              references=diff.REFERENCES, output=diff.OUTPUT, forge_digests=None):
+              references=diff.REFERENCES, output=diff.OUTPUT, forge_digests=None, prerequisite_errors=()):
     report = dict(schema_version=1, revision=revision, run_id=run_id, target=diff.TARGET, jobs=jobs,
-                  fixture_count=0, enabled_case_count=0, gate="failed", configurations={}, cases=[], errors=[])
+                  fixture_count=0, enabled_case_count=0, gate="failed", configurations={}, cases=[],
+                  errors=list(prerequisite_errors))
     errors = report["errors"]
     for job, outcome in jobs.items():
         if outcome != "success":
@@ -269,44 +274,73 @@ def markdown(report):
     return "\n".join(lines) + "\n"
 
 
-def verify_job_stages(report, needs):
-    stages = {}
+def hosted_report(raw_needs, current_run, revision, **paths):
+    errors = []
+    try:
+        needs = json.loads(raw_needs, object_pairs_hook=unique_keys)
+        require(isinstance(needs, dict), "expected an object")
+    except (ValueError, TypeError) as error:
+        errors.append(f"invalid GitHub needs: {error}")
+        needs = {}
+
+    jobs, stages, outputs = {}, {}, {}
     for job, expected in JOB_STAGES.items():
-        raw = needs.get(job, {}).get("outputs", {}).get("stages")
+        entry = needs.get(job)
+        entry = entry if isinstance(entry, dict) else {}
+        jobs[job] = entry.get("result", "missing")
+        outputs[job] = entry.get("outputs")
+        if not isinstance(outputs[job], dict):
+            outputs[job] = {}
         try:
-            observed = json.loads(raw) if raw else {}
+            raw = field(outputs[job], "stages", str)
+            observed = json.loads(raw, object_pairs_hook=unique_keys)
             require(isinstance(observed, dict), "invalid stage outputs")
         except (ValueError, TypeError) as error:
-            report["errors"].append(f"{job}: {error}")
+            errors.append(f"{job}: {error}")
             observed = {}
         stages[job] = {k: observed.get(k, "not_run") for k in expected}
         if any(value != "success" for value in stages[job].values()):
-            report["errors"].append(f"{job}: required stage failed or did not run")
-            report["gate"] = "failed"
+            errors.append(f"{job}: required stage failed or did not run")
+
+    digests = {}
+    for config, job in FORGE_PRODUCERS.items():
+        digest = outputs[job].get(config + "_forge")
+        if not isinstance(digest, str) or not re.fullmatch("[0-9a-f]{64}", digest):
+            errors.append(f"{job}: missing or invalid {config} Forge digest")
+            digest = ""
+        digests[config] = digest
+
+    # A gate-only rerun can consume the successful differential job's original attempt.
+    # Bind its reports to that job output, the current workflow run, and the checked-out revision.
+    run_id = outputs["differential"].get("evidence_run_id")
+    pattern = r"([1-9][0-9]*)-([1-9][0-9]*)-([0-9a-f]{40})"
+    current = re.fullmatch(pattern, current_run)
+    producer = re.fullmatch(pattern, run_id) if isinstance(run_id, str) else None
+    if not (current and producer and current[1] == producer[1] and int(producer[2]) <= int(current[2])
+            and current[3] == producer[3] == revision):
+        errors.append("differential: missing or invalid evidence run ID, attempt, or revision")
+        run_id = current_run
+
+    report = aggregate(run_id, revision, jobs, forge_digests=digests, prerequisite_errors=errors, **paths)
     report["job_stages"] = stages
+    return report
 
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--jobs", help="JSON GitHub needs context (all three prerequisite jobs required)")
+    parser.add_argument("--jobs", help="JSON GitHub needs context for all required CI jobs")
     parser.add_argument("--local-jobs", nargs=3, choices=("success", "failure", "skipped"))
     parser.add_argument("--comparison", choices=("success", "failure"), default="success")
     args = parser.parse_args()
-    jobs = {"differential": args.comparison}
-    if args.jobs is not None:
-        needs = json.loads(args.jobs)
-        jobs = {job: needs.get(job, {}).get("result", "missing") for job in JOBS}
-    elif args.local_jobs:
-        jobs = dict(zip(JOBS, args.local_jobs))
     run_id = os.environ["FORGE_TEST_RUN_ID"]
     revision = subprocess.check_output(["git", "rev-parse", "HEAD"], cwd=diff.SUITE, text=True).strip()
-    forge_digests = None
     if args.jobs is not None:
-        outputs = needs.get("macos", {}).get("outputs", {})
-        forge_digests = {config: outputs.get(config + "_forge", "") for config in diff.CONFIGS}
-    report = aggregate(run_id, revision, jobs, forge_digests=forge_digests)
-    if args.jobs is not None:
-        verify_job_stages(report, needs)
+        report = hosted_report(args.jobs, run_id, revision)
+    else:
+        jobs = {"differential": args.comparison}
+        if args.local_jobs:
+            jobs = dict(zip(("macos", "windows-fixtures", "differential"), args.local_jobs))
+        report = aggregate(run_id, revision, jobs)
     report["environment"] = "github-actions" if args.jobs is not None else "local"
     folder = diff.BUILD / "differential/coverage"
     folder.mkdir(parents=True, exist_ok=True)
