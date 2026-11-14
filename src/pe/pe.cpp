@@ -28,7 +28,7 @@ namespace forge {
                 }
 
                 const uint64_t delta = rva - s.rva;
-                const uint32_t extent = std::min(s.virtualSize, s.rawSize);
+                const uint32_t extent = s.initializedSize();
 
                 if (delta >= extent) {
                     continue;
@@ -160,6 +160,11 @@ namespace forge {
             header = optional.read<pe32plus_header>();
             optional.slice(sizeof(header),
                            uint64_t(header.NumberOfRvaAndSize) * sizeof(data_directory));
+            if (header.SizeOfImage &&
+                header.ImageBase > UINT64_MAX - (uint64_t(header.SizeOfImage) - 1)) {
+                invalid(file.label, opt, "preferred image virtual addresses overflow");
+            }
+
             if (header.AddressOfEntryPoint && header.AddressOfEntryPoint >= header.SizeOfImage) {
                 invalid(file.label, opt, "entry point RVA exceeds SizeOfImage");
             }
@@ -176,15 +181,27 @@ namespace forge {
             for (unsigned i = 0; i < coffHeader.NumberOfSections; ++i) {
                 auto s = sectionHeaders.read<coff_section>(i * sizeof(coff_section));
                 if (s.SizeOfRawData &&
-                    (!s.PointerToRawData ||
+                    (s.PointerToRawData < header.SizeOfHeaders ||
                      uint64_t(s.PointerToRawData) + s.SizeOfRawData > file.bytes.size())) {
                     invalid("section raw data", table + i * sizeof(s),
                             "missing or truncated file range");
                 }
+                if (s.VirtualSize && s.VirtualAddress < header.SizeOfHeaders) {
+                    invalid("section virtual range", table + i * sizeof(s),
+                            "overlaps image headers");
+                }
+
                 if (uint64_t(s.VirtualAddress) + s.VirtualSize > header.SizeOfImage) {
                     invalid("section virtual range", table + i * sizeof(s), "exceeds SizeOfImage");
                 }
                 for (const auto &previous : sections) {
+                    if (s.SizeOfRawData && previous.rawSize &&
+                        s.PointerToRawData < uint64_t(previous.fileOffset) + previous.rawSize &&
+                        previous.fileOffset < uint64_t(s.PointerToRawData) + s.SizeOfRawData) {
+                        invalid("section raw data", table + i * sizeof(s),
+                                "overlaps another section");
+                    }
+
                     if (s.VirtualSize && previous.virtualSize &&
                         s.VirtualAddress < uint64_t(previous.rva) + previous.virtualSize &&
                         previous.rva < uint64_t(s.VirtualAddress) + s.VirtualSize) {
@@ -207,7 +224,8 @@ namespace forge {
                                     s.VirtualAddress,
                                     s.VirtualSize,
                                     s.PointerToRawData,
-                                    s.SizeOfRawData});
+                                    s.SizeOfRawData,
+                                    (s.Characteristics & COFF::IMAGE_SCN_MEM_DISCARDABLE) != 0});
             }
             if (coffHeader.NumberOfSymbols && !coffHeader.PointerToSymbolTable) {
                 invalid("COFF symbol table", pe + 4, "missing file offset");
@@ -312,6 +330,40 @@ namespace forge {
             }
         }
 
+        struct ImportDescriptor {
+            uint32_t name, lookup, addressTable, handle;
+        };
+
+        std::optional<ImportDescriptor> readImportDescriptor(const View &dir, size_t &pos,
+                                                             bool delayed) {
+            if (delayed) {
+                const auto d = dir.read<delay_import_directory_table_entry>(pos);
+                if (dir.bytes.substr(pos, sizeof(d)).find_first_not_of('\0') == StringRef::npos) {
+                    return {};
+                }
+
+                if (d.Attributes != 1) {
+                    invalid(dir.label, dir.offset + pos,
+                            "unsupported delay descriptor attributes (expected RVA-based form)");
+                }
+
+                pos += sizeof(d);
+                return ImportDescriptor{d.Name, d.DelayImportNameTable, d.DelayImportAddressTable,
+                                        d.ModuleHandle};
+            }
+
+            const auto d = dir.read<coff_import_directory_table_entry>(pos);
+            if (d.isNull()) {
+                return {};
+            }
+
+            pos += sizeof(d);
+            return ImportDescriptor{d.NameRVA,
+                                    d.ImportLookupTableRVA ? d.ImportLookupTableRVA
+                                                           : d.ImportAddressTableRVA,
+                                    d.ImportAddressTableRVA, 0};
+        }
+
         void ImageParser::imports(Module &module, bool delayed) {
             auto dir = delayed ? directory(COFF::DELAY_IMPORT_DESCRIPTOR, "delay imports")
                                : directory(COFF::IMPORT_TABLE, "imports");
@@ -320,35 +372,15 @@ namespace forge {
             }
             size_t pos = 0;
             for (;;) {
-                uint32_t dllName, lookup;
-                if (delayed) {
-                    auto d = dir->read<delay_import_directory_table_entry>(pos);
-                    if (dir->bytes.substr(pos, sizeof(d)).find_first_not_of('\0') ==
-                        StringRef::npos) {
-                        return;
-                    }
-                    if (d.Attributes != 1) {
-                        invalid(
-                            dir->label, dir->offset + pos,
-                            "unsupported delay descriptor attributes (expected RVA-based form)");
-                    }
-                    dllName = d.Name;
-                    lookup = d.DelayImportNameTable;
-                    pos += sizeof(d);
-                } else {
-                    auto d = dir->read<coff_import_directory_table_entry>(pos);
-                    if (d.isNull()) {
-                        return;
-                    }
-                    dllName = d.NameRVA;
-                    lookup =
-                        d.ImportLookupTableRVA ? d.ImportLookupTableRVA : d.ImportAddressTableRVA;
-                    pos += sizeof(d);
+                const auto descriptor = readImportDescriptor(*dir, pos, delayed);
+                if (!descriptor) {
+                    return;
                 }
+
                 count(1, *dir);
-                auto spelling = name(tail(dllName, "import DLL name"));
+                auto spelling = name(tail(descriptor->name, "import DLL name"));
                 module.imports.push_back(
-                    {spelling, StringRef(spelling).lower(), delayed, symbols(lookup)});
+                    {spelling, StringRef(spelling).lower(), delayed, symbols(descriptor->lookup)});
             }
         }
 
@@ -578,6 +610,154 @@ namespace forge {
     std::optional<MappedRange> ParsedImage::mapRva(uint64_t rva,
                                                    std::optional<uint32_t> size) const {
         return mapFileRange(metadata.sections, buffer->getBuffer(), rva, size);
+    }
+
+    const Section *ParsedImage::sectionAtRva(uint64_t rva) const {
+        for (const auto &section : metadata.sections) {
+            if (rva >= section.rva && rva - section.rva < section.virtualSize) {
+                return &section;
+            }
+        }
+
+        return nullptr;
+    }
+
+    llvm::StringRef ParsedImage::initializedBytes(RvaRange range) const {
+        const auto *section = sectionAtRva(range.begin);
+
+        if (!section || range.end <= range.begin ||
+            range.end > uint64_t(section->rva) + section->virtualSize) {
+            throw InspectionError("invalid virtual section interval at RVA " + hex(range.begin));
+        }
+
+        const auto fileEnd =
+            std::min(range.end, uint64_t(section->rva) + section->initializedSize());
+
+        if (fileEnd <= range.begin) {
+            return {};
+        }
+
+        auto raw = mapRva(range.begin, static_cast<uint32_t>(fileEnd - range.begin));
+
+        if (!raw) {
+            throw InspectionError("missing initialized section bytes at RVA " + hex(range.begin));
+        }
+
+        return raw->bytes;
+    }
+
+    unsigned relocationWidth(unsigned type) {
+        switch (type) {
+        case llvm::COFF::IMAGE_REL_BASED_ABSOLUTE:
+            return 0;
+        case llvm::COFF::IMAGE_REL_BASED_HIGH:
+        case llvm::COFF::IMAGE_REL_BASED_LOW:
+        case llvm::COFF::IMAGE_REL_BASED_HIGHADJ:
+            return 2;
+        case llvm::COFF::IMAGE_REL_BASED_HIGHLOW:
+            return 4;
+        default:
+            // DIR64 and the existing conservative footprint for unknown AMD64 types.
+            return 8;
+        }
+    }
+
+    namespace {
+        // Some images omit the aggregate IAT directory. The descriptors identify the
+        // loader-written slots even when they lie in an otherwise immutable section.
+        void appendImportWrites(const ParsedImage &image, const llvm::object::data_directory *dir,
+                                bool delayed, size_t &remaining, std::vector<RvaRange> &ranges) {
+            if (!dir || (!dir->Size && !dir->RelativeVirtualAddress)) {
+                return;
+            }
+
+            auto mapped = image.mapRva(dir->RelativeVirtualAddress, dir->Size);
+            if (!mapped || !dir->Size) {
+                throw InspectionError(
+                    "invalid import directory while mapping immutable image data");
+            }
+
+            View view{mapped->bytes, mapped->fileOffset, "image import descriptor"};
+            size_t pos = 0;
+            while (auto descriptor = readImportDescriptor(view, pos, delayed)) {
+                if (!remaining) {
+                    invalid(view.label, view.offset + pos, "import descriptor limit exceeded");
+                }
+
+                --remaining;
+                auto lookup = image.mapRva(descriptor->lookup);
+                if (!lookup || !descriptor->addressTable) {
+                    invalid(view.label, view.offset + pos, "invalid import thunk mapping");
+                }
+
+                View thunks{lookup->bytes, lookup->fileOffset, "image import thunks"};
+                uint64_t size = 0;
+                while (thunks.read<llvm::support::ulittle64_t>(size)) {
+                    if (!remaining) {
+                        invalid(thunks.label, thunks.offset + size, "import slot limit exceeded");
+                    }
+
+                    --remaining;
+                    size += 8;
+                }
+
+                if (size) {
+                    ranges.push_back(
+                        {descriptor->addressTable, uint64_t(descriptor->addressTable) + size});
+                }
+
+                if (descriptor->handle) {
+                    ranges.push_back({descriptor->handle, uint64_t(descriptor->handle) + 8});
+                }
+            }
+        }
+    } // namespace
+
+    std::vector<RvaRange> ParsedImage::imageReadExclusions() const {
+        std::vector<RvaRange> ranges;
+        for (const auto &block : metadata.relocations) {
+            for (const auto &rel : block.entries) {
+                if (const unsigned width = relocationWidth(rel.type)) {
+                    ranges.push_back({rel.rva, uint64_t(rel.rva) + width});
+                }
+            }
+        }
+
+        if (metadata.tls && metadata.tls->index >= metadata.imageBase && metadata.tls->index) {
+            const auto rva = metadata.tls->index - metadata.imageBase;
+            if (rva <= UINT32_MAX) {
+                ranges.push_back({rva, rva + 4});
+            }
+        }
+
+        const auto *iat = coff->getDataDirectory(llvm::COFF::IAT);
+        if (iat && bool(iat->Size) != bool(iat->RelativeVirtualAddress)) {
+            throw InspectionError("incomplete import address table directory");
+        }
+
+        if (iat && iat->Size) {
+            ranges.push_back(
+                {iat->RelativeVirtualAddress, uint64_t(iat->RelativeVirtualAddress) + iat->Size});
+        }
+
+        size_t remaining = 1'000'000;
+        for (bool delayed : {false, true}) {
+            const auto *dir = coff->getDataDirectory(delayed ? llvm::COFF::DELAY_IMPORT_DESCRIPTOR
+                                                             : llvm::COFF::IMPORT_TABLE);
+            appendImportWrites(*this, dir, delayed, remaining, ranges);
+        }
+
+        llvm::sort(ranges, [](auto a, auto b) { return a.begin < b.begin; });
+        std::vector<RvaRange> merged;
+        for (auto range : ranges) {
+            if (!merged.empty() && range.begin <= merged.back().end) {
+                merged.back().end = std::max(merged.back().end, range.end);
+            } else {
+                merged.push_back(range);
+            }
+        }
+
+        return merged;
     }
 
     const llvm::object::ObjectFile &ParsedImage::object() const { return *coff; }

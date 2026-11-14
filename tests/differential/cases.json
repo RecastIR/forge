@@ -272,5 +272,40 @@
     "export": "count_locals",
     "signature": "i64(i64,i64)",
     "harness": "decimal_pairs"
+  },
+  {
+    "fixture_id": "image/lookup",
+    "scope": "function",
+    "export": "lookup",
+    "signature": "i64(i64,i64)",
+    "harness": "decimal_pairs"
+  },
+  {
+    "fixture_id": "image/direct",
+    "scope": "function",
+    "export": "image_direct",
+    "signature": "i64(i64,i64)",
+    "harness": "decimal_pairs"
+  },
+  {
+    "fixture_id": "image/spill",
+    "scope": "function",
+    "export": "image_spill",
+    "signature": "i64(i64,i64)",
+    "harness": "decimal_pairs"
+  },
+  {
+    "fixture_id": "image/loop",
+    "scope": "function",
+    "export": "image_loop",
+    "signature": "i64(i64,i64)",
+    "harness": "decimal_pairs"
+  },
+  {
+    "fixture_id": "image/widths",
+    "scope": "function",
+    "export": "image_widths",
+    "signature": "i64(i64,i64)",
+    "harness": "decimal_pairs"
   }
 ]

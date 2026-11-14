@@ -25,7 +25,7 @@ def initial_slots(invocation):
     return [0xabcdef0123456000 + invocation * 0x1000 + i * 0x101 for i in range(7)]
 
 
-class StackTests(unittest.TestCase):
+class GuestExecution(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
         directory = tempfile.TemporaryDirectory()
@@ -34,11 +34,11 @@ class StackTests(unittest.TestCase):
         report = json.loads(run(FORGE, "inspect", IMAGE, "--format", "json"))
         cls.exports = {name: int(row["rva"], 16) for row in report["modules"][0]["exports"] for name in row["names"]}
 
-    def variants(self, name, *, state=False, corrupt_return=None):
+    def variants(self, name, *, state=False, corrupt_return=None, image=IMAGE):
         rva = self.exports[name]
         ir = self.work / f"{name}.ll"
         signature = [] if state else ["--signature", "i64(i64,i64)"]
-        run(FORGE, "lift", IMAGE, "--rva", hex(rva), "--output", ir, *signature)
+        run(FORGE, "lift", image, "--rva", hex(rva), "--output", ir, *signature)
         if corrupt_return:
             # Guest instructions cannot write the reserved slot. Corrupt one byte
             # after synthetic entry to exercise RET's independent integrity check.
@@ -71,6 +71,8 @@ class StackTests(unittest.TestCase):
         child = subprocess.run([exe], input=data, capture_output=True, timeout=15)
         self.assertEqual(child.returncode, -signal.SIGTRAP, (exe.name, pairs, child.stderr))
 
+
+class StackTests(GuestExecution):
     def test_boundaries(self):
         value = 0x876543210fedcba9
         for width, suffix in ((1, "b"), (2, "w"), (4, "l"), (8, "q")):

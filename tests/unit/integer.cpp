@@ -127,6 +127,7 @@ namespace {
 
         for (const auto &[opcode, form] : {std::pair{"CMP32rm", Form::Load},
                                            {"CMP64mi8", Form::MemoryImmediate},
+                                           {"SUB64rm", Form::Load},
                                            {"ADD32mi8", Form::MemoryImmediate}}) {
             auto instruction = integerInstruction(opcode);
 
@@ -134,6 +135,12 @@ namespace {
                 !flagEffect(instruction->op, instruction->width).generated.all()) {
                 throw std::runtime_error(std::string("incorrect arithmetic memory form ") + opcode);
             }
+        }
+
+        const auto multiply = integerInstruction("IMUL64rm");
+        if (!multiply || multiply->op != Op::Imul || multiply->form != Form::Load ||
+            multiply->width != 64 || multiply->sourceWidth != 64) {
+            throw std::runtime_error("incorrect two-operand memory multiply");
         }
 
         for (StringRef opcode :

@@ -1,0 +1,34 @@
+{
+  "schema_version": 1,
+  "id": "image/direct",
+  "description": "Read a high-bit doubleword from read-only image storage.",
+  "source": "fixtures/image/image_direct.c",
+  "binary": "image_direct.exe",
+  "args": [
+    "0",
+    "5",
+    "1",
+    "-3",
+    "2",
+    "0",
+    "3",
+    "17",
+    "4",
+    "-1",
+    "5",
+    "9999999999",
+    "6",
+    "-9999999999",
+    "7",
+    "2",
+    "-1",
+    "1",
+    "-2",
+    "-4"
+  ],
+  "expected": {
+    "exit_code": 0,
+    "stdout": "4275878547\n4275878556\n4275878554\n4275878538\n4275878557\n-5724121442\n14275878557\n4275878557\n4275878550\n4275878554\n",
+    "stderr": ""
+  }
+}

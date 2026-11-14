@@ -380,6 +380,56 @@
       "id": "frames/count_locals",
       "config": "release",
       "target": "macos-arm64"
+    },
+    {
+      "id": "image/lookup",
+      "config": "debug",
+      "target": "macos-arm64"
+    },
+    {
+      "id": "image/lookup",
+      "config": "release",
+      "target": "macos-arm64"
+    },
+    {
+      "id": "image/direct",
+      "config": "debug",
+      "target": "macos-arm64"
+    },
+    {
+      "id": "image/direct",
+      "config": "release",
+      "target": "macos-arm64"
+    },
+    {
+      "id": "image/spill",
+      "config": "debug",
+      "target": "macos-arm64"
+    },
+    {
+      "id": "image/spill",
+      "config": "release",
+      "target": "macos-arm64"
+    },
+    {
+      "id": "image/loop",
+      "config": "debug",
+      "target": "macos-arm64"
+    },
+    {
+      "id": "image/loop",
+      "config": "release",
+      "target": "macos-arm64"
+    },
+    {
+      "id": "image/widths",
+      "config": "debug",
+      "target": "macos-arm64"
+    },
+    {
+      "id": "image/widths",
+      "config": "release",
+      "target": "macos-arm64"
     }
   ]
 }

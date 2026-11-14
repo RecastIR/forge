@@ -5,6 +5,7 @@
 #include "llvm/ADT/StringExtras.h"
 #include "llvm/BinaryFormat/COFF.h"
 
+#include <algorithm>
 #include <cstdint>
 #include <optional>
 #include <string>
@@ -21,6 +22,17 @@ namespace forge {
     struct Section {
         std::string name, permissions;
         uint32_t rva, virtualSize, fileOffset, rawSize;
+        bool discardable;
+
+        uint32_t initializedSize() const { return std::min(virtualSize, rawSize); }
+
+        bool immutable() const {
+            return permissions[0] == 'r' && permissions[1] != 'w' && !discardable;
+        }
+    };
+
+    struct RvaRange {
+        uint64_t begin, end;
     };
 
     struct MappedRange {
@@ -51,6 +63,8 @@ namespace forge {
         uint32_t rva;
         std::optional<int16_t> adjustment;
     };
+
+    unsigned relocationWidth(unsigned type);
 
     struct RelocationBlock {
         uint32_t pageRva, size;
@@ -106,6 +120,12 @@ namespace forge {
         // Omitting size maps to the end of the file-backed extent.
         std::optional<MappedRange> mapRva(uint64_t rva,
                                           std::optional<uint32_t> size = std::nullopt) const;
+        const Section *sectionAtRva(uint64_t rva) const;
+        // Borrow the initialized prefix of a virtual interval inside a single section.
+        // The remaining bytes in the interval are zero-filled by the PE loader.
+        llvm::StringRef initializedBytes(RvaRange range) const;
+        // Ranges whose loader-visible contents cannot be obtained from the preferred-base snapshot.
+        std::vector<RvaRange> imageReadExclusions() const;
         // DWARF enrichment borrows this object for the duration of its lookup.
         const llvm::object::ObjectFile &object() const;
 

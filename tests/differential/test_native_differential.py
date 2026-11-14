@@ -3,6 +3,7 @@ import argparse
 import os
 from pathlib import Path
 import re
+import struct
 import subprocess
 import sys
 import tempfile
@@ -79,6 +80,45 @@ class NativeDifferentialTests(unittest.TestCase):
             self.assertEqual((failure["context"]["instruction_rva"], failure["context"]["file_offset"],
                               failure["context"]["bytes"]), (hex(selected.start), entry.file_offset, "ff31"))
             self.assertFalse(ir.exists())
+
+    def test_original_image_table(self):
+        manifest = next(m for m in diff.load_catalog() if m.case["id"] == "image/lookup")
+        with tempfile.TemporaryDirectory(dir=self.tmp) as tmp:
+            work = Path(tmp)
+            image = work / "lookup.exe"
+            data = bytearray((diff.BINARIES / "release" / image.name).read_bytes())
+            observed, _ = diff.reference(diff.REFERENCES, manifest, "release", diff.sha256(data))
+            image.write_bytes(data)
+            selected = diff.analyze(self.forge, image, "lookup", work)
+            # The linked Release export takes its array base with LEA RAX,[RIP+disp32].
+            body = data[selected.file_offset:selected.file_offset + selected.end - selected.start]
+            opcode = bytes.fromhex("488d05")
+            self.assertEqual(body.count(opcode), 1)
+            pos = body.index(opcode)
+            table = selected.start + pos + 7 + struct.unpack_from("<i", body, pos + 3)[0]
+            sections = diff.read_json(work / "inspect.json")["modules"][0]["sections"]
+            section, = [s for s in sections if s["permissions"] == "r--"
+                        and 0 <= table-int(s["rva"], 16) <= min(s["raw_size"], s["virtual_size"]) - 8]
+            entry = section["file_offset"] + table - int(section["rva"], 16) + 4
+            struct.pack_into("<I", data, entry, struct.unpack_from("<I", data, entry)[0] + 1)
+            image.write_bytes(data)
+            ir = work / diff.CANONICAL_IR
+            ir.parent.mkdir()
+            diff.lift(self.forge, image, {"signature": "i64(i64,i64)"}, selected, ir)
+            image.unlink()
+            args = manifest.case["args"]
+            lines = [int(line) for line in observed.stdout.splitlines()]
+            for i, (index, multiplier) in enumerate(zip(args[::2], args[1::2])):
+                if int(index) & 7 == 1:
+                    lines[i] += int(multiplier)
+            expected = "".join(f"{value}\n" for value in lines).encode()
+            self.assertNotEqual(expected, observed.stdout)
+            for variant in diff.VARIANTS:
+                directory = work / variant
+                directory.mkdir()
+                exe, _ = diff.native.build(ir, "decimal_pairs", directory, "release", variant)
+                result = diff.native.execute(exe, args, directory)
+                self.assertEqual((result.stdout, result.stderr, result.exit_code), (expected, b"", 0))
 
     def test_changed_return(self):
         def change_return(source):

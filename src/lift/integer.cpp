@@ -100,7 +100,7 @@ namespace forge::x86 {
 
         Form form;
 
-        if (opcode == "CMP32rm") {
+        if (opcode == "CMP32rm" || opcode == "IMUL64rm" || opcode == "SUB64rm") {
             form = Form::Load;
         } else if (opcode == "CMP64mi8" || opcode == "ADD32mi8") {
             form = Form::MemoryImmediate;

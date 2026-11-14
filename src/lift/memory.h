@@ -14,17 +14,19 @@ namespace forge::x86 {
 
     // IR storage belongs to the lifted function. The builder and its insertion
     // point are shared with instruction lowering, including guard continuations.
-    class GuestStack {
+    class GuestMemory {
       public:
         static constexpr uint64_t base = 0x70000000;
         static constexpr unsigned capacity = 4096;
         static constexpr uint64_t entryRsp = base + capacity - 32 - 8;
 
-        explicit GuestStack(llvm::IRBuilder<> &builder) : ir(builder) {}
+        explicit GuestMemory(llvm::IRBuilder<> &builder) : ir(builder) {}
 
-        void allocate();
+        void allocate(llvm::Function *resolver);
         llvm::Value *load(llvm::Value *address, unsigned width);
         StoredValue loadSaved(llvm::Value *address, unsigned width);
+        llvm::Value *loadWritable(llvm::Value *address, unsigned width);
+        StoredValue loadStackSaved(llvm::Value *address, unsigned width);
         void store(llvm::Value *address, StoredValue value);
         void checkReturn(llvm::Value *rsp);
         void guard(llvm::Value *condition);
@@ -35,6 +37,9 @@ namespace forge::x86 {
         llvm::Value *validity = nullptr;
         llvm::BasicBlock *fault = nullptr;
 
+        llvm::Function *imageResolver = nullptr;
+
+        StoredValue checkedLoad(llvm::Value *address, unsigned width, bool allowOpaque);
         llvm::Value *checkedOffset(llvm::Value *address, unsigned width);
         StoredValue loadAt(llvm::Value *offset, unsigned width, bool allowOpaque);
         void storeAt(llvm::Value *offset, StoredValue value);

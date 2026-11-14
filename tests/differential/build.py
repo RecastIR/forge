@@ -269,14 +269,65 @@ def check_frame(name, instructions, config):
             raise ValueError("missing three return paths into the shared epilogue")
 
 
+IMAGE_LEAVES = {"lookup", "image_direct", "image_spill", "image_loop", "image_widths"}
+
+
+def check_image_leaf(name, instructions, sections, config):
+    graph = reachable_leaf(instructions)
+    body = [instructions[address] for address in sorted(graph)]
+    # Verify resolved VAs against the linked PE's section table, independently of Forge.
+    sections = [(int(start, 16), int(size, 16), flags) for size, start, flags in re.findall(
+        r"^\s*\d+\s+\S+\s+([0-9a-f]+)\s+([0-9a-f]+).*\n\s+([^\n]+)", sections, re.MULTILINE)]
+    references = [line for line in body if "[rip" in line]
+    if not references:
+        raise ValueError("missing reachable RIP-relative data reference")
+    for line in references:
+        target = re.search(r"#\s*(?:0x)?([0-9a-f]+)", line)
+        if not target or not any(start <= int(target[1], 16) < start + size and "READONLY" in flags
+                                 and ("CODE" in flags) == (name == "image_widths")
+                                 for start, size, flags in sections):
+            raise ValueError(f"missing immutable section target for {line}")
+    loads = [line for line in body if re.match(r"mov(?:sx|sxd|zx)? \w+,(?:BYTE|WORD|DWORD|QWORD) PTR \[", line)
+             and not re.search(r"\[(rsp|rbp)", line)]
+    if not loads:
+        raise ValueError("missing reachable image load")
+    if name == "lookup":
+        bases = {line.split()[1].split(",")[0] for line in references if line.startswith("lea ")}
+        indexed = [line.partition("[")[2].partition("]")[0] for line in loads if "DWORD PTR [" in line]
+        if not any("+" in operand and bases.intersection(re.findall(r"\br\w+\b", operand)) for operand in indexed):
+            raise ValueError("missing indexed doubleword lookup through the table base")
+    if name == "image_direct" and config == "release" and not any(line in loads for line in references):
+        raise ValueError("missing direct RIP-relative load")
+    if name == "image_loop" and not any(instructions[a] in loads for loop in natural_loops(graph)[0].values() for a in loop):
+        raise ValueError("missing image load inside loop")
+    if name == "image_spill":
+        if len(references) < 2 or not any(len(edges) == 2 for edges in graph.values()):
+            raise ValueError("missing branch-selected data addresses")
+        base = "rbp" if config == "debug" else "rsp"
+        spilled = set()
+        for address, edges in graph.items():
+            line = instructions[address]
+            if line in references and line.startswith("lea ") and len(edges) == 1:
+                register = line.split()[1].split(",")[0]
+                store = instructions[edges[0]]
+                if store.endswith("," + register):
+                    spilled.update(frame_slots([store], "mov", "QWORD", base, store=True))
+        if not spilled.intersection(frame_slots(body, "mov", "QWORD", base)):
+            raise ValueError("missing stack spill and reload of the table base")
+
+
 def check_leaf(path, config="debug"):
     witnesses = INTEGER_WITNESSES.get(path.stem)
-    if witnesses is None and path.stem != "cfg_nested_exits" and path.stem not in FRAME_LOCALS:
+    if (witnesses is None and path.stem != "cfg_nested_exits"
+            and path.stem not in FRAME_LOCALS and path.stem not in IMAGE_LEAVES):
         return
     output = subprocess.check_output(["x86_64-w64-mingw32-objdump", "-d", "--no-show-raw-insn",
                                       "-Mintel", "--disassemble=" + path.stem, path], text=True)
     try:
         instructions = leaf_instructions(output, path.stem)
+        if path.stem in IMAGE_LEAVES:
+            sections = subprocess.check_output(["x86_64-w64-mingw32-objdump", "-h", path], text=True)
+            check_image_leaf(path.stem, instructions, sections, config)
         if path.stem in FRAME_LOCALS:
             check_frame(path.stem, instructions, config)
         if path.stem == "cfg_nested_exits":
