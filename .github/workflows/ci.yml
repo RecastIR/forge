@@ -6,10 +6,10 @@ on:
   push:
     branches: [main]
 
-# Main pushes have a unique group. Only a newer run for the same PR supersedes its predecessor.
+# A new PR revision supersedes the active run. Manual reruns wait their turn.
 concurrency:
   group: forge-ci-${{ github.event.pull_request.number || github.run_id }}
-  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' && github.run_attempt == 1 }}
 
 permissions:
   contents: read
