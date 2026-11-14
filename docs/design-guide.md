@@ -12,7 +12,20 @@ The CLI calls the private `forge_core` library. Inspection follows imports acros
 | [Function analysis](../src/analysis/analysis.h) | `AnalyzedImage` owns its `ParsedImage`. It derives function ranges, overlaps, findings, and eligibility from the parsed records. Optional debug enrichment uses the same image. |
 | [Lifting](../src/lift/lift.h) | `generateIR` borrows the analysis, validates the requested entry, translates supported AMD64 instructions, and verifies the resulting `llvm::Module`. Use this stage for guest semantics. |
 | [Publication](../src/output/publication.h) | `publishIR` borrows the completed module and parsed image. It checks the requested destination and owns the file operations that replace it. |
-| [CLI](../src/cli/main.cpp) | Command dispatch selects policies, sequences core calls, and sets exit status. Renderers consume reports, findings, and classified errors. Keep domain validation in the stage that has the evidence to perform it. |
+| [CLI](../src/cli/main.cpp) | The entry point registers commands and handles help and usage errors. Each command selects policies, sequences core calls, and returns an exit status. Renderers consume reports, findings, and classified errors. |
+
+## Adding a CLI command
+
+1. Follow the [inspect implementation](../src/cli/commands/inspect.cpp). Put the option struct and registration declaration in a header under `src/cli/commands/`. Store paths, flags, and existing core request types by value. Keep command-specific options, validation, and help text in the matching implementation.
+2. In `main.cpp`, declare the options before the `CLI::App`, then call the registration function with the app, options, and exit status. CLI11 retains references to option storage. Bind a `final_callback` that calls the typed executor and records its return value. It runs after help and argument checks. Use `trigger_on_parse()` for options whose every occurrence needs validation.
+3. Keep the executor independent of CLI11. Call the owning core interfaces, render reports to stdout and diagnostics to stderr, and return the command's status. Use `cli/parsing.h` for shared input and report options and `cli/report.h` for existing renderers. Add the command's sources to the root CMake `forge` target.
+4. Exercise the public syntax, both streams, and exit status in the [CLI suite](../tests/integration/test_inspect.py). For a separately testable executor, see the [typed lift test](../tests/unit/lift_command.cpp), which calls the production executor with a generated PE fixture and a diagnostic stream. Register tests in `tests/CMakeLists.txt`.
+
+From the repository root, run the focused tests with fixture setup, including when the build was previously configured with tests disabled.
+
+```sh
+make test CONFIG=Debug BUILD_TESTING=ON CTEST_ARGS='-R "^(cli|lift_command)$$"'
+```
 
 ## Extending an existing component
 

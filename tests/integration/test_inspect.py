@@ -376,13 +376,158 @@ class CLI(Case):
         self.assertTrue(edge["required"])
         self.assertEqual(r["diagnostics"][0]["code"], "DLL_READ_ERROR")
 
+    def test_help(self):
+        commands = {"": ["inspect", "analyze", "lift"],
+                    "inspect": ["--help", "--format", "--strict", "--verbose", "--dll-path"],
+                    "analyze": ["--help", "--format", "--strict", "--functions"],
+                    "lift": ["--help", "--rva", "--output", "--signature", "--diagnostics-format"]}
+        for name, expected in commands.items():
+            with self.subTest(command=name):
+                args = [name] if name else []
+                help_text = self.invoke(*args, "--help", "--unused")
+                short = self.invoke(*args, "-h")
+                self.assertEqual(help_text.stderr, b"")
+                self.assertEqual((short.stdout, short.stderr), (help_text.stdout, b""))
+                usage = " ".join(["Usage: forge", *args])
+                self.assertIn(usage.encode(), help_text.stdout)
+                text = help_text.stdout.decode()
+                if args:
+                    section = text.split("\nOPTIONS:\n", 1)[1].split("\n\n", 1)[0]
+                    names = re.findall(r"^  (?:-\w, +| {8})(--[\w-]+)\b", section, re.MULTILINE)
+                else:
+                    section = text.split("\nSUBCOMMANDS:\n", 1)[1].split("\n\n", 1)[0]
+                    names = re.findall(r"^  ([\w-]+)\b", section, re.MULTILINE)
+                self.assertEqual(names, expected)
+
     def test_usage_and_io_errors(self):
-        for args in [[], ["inspect"], ["inspect", "a", "b"], ["inspect", "a", "--no-such-option"],
-                     ["inspect", "a", "--format", "yaml"], ["inspect", "a", "--dll-path"],
-                     ["inspect", "a", "--dll-path", self.dir / "absent"]]:
-            self.assertIn(b"Usage:", self.invoke(*args, code=2).stderr)
-        self.assertIn(b"READ_ERROR", self.invoke("inspect", self.dir / "absent", code=1).stderr)
-        self.assertIn(b"Usage:", self.invoke("--help").stdout)
+        image = FIXTURES / "minimal.exe"
+        for args in [
+            (), ("unknown",), ("--", "inspect", image), ("--inspect.verbose", image),
+            ("inspect",), ("analyze", "--functions"), ("analyze", image),
+            ("lift", image, "--rva", "0"), ("lift", image, "--output", "out.ll"),
+            ("lift", "--rva", "0", "--output", "out.ll"), ("inspect", image, "lift"),
+            ("inspect", "--unknown", "--help"), ("inspect", "--format", "yaml", "--help"),
+            ("inspect", image, "extra", "--help"), ("inspect", "--format", "--help"),
+            ("inspect", image, "--", "--help"), ("inspect", "--format=json", image),
+            ("inspect", image, "--format=", "json"), ("inspect", "--strict=false", image),
+            ("inspect", image, "--strict=true"), ("inspect", "-hello"), ("inspect", "-"),
+            ("inspect", "--format", "JSON", image), ("inspect", "--format", "", image),
+            ("inspect", image, "--dll-path"), ("inspect", image, "--dll-path", self.dir / "absent"),
+            ("inspect", image, "--dll-path", image), ("inspect", image, "--functions"),
+            ("analyze", image, "--functions", "--verbose"), ("lift", image, "--strict"),
+            ("inspect", image, "--format", "bad", "--format", "text"),
+            ("lift", image, "--rva", "0", "--output", "--anything"),
+            ("lift", image, "--rva", "0", "--output", ""),
+        ]:
+            with self.subTest(args=args):
+                result = self.invoke(*args, code=2)
+                self.assertEqual(result.stdout, b"")
+                self.assertTrue(result.stderr.startswith(b"forge: "))
+                self.assertIn(b"Usage: forge", result.stderr)
+        missing = self.invoke("inspect", self.dir / "absent", code=1)
+        self.assertEqual(missing.stdout, b"")
+        self.assertIn(b"READ_ERROR", missing.stderr)
+
+    def test_empty_lift_input(self):
+        image = FIXTURES / "add.exe"
+        output = self.dir / "already.ll"
+        args = ("lift", "--rva", "4096", "--output", output)
+
+        for inputs in (("", image), (image, ""), ("--", "", image), ("--", image, "")):
+            with self.subTest(inputs=inputs):
+                output.write_bytes(b"keep")
+                result = self.invoke(*args, *inputs, code=2)
+                self.assertEqual(result.stdout, b"")
+                self.assertTrue(result.stderr.startswith(b"forge: "))
+                self.assertIn(b"Usage: forge", result.stderr)
+                self.assertEqual(output.read_bytes(), b"keep")
+
+        missing = self.invoke(*args, code=2)
+        empty = self.invoke(*args, "", code=2)
+        self.assertEqual((empty.stdout, empty.stderr), (b"", missing.stderr))
+        help_text = self.invoke("lift", "--help").stdout
+        help_result = self.invoke("lift", "", "--help")
+        self.assertEqual((help_result.stdout, help_result.stderr), (help_text, b""))
+
+    def test_lift_dispatch_waits_for_validation(self):
+        output = self.dir / "already.ll"
+        output.write_bytes(b"keep")
+        args = ("lift", FIXTURES / "add.exe", "--rva", "4096", "--output", output)
+        help_text = self.invoke("lift", "--help").stdout
+
+        help_result = self.invoke(*args, "--help")
+        self.assertEqual((help_result.stdout, help_result.stderr), (help_text, b""))
+        self.assertEqual(output.read_bytes(), b"keep")
+
+        failed = self.invoke(*args, "--diagnostics-format", "yaml", code=2)
+        message = b"forge: --diagnostics-format: yaml not in {text,json}\n"
+        self.assertEqual((failed.stdout, failed.stderr), (b"", message + help_text))
+        self.assertEqual(output.read_bytes(), b"keep")
+
+    def test_complete_reports(self):
+        image = self.copy("minimal.exe")
+        # Complete pre-migration reports, including whitespace and final LF.
+        section = dict(file_offset=512, name=".text", permissions="r-x", raw_size=512,
+                       rva="0x1000", virtual_size=1)
+        module = dict(entry_point_rva="0x1000", exceptions=None, exports=[], image_base_va="0x140000000",
+                      image_kind="exe", imports=[], machine="AMD64", path=str(image), pe_type="PE32+",
+                      relocations=[], sections=[section], tls=None)
+        inspection = dict(dependencies=[], diagnostics=[], inspection=dict(root_module=0, status="completed"),
+                          modules=[module], schema_version=1, summary={})
+        analysis = dict(diagnostics=[], functions=[], schema_version=1,
+                        unknown_executable_ranges=[dict(end_rva="0x1001", start_rva="0x1000")])
+        for args, expected in [
+            (("inspect", "--format", "text", "--strict", image, "--strict", "--format", "json"), inspection),
+            (("analyze", "--functions", image, "--format", "json", "--functions"), analysis),
+        ]:
+            result = self.invoke(*args)
+            wire = (json.dumps(expected, indent=2, sort_keys=True, ensure_ascii=False) + "\n").encode()
+            self.assertEqual((result.stdout, result.stderr), (wire, b""))
+
+    def test_literal_paths(self):
+        for name in ("--help", "--format=json", "-", "--", "++", "[[aa]]", "lift", "name with spaces"):
+            with self.subTest(name=name):
+                image = self.copy("minimal.exe", name)
+                expected = self.invoke("inspect", image, "--format", "json").stdout
+                marked = self.invoke("inspect", "--format", "json", "--", name, cwd=self.dir)
+                self.assertEqual((marked.stdout, marked.stderr), (expected, b""))
+                if not name.startswith("-"):
+                    ordinary = self.invoke("inspect", name, "--format", "json", cwd=self.dir)
+                    self.assertEqual((ordinary.stdout, ordinary.stderr), (expected, b""))
+
+    def test_lift_outputs_and_repeated_values(self):
+        image = self.copy("add.exe")
+        output = self.dir / "-h"
+        unused = self.dir / "earlier.ll"
+        args = ("lift", image, "--output", unused, "--output", "-h")
+        first = self.invoke(*args, "--rva", "04096", cwd=self.dir)
+        self.assertEqual((first.stdout, first.stderr), (b"", b""))
+        module = output.read_bytes()
+        self.assertIn(b"forge_lifted_1000", module)
+        self.assertFalse(unused.exists())
+        output.unlink()
+        second = self.invoke(*args, "--rva", "0", "--rva", "0X1000", cwd=self.dir)
+        self.assertEqual((second.stdout, second.stderr, output.read_bytes()), (b"", b"", module))
+
+        for invalid in ("", "+4096", "-1", "0x", "0x12z", "4294967296", "0x100000000", "0b1", " 4096"):
+            with self.subTest(rva=invalid):
+                result = self.invoke(*args, "--rva", invalid, "--rva", "4096", cwd=self.dir, code=2)
+                self.assertEqual(result.stdout, b"")
+                self.assertIn(b"Usage: forge", result.stderr)
+        output.write_bytes(b"keep")
+        for tail in (("--unknown",), ("--signature", "i32()"), ("--diagnostics-format", "yaml")):
+            failed = self.invoke(*args, "--rva", "0x1000", *tail, cwd=self.dir, code=2)
+            self.assertEqual(failed.stdout, b"")
+            self.assertEqual(output.read_bytes(), b"keep")
+
+        failure = self.invoke(*args, "--rva", "0x1001", "--diagnostics-format", "text",
+                              "--diagnostics-format", "json", cwd=self.dir, code=1)
+        diagnostic = dict(category="invalid_input", code="ENTRY_INVALID_START",
+                          context=dict(entry_rva="0x1001", input=str(image)),
+                          message="0x1001: expected an exact, valid, unambiguous discovered function start",
+                          schema_version=1, stage="entry")
+        wire = (json.dumps(diagnostic, separators=(",", ":"), sort_keys=True, ensure_ascii=False) + "\n").encode()
+        self.assertEqual((failure.stdout, failure.stderr, output.read_bytes()), (b"", wire, b"keep"))
 
     def test_determinism_and_streams(self):
         exe = self.copy("metadata.exe")
