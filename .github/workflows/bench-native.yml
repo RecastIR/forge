@@ -14,6 +14,7 @@ env:
 
 jobs:
   controls:
+    if: github.event.head_commit.message != 'Verify a cold LLVM and Conan setup on a clean runner'
     name: dev / ${{ matrix.sample }}
     runs-on: macos-26
     strategy:
@@ -46,6 +47,7 @@ jobs:
           if [[ -d "$RUNNER_TEMP/forge-lto" ]]; then du -sh "$RUNNER_TEMP/forge-lto"; fi
 
   cold:
+    if: github.event.head_commit.message != 'Verify a cold LLVM and Conan setup on a clean runner'
     name: dev / cold compiler cache
     runs-on: macos-26
     env:
@@ -71,6 +73,7 @@ jobs:
           path: ${{ runner.temp }}/cold-sample.tgz
 
   warm:
+    if: github.event.head_commit.message != 'Verify a cold LLVM and Conan setup on a clean runner'
     name: dev / ${{ matrix.sample }} compiler cache
     needs: cold
     runs-on: macos-26
@@ -124,3 +127,34 @@ jobs:
           else
             cmp "$object" "$RUNNER_TEMP/cold/$object"
           fi
+
+  uncached-tools:
+    name: dev / cold LLVM and Conan
+    if: github.event.head_commit.message == 'Verify a cold LLVM and Conan setup on a clean runner'
+    runs-on: macos-26
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          fetch-depth: 0
+      - name: Isolate this run's tool and package caches
+        run: |
+          python3 - <<'PYTHON'
+          import os
+          from pathlib import Path
+          for path, key in (
+              (".github/actions/llvm/action.yml", "key: forge-"),
+              (".github/actions/native-setup/action.yml", "key: forge-conan-v2-"),
+          ):
+              file = Path(path)
+              action = file.read_text()
+              assert action.count(key) == 1
+              file.write_text(action.replace(key, f"{key}cold-{os.environ['GITHUB_RUN_ID']}-"))
+          PYTHON
+          git -c user.name=Benchmark -c user.email=benchmark@localhost commit -am 'Use run-specific cache keys for a cold runner test'
+      - uses: ./.github/actions/native-setup
+        with:
+          presets: dev
+      - name: Build and execute the complete native suite offline
+        run: |
+          /usr/bin/sandbox-exec -p '(version 1)(allow default)(deny network-outbound (remote ip "*:*"))' \
+            ./tools/test-forge.sh --native-dev
