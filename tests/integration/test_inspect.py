@@ -523,7 +523,7 @@ class CLI(Case):
         failure = self.invoke(*args, "--rva", "0x1001", "--diagnostics-format", "text",
                               "--diagnostics-format", "json", cwd=self.dir, code=1)
         diagnostic = dict(category="invalid_input", code="ENTRY_INVALID_START",
-                          context=dict(entry_rva="0x1001", input=str(image)),
+                          context=dict(entry_rva="0x1001", input=str(image), signature="register-state"),
                           message="0x1001: expected an exact, valid, unambiguous discovered function start",
                           schema_version=1, stage="entry")
         wire = (json.dumps(diagnostic, separators=(",", ":"), sort_keys=True, ensure_ascii=False) + "\n").encode()

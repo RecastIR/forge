@@ -190,6 +190,76 @@
       "id": "arithmetic/integer_mix",
       "config": "release",
       "target": "macos-arm64"
+    },
+    {
+      "id": "control_flow/counted_sum",
+      "config": "debug",
+      "target": "macos-arm64"
+    },
+    {
+      "id": "control_flow/counted_sum",
+      "config": "release",
+      "target": "macos-arm64"
+    },
+    {
+      "id": "control_flow/shift_loop",
+      "config": "debug",
+      "target": "macos-arm64"
+    },
+    {
+      "id": "control_flow/shift_loop",
+      "config": "release",
+      "target": "macos-arm64"
+    },
+    {
+      "id": "control_flow/nested_exits",
+      "config": "debug",
+      "target": "macos-arm64"
+    },
+    {
+      "id": "control_flow/nested_exits",
+      "config": "release",
+      "target": "macos-arm64"
+    },
+    {
+      "id": "control_flow/diamond",
+      "config": "debug",
+      "target": "macos-arm64"
+    },
+    {
+      "id": "control_flow/diamond",
+      "config": "release",
+      "target": "macos-arm64"
+    },
+    {
+      "id": "control_flow/flag_join",
+      "config": "debug",
+      "target": "macos-arm64"
+    },
+    {
+      "id": "control_flow/flag_join",
+      "config": "release",
+      "target": "macos-arm64"
+    },
+    {
+      "id": "control_flow/carry_loop",
+      "config": "debug",
+      "target": "macos-arm64"
+    },
+    {
+      "id": "control_flow/carry_loop",
+      "config": "release",
+      "target": "macos-arm64"
+    },
+    {
+      "id": "control_flow/jcc",
+      "config": "debug",
+      "target": "macos-arm64"
+    },
+    {
+      "id": "control_flow/jcc",
+      "config": "release",
+      "target": "macos-arm64"
     }
   ]
 }

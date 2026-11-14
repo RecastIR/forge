@@ -114,7 +114,7 @@ add_test(NAME fixtures COMMAND "${Python3_EXECUTABLE}" -B
   --mc "${llvm-mc}" --link "${lld-link}" --dlltool "${llvm-dlltool}" --clang "${clang}")
 set_tests_properties(fixtures PROPERTIES FIXTURES_SETUP pe_images)
 add_test(NAME input_lifetime COMMAND input_lifetime "${fixtures}/minimal.exe")
-add_test(NAME lift_contract COMMAND lift_contract "${fixtures}/add.exe")
+add_test(NAME lift_contract COMMAND lift_contract "${fixtures}/add.exe" "${fixtures}/cfg.exe")
 add_test(NAME lift_command COMMAND lift_command "${fixtures}/add.exe")
 set_tests_properties(input_lifetime lift_contract lift_command PROPERTIES FIXTURES_REQUIRED pe_images)
 if(NOT FORGE_BUILD_CLI)

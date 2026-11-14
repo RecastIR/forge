@@ -133,6 +133,55 @@
     "harness": "decimal_pairs"
   },
   {
+    "fixture_id": "control_flow/counted_sum",
+    "scope": "function",
+    "export": "cfg_counted_sum",
+    "signature": "i64(i64,i64)",
+    "harness": "decimal_pairs"
+  },
+  {
+    "fixture_id": "control_flow/shift_loop",
+    "scope": "function",
+    "export": "cfg_shift_loop",
+    "signature": "i64(i64,i64)",
+    "harness": "decimal_pairs"
+  },
+  {
+    "fixture_id": "control_flow/nested_exits",
+    "scope": "function",
+    "export": "cfg_nested_exits",
+    "signature": "i64(i64,i64)",
+    "harness": "decimal_pairs"
+  },
+  {
+    "fixture_id": "control_flow/diamond",
+    "scope": "function",
+    "export": "cfg_diamond",
+    "signature": "i64(i64,i64)",
+    "harness": "decimal_pairs"
+  },
+  {
+    "fixture_id": "control_flow/flag_join",
+    "scope": "function",
+    "export": "cfg_flag_join",
+    "signature": "i64(i64,i64)",
+    "harness": "decimal_pairs"
+  },
+  {
+    "fixture_id": "control_flow/carry_loop",
+    "scope": "function",
+    "export": "cfg_carry_loop",
+    "signature": "i64(i64,i64)",
+    "harness": "decimal_pairs"
+  },
+  {
+    "fixture_id": "control_flow/jcc",
+    "scope": "function",
+    "export": "cfg_jcc",
+    "signature": "i64(i64,i64)",
+    "harness": "decimal_pairs"
+  },
+  {
     "fixture_id": "runner/exit_nonzero",
     "blocked_reason": "The function harness treats nonzero termination as a harness failure."
   },

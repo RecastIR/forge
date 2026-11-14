@@ -28,7 +28,7 @@ namespace forge::cli {
             }
 
             if (options.jsonDiagnostics) {
-                printLiftDiagnostic(error, options.input, options.request.startRva, err);
+                printLiftDiagnostic(error, options.input, options.request, err);
             } else {
                 printFailure(error, options.input, err);
             }
@@ -45,7 +45,7 @@ namespace forge::cli {
                 failure.context.output = options.output;
             }
 
-            printLiftDiagnostic(failure, options.input, options.request.startRva, err);
+            printLiftDiagnostic(failure, options.input, options.request, err);
             return 1;
         }
     }

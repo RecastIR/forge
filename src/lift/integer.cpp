@@ -87,6 +87,49 @@ namespace forge::x86 {
         return IntegerInstruction{op, form, width, sourceWidth};
     }
 
+    FlagEffect flagEffect(Op op, unsigned width, std::optional<unsigned> count) {
+        FlagSet all;
+        all.set();
+        const FlagSet carry(1U << CF);
+        const FlagSet overflow(1U << OF);
+        const FlagSet logical = all & ~FlagSet(1U << AF);
+        switch (op) {
+        case Op::Mov:
+        case Op::Movsx:
+        case Op::Movzx:
+        case Op::Not:
+            return {{}, all};
+        case Op::Inc:
+        case Op::Dec:
+            return {all & ~carry, carry};
+        case Op::Imul:
+            return {carry | overflow, {}};
+        case Op::And:
+        case Op::Or:
+        case Op::Test:
+        case Op::Xor:
+            return {logical, {}};
+        case Op::Shl:
+        case Op::Shr:
+        case Op::Sar: {
+            if (count) {
+                *count &= width == 64 ? 63U : 31U;
+            }
+
+            if (count == 0) {
+                return {{}, all};
+            }
+
+            auto available = logical;
+            available[OF] = count == 1;
+            available[CF] = op == Op::Sar || width >= 32 || (count && *count < width);
+            return count ? FlagEffect{available, {}} : FlagEffect{{}, available};
+        }
+        default:
+            return {all, {}};
+        }
+    }
+
     void IntegerSemantics::resultFlags(Value *result) {
         flags[ZF] = ir.CreateIsNull(result);
         flags[SF] = ir.CreateIsNeg(result);
@@ -120,6 +163,13 @@ namespace forge::x86 {
     }
 
     Value *IntegerSemantics::arithmetic(Op op, Value *lhs, Value *rhs) {
+        auto availability = flagEffect(op, lhs->getType()->getIntegerBitWidth());
+        for (unsigned f = 0; f < FlagCount; ++f) {
+            if (!availability.generated[f] && !availability.carried[f]) {
+                flags[f] = nullptr;
+            }
+        }
+
         switch (op) {
         case Op::Add:
         case Op::Adc:
@@ -141,7 +191,6 @@ namespace forge::x86 {
             return ir.CreateNot(lhs);
         case Op::Imul: {
             auto *product = ir.CreateBinaryIntrinsic(Intrinsic::smul_with_overflow, lhs, rhs);
-            flags = {};
             flags[CF] = flags[OF] = ir.CreateExtractValue(product, 1);
             return ir.CreateExtractValue(product, 0);
         }
@@ -154,7 +203,6 @@ namespace forge::x86 {
                                           : ir.CreateAnd(lhs, rhs);
             resultFlags(result);
             flags[CF] = flags[OF] = ir.getFalse();
-            flags[AF] = nullptr;
 
             return result;
         }
@@ -195,12 +243,12 @@ namespace forge::x86 {
         auto *beforeLast = shifted(ir.CreateAnd(ir.CreateSub(n, ir.getInt64(1)), 63));
         auto *carry = ir.CreateTrunc(
             op == Op::Shl ? ir.CreateLShr(beforeLast, width - 1) : beforeLast, ir.getInt1Ty());
-        flags[CF] = op == Op::Sar || width >= 32 || (fixed && fixed->getZExtValue() < width)
-                        ? carry
-                        : nullptr;
+        auto effect = flagEffect(
+            op, width, fixed ? std::optional<unsigned>(fixed->getZExtValue()) : std::nullopt);
+        flags[CF] = (effect.generated[CF] || effect.carried[CF]) ? carry : nullptr;
         flags[OF] = nullptr;
 
-        if (fixed && fixed->isOne()) {
+        if (effect.generated[OF]) {
             flags[OF] = op == Op::Sar   ? ir.getFalse()
                         : op == Op::Shr ? ir.CreateIsNeg(operand)
                                         : ir.CreateXor(flags[SF], carry);
