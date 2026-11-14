@@ -624,6 +624,23 @@ with (work / 'ready').open('w') as locked:
                     fcntl.flock(lock, fcntl.LOCK_SH)
                     self.assertFalse((work / "late").exists())
 
+    def test_shared_graph_rejects_other_inputs_before_building(self):
+        tree = self.work / "cmake-workers/1"
+        case = self.work / "unit/name"
+        work = case / "baseline"
+        work.mkdir(parents=True)
+        ir = case / diff.CANONICAL_IR
+        harness = "decimal_pairs"
+        worker = diff.native.SuiteBuild(tree, "debug", self.work, [dict(fixture_id="unit/name", harness=harness)],
+                                        diff.native.ActiveProcesses(), {})
+        for args in ((ir, harness, work, "release", "baseline"),
+                     (ir, "other_harness", work, "debug", "baseline"),
+                     (ir, harness, work, "debug", "o2"),
+                     (self.work / "different.ll", harness, work, "debug", "baseline")):
+            with self.subTest(args=args), self.assertRaises(ValueError):
+                worker.build(*args)
+        self.assertFalse(tree.exists())
+
     def test_cancelled_workers_reap_active_and_racing_launches(self):
         processes = diff.native.ActiveProcesses()
         worker = diff.native.SuiteBuild(self.work, "debug", self.work, [], processes, {})

@@ -129,30 +129,36 @@ class SuiteBuild:
         self.tree = tree
         self.config = config
         self.folder = folder
-        self.cases = cases
+        self.harnesses = {case["fixture_id"]: case["harness"] for case in cases}
         self.stop = stop
         self.timings = timings
         self.configured = False
         self.error = None
 
     def build(self, ir, harness, work, config, variant):
+        case_id = work.parent.relative_to(self.folder)
+        if config != self.config or self.harnesses.get(case_id.as_posix()) != harness:
+            raise ValueError(f"unknown suite build target: {case_id} [{config}] harness {harness}")
+        if variant not in ("baseline", "o2") or work.name != variant:
+            raise ValueError(f"suite variant {variant} disagrees with output {work}")
         if ir != work.parent / "generated/lifted.ll":
             raise ValueError(f"unexpected suite compiler input: {ir}")
+        configuration_log = self.tree / "configuration.log"
+        with (work / "compilation.log").open("a") as log:
+            print(f"Shared configuration: {os.path.relpath(configuration_log, work)}", file=log)
         if self.error is not None:
             raise ValueError(self.error)
         if not self.configured:
             self.tree.mkdir(parents=True)
-            entries = ";".join(f"{case['fixture_id']}:{case['harness']}" for case in self.cases)
+            entries = ";".join(f"{name}:{contract}" for name, contract in self.harnesses.items())
             args = [f"-DFORGE_DIFFERENTIAL_CASES={entries}", f"-DFORGE_DIFFERENTIAL_OUTPUT={self.folder}"]
             try:
-                phase("configuration", configure(self.tree, self.config, args), self.tree / "configuration.log",
-                      self.timings)
+                phase("configuration", configure(self.tree, self.config, args), configuration_log, self.timings)
             except (OSError, ValueError) as error:
-                self.error = f"{error} ({self.tree / 'configuration.log'})"
+                self.error = f"{error} ({configuration_log})"
                 raise ValueError(self.error) from error
             self.configured = True
 
-        case_id = work.parent.relative_to(self.folder)
         target = "-".join(("diff", *case_id.parts, variant))
         return build_targets(self.tree, target, ir, harness, work, config, variant, self.timings)
 
