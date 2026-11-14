@@ -1,0 +1,183 @@
+name: Differential performance experiment
+on:
+  push:
+    branches: [perf/ci-benchmarks]
+    paths:
+      - .github/workflows/bench-differential.yml
+      - .github/bench/differential.py
+
+permissions:
+  contents: read
+  actions: read
+
+env:
+  CANDIDATE_RUN: "43545829055"
+  CANDIDATE_SHA: 8404da144b5b28bd61ba5d396ab0aee6b5a2f51f
+  FORGE_TEST_RUN_ID: ${{ github.run_id }}-${{ github.run_attempt }}-8404da144b5b28bd61ba5d396ab0aee6b5a2f51f
+
+jobs:
+  single:
+    runs-on: macos-26
+    strategy:
+      fail-fast: false
+      max-parallel: 1
+      matrix:
+        workers: [1, 2, 4]
+    steps:
+      - &experiment
+        uses: actions/checkout@v6
+        with:
+          path: experiment
+          sparse-checkout: .github/bench
+      - &candidate
+        uses: actions/checkout@v6
+        with:
+          ref: ${{ env.CANDIDATE_SHA }}
+          path: candidate
+      - &llvm
+        uses: ./candidate/.github/actions/llvm
+      - &executables
+        uses: actions/download-artifact@v4
+        with:
+          run-id: ${{ env.CANDIDATE_RUN }}
+          github-token: ${{ github.token }}
+          pattern: tested-macos-arm64-*
+          merge-multiple: true
+          path: candidate/build/tested
+      - &extract
+        name: Extract the candidate's tested executables
+        working-directory: candidate
+        run: |
+          test "$(git rev-parse HEAD)" = "$CANDIDATE_SHA"
+          for preset in dev sanitize; do tar -xzf "build/tested/tested-$preset.tgz"; done
+          shasum -a 256 build/dev/forge build/sanitize/forge
+      - &inputs
+        uses: actions/download-artifact@v4
+        with:
+          run-id: ${{ env.CANDIDATE_RUN }}
+          github-token: ${{ github.token }}
+          name: windows-x64-inputs
+          path: candidate/build
+      - name: Run both complete configurations and the real negative suite
+        working-directory: candidate
+        run: python3 -B ../experiment/.github/bench/differential.py run --workers ${{ matrix.workers }} --shards 1 --shard 0
+      - uses: actions/upload-artifact@v4
+        with:
+          name: single-${{ matrix.workers }}
+          path: |
+            candidate/build/evidence.tgz
+            candidate/build/metric.json
+          if-no-files-found: error
+
+  compare-singles:
+    runs-on: ubuntu-24.04
+    needs: single
+    outputs:
+      workers: ${{ steps.winner.outputs.workers }}
+    steps:
+      - *experiment
+      - *candidate
+      - *executables
+      - *extract
+      - *inputs
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: single-*
+          path: candidate/build/trials
+      - id: winner
+        name: Reconcile every case and choose the fastest green worker count
+        working-directory: candidate
+        run: |
+          set -eu
+          for workers in 1 2 4; do
+            trial="build/trial-$workers"
+            mkdir "$trial"
+            mv "build/trials/single-$workers" "$trial/"
+            extra=()
+            if [[ "$workers" != 1 ]]; then extra=(--expected build/reference.json); fi
+            python3 -B ../experiment/.github/bench/differential.py combine --shards 1 --path "$trial" "${extra[@]}"
+            if [[ "$workers" = 1 ]]; then cp build/fingerprint.json build/reference.json; fi
+          done
+          python3 - <<'PY'
+          import json, os
+          from pathlib import Path
+          trials = [json.loads(p.read_text()) for p in sorted(Path("build").glob("trial-*/single-*/metric.json"))]
+          for t in trials: print(t)
+          winner = min(trials, key=lambda t:t["elapsed"]["debug"]+t["elapsed"]["release"])
+          with open(os.environ["GITHUB_OUTPUT"],"a") as stream: print("workers="+str(winner["workers"]),file=stream)
+          PY
+      - uses: actions/upload-artifact@v4
+        with:
+          name: reference-observations
+          path: candidate/build/reference.json
+          if-no-files-found: error
+
+  single-gate:
+    runs-on: ubuntu-24.04
+    needs: single
+    strategy:
+      fail-fast: false
+      matrix:
+        workers: [1, 2, 4]
+    steps:
+      - *experiment
+      - *candidate
+      - *executables
+      - *extract
+      - *inputs
+      - uses: actions/download-artifact@v4
+        with:
+          name: single-${{ matrix.workers }}
+          path: candidate/build/trial/runner
+      - name: Measure one-runner evidence transfer and full gate
+        working-directory: candidate
+        run: python3 -B ../experiment/.github/bench/differential.py combine --shards 1 --path build/trial
+
+  split:
+    needs: compare-singles
+    runs-on: macos-26
+    strategy:
+      fail-fast: false
+      matrix:
+        shard: [0, 1]
+    steps:
+      - *experiment
+      - *candidate
+      - *llvm
+      - *executables
+      - *extract
+      - *inputs
+      - name: Run disjoint fixture configurations and once-per-runner-set negatives
+        working-directory: candidate
+        env:
+          WORKERS: ${{ needs.compare-singles.outputs.workers }}
+          SHARD: ${{ matrix.shard }}
+        run: python3 -B ../experiment/.github/bench/differential.py run --workers "$WORKERS" --shards 2 --shard "$SHARD"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: split-${{ matrix.shard }}
+          path: |
+            candidate/build/evidence.tgz
+            candidate/build/metric.json
+          if-no-files-found: error
+
+  reconcile:
+    needs: split
+    runs-on: ubuntu-24.04
+    steps:
+      - *experiment
+      - *candidate
+      - *executables
+      - *extract
+      - *inputs
+      - uses: actions/download-artifact@v4
+        with:
+          name: reference-observations
+          path: candidate/build
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: split-*
+          path: candidate/build/split
+      - name: Independently reconcile both shards and compare to fresh serial evidence
+        working-directory: candidate
+        run: python3 -B ../experiment/.github/bench/differential.py combine --shards 2 --path build/split --expected build/reference.json
