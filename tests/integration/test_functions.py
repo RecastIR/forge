@@ -405,7 +405,7 @@ class Lift(Case):
         entry = 0x1000
         image, output = self.dir / "graph.exe", self.dir / "graph.ll"
 
-        def lift(code, failure=None):
+        def lift(code, failure=None, reason=None, category="unsupported"):
             body = bytes.fromhex(code)
             data = bytearray(original)
             pos = layout.file_offset(entry)
@@ -414,13 +414,20 @@ class Lift(Case):
             image.write_bytes(data)
             args = ("lift", image, "--rva", hex(entry), "--signature", "i64(i64,i64)",
                     "--diagnostics-format", "json", "--output", output)
+            if failure:
+                output.write_text("previous IR")
             result = self.invoke(*args, code=1 if failure else 0)
             if failure:
                 diagnostic = json.loads(result.stderr)
-                self.assertEqual(diagnostic["code"], failure)
+                self.assertEqual((diagnostic["stage"], diagnostic["category"], diagnostic["code"]),
+                                 ("lifting", category, failure))
+                if reason:
+                    self.assertTrue(diagnostic["message"].endswith(reason), diagnostic)
                 context = diagnostic["context"]
-                self.assertEqual(context["signature"], "i64(i64,i64)")
+                self.assertEqual((context["signature"], context["entry_rva"], context["input"]),
+                                 ("i64(i64,i64)", hex(entry), str(image)))
                 self.assertLessEqual(int(context["block_rva"], 16), int(context["instruction_rva"], 16))
+                self.assertEqual(output.read_text(), "previous IR")
                 return context
             return output.read_text()
 
@@ -431,16 +438,36 @@ class Lift(Case):
             with self.subTest(code=code):
                 lift(code)
 
-        # First arrival cannot borrow RAX or CF from a later iteration.
-        for code, diagnostic in (
-                ("48 01 c8 48 89 d0 eb f8", "LIFT_UNDEFINED_REGISTER"),
-                ("11 d1 eb fc", "LIFT_UNDEFINED_FLAG"),
-                # Carry valid on entry, invalidated by a narrow shift only on the backedge.
-                ("39 d1 72 05 c0 e1 08 eb f9 89 c8 c3", "LIFT_UNDEFINED_FLAG"),
-                # Only one path defines AH, so AX cannot be read at the join.
-                ("39 d1 74 04 88 cc eb 02 88 c8 0f b7 c0 c3", "LIFT_UNDEFINED_REGISTER")):
+        # LEA defines R8. MOVSX defines AX and MOVZX supplies the full RAX for ADC.
+        lift("39 d1 4c 8d 04 11 eb 00 66 0f be c2 eb 00 0f b7 c0 4c 11 c0 c3")
+        # INC, DEC and NOT preserve CMP's CF through CMOV and into the next block.
+        lift("89 c8 39 d1 ff c0 ff ca f7 d2 0f 42 c2 eb 00 48 11 d0 c3")
+
+        register, flag = "LIFT_UNDEFINED_REGISTER", "LIFT_UNDEFINED_FLAG"
+        for code, diagnostic, reason, block, instruction, opcode, encoded in (
+                # First arrival cannot borrow RAX or CF from a later iteration.
+                ("48 01 c8 48 89 d0 eb f8", register, "incoming RAX", 0, 0, "ADD64rr", "4801c8"),
+                ("11 d1 eb fc", flag, "flags: CF", 0, 0, "ADC32rr", "11d1"),
+                # Carry invalidated only on the backedge.
+                ("39 d1 72 05 c0 e1 08 eb f9 89 c8 c3", flag, "flags: CF", 2, 2, "JCC_1", "7205"),
+                # Exactly one incoming path defines all of R8. The join reads it after a MOV.
+                ("39 d1 74 03 49 89 c8 89 d0 4c 01 c0 c3", register, "incoming R8", 7, 9, "ADD64rr", "4c01c0"),
+                # One arm writes AH and the other AL. Neither defines all of AX.
+                ("39 d1 74 04 88 cc eb 02 88 c8 0f b7 c0 c3", register, "incoming RAX", 10, 10, "MOVZX32rr16", "0fb7c0"),
+                # TEST leaves AF undefined. Only the CMP path supplies it to LAHF.
+                ("85 d1 74 02 39 d1 9f c3", flag, "flags: AF", 6, 6, "LAHF", "9f"),
+                # Self-CMP can set flags on undefined scratch without defining that register.
+                ("45 39 c0 eb 00 4c 89 c0 c3", register, "incoming R8", 5, 5, "MOV64rr", "4c89c0"),
+                # Even with a known-true condition, CMOV reads its old destination.
+                ("39 c9 eb 00 0f 44 c2 c3", register, "incoming RAX", 4, 4, "CMOV32rr", "0f44c2"),
+                # A possible zero count requires a prior ZF. Large logical byte shifts lose CF.
+                ("48 d3 fa eb 00 0f 94 c0 c3", flag, "flags: ZF", 5, 5, "SETCCr", "0f94c0"),
+                ("39 d1 d2 ea eb 00 0f 92 c0 c3", flag, "flags: CF", 6, 6, "SETCCr", "0f92c0"),
+                ("39 d1 48 d3 fa eb 00 0f 90 c0 c3", flag, "flags: OF", 7, 7, "SETCCr", "0f90c0")):
             with self.subTest(code=code):
-                lift(code, diagnostic)
+                context = lift(code, diagnostic, reason)
+                self.assertEqual((context["block_rva"], context["instruction_rva"], context["opcode"], context["bytes"]),
+                                 (hex(entry + block), hex(entry + instruction), opcode, encoded))
 
         # Discover a target inside an instruction before and after the containing decode.
         for code, origin, target in (
@@ -453,7 +480,7 @@ class Lift(Case):
                 context = lift(code, "LIFT_UNSUPPORTED_CONTROL_FLOW")
                 self.assertEqual((context["instruction_rva"], context["branch_target"]),
                                  (hex(entry + origin), entry + target))
-        self.assertEqual(lift("eb 01 cc 0f", "LIFT_INVALID_ENCODING")["bytes"], "0f")
+        self.assertEqual(lift("eb 01 cc 0f", "LIFT_INVALID_ENCODING", category="invalid_input")["bytes"], "0f")
         self.assertEqual(lift("ff e0", "LIFT_UNSUPPORTED_CONTROL_FLOW")["bytes"], "ffe0")
 
     def test_flag_missing_at_forward_join(self):

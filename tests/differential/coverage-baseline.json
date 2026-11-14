@@ -260,6 +260,36 @@
       "id": "control_flow/jcc",
       "config": "release",
       "target": "macos-arm64"
+    },
+    {
+      "id": "control_flow/entry_backedge",
+      "config": "debug",
+      "target": "macos-arm64"
+    },
+    {
+      "id": "control_flow/entry_backedge",
+      "config": "release",
+      "target": "macos-arm64"
+    },
+    {
+      "id": "control_flow/identical_successors",
+      "config": "debug",
+      "target": "macos-arm64"
+    },
+    {
+      "id": "control_flow/identical_successors",
+      "config": "release",
+      "target": "macos-arm64"
+    },
+    {
+      "id": "control_flow/partial_join",
+      "config": "debug",
+      "target": "macos-arm64"
+    },
+    {
+      "id": "control_flow/partial_join",
+      "config": "release",
+      "target": "macos-arm64"
     }
   ]
 }

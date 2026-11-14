@@ -182,6 +182,27 @@
     "harness": "decimal_pairs"
   },
   {
+    "fixture_id": "control_flow/entry_backedge",
+    "scope": "function",
+    "export": "cfg_entry_backedge",
+    "signature": "i64(i64,i64)",
+    "harness": "decimal_pairs"
+  },
+  {
+    "fixture_id": "control_flow/identical_successors",
+    "scope": "function",
+    "export": "cfg_identical_successors",
+    "signature": "i64(i64,i64)",
+    "harness": "decimal_pairs"
+  },
+  {
+    "fixture_id": "control_flow/partial_join",
+    "scope": "function",
+    "export": "cfg_partial_join",
+    "signature": "i64(i64,i64)",
+    "harness": "decimal_pairs"
+  },
+  {
     "fixture_id": "runner/exit_nonzero",
     "blocked_reason": "The function harness treats nonzero termination as a harness failure."
   },

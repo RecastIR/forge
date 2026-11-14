@@ -44,6 +44,78 @@ namespace {
         }
     }
 
+    void checkFlagAvailability(StringRef opcode, IRBuilder<> &ir, Value *count = nullptr,
+                               std::optional<unsigned> fixed = {}) {
+        const auto instruction = integerInstruction(opcode);
+        if (!instruction) {
+            throw std::runtime_error("unrecognized test opcode " + opcode.str());
+        }
+
+        const auto effect = flagEffect(instruction->op, instruction->width, fixed);
+        auto *operand = ir.getIntN(instruction->width, 7);
+        IntegerSemantics semantics(ir);
+
+        for (unsigned mask = 0; mask < (1U << FlagCount); ++mask) {
+            const FlagSet incoming(mask);
+            // The translator requires carry before calling arithmetic for ADC or SBB.
+            if ((instruction->op == Op::Adc || instruction->op == Op::Sbb) && !incoming[CF]) {
+                continue;
+            }
+
+            for (unsigned f = 0; f < FlagCount; ++f) {
+                semantics.flags[f] = incoming[f] ? ir.getTrue() : nullptr;
+            }
+
+            if (count) {
+                semantics.shift(instruction->op, operand, count);
+            } else {
+                semantics.arithmetic(instruction->op, operand, operand);
+            }
+
+            FlagSet actual;
+            for (unsigned f = 0; f < FlagCount; ++f) {
+                actual[f] = semantics.flags[f] != nullptr;
+            }
+
+            const auto expected = effect.apply(incoming);
+            if (actual != expected) {
+                throw std::runtime_error(opcode.str() + " with incoming flags " +
+                                         incoming.to_string() + ": expected " +
+                                         expected.to_string() + ", emitted " + actual.to_string());
+            }
+        }
+    }
+
+    void checkShiftEffects(StringRef operation, unsigned width, IRBuilder<> &ir, Value *cl) {
+        const auto prefix = operation.str() + std::to_string(width);
+        checkFlagAvailability(prefix + "rCL", ir, cl);
+        checkFlagAvailability(prefix + "r1", ir, ir.getInt8(1), 1);
+
+        for (unsigned count : {0U, 1U, width - 1, width, width + 1, 32U, 64U}) {
+            checkFlagAvailability(prefix + "ri", ir, ir.getInt8(static_cast<uint8_t>(count)),
+                                  count);
+        }
+    }
+
+    void checkEffects() {
+        LLVMContext context;
+        Module module("availability", context);
+        auto *type = FunctionType::get(Type::getVoidTy(context), Type::getInt8Ty(context), false);
+        auto *fn = Function::Create(type, Function::InternalLinkage, "test", module);
+        IRBuilder<> ir(BasicBlock::Create(context, "entry", fn));
+
+        for (auto opcode : {"ADD8rr", "ADC8ri", "SUB8ri", "SBB8rr", "CMP8i8", "INC8r", "DEC8r",
+                            "NEG8r", "NOT8r", "AND8rr", "OR8rr", "XOR8rr", "TEST8rr", "IMUL16rr"}) {
+            checkFlagAvailability(opcode, ir);
+        }
+
+        for (StringRef operation : {"SHL", "SHR", "SAR"}) {
+            for (unsigned width : {8U, 16U, 32U, 64U}) {
+                checkShiftEffects(operation, width, ir, fn->getArg(0));
+            }
+        }
+    }
+
     void check() {
         LLVMContext context;
         Module module("integer-tests", context);
@@ -114,6 +186,7 @@ namespace {
 int main() {
     try {
         check();
+        checkEffects();
     } catch (const std::exception &error) {
         errs() << "integer semantics: " << error.what() << '\n';
         return 1;

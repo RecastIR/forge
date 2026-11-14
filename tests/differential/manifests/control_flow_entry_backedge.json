@@ -1,0 +1,26 @@
+{
+  "schema_version": 1,
+  "id": "control_flow/entry_backedge",
+  "description": "Return the seed plus one visit for each count down to zero at the function entry.",
+  "source": "fixtures/arithmetic/integer_driver.c",
+  "binary": "cfg_entry_backedge.exe",
+  "args": [
+    "0",
+    "20",
+    "1",
+    "-9",
+    "7",
+    "31",
+    "8",
+    "44",
+    "-1",
+    "-2",
+    "10",
+    "0"
+  ],
+  "expected": {
+    "exit_code": 0,
+    "stdout": "21\n-7\n39\n45\n6\n3\n",
+    "stderr": ""
+  }
+}

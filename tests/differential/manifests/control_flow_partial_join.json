@@ -1,0 +1,26 @@
+{
+  "schema_version": 1,
+  "id": "control_flow/partial_join",
+  "description": "Return AX defined by separate flag bytes on one path and a preserved word on the other.",
+  "source": "fixtures/arithmetic/integer_driver.c",
+  "binary": "cfg_partial_join.exe",
+  "args": [
+    "7",
+    "7",
+    "2",
+    "1",
+    "16",
+    "1",
+    "-1",
+    "0",
+    "6",
+    "8",
+    "65537",
+    "65538"
+  ],
+  "expected": {
+    "exit_code": 0,
+    "stdout": "17921\n512\n5632\n65535\n6\n1\n",
+    "stderr": ""
+  }
+}

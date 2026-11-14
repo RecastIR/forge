@@ -6,6 +6,7 @@
 #include "llvm/ADT/ScopeExit.h"
 #include "llvm/ADT/SmallString.h"
 #include "llvm/IR/BasicBlock.h"
+#include "llvm/IR/CFG.h"
 #include "llvm/IR/Function.h"
 #include "llvm/IR/Instructions.h"
 #include "llvm/IR/Module.h"
@@ -174,6 +175,78 @@ namespace {
         check(edges == expected, "incorrect basic-block boundaries or successors");
     }
 
+    void checkEntryBackedge(const llvm::BasicBlock &entry, const llvm::BasicBlock &header) {
+        const auto *branch = llvm::dyn_cast<llvm::CondBrInst>(header.getTerminator());
+        check(branch && llvm::pred_size(&header) == 2, "entry loop must have two predecessors");
+        const auto *latch = branch->getSuccessor(1);
+        check(llvm::isa<llvm::ReturnInst>(branch->getSuccessor(0)->getTerminator()) &&
+                  llvm::isa<llvm::UncondBrInst>(latch->getTerminator()) &&
+                  latch->getTerminator()->getSuccessor(0) == &header &&
+                  llvm::is_contained(llvm::predecessors(&header), &entry),
+              "entry loop lost its exit, synthetic entry, or backedge");
+    }
+
+    void checkIdenticalSuccessors(const llvm::BasicBlock &source) {
+        const auto *branch = llvm::dyn_cast<llvm::CondBrInst>(source.getTerminator());
+        check(branch && branch->getSuccessor(0) == branch->getSuccessor(1),
+              "conditional branch lost its parallel edges");
+        const auto *join = branch->getSuccessor(0);
+        bool usesCarry = false;
+        bool usesZero = false;
+
+        for (const auto &phi : join->phis()) {
+            check(phi.getNumIncomingValues() == 2 && phi.getIncomingBlock(0) == &source &&
+                      phi.getIncomingBlock(1) == &source &&
+                      phi.getIncomingValue(0) == phi.getIncomingValue(1),
+                  "flag PHI must receive the same value on each parallel edge");
+            usesCarry |= phi.getName() == "CF" && !phi.use_empty();
+            usesZero |= phi.getName() == "ZF" && !phi.use_empty();
+        }
+
+        check(usesCarry && usesZero, "successor must consume both carry and zero PHIs");
+    }
+
+    void checkControlFlowLeaves(const fs::path &fixture) {
+        AnalyzedImage analysis(
+            std::make_unique<ParsedImage>(InputFile(fixture), ParsePolicy::Inspection),
+            DebugInfo::Omit);
+        llvm::LLVMContext context;
+
+        for (std::string_view name :
+             {"cfg_entry_backedge", "cfg_identical_successors", "cfg_partial_join"}) {
+            const auto &exports = analysis.module().exports;
+            const auto symbol = llvm::find_if(
+                exports, [&](const Export &item) { return llvm::is_contained(item.names, name); });
+            check(symbol != exports.end(), "missing CFG regression export");
+            auto module =
+                generateIR(analysis, {symbol->rva, EntryMode::WindowsX64I64Pair}, context);
+            const auto *body =
+                module->getFunction("forge_lifted_" + llvm::utohexstr(symbol->rva, true));
+            check(body && !llvm::verifyModule(*module), "CFG regression failed LLVM verification");
+            const auto &entry = body->getEntryBlock();
+            const auto *start = llvm::dyn_cast<llvm::UncondBrInst>(entry.getTerminator());
+            check(start != nullptr, "missing synthetic entry branch");
+
+            if (name == "cfg_entry_backedge") {
+                checkEntryBackedge(entry, *start->getSuccessor());
+            } else if (name == "cfg_identical_successors") {
+                checkIdenticalSuccessors(*start->getSuccessor());
+            } else {
+                const auto *branch =
+                    llvm::dyn_cast<llvm::CondBrInst>(start->getSuccessor()->getTerminator());
+                check(branch != nullptr, "partial register writes must branch");
+                const auto *left =
+                    llvm::dyn_cast<llvm::UncondBrInst>(branch->getSuccessor(0)->getTerminator());
+                const auto *right =
+                    llvm::dyn_cast<llvm::UncondBrInst>(branch->getSuccessor(1)->getTerminator());
+                check(left && right && left != right &&
+                          left->getSuccessor() == right->getSuccessor() &&
+                          llvm::isa<llvm::ReturnInst>(left->getSuccessor()->getTerminator()),
+                      "partial register return must join both writing paths");
+            }
+        }
+    }
+
     void checkVerifierFailure(llvm::LLVMContext &context, const fs::path &source) {
         llvm::Module module("invalid", context);
         auto *type = llvm::FunctionType::get(llvm::Type::getVoidTy(context), false);
@@ -198,6 +271,7 @@ namespace {
 int main(int argc, char **argv) try {
     check(argc == 3, "expected add.exe and cfg.exe fixtures");
     checkControlFlow(argv[2]);
+    checkControlFlowLeaves(argv[2]);
     llvm::SmallString<128> temporary;
 
     if (auto error = llvm::sys::fs::createUniqueDirectory("forge-lift", temporary)) {

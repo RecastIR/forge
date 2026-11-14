@@ -1,0 +1,28 @@
+{
+  "schema_version": 1,
+  "id": "control_flow/identical_successors",
+  "description": "Read ZF and CF at the common destination of both edges of a conditional jump after a CL shift.",
+  "source": "fixtures/arithmetic/integer_driver.c",
+  "binary": "cfg_identical_successors.exe",
+  "args": [
+    "0",
+    "3",
+    "64",
+    "64",
+    "1",
+    "1",
+    "1",
+    "4",
+    "2",
+    "-2",
+    "1",
+    "0",
+    "63",
+    "-1"
+  ],
+  "expected": {
+    "exit_code": 0,
+    "stdout": "256\n1\n257\n0\n256\n1\n256\n",
+    "stderr": ""
+  }
+}

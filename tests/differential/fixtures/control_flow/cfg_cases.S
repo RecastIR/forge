@@ -82,3 +82,44 @@ leaf jcc
     predicate g,15
     ret
     .seh_endproc
+
+# Re-enter the first instruction with the decremented count and updated sum.
+leaf entry_backedge
+1:
+    andl $7, %ecx
+    incq %rdx
+    testl %ecx, %ecx
+    je 2f
+    decl %ecx
+    jmp 1b
+2:
+    movq %rdx, %rax
+    ret
+    .seh_endproc
+
+# Both edges carry the same flags, including CMP's flags for a masked-zero shift.
+leaf identical_successors
+    cmpq %rdx, %rcx
+    sarq %cl, %rdx
+    je 1f
+1:
+    setz %al
+    setc %ah
+    movzwl %ax, %eax
+    ret
+    .seh_endproc
+
+# Define exactly AX on both arms. TEST must preserve the word returned at the join.
+leaf partial_join
+    cmpq %rdx, %rcx
+    jl 1f
+    sete %al
+    lahf
+    jmp 2f
+1:
+    movw %cx, %ax
+    testw %dx, %ax
+2:
+    movzwl %ax, %eax
+    ret
+    .seh_endproc
