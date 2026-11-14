@@ -123,7 +123,7 @@ jobs:
       stages: ${{ toJSON(steps.verify.outputs) }}
     needs: [macos-dev, macos-sanitize, windows-fixtures]
     env:
-      FORGE_DIFF_JOBS: '2'
+      FORGE_DIFF_JOBS: '4'
     runs-on: macos-26
     steps:
       - uses: actions/checkout@v6

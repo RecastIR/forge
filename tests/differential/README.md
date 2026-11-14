@@ -214,4 +214,20 @@ The gate publishes a job summary and schema-v1 `build/differential/coverage/cove
 
 For a new enabled case, add its function contract to `cases.json` and add a matching `id`, `config`, `target` obligation to `coverage-baseline.json` for each supported configuration. Cases default to Debug and Release. Use the optional nonempty `configs` list for a narrower contract. A known blocker may be declared as a fixture ID with `blocked_reason` and optional `configs`. A fixture can have an enabled entry for Debug and a blocked entry for Release when their configurations are disjoint. CI never converts an enabled failure into a blocker. An intentional coverage reduction requires matching definition and baseline edits plus an explanation in the PR, preferably with a replacement test or tracking issue. The baseline is maintained by hand.
 
+### CI timing and worker selection
+
+Use workflow creation through completion of `regression-gate` to measure PR latency. For a rerun, start the clock when GitHub creates the new attempt. Sum the durations of all macOS jobs to compare runner use. The Actions summaries separate configure, build and CTest on macOS. The differential summary gives wall time plus cumulative worker time for reference validation, analysis, lifting, configuration, object compilation, linking, execution and comparison. Cumulative times overlap when workers run concurrently.
+
+| Hosted run, 29 Windows references and 19 enabled fixtures per configuration | Elapsed through gate | macOS runner time | Differential job |
+| --- | ---: | ---: | ---: |
+| [Before the change](https://github.com/RecastIR/forge/actions/runs/43540234265) | 45m39s | 45m21s | 18m26s |
+| [Two workers, cold Conan and compiler caches](https://github.com/RecastIR/forge/actions/runs/43545829055/attempts/1) | 18m12s | 25m40s | 5m57s |
+| [Same commit, warm caches](https://github.com/RecastIR/forge/actions/runs/43545829055/attempts/2) | 18m27s | 28m33s | 9m15s |
+
+Before the change, per-variant CMake configuration took 11m14s across 76 positive variants. The cold two-worker run included nearly five minutes waiting for the differential runner. On the warm rerun the two native builds had 27/27 compiler-cache hits, while the nine negative integrations took 3m54s versus 2m00s on the cold run. Queue time and Xcode performance both affect total latency.
+
+CI uses four fixture workers on one Apple Silicon runner. On identical inputs, both full positive suites took 257s with one worker, 150s with two, and 118s with four. Including setup, all negative integrations, transfers and gate reconciliation, one four-worker runner took 4m39s from job start. Splitting the fixtures over two four-worker runners took 6m44s and consumed 9m55s of macOS runner time versus 4m25s. All comparisons produced matching fixture evidence. [Hosted worker and sharding experiment](https://github.com/RecastIR/forge/actions/runs/43548398069)
+
+Native builds use three compilation jobs, a runner-local ThinLTO cache and a bounded ccache for the two Makefile test configurations. In a separate Debug trial, a fresh runner restored an 11.8 MB compiler cache and built in 65.8s versus 90.2s cold. Editing one translation unit caused one miss and 26 hits. The rebuilt object contained the changed symbol. A profile edit changed the Conan key and regenerated the same locked package identity. [Compiler-cache trial](https://github.com/RecastIR/forge/actions/runs/43546000884) · [Cold toolchain validation](https://github.com/RecastIR/forge/actions/runs/43546114845) · [Conan invalidation trial](https://github.com/RecastIR/forge/actions/runs/43547833484)
+
 Repository administrators should require the GitHub Actions check `regression-gate` on `main`, require pull requests and code-owner review, and retain other required checks. The baseline and ownership file designate `@ziflex`. Add a second owner with write access before enforcing owner reviews on baseline changes authored by `@ziflex`. Verify the status check after the first hosted run.
