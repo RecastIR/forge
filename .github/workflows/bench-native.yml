@@ -14,7 +14,7 @@ env:
 
 jobs:
   controls:
-    if: github.event.head_commit.message != 'Verify a cold LLVM and Conan setup on a clean runner'
+    if: github.event.head_commit.message == 'Measure native CI build parallelism and compiler cache reuse'
     name: dev / ${{ matrix.sample }}
     runs-on: macos-26
     strategy:
@@ -47,7 +47,7 @@ jobs:
           if [[ -d "$RUNNER_TEMP/forge-lto" ]]; then du -sh "$RUNNER_TEMP/forge-lto"; fi
 
   cold:
-    if: github.event.head_commit.message != 'Verify a cold LLVM and Conan setup on a clean runner'
+    if: github.event.head_commit.message == 'Measure native CI build parallelism and compiler cache reuse'
     name: dev / cold compiler cache
     runs-on: macos-26
     env:
@@ -73,7 +73,7 @@ jobs:
           path: ${{ runner.temp }}/cold-sample.tgz
 
   warm:
-    if: github.event.head_commit.message != 'Verify a cold LLVM and Conan setup on a clean runner'
+    if: github.event.head_commit.message == 'Measure native CI build parallelism and compiler cache reuse'
     name: dev / ${{ matrix.sample }} compiler cache
     needs: cold
     runs-on: macos-26
@@ -158,3 +158,67 @@ jobs:
         run: |
           /usr/bin/sandbox-exec -p '(version 1)(allow default)(deny network-outbound (remote ip "*:*"))' \
             ./tools/test-forge.sh --native-dev
+
+  conan-invalidation:
+    name: real Conan cache key invalidation
+    if: github.event.head_commit.message == 'Check Conan profile cache invalidation'
+    runs-on: macos-26
+    steps:
+      - uses: actions/checkout@v6
+      - name: Expose the selected package-cache hit for this experiment
+        run: |
+          python - <<'PYTHON'
+          from pathlib import Path
+          p = Path(".github/actions/native-setup/action.yml")
+          text = p.read_text()
+          before = '        archive="$RUNNER_TEMP/forge-packages.tgz"'
+          assert text.count(before) == 1
+          p.write_text(text.replace(before, '        echo "FORGE_BENCH_CONAN_HIT=$CACHE_HIT" >> "$GITHUB_ENV"\n' + before))
+          PYTHON
+      - name: Record the selected Conan package archive and first-party integration
+        id: before
+        uses: ./.github/actions/native-setup
+        with:
+          presets: dev
+      - name: Snapshot the locked package bytes and change the checked-in profile
+        run: |
+          test "$FORGE_BENCH_CONAN_HIT" = true
+          archive="$RUNNER_TEMP/forge-packages.tgz"
+          test -s "$archive"
+          conan list '*:*' --format=json > "$RUNNER_TEMP/first-packages.json"
+          initial="$RUNNER_TEMP/first-cli-header-sha256"
+          folder=$(conan cache path "$(python -c 'import json; x=json.load(open("conan.lock")); print(x["requires"][0].split("%")[0])')")
+          test -d "$folder"
+          find "$CONAN_HOME" -name CLI.hpp -type f -exec shasum -a 256 {} \; | cut -d' ' -f1 | sort > "$initial"
+          test -s "$initial"
+          echo '# Native cache invalidation control' >> conan/profiles/macos-arm64-appleclang
+          mv "$archive" "$RUNNER_TEMP/original-forge-packages.tgz"
+          mv "$CONAN_HOME" "$RUNNER_TEMP/original-forge-conan"
+          mv build "$RUNNER_TEMP/original-build"
+      - name: Provision with the changed profile using a fresh Conan home
+        id: after
+        uses: ./.github/actions/native-setup
+        with:
+          presets: dev
+      - name: Verify locked bytes and offline reuse
+        run: |
+          test "$FORGE_BENCH_CONAN_HIT" != true
+          conan list '*:*' --format=json > "$RUNNER_TEMP/second-packages.json"
+          python - <<'PYTHON'
+          import json, os
+          from pathlib import Path
+          root = Path(os.environ['RUNNER_TEMP'])
+          def package_ids(filename):
+              recipes = json.loads((root / filename).read_text())['Local Cache']
+              return {(ref, rev, pid)
+                      for ref, data in recipes.items()
+                      for rev, package in data['revisions'].items()
+                      for pid in package['packages']}
+          before = package_ids('first-packages.json')
+          after = package_ids('second-packages.json')
+          assert before and before == after, (before, after)
+          print('Verified locked Conan package IDs:', before)
+          PYTHON
+          find "$CONAN_HOME" -name CLI.hpp -type f -exec shasum -a 256 {} \; | cut -d' ' -f1 | sort > "$RUNNER_TEMP/second-cli-header-sha256"
+          cmp "$RUNNER_TEMP/first-cli-header-sha256" "$RUNNER_TEMP/second-cli-header-sha256"
+          make provision PRESET=dev CACHE_ONLY=1
