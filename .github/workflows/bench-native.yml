@@ -1,0 +1,126 @@
+name: Native CI benchmark
+
+on:
+  push:
+    branches: [perf/ci-benchmarks]
+    paths: [.github/workflows/bench-native.yml]
+
+permissions:
+  contents: read
+
+env:
+  FORGE_CI_THINLTO_CACHE: 'true'
+  CMAKE_BUILD_PARALLEL_LEVEL: '3'
+
+jobs:
+  controls:
+    name: dev / ${{ matrix.sample }}
+    runs-on: macos-26
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - sample: unconstrained
+            jobs: ''
+            lto: 'false'
+          - sample: three-way
+            jobs: '3'
+            lto: 'false'
+          - sample: three-way + local ThinLTO
+            jobs: '3'
+            lto: 'true'
+    env:
+      CMAKE_BUILD_PARALLEL_LEVEL: ${{ matrix.jobs }}
+      FORGE_CI_THINLTO_CACHE: ${{ matrix.lto }}
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          fetch-depth: 0
+      - uses: ./.github/actions/native-setup
+        with:
+          presets: dev
+      - name: Control build and full CTest
+        run: |
+          /usr/bin/sandbox-exec -p '(version 1)(allow default)(deny network-outbound (remote ip "*:*"))' \
+            ./tools/test-forge.sh --native-dev
+          if [[ -d "$RUNNER_TEMP/forge-lto" ]]; then du -sh "$RUNNER_TEMP/forge-lto"; fi
+
+  cold:
+    name: dev / cold compiler cache
+    runs-on: macos-26
+    env:
+      FORGE_CI_CCACHE: 'true'
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          fetch-depth: 0
+      - uses: ./.github/actions/native-setup
+        with:
+          compiler-cache: 'true'
+          presets: dev
+      - name: Cold build and full CTest
+        run: |
+          /usr/bin/sandbox-exec -p '(version 1)(allow default)(deny network-outbound (remote ip "*:*"))' \
+            ./tools/test-forge.sh --native-dev
+          ccache --show-stats --verbose
+          du -sh "$CCACHE_DIR" "$RUNNER_TEMP/forge-lto"
+          tar -czf "$RUNNER_TEMP/cold-sample.tgz" build/dev/CMakeFiles/forge_core.dir/src/diagnostic.cpp.o build/dev/forge
+      - uses: actions/upload-artifact@v4
+        with:
+          name: cold-sample
+          path: ${{ runner.temp }}/cold-sample.tgz
+
+  warm:
+    name: dev / ${{ matrix.sample }} compiler cache
+    needs: cold
+    runs-on: macos-26
+    strategy:
+      fail-fast: false
+      matrix:
+        sample: [warm, edited]
+    env:
+      FORGE_CI_CCACHE: 'true'
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          fetch-depth: 0
+      - name: Edit a single translation unit
+        if: matrix.sample == 'edited'
+        run: |
+          echo 'extern "C" unsigned forge_benchmark_cache_version() { return 43545829u; }' >> src/diagnostic.cpp
+          git -c user.name=Benchmark -c user.email=benchmark@localhost commit -am 'Change one translation unit for the compile-cache experiment'
+      - uses: ./.github/actions/native-setup
+        with:
+          compiler-cache: 'true'
+          presets: dev
+      - uses: actions/download-artifact@v4
+        with:
+          name: cold-sample
+          path: ${{ runner.temp }}
+      - name: Full build and CTest from restored objects
+        run: |
+          /usr/bin/sandbox-exec -p '(version 1)(allow default)(deny network-outbound (remote ip "*:*"))' \
+            ./tools/test-forge.sh --native-dev
+          ccache --show-stats --verbose
+          ccache --print-stats > "$RUNNER_TEMP/ccache-stats"
+          cat "$RUNNER_TEMP/ccache-stats"
+          du -sh "$CCACHE_DIR" "$RUNNER_TEMP/forge-lto"
+      - name: Verify cache reuse and edited object
+        env:
+          SAMPLE: ${{ matrix.sample }}
+        run: |
+          mkdir "$RUNNER_TEMP/cold"
+          tar -xzf "$RUNNER_TEMP/cold-sample.tgz" -C "$RUNNER_TEMP/cold"
+          object=build/dev/CMakeFiles/forge_core.dir/src/diagnostic.cpp.o
+          hits=$(awk '/^(direct_cache_hit|preprocessed_cache_hit)[[:space:]]/ { n += $2 } END { print n+0 }' "$RUNNER_TEMP/ccache-stats")
+          misses=$(awk '$1 == "cache_miss" { print $2 }' "$RUNNER_TEMP/ccache-stats")
+          echo "Cache hits: $hits; misses: $misses"
+          test "$hits" -gt 0
+          if [[ "$SAMPLE" == edited ]]; then
+            test "$misses" -gt 0
+            ! cmp -s "$object" "$RUNNER_TEMP/cold/$object" || exit 1
+            nm "$object" > "$RUNNER_TEMP/symbols"
+            grep -q _forge_benchmark_cache_version "$RUNNER_TEMP/symbols"
+          else
+            cmp "$object" "$RUNNER_TEMP/cold/$object"
+          fi
