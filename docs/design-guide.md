@@ -24,6 +24,7 @@ The CLI calls the private `forge_core` library. Inspection follows imports acros
 From the repository root, run the focused tests with fixture setup, including when the build was previously configured with tests disabled.
 
 ```sh
+make provision
 make test CONFIG=Debug BUILD_TESTING=ON CTEST_ARGS='-R "^(cli|lift_command)$$"'
 ```
 

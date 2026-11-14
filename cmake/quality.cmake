@@ -29,29 +29,6 @@ execute_process(COMMAND "${python}" -B "${style}" native-sources
   WORKING_DIRECTORY "${root}" OUTPUT_VARIABLE source_list OUTPUT_STRIP_TRAILING_WHITESPACE
   COMMAND_ERROR_IS_FATAL ANY)
 string(REPLACE "\n" ";" sources "${source_list}")
-if(NOT LINT_DATABASE)
-  forge_llvm_tool(clang)
-  forge_llvm_tool(clang++)
-  if(CMAKE_HOST_APPLE)
-    set(sdk -DCMAKE_OSX_SYSROOT=macosx)
-  endif()
-  file(LOCK "${BUILD_DIR}/forge-lint.lock" GUARD PROCESS)
-  if(EXISTS "${BUILD_DIR}/CMakeCache.txt")
-    load_cache("${BUILD_DIR}" READ_WITH_PREFIX cached_ CMAKE_HOME_DIRECTORY CMAKE_CXX_COMPILER)
-    if(cached_CMAKE_HOME_DIRECTORY STREQUAL root AND
-       NOT cached_CMAKE_CXX_COMPILER STREQUAL "${clang++}")
-      # CMake discards command-line settings when it redetects a changed compiler.
-      # Start the dedicated analysis cache fresh so the SDK and database flags survive.
-      file(REMOVE "${BUILD_DIR}/CMakeCache.txt")
-    endif()
-  endif()
-  execute_process(COMMAND "${CMAKE_COMMAND}" -S "${root}" -B "${BUILD_DIR}" -G "Unix Makefiles"
-    "-DCMAKE_C_COMPILER=${clang}" "-DCMAKE_CXX_COMPILER=${clang++}"
-    "-DLLVM_DIR=${LLVM_DIR}" ${sdk} -DCMAKE_BUILD_TYPE=Debug -DBUILD_TESTING=OFF
-    -DCMAKE_EXPORT_COMPILE_COMMANDS=ON COMMAND_ERROR_IS_FATAL ANY)
-  set(LINT_DATABASE "${BUILD_DIR}/compile_commands.json")
-endif()
-
 get_filename_component(database "${LINT_DATABASE}" ABSOLUTE)
 get_filename_component(directory "${database}" DIRECTORY)
 get_filename_component(filename "${database}" NAME)

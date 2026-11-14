@@ -22,16 +22,6 @@ def command(args, **kwargs):
     return subprocess.check_output(args, text=True, **kwargs).strip()
 
 
-def build_image(suite):
-    image = command(["docker", "build", "--platform", "linux/amd64", "--target", "reference",
-                     "-q", "-f", suite / "toolchain/Dockerfile", suite])
-    platform = command(["docker", "image", "inspect", "--format", "{{.Os}}/{{.Architecture}}", image])
-    if platform != "linux/amd64":
-        raise ValueError(f"unexpected Wine image platform {platform!r}")
-    host = command(["docker", "info", "--format", "{{.Architecture}}"])
-    return dict(container_image_id=image, container_platform=platform, docker_host_arch=host)
-
-
 def supervise(process, startup_timeout=STARTUP_TIMEOUT, execution_timeout=EXECUTION_TIMEOUT):
     payload = bytearray()
     diagnostic = bytearray()
@@ -76,7 +66,7 @@ def supervise(process, startup_timeout=STARTUP_TIMEOUT, execution_timeout=EXECUT
 
 def execute(image, binary, args, *, container_env=()):
     name = "forge-reference-" + uuid.uuid4().hex
-    options = ["docker", "create", "--name", name, "--platform", "linux/amd64", "--network", "none",
+    options = ["docker", "create", "--pull", "never", "--name", name, "--platform", "linux/amd64", "--network", "none",
                "--hostname", "forge-reference", "--log-driver", "none", "--cap-drop", "ALL",
                "--security-opt", "no-new-privileges", "--pids-limit", "128",
                "--tmpfs", "/tmp:rw,nosuid,nodev,size=64m",

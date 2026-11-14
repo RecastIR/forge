@@ -87,16 +87,28 @@ add_test(NAME windows_differential_runner COMMAND "${Python3_EXECUTABLE}" -B
   "${CMAKE_CURRENT_SOURCE_DIR}/differential/test_differential.py")
 add_test(NAME differential_coverage COMMAND "${Python3_EXECUTABLE}" -B
   "${CMAKE_CURRENT_SOURCE_DIR}/differential/test_coverage.py")
-foreach(tool llvm-mc lld-link llvm-dlltool llvm-readobj clang opt llc)
+foreach(tool llvm-mc lld-link llvm-dlltool clang)
   forge_llvm_tool("${tool}")
 endforeach()
+set(build_test_toolchain "")
+if(FORGE_BUILD_CLI)
+  get_filename_component(build_test_toolchain "${CMAKE_TOOLCHAIN_FILE}" ABSOLUTE BASE_DIR "${PROJECT_BINARY_DIR}")
+endif()
+set(build_test_args
+  "${PROJECT_SOURCE_DIR}" "${CMAKE_COMMAND}" "${LLVM_DIR}" "${llvm_bin}" "${FORGE_BUILD_ROOT}/tmp"
+  "$<BOOL:${FORGE_BUILD_CLI}>" "$<1:${build_test_toolchain}>" "$<CONFIG>" "${CMAKE_GENERATOR}")
 add_test(NAME build_config COMMAND "${Python3_EXECUTABLE}" -B
-  "${CMAKE_CURRENT_SOURCE_DIR}/integration/test_build.py" "${PROJECT_SOURCE_DIR}" "${CMAKE_COMMAND}" "${LLVM_DIR}" "${llvm_bin}")
+  "${CMAKE_CURRENT_SOURCE_DIR}/integration/test_build.py" build ${build_test_args})
+if(FORGE_BUILD_CLI)
+  add_test(NAME build_provisioning COMMAND "${Python3_EXECUTABLE}" -B
+    "${CMAKE_CURRENT_SOURCE_DIR}/integration/test_build.py" provisioning ${build_test_args})
+  set_tests_properties(build_provisioning PROPERTIES SKIP_RETURN_CODE 77)
+endif()
 if(llvm_version STREQUAL "23.1.5" AND EXISTS "${llvm_bin}/clang-format" AND EXISTS "${llvm_bin}/clang-tidy")
   add_test(NAME cpp_style COMMAND "${Python3_EXECUTABLE}" -B
-    "${CMAKE_CURRENT_SOURCE_DIR}/integration/test_style.py" "${PROJECT_SOURCE_DIR}" "${llvm_bin}")
+    "${CMAKE_CURRENT_SOURCE_DIR}/integration/test_style.py" "${PROJECT_SOURCE_DIR}" "${llvm_bin}" "${FORGE_BUILD_ROOT}/tmp")
 endif()
-set(fixtures "${PROJECT_BINARY_DIR}/fixtures")
+set(fixtures "${PROJECT_BINARY_DIR}/fixtures/$<CONFIG>")
 add_test(NAME fixtures COMMAND "${Python3_EXECUTABLE}" -B
   "${CMAKE_CURRENT_SOURCE_DIR}/fixtures/generate.py" "${fixtures}"
   --mc "${llvm-mc}" --link "${lld-link}" --dlltool "${llvm-dlltool}" --clang "${clang}")
@@ -105,6 +117,12 @@ add_test(NAME input_lifetime COMMAND input_lifetime "${fixtures}/minimal.exe")
 add_test(NAME lift_contract COMMAND lift_contract "${fixtures}/add.exe")
 add_test(NAME lift_command COMMAND lift_command "${fixtures}/add.exe")
 set_tests_properties(input_lifetime lift_contract lift_command PROPERTIES FIXTURES_REQUIRED pe_images)
+if(NOT FORGE_BUILD_CLI)
+  return()
+endif()
+foreach(tool llvm-readobj opt llc)
+  forge_llvm_tool("${tool}")
+endforeach()
 foreach(suite metadata dependencies malformed cli discovery lift)
   set(script test_inspect.py)
   if(suite MATCHES "^(discovery|lift)$")

@@ -12,21 +12,31 @@ case "$#:${1-}" in
 esac
 
 repo=$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)
+cd "$repo"
 suite="$repo/tests/differential"
-output="$repo/build/fixtures/windows-x64"
+root=${BUILD_ROOT:-build}
+output="$root/fixtures/windows-x64"
 if git -C "$repo" rev-parse --is-inside-work-tree >/dev/null 2>&1; then
-    tracked=$(git -C "$repo" ls-files -- build/fixtures/windows-x64 'tests/differential/*.exe' 'tests/differential/*SHA256SUMS')
+    tracked=$(git -C "$repo" ls-files -- 'tests/differential/*.exe' 'tests/differential/*SHA256SUMS')
     if [ -n "$tracked" ]; then
         printf 'Generated fixture artifacts in the Git index:\n%s\n' "$tracked" >&2
         exit 1
     fi
-    if ! git -C "$repo" check-ignore -q build/fixtures/windows-x64/debug/SHA256SUMS; then
-        echo "The fixture export directory must be ignored by Git." >&2
-        exit 1
-    fi
+    # In-repository exports must be ignored. An intentional external root is also supported.
+    relative=$(python3 -c 'import os,sys; print(os.path.relpath(os.path.realpath(sys.argv[1])))' "$output")
+    case "$relative" in
+        ../*) ;;
+        *)
+            if test -n "$(git ls-files -- "$relative")" || ! git check-ignore -q -- "$relative/debug/SHA256SUMS"; then
+                echo "The fixture export directory must be ignored by Git: $output" >&2
+                exit 1
+            fi ;;
+    esac
 fi
-mkdir -p "$output"
-image=$(docker build --platform linux/amd64 --target toolchain -q -t forge-windows-fixture-toolchain \
-    -f "$suite/toolchain/Dockerfile" "$suite")
-exec docker run --rm --platform linux/amd64 --network none --user "$(id -u):$(id -g)" \
-    -e "FORGE_TOOLCHAIN_ID=$image" -v "$suite:/suite:ro" -v "$output:/output" "$image" python3 -B /suite/build.py "$@"
+image=$(python3 -B "$suite/fixture_images.py" --id toolchain)
+mkdir -p "$output" "$root/tmp"
+output=$(cd "$output" && pwd -P)
+temporary=$(cd "$root/tmp" && pwd -P)
+exec docker run --pull never --rm --platform linux/amd64 --network none --user "$(id -u):$(id -g)" \
+    -e "FORGE_TOOLCHAIN_ID=$image" -e TMPDIR=/forge-tmp -v "$temporary:/forge-tmp" \
+    -v "$suite:/suite:ro" -v "$output:/output" "$image" python3 -B /suite/build.py "$@"

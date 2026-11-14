@@ -2,17 +2,33 @@ cmake_minimum_required(VERSION 3.20)
 file(REAL_PATH "${CMAKE_CURRENT_SOURCE_DIR}" source_dir)
 file(REAL_PATH "${CMAKE_CURRENT_BINARY_DIR}" binary_dir)
 if(source_dir STREQUAL binary_dir)
-  message(FATAL_ERROR "Forge requires an out-of-source build. From the source directory run\n  cmake -S . -B build")
+  message(FATAL_ERROR "Forge requires an out-of-source build. Use make provision PRESET=dev, then cmake --preset dev.")
 endif()
+set(FORGE_BUILD_ROOT "${source_dir}/build" CACHE PATH "Parent directory for Forge build output")
+file(REAL_PATH "${FORGE_BUILD_ROOT}" build_root)
+file(REAL_PATH "${source_dir}/build" default_build_root)
+if(binary_dir STREQUAL default_build_root OR binary_dir STREQUAL build_root)
+  message(FATAL_ERROR "The build root is a container. Configure a child with cmake --preset dev. "
+    "Save any existing artifacts and retire the old root CMake cache separately.")
+endif()
+include(cmake/dependencies.cmake)
 project(Forge LANGUAGES C CXX)
 
 include(cmake/llvm.cmake)
+forge_check_dependencies()
 foreach(action format format-check format-audit)
   add_custom_target(${action}
     COMMAND "${CMAKE_COMMAND}" "-DACTION=${action}" "-DLLVM_DIR=${LLVM_DIR}"
             -P "${CMAKE_CURRENT_SOURCE_DIR}/cmake/quality.cmake"
     WORKING_DIRECTORY "${CMAKE_CURRENT_SOURCE_DIR}" VERBATIM)
 endforeach()
+if(FORGE_PRESET STREQUAL "lint")
+  add_custom_target(lint
+    COMMAND "${CMAKE_COMMAND}" -DACTION=lint "-DLLVM_DIR=${LLVM_DIR}"
+            "-DLINT_DATABASE=${CMAKE_BINARY_DIR}/compile_commands.json"
+            -P "${CMAKE_CURRENT_SOURCE_DIR}/cmake/quality.cmake"
+    WORKING_DIRECTORY "${CMAKE_CURRENT_SOURCE_DIR}" VERBATIM)
+endif()
 option(FORGE_ENABLE_SANITIZERS "Build Forge with AddressSanitizer and UndefinedBehaviorSanitizer" OFF)
 if(FORGE_ENABLE_SANITIZERS)
   set(sanitizer_link_flags -fsanitize=address,undefined)
@@ -58,18 +74,20 @@ if(APPLE AND TARGET LTO)
 endif()
 configure_forge_cxx(forge_core)
 
-add_library(cli11 INTERFACE)
-add_library(CLI11::CLI11 ALIAS cli11)
-target_include_directories(cli11 SYSTEM INTERFACE "${CMAKE_CURRENT_SOURCE_DIR}/third_party/cli11")
-
-add_executable(forge
-  src/cli/main.cpp src/cli/parsing.cpp src/cli/analysis_input.cpp
-  src/cli/commands/inspect.cpp src/cli/commands/analyze.cpp
-  src/cli/commands/lift.cpp src/cli/commands/lift_execution.cpp
-  src/cli/report.cpp src/cli/analysis_report.cpp src/cli/diagnostic.cpp)
-set_target_properties(forge PROPERTIES LINK_LIBRARIES_STRATEGY REORDER_FREELY)
-target_link_libraries(forge PRIVATE forge_core CLI11::CLI11)
-configure_forge_cxx(forge)
+if(FORGE_BUILD_CLI)
+  # Use only the CLI11 config generated for this toolchain, including when a
+  # different CLI11_DIR was supplied on the command line or cached previously.
+  set(CLI11_DIR "${FORGE_CONAN_DIRECTORY}")
+  find_package(CLI11 REQUIRED CONFIG PATHS "${CLI11_DIR}" NO_DEFAULT_PATH NO_CMAKE_FIND_ROOT_PATH)
+  add_executable(forge
+    src/cli/main.cpp src/cli/parsing.cpp src/cli/analysis_input.cpp
+    src/cli/commands/inspect.cpp src/cli/commands/analyze.cpp
+    src/cli/commands/lift.cpp src/cli/commands/lift_execution.cpp
+    src/cli/report.cpp src/cli/analysis_report.cpp src/cli/diagnostic.cpp)
+  set_target_properties(forge PROPERTIES LINK_LIBRARIES_STRATEGY REORDER_FREELY)
+  target_link_libraries(forge PRIVATE forge_core CLI11::CLI11)
+  configure_forge_cxx(forge)
+endif()
 
 include(CTest)
 if(BUILD_TESTING OR CMAKE_EXPORT_COMPILE_COMMANDS OR DEFINED FORGE_DIFFERENTIAL_IR)

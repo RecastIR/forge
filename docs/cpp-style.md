@@ -145,10 +145,11 @@ Select the checksum-verified LLVM **23.1.5** package described in the [build ins
 make format         # Format all project-owned C, C++, and headers
 make format-check   # Check formatting and fixture braces across the tree
 make format-audit   # Run the same read-only whole-tree check
+make provision PRESET=lint
 make lint           # Run native safety, maintainability, and changed-line style checks
 ```
 
-After configuring a build, `cmake --build build --target format` and `cmake --build build --target format-check` use the same commands as Make. In CLion or VS Code, select the release's clang-format binary and repository style for document formatting. For clangd or IDE linting, use the matching tools and `compile_commands.json` from the lint build. IDEs may display diagnostics throughout an open file.
+After configuring a build, `cmake --build --preset dev --target format` and `cmake --build --preset dev --target format-check` use the same commands as Make. In CLion or VS Code, select the release's clang-format binary and repository style for document formatting. For clangd or IDE linting, use the matching tools and `compile_commands.json` from the lint build. IDEs may display diagnostics throughout an open file.
 
 | Enforcement | Coverage |
 | --- | --- |

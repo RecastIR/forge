@@ -16,7 +16,7 @@ from protocol import STREAM_LIMIT
 from run import verified_export
 
 STATUSES = ("passed", "failed", "error", "reference_only", "blocked")
-JOB_STAGES = {"macos": ("formatting", "lint", "debug", "build_oracles", "sanitize", "build-sanitize_oracles"),
+JOB_STAGES = {"macos": ("formatting", "lint", "debug", "dev_oracles", "sanitize", "sanitize_oracles"),
               "windows-fixtures": ("build", "capture", "wine_tests"),
               "differential": ("debug", "release", "negative_tests")}
 JOBS = tuple(JOB_STAGES)
@@ -308,7 +308,7 @@ def main():
     if args.jobs is not None:
         verify_job_stages(report, needs)
     report["environment"] = "github-actions" if args.jobs is not None else "local"
-    folder = diff.BUILD / "coverage"
+    folder = diff.BUILD / "differential/coverage"
     folder.mkdir(parents=True, exist_ok=True)
     diff.write_json(folder / "coverage.json", report)
     summary = markdown(report)

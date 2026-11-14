@@ -4,6 +4,7 @@ from contextlib import contextmanager
 import fcntl
 import hashlib
 import json
+import os
 from pathlib import Path
 import signal
 import stat
@@ -11,15 +12,16 @@ import subprocess
 import sys
 import tempfile
 
-from docker_wine import CleanupFailure, build_image, execute
+from docker_wine import CleanupFailure, execute
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+from fixture_images import reference_environment
 from comparison import Observation, describe, differences
 from manifests import FIXTURE_ID, SUITE, load_catalog
 
-BUILD = SUITE.parents[1] / "build"
+BUILD = (SUITE.parents[1] / (os.environ.get("BUILD_ROOT") or "build")).resolve()
 BINARIES = BUILD / "fixtures/windows-x64"
-REFERENCES = BUILD / "reference/windows-x64/wine"
+REFERENCES = BUILD / "differential/reference/windows-x64/wine"
 
 
 def selection(argv):
@@ -42,7 +44,8 @@ def runner_version():
     # Image ID covers the guest and Windows parent; include the host-side implementation too.
     digest = hashlib.sha256()
     for path in (Path(__file__), Path(__file__).with_name("docker_wine.py"),
-                 Path(__file__).with_name("protocol.py"), SUITE / "manifests.py", SUITE / "comparison.py"):
+                 Path(__file__).with_name("protocol.py"), SUITE / "manifests.py", SUITE / "comparison.py",
+                 SUITE / "fixture_images.py"):
         digest.update(path.read_bytes())
         digest.update(b"\0")
     return "1+sha256." + digest.hexdigest()
@@ -158,7 +161,7 @@ def run(configs, fixture, *, suite=SUITE, binaries=BINARIES, output=REFERENCES):
                         binary, digest = snapshot(binaries, config, case["binary"], Path(tmp))
                         if provenance is None and setup_failure is None:
                             try:
-                                provenance = dict(build_image(suite), runner_version=runner_version())
+                                provenance = dict(reference_environment(suite), runner_version=runner_version())
                             except (OSError, ValueError, subprocess.SubprocessError) as error:
                                 setup_failure = f"Wine environment setup failed: {error}"
                         if setup_failure:

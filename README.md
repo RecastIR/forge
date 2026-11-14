@@ -21,7 +21,7 @@ The root CMake project builds the `forge` CLI on a private `forge_core` library.
 | `tests/support/` | C++ harness for calling a lifted function from a test |
 | `tests/differential/` | Windows x64 fixtures, manifests, cross-build tooling, and Wine reference capture |
 
-Add new production code to the component that owns it. Create `runtime/` when generated code first needs a shared native implementation. Register tests in `tests/CMakeLists.txt`. Build the whole-executable fixtures with `./tools/build-windows-fixtures.sh --all`, then capture their Wine references with `./tools/run-windows-references.sh --all`. On Apple Silicon, compare enabled lifted functions with `./tools/run-differential.sh --all --config debug` or `--config release`. See the [fixture guide](tests/differential/README.md).
+Add new production code to the component that owns it. Create `runtime/` when generated code first needs a shared native implementation. Register tests in `tests/CMakeLists.txt`. Build the whole-executable fixtures with `make provision-fixtures` and `./tools/build-windows-fixtures.sh --all`, then capture their Wine references with `./tools/run-windows-references.sh --all`. On Apple Silicon, compare enabled lifted functions with `./tools/run-differential.sh --all --config debug` or `--config release`. See the [fixture guide](tests/differential/README.md).
 
 ### Image ownership and stage contracts
 
@@ -33,7 +33,7 @@ Dependency inspection reads import and export tables and retains detached module
 
 Forge uses Apple Silicon, Apple Clang with C++20, CMake, and a stable **LLVM 23.x** installation. CI pins **23.1.5**. The test suite also uses Python 3.9+, LLVM Clang, `llvm-mc`, `llvm-dlltool`, `lld-link`, `llvm-readobj`, `opt`, and `llc`. Use the complete [LLVM release archive for macOS ARM64](https://github.com/llvm/llvm-project/releases/tag/llvmorg-23.1.5) to obtain these tools together.
 
-The Forge CLI uses CLI11 v2.7.2. The official `CLI11.hpp` release asset and its license are checked into `third_party/cli11/`. The header's SHA-256 is `ffa9a30da295c5858fb5f91f9f45771bab09471d7010a34c7c68c857a330dd76`. CMake exposes it as the header-only interface target `CLI11::CLI11`, linked privately to `forge`. Builds use the checked-in header offline. [Upstream release and assets](https://github.com/CLIUtils/CLI11/releases/tag/v2.7.2)
+The native build uses CMake 3.20+ and Unix Makefiles, or Xcode for IDE builds. The complete CI-equivalent suite requires CMake 3.21+ for JUnit. LLVM is installed separately. Select the checked release with the following commands.
 
 ```sh
 # From a directory containing the release archive, extract to a new directory.
@@ -42,25 +42,54 @@ mkdir -p "$HOME/toolchains/llvm-23.1.5"
 zstd --long=30 -dc LLVM-23.1.5-macOS-ARM64.tar.zst | tar -xf - --strip-components=1 -C "$HOME/toolchains/llvm-23.1.5"
 export LLVM_CONFIG="$HOME/toolchains/llvm-23.1.5/bin/llvm-config"
 export LLVM_DIR="$("$LLVM_CONFIG" --cmakedir)"
-# In the Forge checkout:
-make
-build/forge inspect path/to/game.exe
-build/forge inspect path/to/game.exe --verbose
-build/forge inspect path/to/game.exe --dll-path ./bin --dll-path ./plugins --format json
-build/forge inspect path/to/game.exe --strict --format json > report.json
 ```
 
-`make` configures and builds Forge in `build/`. Set `LLVM_DIR` to the directory containing `LLVMConfig.cmake`, or select its `bin/llvm-config` with `LLVM_CONFIG`. If both are set they must select the same installation. Export your selection when using separate Make, quality, and differential commands. Automatic discovery checks Homebrew’s versioned and unversioned LLVM prefixes on macOS and then the directories on `PATH` for a stable 23.x release. Configuration prints the package version, directory, and paths to the tools needed by that build. For a CLI-only build, use `make BUILD_TESTING=OFF`. Use `BUILD_TESTING=ON` to re-enable the tests.
-
-For a checkout with an LLVM 17 cache, use `make test BUILD_DIR=build-llvm23 CONFIG=Debug`. For the full workflow, which uses fixed directory names, start from a clean checkout or move the old build, lint and sanitizer directories aside after saving any PE and reference artifacts. `make clean` retains the old selection.
-
-Set `BUILD_DIR` to choose an out-of-source build directory. With Unix Makefiles, `CONFIG=Release` sets the cached build type and later calls reuse it. With Xcode, pass `CONFIG` on each invocation to select the configuration for that command. Its default is `Debug`.
+Forge checks that both LLVM selectors identify the same installation. With neither set, discovery checks Homebrew and then `PATH` for stable LLVM 23.x. From the checkout, install the pinned build tools and provision the development preset.
 
 ```sh
-CMAKE_GENERATOR=Xcode make test BUILD_DIR=build-xcode CONFIG=Release
-make fixtures BUILD_DIR=build-xcode CONFIG=Release
-make clean BUILD_DIR=build-xcode CONFIG=Release
+python3.12 -m venv build/tools/venv
+. build/tools/venv/bin/activate
+python -m pip install -r requirements-build.txt
+make provision
+make build
+make test
+build/dev/forge inspect path/to/game.exe
+build/dev/forge inspect path/to/game.exe --dll-path ./bin --dll-path ./plugins --format json
 ```
+
+### Configurations and dependency updates
+
+The checked-in `CMakePresets.json` defines the workflows. Conan writes generated presets only inside each selected configuration’s `conan/` directory. A developer’s root `CMakeUserPresets.json` stays private. List the configurations before provisioning with `cmake --list-presets`. After provisioning, `cmake --preset dev`, `cmake --build --preset dev`, and `ctest --preset dev` run directly. Native build and test commands consume generated files without installing packages.
+
+| Workflow | Provision | Use | Output |
+| --- | --- | --- | --- |
+| Development | `make provision` | `make test` | `build/dev/` |
+| Release | `make provision PRESET=release` | `make test PRESET=release` | `build/release/` |
+| Debug ASan + UBSan | `make provision PRESET=sanitize` | `make sanitize` | `build/sanitize/` |
+| Clang analysis | `make provision PRESET=lint` | `make lint` | `build/lint/compile_commands.json` |
+| Xcode | `make provision PRESET=xcode` | `make test PRESET=xcode CONFIG=Release` | `build/xcode/Release/` |
+
+Each configuration has its own `conan/` directory. Conan 2 reads `conanfile.py`, which declares header-only CLI11 2.7.2 for the CLI, and `conan.lock`, which pins its recipe revision. The native build and host profiles in `conan/profiles/` select macOS ARM64, Apple Clang 21, libc++, and C++20. The lint host profile uses Clang 23 from the selected LLVM installation. To use another compatible local compiler installation, set `CONAN_HOST_PROFILE` and, when appropriate, `CONAN_BUILD_PROFILE` to reviewed local profile paths before provisioning an empty directory. The generated toolchain and package descriptions refer to Conan’s shared package cache. Keep the cache available while using those configurations.
+
+`make provision PRESET=dev CACHE_ONLY=1` regenerates integration with remotes disabled and rejects a missing package. Ordinary provisioning can download locked packages. For a dependency update, edit the recipe, run `make update-lock`, review the lockfile diff, provision each affected workflow, and run its checks. Tool versions come from `requirements-build.txt`. LLVM, Xcode, the SDK, and the fixture images have separate provisioning.
+
+The normal build enables the CLI. Use `make build BUILD_TESTING=OFF` to omit tests and `make test BUILD_TESTING=ON` to re-enable them in the same tree. To build core and its applicable tests without provisioning CLI11 or Conan, configure a separate binary directory with `cmake -S . -B build/core -DFORGE_BUILD_CLI=OFF`, then `cmake --build build/core` and `ctest --test-dir build/core --output-on-failure`. For a Conan-managed core build, provision a separate exact directory with `WITH_CLI=OFF`. Native differential harnesses and the standalone MinGW project also work without Conan.
+
+### Output directories and existing checkouts
+
+`BUILD_ROOT` chooses the parent of named configurations. `BUILD_DIR` selects an exact directory for one workflow, including lint and sanitizers. Pass the same location to provisioning and subsequent commands.
+
+```sh
+make provision BUILD_ROOT="/tmp/forge checks" PRESET=release
+make test BUILD_ROOT="/tmp/forge checks" PRESET=release
+make provision BUILD_DIR="/tmp/asan check" PRESET=sanitize
+make sanitize BUILD_DIR="/tmp/asan check"
+make clean BUILD_DIR="/tmp/asan check"
+```
+
+With an exact directory and no selector, generic configure, build, test, and clean commands reuse its recorded workflow. A fresh selection defaults to `dev`. `CONFIG=Release` selects the single-configuration release workflow, or the Release build of an explicitly selected Xcode project. Select `PRESET=sanitize` explicitly when passing `CONFIG=Debug` to a generic command for a sanitizer directory. Reuse requires compatible profiles and settings. Select a fresh directory for a different workflow. `make clean` removes compiled targets from the selected configuration and retains its cache and dependency integration.
+
+Older checkouts may contain a CMake cache directly in `build/`. Run `find . -maxdepth 2 -name CMakeCache.txt -print` to identify old top-level caches. Keep any wanted PEs, Wine references, and reports before retiring those generated files deliberately. Start new builds in the named subdirectories. Relocating a configured cache retains absolute paths to its former location. The nested workflows can run alongside the old files.
 
 ## Command-line compatibility
 
@@ -80,7 +109,7 @@ For command registration, callback lifetimes, and instructions for running the C
 
 For help choosing a component, tracing ownership, and testing a change to its contract, see the [component design guide](docs/design-guide.md).
 
-Run `./tools/test-forge.sh --all` on Apple Silicon for the complete native, Wine, and differential regression workflow. Stage commands, dependencies, CI artifacts, and the coverage policy are in the [regression guide](tests/differential/README.md#regression-ci-and-local-reproduction).
+After provisioning the [regression prerequisites](tests/differential/README.md#regression-ci-and-local-reproduction), run `./tools/test-forge.sh --all` on Apple Silicon for the complete native, Wine, and differential regression workflow. Stage commands, dependencies, CI artifacts, and the coverage policy are in the [regression guide](tests/differential/README.md#regression-ci-and-local-reproduction).
 
 Install Apple's developer tools with `xcode-select --install`. The LLVM release package also provides `clang-format`, `clang-tidy`, and `llvm-config`. Formatting and linting are opt-in locally. The GitHub Actions workflow checks formatting, runs clang-tidy, and tests Debug and sanitizer builds on macOS 26 ARM64 for pull requests and pushes to `main`. It uses LLVM 23.1.5 and a Python environment with Unicorn 2.1.4 for the function-level oracle.
 
@@ -95,12 +124,12 @@ make test CONFIG=Debug
 make sanitize       # Run CTest in a separate Debug build with ASan and UBSan
 ```
 
-`make lint` configures `<BUILD_DIR>-lint/` with Unix Makefiles and refreshes its `compile_commands.json` on each invocation. On macOS it pairs the selected LLVM compiler and clang-tidy with the macOS SDK. This also works alongside an Xcode build. All quality targets use the same LLVM selection as the build. The native build uses Apple’s compiler, SDK and linker. When linking LLVM libraries, the Apple linker loads the selected package’s libLTO to read its ThinLTO bitcode.
+`make lint` configures the lint preset in `build/lint/` with Unix Makefiles and refreshes its `compile_commands.json` on each invocation. On macOS it pairs the selected LLVM compiler and clang-tidy with the macOS SDK. This also works alongside an Xcode build. All quality targets use the same LLVM selection as the build. The native build uses Apple’s compiler, SDK and linker. When linking LLVM libraries, the Apple linker loads the selected package’s libLTO to read its ThinLTO bitcode.
 
 ```sh
 make lint LLVM_CONFIG=/path/to/bin/llvm-config
 make configure CMAKE_ARGS=-DCMAKE_EXPORT_COMPILE_COMMANDS=ON
-make lint LINT_DATABASE=build/compile_commands.json
+make lint LINT_DATABASE=build/dev/compile_commands.json
 ```
 
 The last two commands regenerate and use a Unix Makefiles or Ninja build's own database. An external database must include the harness, unit tests, and every Forge translation unit. Lint requires Python 3 and uses a temporary clang-tidy overlay for four expressions in LLVM’s operand-storage headers. LLVM allocates these operands before its C++ objects, which the bounds checker models as separate allocations. The overlay annotates only those upstream expressions for that check. The style guide lists blocking and advisory diagnostics.
@@ -143,18 +172,18 @@ A required edge is reachable from the root via direct imports alone. Requirednes
 ```sh
 make test
 make fixtures
-build/forge inspect build/fixtures/metadata.exe --strict
+build/dev/forge inspect build/dev/fixtures/Debug/metadata.exe --strict
 ```
 
 CTest runs `tests/fixtures/generate.py` to assemble and link SDK-free sources with fixed PE timestamps into the build directory. Tests compare metadata to `llvm-readobj` and create malformed copies in temporary directories. To exercise same-directory case collisions on a case-insensitive Mac, point `TMPDIR` at a writable directory on a case-sensitive volume.
 
-`make fixtures` regenerates just the test images. `make sanitize` builds and runs the suite in Debug with AddressSanitizer and UndefinedBehaviorSanitizer in `<BUILD_DIR>-sanitize/`. It forwards `CMAKE_ARGS`, including compiler and deployment-target settings. Direct CMake builds can enable the same instrumentation with `-DFORGE_ENABLE_SANITIZERS=ON`. `make clean` removes compiled targets from the selected configuration and keeps the CMake cache.
+`make fixtures` regenerates the current preset’s test images. `make sanitize` compiles and runs the Debug suite with AddressSanitizer and UndefinedBehaviorSanitizer in `build/sanitize/`. CMake options such as a deployment target can be passed through `CMAKE_ARGS`.
 
 ## Discover functions
 
 ```sh
-build/forge analyze fastgron.exe --functions
-build/forge analyze fastgron.exe --functions --format json --strict
+build/dev/forge analyze fastgron.exe --functions
+build/dev/forge analyze fastgron.exe --functions --format json --strict
 ```
 
 Analysis reads the root image's PE exception directory, conventionally stored in `.pdata`. Each record reports a half-open interval `[start_rva, end_rva)`, byte count, unwind RVA, original zero-based record indices, and entry-point/TLS-callback membership. Where embedded DWARF is usable, LLVM supplies the enclosing function's linkage name and source location, including when its first instruction comes from an inlined call. Gaps in executable sections remain `unknown_executable_ranges`. These may include leaf functions, padding, or embedded data.
@@ -172,14 +201,14 @@ The following example builds a Windows EXE from `tests/fixtures/add.c`. Clang co
 ```sh
 make test
 llvm_bin="$("$LLVM_CONFIG" --bindir)"
-build/forge analyze build/fixtures/add.exe --functions
-build/forge lift build/fixtures/add.exe --rva 0x1000 \
-  --signature 'i64(i64,i64)' --output build/add.ll
-"$llvm_bin/opt" -passes=verify -disable-output build/add.ll
-"$llvm_bin/llc" -filetype=obj build/add.ll -o build/add.o
-"$llvm_bin/llvm-readobj" --file-headers build/add.o
-xcrun clang++ -arch arm64 -std=c++20 tests/support/native_harness.cpp build/add.o -o build/add-harness
-printf 'a 14\nffffffffffffffff 1\n' | build/add-harness
+build/dev/forge analyze build/dev/fixtures/Debug/add.exe --functions
+build/dev/forge lift build/dev/fixtures/Debug/add.exe --rva 0x1000 \
+  --signature 'i64(i64,i64)' --output build/dev/add.ll
+"$llvm_bin/opt" -passes=verify -disable-output build/dev/add.ll
+"$llvm_bin/llc" -filetype=obj build/dev/add.ll -o build/dev/add.o
+"$llvm_bin/llvm-readobj" --file-headers build/dev/add.o
+xcrun clang++ -arch arm64 -std=c++20 tests/support/native_harness.cpp build/dev/add.o -o build/dev/add-harness
+printf 'a 14\nffffffffffffffff 1\n' | build/dev/add-harness
 ```
 
 The object reports `Mach-O arm64`. The harness prints `1e` and `0` for 10 + 20 and −1 + 1. It accepts empty input and reports failure for an incomplete pair or an input or output error.
@@ -247,7 +276,7 @@ The `codegen` suite checks the exact RVA-named function in both optimized IR int
 The optional `differential` suite uses Unicorn when its Python package is available to CTest's interpreter. It executes the fixture's original x86-64 code bytes with a Windows x64 call frame and compares the resulting RAX with the native harness. This is isolated machine-code differential execution. The standard native run and the generated functions have no emulator dependency. CTest reports a skip when the optional oracle or native host is unavailable.
 
 ```sh
-ctest --test-dir build -C Debug -R '^differential$' --output-on-failure
+ctest --preset dev -R '^differential$' --output-on-failure
 ```
 
 On Apple Silicon, 30 fixture cases passed all 8,160 source-reference comparisons before optimization and all 8,160 after optimization. The optimized native functions also matched all 8,160 independent Unicorn 2.1.4 results. As a negative check, substituting JL for JLE in the linked PE failed on input `(0, 0)` under both normal Python and `PYTHONOPTIMIZE=1`.
@@ -255,7 +284,7 @@ On Apple Silicon, 30 fixture cases passed all 8,160 source-reference comparisons
 The pinned Windows fastgron v0.7.7 executable (SHA-256 `1c18064f88804a0519fa51d9a4755bd25b7b73d16e28bddf24e3e1688480eb47`) produced 235 valid ranges and no analysis findings. LLVM resolved `0x29c50` to `std::ctype<char>::do_widen(char) const` at `locale_facets.h:1092`. Its bytes `89 d0 c3` lifted and compiled to ARM64. The signatureless form models the EDX-to-EAX move and zero-extension. That C++ member function has a different prototype from the fixture wrapper. [fastgron v0.7.7 release](https://github.com/adamritter/fastgron/releases/tag/v0.7.7)
 
 ```sh
-build/forge lift fastgron.exe --rva 0x29c50 --output build/fastgron.ll
-"$llvm_bin/llc" -filetype=obj build/fastgron.ll -o build/fastgron.o
-"$llvm_bin/llvm-objdump" -d build/fastgron.o
+build/dev/forge lift fastgron.exe --rva 0x29c50 --output build/dev/fastgron.ll
+"$llvm_bin/llc" -filetype=obj build/dev/fastgron.ll -o build/dev/fastgron.o
+"$llvm_bin/llvm-objdump" -d build/dev/fastgron.o
 ```

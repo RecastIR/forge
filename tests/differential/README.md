@@ -22,9 +22,10 @@ These C11 and C++20 console programs provide Windows x64 inputs for whole-execut
 
 ## Build and inspect
 
-From the repository root, use Docker with Linux amd64 container support. Apple Silicon uses Docker Desktop's amd64 emulation. The first build needs access to the Debian image registry and package snapshot. Fixture compilation and inspection run with networking disabled. The normal Forge build and native CTest suite require only their existing tools.
+From the repository root, use Docker with Linux amd64 container support. Apple Silicon uses Docker Desktop's amd64 emulation. Explicit image preparation needs access to the Debian image registry and package snapshot. Fixture compilation and inspection run with networking disabled. Rerun image preparation when a pinned image input changes. The native Forge dependency setup is independent.
 
 ```sh
+make provision-fixtures
 ./tools/build-windows-fixtures.sh --all
 ./tools/build-windows-fixtures.sh --config debug
 ./tools/build-windows-fixtures.sh --config release
@@ -34,7 +35,7 @@ The wrapper configures the standalone fixture CMake project with Ninja and the W
 
 ```sh
 (cd build/fixtures/windows-x64/debug && shasum -a 256 -c SHA256SUMS)
-build/forge inspect build/fixtures/windows-x64/release/imports_kernel32.exe --format json
+build/dev/forge inspect build/fixtures/windows-x64/release/imports_kernel32.exe --format json
 ```
 
 The Dockerfile pins the amd64 Debian Bookworm image by digest and installs packages from the signed 2025-02-24 snapshot. The cross compiler uses the Win32 threading model. The exact package revisions are GCC/G++ `12.2.0-14+25.2`, MinGW-w64 headers and libraries `10.0.0-3`, binutils `2.40-2+10.4`, CMake `3.25.1-1`, and Ninja `1.11.1-2~deb12u1`. The build fixes the locale, timezone, source and debug directory mappings, and PE timestamp. Debug uses `-O0 -g` and Release uses `-O2`. Compiler support libraries are linked statically. [Toolchain definition](toolchain/Dockerfile) · [Compiler and linker flags](fixtures/CMakeLists.txt)
@@ -84,7 +85,7 @@ The startup deadline is 120 seconds and the execution deadline is 10 seconds. Ea
 ### Result layout and interpretation
 
 ```text
-build/reference/windows-x64/wine/debug/runner/exit_and_stderr/
+build/differential/reference/windows-x64/wine/debug/runner/exit_and_stderr/
   result.json
   stdout.bin
   stderr.bin
@@ -101,7 +102,7 @@ For the combined regression, `stdout.bin` is empty, `stderr.bin` contains the 13
 - **Missing executable or checksum mismatch.** Rebuild with `./tools/build-windows-fixtures.sh --config debug` or `--config release`. An unsupported PE fails inspection before Wine launches it.
 - **Wine startup or dependency failure.** Check the fixture/configuration label, loader status, and diagnostic tail. Use the pinned toolchain's `x86_64-w64-mingw32-objdump -p` to inspect imported DLL names. A missing imported DLL can yield `0xc0000135`; a fixture that deliberately exits with that value after startup has an observable exit code.
 - **Output or exit mismatch.** Rerun the individual fixture. Diagnostics identify every differing field, the first differing byte offset, both lengths, and escaped byte context. Check binary stream mode, arguments, and flushes before explicit process termination.
-- **Timeout, overflow, or artifact write failure.** Check fixture termination, descendants inheriting handles, output volume, and permissions or free space under `build/reference/`. Correct the cause and rerun to publish a fresh result.
+- **Timeout, overflow, or artifact write failure.** Check fixture termination, descendants inheriting handles, output volume, and permissions or free space under `build/differential/reference/`. Correct the cause and rerun to publish a fresh result.
 
 The existing `windows-fixtures` job on native Linux amd64 builds both configurations, runs this CLI, reopens the entire artifact matrix, exercises real Wine failure cases, and uploads the references and matching PE exports together in `windows-x64-inputs` on success. Run `python3 -B tests/differential/reference/test_runner.py` for Wine-free tests and `python3 -B tests/differential/reference/test_wine.py` after a complete capture for integration tests. The native Forge CTest suite includes the Wine-free runner tests.
 
@@ -118,6 +119,7 @@ The SDK-free parser and lifter samples live in `tests/fixtures/`. The existing `
 On Apple Silicon, build Forge with LLVM 23 and export the LLVM selection from the [build instructions](../../README.md#build-and-run) for the harness configurations. Prepare matching Windows binaries and references with the commands above, or extract the successful Linux job’s `windows-x64-inputs` artifact into `build/`. The native comparison runs offline using those files.
 
 ```sh
+make provision
 make CONFIG=Debug
 ./tools/run-differential.sh --fixture arithmetic/add_i64 --config debug
 ./tools/run-differential.sh --fixture arithmetic/weighted_pair_i64 --config debug
@@ -128,11 +130,12 @@ make CONFIG=Debug
   --reference-root /path/to/windows-x64-wine-references
 ```
 
-Use `--forge PATH` to select the executable for inspection, analysis, and lifting. Relative paths resolve from the directory where you invoke the runner. The default is the repository’s `build/forge`. The report records the SHA-256 of the selected executable. To use Xcode with a custom build directory, run both commands from the repository root.
+Use `--forge PATH` to select the executable for inspection, analysis, and lifting. Relative paths resolve from the directory where you invoke the runner. The default is the repository’s `build/dev/forge`. The report records the SHA-256 of the selected executable. To use the Xcode preset, run both commands from the repository root.
 
 ```sh
-CMAKE_GENERATOR=Xcode make BUILD_DIR=build-xcode CONFIG=Debug
-CMAKE_GENERATOR=Xcode ./tools/run-differential.sh --all --config debug --forge build-xcode/Debug/forge
+make provision PRESET=xcode
+make build PRESET=xcode CONFIG=Debug
+CMAKE_GENERATOR=Xcode ./tools/run-differential.sh --all --config debug --forge build/xcode/Debug/forge
 ```
 
 The manifest supplies the binary, arguments and expected Windows behavior. [cases.json](cases.json) associates an enabled fixture ID with its function export, explicit ABI signature, scope and CMake harness. Each invocation snapshots the selected PE against its configuration’s `SHA256SUMS`. The consumer checks the v1 reference’s validated status, IDs, configuration, binary and manifest hashes, publisher fingerprint, and Wine provenance. It requires the designated regular stream files, verifies sizes and hashes, and independently checks the recorded bytes and full exit code against the manifest. It compares native behavior with the verified observation held in memory. A local override must point to a trusted producer’s artifacts. Hashes detect changes relative to the publication. CI obtains producer identity from its same-run artifact transfer.
@@ -172,14 +175,13 @@ Use `python3 -B tests/differential/test_differential.py` for the Wine-free compa
 
 ## Regression CI and local reproduction
 
-From a clean Apple Silicon checkout, install Xcode, the LLVM 23 distribution, CMake 3.21+ (for CTest JUnit), and a Docker engine capable of running Linux amd64 containers. Select a Python environment with the pinned Unicorn oracle.
+From an Apple Silicon checkout, follow the [tool setup](../../README.md#build-and-run) to select LLVM and activate the pinned Python environment. The full gate uses Xcode, CMake 3.21+ for JUnit, and Docker with Linux amd64 images. Prepare the native configurations and fixture images before starting it.
 
 ```sh
-python3.12 -m venv /tmp/forge-oracle
-/tmp/forge-oracle/bin/python -m pip install --only-binary=:all: unicorn==2.1.4
-export CMAKE_ARGS="-DPython3_EXECUTABLE=/tmp/forge-oracle/bin/python"
-export LLVM_CONFIG="$HOME/toolchains/llvm-23.1.5/bin/llvm-config"
-export LLVM_DIR="$("$LLVM_CONFIG" --cmakedir)"
+make provision
+make provision PRESET=sanitize
+make provision PRESET=lint
+make provision-fixtures
 ./tools/test-forge.sh --all
 ```
 
@@ -187,7 +189,7 @@ The stage commands also work individually. Run `--native` for formatting, clang-
 
 On PRs into `main` and pushes to `main`, `windows-fixtures` on Linux amd64 and `macos` on macOS 26 arm64 run in parallel. The former publishes validated PEs, checksums, per-configuration toolchain/reproducibility records, and captured references. Both macOS jobs verify the pinned LLVM 23.1.5 release archive by SHA-256 before extraction. The native job archives its two tested Forge executables. The Linux producer uses its separate MinGW and Wine pins. The `differential` job downloads those same-run artifacts on macOS 26 arm64, uses sanitized Forge with Xcode for Debug and ordinary Forge with the default generator for Release to lift and compile the selected functions, and runs the harnesses. Linux `regression-gate` checks prerequisite stage outcomes and the digests of the two tested Forge executables, reopens the exports and references, and compares the saved native observations again. Hosted references require an amd64 Docker host. Local reports record the actual backend and are labeled local.
 
-The gate publishes a job summary and schema-v1 `build/coverage/coverage.json`. Each row identifies its configuration, target, scope, reference and case report. Read the category totals and passing scopes separately for Debug and Release. A missing prerequisite, case report, or successful execution fails the gate. The JSON and diagnostic artifacts are available from the workflow run for seven days. Extract `macos-arm64-differential` under `build/differential/` to follow report paths. The native harness in the downloaded diagnostics can be made executable with `chmod +x`. Failed Windows captures are kept separately in `windows-diagnostics` and are ineligible as CI reference inputs.
+The gate publishes a job summary and schema-v1 `build/differential/coverage/coverage.json`. Each row identifies its configuration, target, scope, reference and case report. Read the category totals and passing scopes separately for Debug and Release. A missing prerequisite, case report, or successful execution fails the gate. The JSON and diagnostic artifacts are available from the workflow run for seven days. Extract `macos-arm64-differential` under `build/differential/` to follow report paths. The native harness in the downloaded diagnostics can be made executable with `chmod +x`. Failed Windows captures are kept separately in `windows-diagnostics` and are ineligible as CI reference inputs.
 
 | Coverage status | Evidence |
 | --- | --- |

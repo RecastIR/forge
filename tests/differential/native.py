@@ -67,7 +67,8 @@ def build(ir, harness, work, config, variant):
     tree = work / "native"
     log = work / "compilation.log"
     name = "differential_" + harness
-    configure = ["cmake", "-S", SUITE.parents[1], "-B", tree, "-DBUILD_TESTING=OFF",
+    configure = ["cmake", "-S", SUITE.parents[1], "-B", tree, "-DBUILD_TESTING=OFF", "-DFORGE_BUILD_CLI=OFF",
+                 "-DCMAKE_TOOLCHAIN_FILE:FILEPATH=",
                  f"-DFORGE_DIFFERENTIAL_IR={ir}", f"-DFORGE_DIFFERENTIAL_VARIANT={variant}",
                  f"-DCMAKE_BUILD_TYPE={config.capitalize()}"]
     build_target = ["cmake", "--build", tree, "--config", config.capitalize(), "--target"]

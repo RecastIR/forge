@@ -108,7 +108,7 @@ The source survey used the November commit. The executable experiment used the o
 <details>
 <summary>Reproduce the lift, adapter, native builds and comparisons</summary>
 
-From the Forge root on Apple Silicon, prepare `build/forge`, both fixture exports and their matching validated Wine references as described in the [regression guide](../tests/differential/README.md#regression-ci-and-local-reproduction). Use the following blocks in the same shell. Only the temporary working directory is mounted into the upstream tool.
+From the Forge root on Apple Silicon, prepare `build/dev/forge`, both fixture exports and their matching validated Wine references as described in the [regression guide](../tests/differential/README.md#regression-ci-and-local-reproduction). Use the following blocks in the same shell. Only the temporary working directory is mounted into the upstream tool.
 
 ```sh
 work=$(mktemp -d)
@@ -185,7 +185,7 @@ for config in ("debug", "release"):
         job = Path(tmp)
         pe, digest = d.snapshot(d.BINARIES, config, manifest.case["binary"], job)
         wanted, _ = d.reference(d.REFERENCES, manifest, config, digest)
-        start = int(d.analyze(Path("build/forge").resolve(), pe, "flag_adc", job), 16)
+        start = d.analyze(Path("build/dev/forge").resolve(), pe, "flag_adc", job).start
         module = d.read_json(job / "inspect.json")["modules"][0]
         row, = [r for r in d.read_json(job / "analysis.json")["functions"] if int(r["start_rva"], 16) == start]
         stop = int(row["end_rva"], 16)

@@ -1,0 +1,9 @@
+{
+    "version": "0.5",
+    "requires": [
+        "cli11/2.7.2#704b6fc8383dbb05a6cf698c01ed74a2%1790863513.388"
+    ],
+    "build_requires": [],
+    "python_requires": [],
+    "config_requires": []
+}

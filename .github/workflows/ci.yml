@@ -23,36 +23,75 @@ jobs:
       - uses: actions/checkout@v6
         with:
           fetch-depth: 0
-      - uses: actions/cache@v4
-        with:
-          path: ${{ runner.temp }}/unicorn-wheels
-          key: unicorn-2.1.4-macos-arm64-python3.12-v1
       - uses: ./.github/actions/llvm
-      - name: Set up the function oracle
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+          cache: pip
+          cache-dependency-path: requirements-build.txt
+      - name: Install the pinned build tools and function oracle
         run: |
-          brew install python@3.12
           venv="$RUNNER_TEMP/forge-python"
-          "$(brew --prefix python@3.12)/bin/python3.12" -m venv "$venv"
-          wheels="$RUNNER_TEMP/unicorn-wheels"
-          "$venv/bin/python" -m pip download --no-deps --only-binary=:all: --dest "$wheels" unicorn==2.1.4
-          "$venv/bin/python" -m pip install --no-index --find-links "$wheels" unicorn==2.1.4
+          python -m venv "$venv"
+          "$venv/bin/python" -m pip install --only-binary=unicorn -r requirements-build.txt
+          echo "$venv/bin" >> "$GITHUB_PATH"
           echo "CMAKE_ARGS=-DPython3_EXECUTABLE=$venv/bin/python" >> "$GITHUB_ENV"
+          echo "CONAN_HOME=$RUNNER_TEMP/forge-conan" >> "$GITHUB_ENV"
+      - uses: actions/cache@v4
+        id: packages
+        with:
+          path: ${{ runner.temp }}/forge-packages.tgz
+          key: forge-conan-macos26-${{ runner.arch }}-${{ hashFiles('conanfile.py', 'conan.lock', 'conan/profiles/**', 'requirements-build.txt', 'CMakePresets.json') }}
+      - name: Provision the locked dependencies
+        env:
+          CACHE_HIT: ${{ steps.packages.outputs.cache-hit }}
+        run: |
+          if [[ "$CACHE_HIT" == true ]]; then conan cache restore "$RUNNER_TEMP/forge-packages.tgz"; fi
+          for preset in dev release sanitize lint xcode; do make provision PRESET="$preset"; done
+          if [[ "$CACHE_HIT" != true ]]; then
+            conan cache save '*:*' --no-source --file "$RUNNER_TEMP/forge-packages.tgz"
+          fi
       - name: Check formatting, lint, Debug CTest, and sanitizer CTest
         id: verify
         env:
           FORGE_STYLE_BASE: ${{ github.event.pull_request.base.sha || github.event.before }}
-        run: ./tools/test-forge.sh --native
+        run: |
+          /usr/bin/sandbox-exec -p '(version 1)(allow default)(deny network-outbound (remote ip "*:*"))' \
+            ./tools/test-forge.sh --native
+      - name: Exercise Release and Xcode presets
+        run: |
+          for preset in release xcode; do
+            make test PRESET="$preset" CTEST_ARGS="-R ^cli$"
+          done
+      - name: Check the build layout and source tree
+        run: |
+          test ! -f build/CMakeCache.txt
+          test -z "$(find . -maxdepth 1 -type d -name 'build-*' -print)"
+          test -z "$(git status --porcelain --untracked-files=all)"
       - name: Package the tested Forge executables
         id: package
         run: |
-          tar -czf tested-forge.tgz build/forge build-sanitize/forge
-          shasum -a 256 build-sanitize/forge | awk '{print "debug=" $1}' >> "$GITHUB_OUTPUT"
-          shasum -a 256 build/forge | awk '{print "release=" $1}' >> "$GITHUB_OUTPUT"
+          tar -czf "$RUNNER_TEMP/tested-forge.tgz" build/dev/forge build/sanitize/forge
+          shasum -a 256 build/sanitize/forge | awk '{print "debug=" $1}' >> "$GITHUB_OUTPUT"
+          shasum -a 256 build/dev/forge | awk '{print "release=" $1}' >> "$GITHUB_OUTPUT"
       - uses: actions/upload-artifact@v4
         with:
           name: tested-macos-arm64-forge
-          path: tested-forge.tgz
+          path: ${{ runner.temp }}/tested-forge.tgz
           if-no-files-found: error
+          retention-days: 7
+          overwrite: true
+
+      - name: Preserve failed native configuration and test logs
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: native-diagnostics
+          path: |
+            build/*/required-tests.xml
+            build/*/Testing/Temporary/*.log
+            build/*/CMakeFiles/CMakeConfigureLog.yaml
+          if-no-files-found: warn
           retention-days: 7
           overwrite: true
 
@@ -69,6 +108,8 @@ jobs:
           python3 -B tests/differential/reference/test_runner.py
           python3 -B tests/differential/test_differential.py
           python3 -B tests/differential/test_coverage.py
+      - name: Prepare the pinned MinGW and Wine images
+        run: make provision-fixtures
       - name: Build reproducible PEs, capture references, and verify Wine boundaries
         id: verify
         run: ./tools/test-forge.sh --references
@@ -78,7 +119,7 @@ jobs:
           name: windows-x64-inputs
           path: |
             build/fixtures/windows-x64
-            build/reference/windows-x64/wine
+            build/differential/reference/windows-x64/wine
           if-no-files-found: error
           retention-days: 7
           overwrite: true
@@ -89,7 +130,7 @@ jobs:
           name: windows-diagnostics
           path: |
             build/fixtures/windows-x64
-            build/reference/windows-x64
+            build/differential/reference/windows-x64
           if-no-files-found: warn
           retention-days: 7
           overwrite: true
@@ -106,7 +147,8 @@ jobs:
       - uses: actions/download-artifact@v4
         with:
           name: tested-macos-arm64-forge
-      - run: tar -xzf tested-forge.tgz
+          path: ${{ runner.temp }}
+      - run: tar -xzf "$RUNNER_TEMP/tested-forge.tgz"
       - uses: actions/download-artifact@v4
         with:
           name: windows-x64-inputs
@@ -134,6 +176,7 @@ jobs:
             build/differential/**/native/bin/differential_*
             build/differential/**/stdout.bin
             build/differential/**/stderr.bin
+            !build/differential/reference/**
           if-no-files-found: error
           retention-days: 7
           overwrite: true
@@ -164,7 +207,7 @@ jobs:
         if: ${{ always() }}
         with:
           name: regression-coverage
-          path: build/coverage/coverage.json
+          path: build/differential/coverage/coverage.json
           if-no-files-found: error
           retention-days: 7
           overwrite: true

@@ -1,31 +1,15 @@
-BUILD_DIR ?= build
-build_config = $(or $(CONFIG),Debug)
-configure_flags = $(if $(LLVM_DIR),"-DLLVM_DIR=$(LLVM_DIR)") \
-                  $(if $(LLVM_CONFIG),"-DLLVM_CONFIG=$(LLVM_CONFIG)") \
-                  $(if $(BUILD_TESTING),"-DBUILD_TESTING=$(BUILD_TESTING)") \
-                  $(if $(CONFIG),"-DCMAKE_BUILD_TYPE=$(CONFIG)") \
-                  $(if $(SANITIZE),"-DFORGE_ENABLE_SANITIZERS=$(SANITIZE)")
+.DEFAULT_GOAL := build
 
-.PHONY: build configure test fixtures sanitize clean format format-check format-audit lint
+export BUILD_ROOT BUILD_DIR PRESET CONFIG BUILD_TESTING SANITIZE CMAKE_ARGS CTEST_ARGS
+export LLVM_DIR LLVM_CONFIG LINT_DATABASE CONAN_HOST_PROFILE CONAN_BUILD_PROFILE WITH_CLI CACHE_ONLY
 
-build: configure
-	cmake --build "$(BUILD_DIR)" --config "$(build_config)" --parallel
+.PHONY: build configure test fixtures sanitize lint clean provision provision-fixtures update-lock format format-check format-audit
 
-configure:
-	cmake -S . -B "$(BUILD_DIR)" $(CMAKE_ARGS) $(configure_flags)
+build configure test fixtures sanitize lint clean provision update-lock:
+	@python3 -B cmake/workflow.py $@
 
-test: build
-	ctest --test-dir "$(BUILD_DIR)" -C "$(build_config)" --output-on-failure --no-tests=error $(CTEST_ARGS)
+provision-fixtures:
+	@python3 -B tests/differential/fixture_images.py --provision
 
-fixtures: configure
-	ctest --test-dir "$(BUILD_DIR)" -C "$(build_config)" --output-on-failure --no-tests=error -R '^fixtures$$'
-
-sanitize:
-	$(MAKE) test BUILD_DIR="$(BUILD_DIR)-sanitize" CONFIG=Debug SANITIZE=ON
-
-format format-check format-audit lint:
-	cmake "-DACTION=$@" "-DBUILD_DIR=$(BUILD_DIR)-lint" "-DLLVM_CONFIG=$(LLVM_CONFIG)" \
-	      "-DLLVM_DIR=$(LLVM_DIR)" "-DLINT_DATABASE=$(LINT_DATABASE)" -P cmake/quality.cmake
-
-clean:
-	@if test -f "$(BUILD_DIR)/CMakeCache.txt"; then cmake --build "$(BUILD_DIR)" --config "$(build_config)" --target clean; fi
+format format-check format-audit:
+	@cmake -DACTION=$@ -P cmake/quality.cmake

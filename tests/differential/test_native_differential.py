@@ -1,7 +1,9 @@
 """Native regression runs using the genuine PE, Wine publication, Forge and native build."""
+import argparse
 import os
 from pathlib import Path
 import re
+import sys
 import tempfile
 import unittest
 from unittest.mock import patch
@@ -14,9 +16,15 @@ OUTPUT = diff.OUTPUT.parent / "negative-tests"
 
 
 class NativeDifferentialTests(unittest.TestCase):
+    forge = diff.DEFAULT_FORGE
+
+    def setUp(self):
+        self.tmp = diff.BUILD / "tmp"
+        self.tmp.mkdir(parents=True, exist_ok=True)
+
     def negative(self, name, category, *, fixture=CASE, binaries=diff.BINARIES):
         output = OUTPUT / name
-        self.assertEqual(diff.run("debug", fixture, binaries=binaries, output=output), 1)
+        self.assertEqual(diff.run("debug", fixture, binaries=binaries, output=output, forge=self.forge), 1)
         report = diff.read_json(output / "debug" / fixture / "result.json")
         self.assertEqual(report["failure_categories"], [category])
         return report
@@ -36,22 +44,22 @@ class NativeDifferentialTests(unittest.TestCase):
 
     def test_real_unsupported_instruction_diagnostic(self):
         manifest = next(m for m in diff.load_catalog() if m.case["id"] == CASE)
-        with tempfile.TemporaryDirectory() as tmp:
+        with tempfile.TemporaryDirectory(dir=self.tmp) as tmp:
             work = Path(tmp).resolve()
             image = work / manifest.case["binary"]
             data = bytearray((diff.BINARIES / "debug" / image.name).read_bytes())
             image.write_bytes(data)
-            entry = diff.analyze(diff.DEFAULT_FORGE, image, "add_i64", work)
+            entry = diff.analyze(self.forge, image, "add_i64", work)
             length = entry.end - entry.start
             # PUSH RAX, RET and padding preserve every PE table and the discovered extent.
             self.assertGreaterEqual(length, 2)
             data[entry.file_offset:entry.file_offset + length] = b"\x50\xc3".ljust(length, b"\xcc")
             image.write_bytes(data)
-            selected = diff.analyze(diff.DEFAULT_FORGE, image, "add_i64", work)
+            selected = diff.analyze(self.forge, image, "add_i64", work)
             ir = work / diff.CANONICAL_IR
             ir.parent.mkdir()
             with self.assertRaisesRegex(diff.Unsupported, "LIFT_UNSUPPORTED_INSTRUCTION"):
-                diff.lift(diff.DEFAULT_FORGE, image, {"signature": "i64(i64,i64)"}, selected, ir)
+                diff.lift(self.forge, image, {"signature": "i64(i64,i64)"}, selected, ir)
             failure = diff.read_json(work / "lifting.log")
             self.assertEqual((failure["context"]["instruction_rva"], failure["context"]["file_offset"],
                               failure["context"]["bytes"]), (hex(selected.start), entry.file_offset, "50"))
@@ -130,23 +138,28 @@ class NativeDifferentialTests(unittest.TestCase):
 
     def test_instrumented_harness_link(self):
         for generator in ("Unix Makefiles", "Xcode"):
-            with self.subTest(generator=generator), tempfile.TemporaryDirectory() as tmp:
+            with self.subTest(generator=generator), tempfile.TemporaryDirectory(dir=self.tmp) as tmp:
                 output = Path(tmp).resolve()
                 flags = "-fsanitize=undefined"
                 link_map = output / "harness.map"
                 # The Xcode generator takes link options separately from CXXFLAGS.
                 ldflags = f'{flags} -Xlinker -map -Xlinker "{link_map}"' if generator == "Xcode" else ""
-                with patch.dict(os.environ, CMAKE_GENERATOR=generator, CXXFLAGS=flags, LDFLAGS=ldflags):
-                    self.assertEqual(diff.run("debug", WEIGHTED, output=output), 0)
+                with patch.dict(os.environ, CMAKE_GENERATOR=generator, CXXFLAGS=flags, LDFLAGS=ldflags,
+                                CMAKE_TOOLCHAIN_FILE=str(output / "unavailable-conan-toolchain.cmake")):
+                    self.assertEqual(diff.run("debug", WEIGHTED, output=output, forge=self.forge), 0)
+                for variant in diff.VARIANTS:
+                    cache = (output / "debug" / WEIGHTED / variant / "native/CMakeCache.txt").read_text()
+                    self.assertIn("FORGE_BUILD_CLI:BOOL=OFF", cache)
+                    self.assertNotIn("CLI11_DIR:", cache)
                 if generator == "Xcode":
                     self.assertIn("_forge_lifted", link_map.read_text())
 
     def test_weighted_repeatability(self):
-        with tempfile.TemporaryDirectory() as tmp:
+        with tempfile.TemporaryDirectory(dir=self.tmp) as tmp:
             observations = []
             for run in ("first", "second"):
                 output = Path(tmp).resolve() / run
-                self.assertEqual(diff.run("debug", WEIGHTED, output=output), 0)
+                self.assertEqual(diff.run("debug", WEIGHTED, output=output, forge=self.forge), 0)
                 work = output / "debug" / WEIGHTED
                 report = diff.read_json(work / "result.json")
                 self.assertEqual(report["status"], "passed")
@@ -168,7 +181,7 @@ class NativeDifferentialTests(unittest.TestCase):
     def test_stale_reference(self):
         manifest = next(m for m in diff.load_catalog() if m.case["id"] == CASE)
         binary = manifest.case["binary"]
-        with tempfile.TemporaryDirectory() as tmp:
+        with tempfile.TemporaryDirectory(dir=self.tmp) as tmp:
             root = Path(tmp).resolve()
             (root / "debug").mkdir()
             release = (diff.BINARIES / "release" / binary).read_bytes()
@@ -180,4 +193,8 @@ class NativeDifferentialTests(unittest.TestCase):
 
 
 if __name__ == "__main__":
-    unittest.main()
+    parser = argparse.ArgumentParser(add_help=False)
+    parser.add_argument("--forge", type=Path, default=diff.DEFAULT_FORGE)
+    args, tests = parser.parse_known_args()
+    NativeDifferentialTests.forge = args.forge.resolve()
+    unittest.main(argv=[sys.argv[0], *tests])

@@ -129,3 +129,8 @@ function(forge_llvm_tool name)
   set("${name}" "${path}" PARENT_SCOPE)
   message(STATUS "  ${name}: ${path}")
 endfunction()
+
+# The lint provisioner needs the same validated compiler installation as clang-tidy.
+if(CMAKE_SCRIPT_MODE_FILE STREQUAL CMAKE_CURRENT_LIST_FILE)
+  execute_process(COMMAND "${CMAKE_COMMAND}" -E echo "${llvm_bin}")
+endif()
