@@ -1,6 +1,7 @@
 #include "cli/parsing.h"
 
 #include <algorithm>
+#include <optional>
 #include <string_view>
 
 namespace forge::cli {
@@ -51,7 +52,7 @@ namespace forge::cli {
         // CLI11 splits attached values and treats ++ as a subcommand terminator.
         // Check the original option spelling and pass the input literally after --.
         std::vector<std::string> args{name};
-        std::string input;
+        std::optional<std::string> input;
         bool literal = false;
 
         for (int i = 2; i < argc; ++i) {
@@ -64,7 +65,7 @@ namespace forge::cli {
 
             const bool positional = literal || !arg.starts_with('-');
 
-            if (positional && !input.empty()) {
+            if (positional && input) {
                 throw CLI::ExtrasError({arg});
             }
 
@@ -98,9 +99,9 @@ namespace forge::cli {
             args.push_back(literalArgument(argv[i]));
         }
 
-        if (!input.empty()) {
+        if (input && !input->empty()) {
             args.emplace_back("--");
-            args.push_back(literalArgument(std::move(input)));
+            args.push_back(literalArgument(std::move(*input)));
         }
 
         // CLI11 expects its vector of arguments in reverse order.

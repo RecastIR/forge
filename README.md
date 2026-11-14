@@ -72,11 +72,9 @@ Run `forge --help` or `forge -h` for the command list. Use either spelling after
 | `analyze <image> --functions` | `--functions` is required. `--format` accepts `text` (default) or `json`. `--strict` defaults off. | The function report goes to stdout and findings to stderr. Exit 0 on completion, or 3 for findings under strict mode. |
 | `lift <exe> --rva <rva> --output <file>` | Use an unsigned 32-bit decimal RVA or hexadecimal with `0x` or `0X`. The default entry mode uses register state. The optional `--signature` accepts `i64(i64,i64)`. `--diagnostics-format` accepts `text` (default) or `json`. | Success writes the IR file, leaves both streams empty, and exits 0. Handled execution failures exit 1. JSON diagnostics contain one object followed by LF on stderr. An output that aliases the input is a text usage error in either mode. |
 
-Each command takes one input. Options may appear on either side of it. Use `--` before a filename beginning with a dash. Pass option values as separate, nonempty arguments. Values beginning with `--` are rejected. Repeated flags are idempotent. Each occurrence of a scalar option must be valid, and the last value takes effect. Usage errors print text and usage to stderr and exit 2. Input read and PE errors exit 1.
+Each command takes exactly one nonempty input path. Options may appear on either side of it. Use `--` before a filename beginning with a dash. Pass option values as separate, nonempty arguments. Values beginning with `--` are rejected. Repeated flags are idempotent. Each occurrence of a scalar option must be valid, and the last value takes effect. Usage errors print text and usage to stderr and exit 2. Input read and PE errors exit 1.
 
-After `make CONFIG=Debug`, run `ctest --test-dir build -C Debug -R '^cli$' --output-on-failure` to generate the PE fixtures and run the executable-level compatibility tests.
-
-For command registration, callback lifetimes, and executor tests, see [Adding a CLI command](docs/design-guide.md#adding-a-cli-command).
+For command registration, callback lifetimes, and instructions for running the CLI compatibility and executor tests, see [Adding a CLI command](docs/design-guide.md#adding-a-cli-command).
 
 ## Development checks
 

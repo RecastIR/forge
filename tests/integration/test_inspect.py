@@ -377,10 +377,11 @@ class CLI(Case):
         self.assertEqual(r["diagnostics"][0]["code"], "DLL_READ_ERROR")
 
     def test_help(self):
-        commands = {"inspect": ("--dll-path", "--verbose", "--format", "--strict"),
-                    "analyze": ("--functions", "--format", "--strict"),
-                    "lift": ("--rva", "--output", "--signature", "--diagnostics-format")}
-        for name, expected in [("", commands), *commands.items()]:
+        commands = {"": ["inspect", "analyze", "lift"],
+                    "inspect": ["--help", "--format", "--strict", "--verbose", "--dll-path"],
+                    "analyze": ["--help", "--format", "--strict", "--functions"],
+                    "lift": ["--help", "--rva", "--output", "--signature", "--diagnostics-format"]}
+        for name, expected in commands.items():
             with self.subTest(command=name):
                 args = [name] if name else []
                 help_text = self.invoke(*args, "--help", "--unused")
@@ -389,11 +390,14 @@ class CLI(Case):
                 self.assertEqual((short.stdout, short.stderr), (help_text.stdout, b""))
                 usage = " ".join(["Usage: forge", *args])
                 self.assertIn(usage.encode(), help_text.stdout)
-                for token in expected:
-                    self.assertIn(token.encode(), help_text.stdout)
+                text = help_text.stdout.decode()
                 if args:
-                    for other in {"--dll-path", "--functions", "--rva"}.difference(expected):
-                        self.assertNotIn(other.encode(), help_text.stdout)
+                    section = text.split("\nOPTIONS:\n", 1)[1].split("\n\n", 1)[0]
+                    names = re.findall(r"^  (?:-\w, +| {8})(--[\w-]+)\b", section, re.MULTILINE)
+                else:
+                    section = text.split("\nSUBCOMMANDS:\n", 1)[1].split("\n\n", 1)[0]
+                    names = re.findall(r"^  ([\w-]+)\b", section, re.MULTILINE)
+                self.assertEqual(names, expected)
 
     def test_usage_and_io_errors(self):
         image = FIXTURES / "minimal.exe"
@@ -423,6 +427,27 @@ class CLI(Case):
         missing = self.invoke("inspect", self.dir / "absent", code=1)
         self.assertEqual(missing.stdout, b"")
         self.assertIn(b"READ_ERROR", missing.stderr)
+
+    def test_empty_lift_input(self):
+        image = FIXTURES / "add.exe"
+        output = self.dir / "already.ll"
+        args = ("lift", "--rva", "4096", "--output", output)
+
+        for inputs in (("", image), (image, ""), ("--", "", image), ("--", image, "")):
+            with self.subTest(inputs=inputs):
+                output.write_bytes(b"keep")
+                result = self.invoke(*args, *inputs, code=2)
+                self.assertEqual(result.stdout, b"")
+                self.assertTrue(result.stderr.startswith(b"forge: "))
+                self.assertIn(b"Usage: forge", result.stderr)
+                self.assertEqual(output.read_bytes(), b"keep")
+
+        missing = self.invoke(*args, code=2)
+        empty = self.invoke(*args, "", code=2)
+        self.assertEqual((empty.stdout, empty.stderr), (b"", missing.stderr))
+        help_text = self.invoke("lift", "--help").stdout
+        help_result = self.invoke("lift", "", "--help")
+        self.assertEqual((help_result.stdout, help_result.stderr), (help_text, b""))
 
     def test_lift_dispatch_waits_for_validation(self):
         output = self.dir / "already.ll"
