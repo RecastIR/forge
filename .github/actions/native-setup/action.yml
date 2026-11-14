@@ -41,22 +41,27 @@ runs:
           conan --version
         } | tee "$RUNNER_TEMP/forge-toolchain.txt"
         echo "id=$(shasum -a 256 "$RUNNER_TEMP/forge-toolchain.txt" | cut -d' ' -f1)" >> "$GITHUB_OUTPUT"
+        echo "restore_started=$(date +%s)" >> "$GITHUB_OUTPUT"
     - name: Restore locked Conan packages
       id: packages
-      uses: actions/cache@v4
+      uses: actions/cache/restore@v4
       with:
         path: ${{ runner.temp }}/forge-packages.tgz
-        key: forge-conan-v2-${{ runner.arch }}-${{ steps.toolchain.outputs.id }}-${{ hashFiles('conanfile.py', 'conan.lock', 'conan/profiles/**', 'requirements-build.txt', 'CMakePresets.json', 'cmake/workflow.py', '.github/actions/llvm/action.yml') }}
+        key: forge-conan-v2-${{ runner.arch }}-${{ steps.toolchain.outputs.id }}-${{ hashFiles('conanfile.py', 'conan.lock', 'conan/profiles/**', 'requirements-build.txt', 'CMakePresets.json', 'cmake/workflow.py', '.github/actions/llvm/action.yml', '.github/actions/native-setup/action.yml') }}
     - name: Unpack the locked Conan packages
       if: steps.packages.outputs.cache-hit == 'true'
       shell: bash
       run: conan cache restore "$RUNNER_TEMP/forge-packages.tgz"
     - name: Generate the locked preset integrations
+      id: provision
       env:
         CACHE_HIT: ${{ steps.packages.outputs.cache-hit }}
         PRESETS: ${{ inputs.presets }}
+        RESTORE_STARTED: ${{ steps.toolchain.outputs.restore_started }}
       shell: bash
       run: |
+        start=$(date +%s)
+        echo "- Conan restore (cache hit: ${CACHE_HIT:-false}) took $((start - RESTORE_STARTED))s" >> "$GITHUB_STEP_SUMMARY"
         cache_only=1
         if [[ "$CACHE_HIT" != true ]]; then
           # Both native suites exercise all presets with the network disabled.
@@ -64,13 +69,30 @@ runs:
           cache_only=0
         fi
         for preset in $PRESETS; do make provision PRESET="$preset" CACHE_ONLY="$cache_only"; done
+        end=$(date +%s)
+        echo "- Conan provision ($PRESETS) took $((end - start))s" >> "$GITHUB_STEP_SUMMARY"
+        echo "save_started=$end" >> "$GITHUB_OUTPUT"
     - name: Archive the locked Conan packages
       if: steps.packages.outputs.cache-hit != 'true'
       shell: bash
       run: conan cache save '*:*' --no-source --file "$RUNNER_TEMP/forge-packages.tgz"
+    - name: Save the locked Conan archive
+      if: steps.packages.outputs.cache-hit != 'true'
+      uses: actions/cache/save@v4
+      with:
+        path: ${{ runner.temp }}/forge-packages.tgz
+        key: ${{ steps.packages.outputs.cache-primary-key }}
     - name: Enable the runner-local ThinLTO object cache
       shell: bash
+      env:
+        CACHE_HIT: ${{ steps.packages.outputs.cache-hit }}
+        SAVE_STARTED: ${{ steps.provision.outputs.save_started }}
       run: |
+        if [[ "$CACHE_HIT" == true ]]; then
+          echo "- Conan save skipped on exact cache hit" >> "$GITHUB_STEP_SUMMARY"
+        else
+          echo "- Conan archive and save took $(( $(date +%s) - SAVE_STARTED ))s" >> "$GITHUB_STEP_SUMMARY"
+        fi
         mkdir -p "$RUNNER_TEMP/forge-lto"
         echo "LDFLAGS=-Wl,-cache_path_lto,$RUNNER_TEMP/forge-lto" >> "$GITHUB_ENV"
     - name: Install pinned ccache

@@ -70,13 +70,6 @@ check_layout() {
         test -z "$(git status --porcelain --untracked-files=all)"
 }
 
-xcode_release() {
-    # Debug has configured this multi-configuration tree with every Conan integration.
-    cmake --build "$BUILD_ROOT/xcode" --config Release &&
-        ctest --test-dir "$BUILD_ROOT/xcode" --output-on-failure --no-tests=error -C Release -R '^cli$' &&
-        test -x "$BUILD_ROOT/xcode/Release/forge"
-}
-
 case "$1" in
 --native)
     require_native
@@ -95,7 +88,10 @@ case "$1" in
     stage release make test PRESET=release CTEST_ARGS='-R ^cli$$'
     stage xcode_debug make test PRESET=xcode CONFIG=Debug CTEST_ARGS='-R ^cli$$'
     test -x "$BUILD_ROOT/xcode/Debug/forge"
-    stage xcode_release xcode_release
+    # Both configurations use the tree configured by the Xcode Debug check.
+    stage xcode_release_build cmake --build "$BUILD_ROOT/xcode" --config Release
+    stage xcode_release_ctest ctest --test-dir "$BUILD_ROOT/xcode" --output-on-failure --no-tests=error -C Release -R '^cli$'
+    test -x "$BUILD_ROOT/xcode/Release/forge"
     stage layout check_layout ;;
 --references)
     docker info >/dev/null || { echo "Start a Docker engine with Linux amd64 support for the pinned MinGW and Wine images." >&2; exit 1; }

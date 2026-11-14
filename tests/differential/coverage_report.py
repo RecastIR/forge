@@ -19,7 +19,7 @@ STATUSES = ("passed", "failed", "error", "reference_only", "blocked")
 JOB_STAGES = {
     "macos-dev": ("debug", "dev_oracles"),
     "macos-sanitize": ("sanitize", "sanitize_oracles"),
-    "macos-presets": ("formatting", "lint", "release", "xcode_debug", "xcode_release", "layout"),
+    "macos-presets": ("formatting", "lint", "release", "xcode_debug", "xcode_release_build", "xcode_release_ctest", "layout"),
     "windows-fixtures": ("build", "capture", "wine_tests"),
     "differential": ("debug", "release", "negative_tests"),
 }
