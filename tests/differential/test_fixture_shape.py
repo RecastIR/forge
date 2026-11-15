@@ -84,17 +84,29 @@ class FixtureShapeTests(unittest.TestCase):
     def test_image_target_join_requires_distinct_sections_on_branch_arms(self):
         sections = ("  0 .choicea 00000008 00002000 00002000\n  CONTENTS, ALLOC, LOAD, READONLY, DATA\n"
                     "  1 .choiceb 00000008 00003000 00003000\n  CONTENTS, ALLOC, LOAD, READONLY, DATA")
-        body = ["je 3", "lea r8,[rip+0x10] # 2000", "jmp 4", "lea r8,[rip+0x20] # 3000",
-                "movzx eax,WORD PTR [r8+0x4]", "ret"]
+        body = ["test rcx,rcx", "je 6", "lea r8,[rip+0x20] # 3000", "xor r10,r10", "sub r11,r11", "jmp 9",
+                "lea r8,[rip+0x10] # 2000", "xor r10d,r10d", "sub r11d,r11d", "sub r10d,0x1", "mov eax,0xffffffff",
+                "sub r10,rax", "add eax,0x4", "mov r9,r8", "add r9,r10", "add r9,r11", "add r9,rax",
+                "mov QWORD PTR [rsp+0x8],r9", "mov r10,QWORD PTR [rsp+0x8]", "movzx eax,WORD PTR [r10+0x1]",
+                "add rax,rdx", "ret"]
         check_image_leaf("image_target_join", dict(enumerate(body)), sections, "debug")
-        for index, change in ((0, "jmp 3"), (3, "lea r8,[rip+0x20] # 2004"), (3, "lea r9,[rip+0x20] # 3000")):
+        interior = dict(enumerate(body))
+        interior[2] = body[2].replace("3000", "3001")
+        interior[6] = body[6].replace("2000", "2001")
+        check_image_leaf("image_target_join", interior, sections, "release")
+        for index, change, reason in ((1, "jmp 6", "expected 'je'"), (2, "lea r8,[rip+0x20] # 2004", "distinct"),
+                                      (3, "xor r10d,r10d", "xor r10,r10"), (5, "jmp a", "shared join"),
+                                      (8, "sub r11d,r10d", "sub r11d,r11d"), (9, "sub r10,0x1", "sub r10d,0x1"),
+                                      (12, "jmp d", "add eax,0x4"), (13, "mov r9,r11", "mov r9,r8"),
+                                      (18, "mov r10,QWORD PTR [rsp+0x10]", r"rsp\+0x8")):
             modified = dict(enumerate(body))
             modified[index] = change
-            with self.subTest(change=change), self.assertRaisesRegex(ValueError, "branch selecting two distinct"):
+            with self.subTest(change=change), self.assertRaisesRegex(ValueError, reason):
                 check_image_leaf("image_target_join", modified, sections, "release")
 
     def test_retarget_requires_a_writable_relocated_slot_and_distinct_targets(self):
-        body = ["lea r9,[rip+0x8] # 401000 <.initial>", "lea r9,[rip+0x8] # 402000 <.other>",
+        body = ["test rcx,rcx", "je 7", "lea r9,[rip+0x8] # 402000 <.other>", "cmp rcx,0x1", "je 6",
+                "lea r9,[rip+0x8] # 401000 <.initial>",
                 "mov QWORD PTR [rip+0x8],r9 # 403000 <.ptrslot>", "mov r8,QWORD PTR [rip+0x8] # 403000 <.ptrslot>",
                 "lea r9,[r8+0x2]", "add WORD PTR [r9],dx", "mov rax,QWORD PTR [r8]", "ret"]
         sections = [(0x401000 + n * 4096, 8, n * 8, "CONTENTS, ALLOC, LOAD, DATA") for n in range(3)]
@@ -106,9 +118,16 @@ class FixtureShapeTests(unittest.TestCase):
                 check_global_leaf(path, dict(enumerate(code)), sections, report, "debug")
 
             check(body)
-            for index, change in ((1, body[1].replace("402000", "401000")),
-                                  (2, body[2].replace(",r9", ",rdx"))):
-                with self.subTest(change=change), self.assertRaisesRegex(ValueError, "retargeting"):
+            # Both addresses and the relocated slot are present, but every call replaces it.
+            always_retarget = [body[5], body[2], *body[6:]]
+            with self.assertRaisesRegex(ValueError, "test rcx,rcx"):
+                check(always_retarget)
+            for index, change, reason in ((2, body[2].replace("402000", "401000"), "cross writable sections"),
+                                          (1, "je 8", "same slot reload"), (4, "je 7", "same pointer store"),
+                                          (6, body[6].replace(",r9", ",rdx"), "expected 'mov QWORD PTR"),
+                                          (8, "lea r9,[r8+0x4]", "expected 'lea r9"),
+                                          (9, "jmp a", "expected 'add WORD PTR")):
+                with self.subTest(change=change), self.assertRaisesRegex(ValueError, reason):
                     check([*body[:index], change, *body[index + 1:]])
 
     def test_global_static_uses_the_live_weights_base_in_the_loop(self):

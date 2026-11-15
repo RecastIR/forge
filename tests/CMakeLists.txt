@@ -94,7 +94,7 @@ if(BUILD_TESTING OR CMAKE_EXPORT_COMPILE_COMMANDS)
   add_executable(asm_info_lifetime unit/asm_info.cpp)
   add_executable(input_lifetime unit/input.cpp)
   add_executable(lift_contract unit/lift.cpp)
-  target_link_libraries(lift_contract PRIVATE LLVMAsmParser)
+  target_link_libraries(lift_contract PRIVATE LLVMAnalysis LLVMAsmParser)
   add_executable(lift_command unit/lift_command.cpp
     ../src/cli/commands/lift_execution.cpp ../src/cli/analysis_input.cpp ../src/cli/diagnostic.cpp)
   set_target_properties(integer_semantics lift_contract PROPERTIES LINK_LIBRARIES_STRATEGY REORDER_FREELY)

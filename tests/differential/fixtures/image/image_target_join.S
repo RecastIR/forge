@@ -18,12 +18,24 @@ image_target_join:
     testq %rcx, %rcx
     je 1f
     leaq .choiceb(%rip), %r8
+    xorq %r10, %r10
+    subq %r11, %r11
     jmp 2f
 1:
     leaq .choicea(%rip), %r8
+    xorl %r10d, %r10d
+    subl %r11d, %r11d
 2:
+    # After 32-bit underflow R10 holds UINT32_MAX, and wide subtraction makes it zero.
+    subl $1, %r10d
+    movl $0xffffffff, %eax
+    subq %rax, %r10
+    # Overflow the same 32-bit maximum to get the interior offset of three.
+    addl $4, %eax
     movq %r8, %r9
-    addq $3, %r9
+    addq %r10, %r9
+    addq %r11, %r9
+    addq %rax, %r9
     movq %r9, 8(%rsp)
     movq 8(%rsp), %r10
     movzwl 1(%r10), %eax

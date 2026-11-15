@@ -2,7 +2,7 @@
 import json
 import os
 from pathlib import Path
-import re
+import subprocess
 
 from pe_layout import Layout
 from test_stack import FORGE, IMAGE, run
@@ -13,38 +13,76 @@ def image_stats(image, base, ir):
                           image, hex(base), ir))
 
 
-def count_probes(ir):
-    # Instrument each actual table-row address calculation, including the final
-    # candidate check. The untouched module is independently exercised first.
-    sites = 0
-
-    def increment(match):
-        nonlocal sites
-        sites += 1
-        return (f"  %probes.{sites} = load volatile i64, ptr @probes\n"
-                f"  %next.{sites} = add i64 %probes.{sites}, 1\n"
-                f"  store volatile i64 %next.{sites}, ptr @probes\n" + match[0])
-
-    text = re.sub(r"^  %[^ ]+ = getelementptr [^\n]*ptr @image\.ranges,[^\n]*",
-                  increment, ir, flags=re.MULTILINE)
-    if not sites or text.count("define i64 @forge_lifted(") != 1:
-        raise ValueError("missing image-table probes or native entry in generated module")
-    text = text.replace("define i64 @forge_lifted(", "define internal i64 @lookup(")
-    return text + """
-@probes = internal global i64 0
-define i64 @forge_lifted(i64 %address, i64 %second) {
-  store i64 0, ptr @probes
-  call i64 @lookup(i64 %address, i64 %second)
-  %count = load i64, ptr @probes
-  ret i64 %count
-}
-"""
+def counted_resolver(ir):
+    measured = ir.with_suffix(".visits.ll")
+    measured.write_bytes(run(os.environ["FORGE_TEST_LIFT_CONTRACT"], "--count-resolver-blocks", ir))
+    return measured
 
 
 class ImageScaling:
+    def test_counts_pointer_walking_resolver(self):
+        # A linear scan can hoist its sole reference to the table and advance a
+        # cursor. Counting table-name occurrences misses every subsequent probe.
+        rows = 32
+        contents = r"\00" * (rows - 1) + r"\01"
+        ir = self.work / "linear-cursor.ll"
+        ir.write_text(f'''target triple = "arm64-apple-macosx11.0.0"
+@image.ranges = private constant [{rows} x i8] c"{contents}"
+
+define internal ptr @forge_image_address(i64 %key) {{
+entry:
+  %first = getelementptr i8, ptr @image.ranges, i64 0
+  %valid = icmp ule i64 %key, 1
+  br i1 %valid, label %walk, label %fault
+walk:
+  %cursor = phi ptr [ %first, %entry ], [ %next, %walk ]
+  %byte = load i8, ptr %cursor
+  %wide = zext i8 %byte to i64
+  %hit = icmp eq i64 %key, %wide
+  %next = getelementptr i8, ptr %cursor, i64 1
+  br i1 %hit, label %found, label %walk
+found:
+  ret ptr %cursor
+fault:
+  call void @llvm.trap()
+  unreachable
+}}
+declare void @llvm.trap()
+
+define i64 @forge_lifted(i64 %key, i64 %unused) {{
+  %row = call ptr @forge_image_address(i64 %key)
+  %byte = load i8, ptr %row
+  %result = zext i8 %byte to i64
+  ret i64 %result
+}}
+''')
+        inputs = b"0 0\n1 0\n0 0\n"
+        for exe in self.compile_variants(ir):
+            self.assertEqual(run(exe, input=inputs), b"0\n1\n0\n")
+        for exe in self.compile_variants(counted_resolver(ir)):
+            visits = [int(line, 16) for line in run(exe, input=inputs).splitlines()]
+            self.assertEqual(visits, [3, rows + 2, 3])
+            self.assertGreater(visits[1], rows.bit_length() + 4)
+
+        # Keep the same working scan, but move it out of the measured body.
+        delegated = self.work / "delegated-cursor.ll"
+        delegated.write_text(ir.read_text().replace("define internal ptr @forge_image_address(",
+                                                    "define internal ptr @walk_rows(") + """
+define internal ptr @forge_image_address(i64 %key) {
+  %row = call ptr @walk_rows(i64 %key)
+  ret ptr %row
+}
+""")
+        for exe in self.compile_variants(delegated):
+            self.assertEqual(run(exe, input=inputs), b"0\n1\n0\n")
+        with self.assertRaises(subprocess.CalledProcessError) as failure:
+            counted_resolver(delegated)
+        self.assertIn(b"unmeasured call in image resolver", failure.exception.stderr)
+
     def test_relocation_heavy_lookup(self):
         current = os.environ["FORGE_TEST_LIFT_CONTRACT"]
         previous = os.environ.get("FORGE_TEST_PREVIOUS_LIFT_CONTRACT")
+        shapes = {}
         for fields in (8, 64, 512):
             image = Path(IMAGE).with_name(f"image-ranges-{fields}.exe")
             module = json.loads(run(FORGE, "inspect", image, "--format", "json"))["modules"][0]
@@ -73,10 +111,13 @@ class ImageScaling:
                 ir.write_bytes(data)
                 stats = image_stats(image, base, ir)
                 self.assertEqual(stats["selected_sections"], len(selected))
-                self.assertEqual((stats["initialized_bytes"], stats["virtual_bytes"]), (extent, extent))
+                for key in ("budgeted_initialized_bytes", "emitted_initializer_bytes", "virtual_bytes"):
+                    self.assertEqual(stats[key], extent)
                 self.assertEqual(stats["intervals"], len(hits))
                 self.assertEqual(stats["ir_bytes"], len(data))
                 self.assertLessEqual(stats["resolver_blocks"], 10)
+                shape = (stats["resolver_blocks"], stats["resolver_instructions"])
+                self.assertEqual(shape, shapes.setdefault(label, shape))
 
                 for exe in self.compile_variants(ir):
                     values = run(exe, input=inputs + remaining_words).splitlines()
@@ -87,15 +128,14 @@ class ImageScaling:
                                     start + 16*(fields//2) + 5, start + 16*(fields-1) + 1):
                         self.trap(exe, [(address, 0)])
 
-                probe_ir = ir.with_suffix(".probes.ll")
-                probe_ir.write_text(count_probes(data.decode()))
-                for exe in self.compile_variants(probe_ir):
+                for exe in self.compile_variants(counted_resolver(ir)):
                     counts = [int(line, 16) for line in run(exe, input=inputs).splitlines()]
                     self.assertEqual(len(counts), len(hits))
                     self.assertGreater(min(counts), 0)
                     if label == "current":
-                        self.assertLessEqual(max(counts), len(hits).bit_length() + 1)
-                    stats["max_row_probes"] = max(counts)
+                        # Entry, search exit, candidate and success add four visits.
+                        self.assertLessEqual(max(counts), len(hits).bit_length() + 4)
+                    stats["max_resolver_block_visits"] = max(counts)
                     if previous or os.environ.get("FORGE_IMAGE_METRICS"):
                         variant = "o2" if exe.stem.endswith(".o2") else "baseline"
                         print(json.dumps(dict(stats, build=label, fields=fields, variant=variant),

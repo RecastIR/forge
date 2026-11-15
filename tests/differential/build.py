@@ -84,10 +84,6 @@ INTEGER_WITNESSES = {
     "integer_mix": ("shl ", "xor ", "imul "),
     "global_rmw": ("add BYTE PTR [rip", "seto ", "inc WORD PTR [rip", "dec BYTE PTR [rip", "setb ",
                    "sub DWORD PTR [rip", "setb ", "mov r8,QWORD PTR [rip"),
-    "image_target_join": ("mov r9,r8", "add r9,0x3", "mov QWORD PTR [rsp+0x8],r9",
-                          "mov r10,QWORD PTR [rsp+0x8]", "movzx eax,WORD PTR [r10+0x1]"),
-    "global_retarget": ("mov QWORD PTR [rip", "mov r8,QWORD PTR [rip", "lea r9,[r8+0x2]",
-                        "add WORD PTR [r9],dx", "mov rax,QWORD PTR [r8]"),
 }
 
 
@@ -324,6 +320,41 @@ def section_rows(sections):
                 sections, re.MULTILINE)]
 
 
+def follow_assembly_path(instructions, graph, start, *expected):
+    # Walk consecutive CFG edges in the hand-assembled leaf. Resolve RIP operands
+    # by their linked VA; branch destinations come from the disassembly graph.
+    edges = [start]
+    for wanted in expected:
+        if len(edges) != 1:
+            raise ValueError(f"expected a single path to {wanted!r}")
+        addr = edges[0]
+        code, _, target = instructions[addr].partition(" # ")
+        if target:
+            va = int(target.split()[0], 16)
+            code = re.sub(r"\[rip[^]]*\]", f"[{va:x}]", code)
+        if code.startswith(("je ", "jmp ")):
+            code = code.split()[0]
+        if code != wanted:
+            raise ValueError(f"expected {wanted!r} at {addr:x}, found {instructions[addr]!r}")
+        edges = graph[addr]
+    return edges
+
+
+def check_target_join(instructions, graph, sections):
+    narrow, wide = follow_assembly_path(instructions, graph, min(graph), "test rcx,rcx", "je")
+    first, second = (sections.get(instructions[addr]) for addr in (narrow, wide))
+    if first is None or second is None or first[0] == second[0]:
+        raise ValueError("expected a branch selecting two distinct immutable sections")
+    join = follow_assembly_path(instructions, graph, narrow, f"lea r8,[{first[1]:x}]", "xor r10d,r10d", "sub r11d,r11d")
+    other = follow_assembly_path(instructions, graph, wide, f"lea r8,[{second[1]:x}]", "xor r10,r10", "sub r11,r11", "jmp")
+    if other != join:
+        raise ValueError("offset arithmetic must begin at the shared join")
+    follow_assembly_path(instructions, graph, join[0], "sub r10d,0x1", "mov eax,0xffffffff", "sub r10,rax",
+                         "add eax,0x4", "mov r9,r8", "add r9,r10", "add r9,r11", "add r9,rax",
+                         "mov QWORD PTR [rsp+0x8],r9", "mov r10,QWORD PTR [rsp+0x8]", "movzx eax,WORD PTR [r10+0x1]",
+                         "add rax,rdx", "ret")
+
+
 def check_image_leaf(name, instructions, sections, config):
     graph = reachable_leaf(instructions)
     body = [instructions[address] for address in sorted(graph)]
@@ -340,7 +371,7 @@ def check_image_leaf(name, instructions, sections, config):
                         and ("CODE" in flags) == (name == "image_widths")), None)
         if section is None:
             raise ValueError(f"missing immutable section target for {line}")
-        target_sections[line] = section
+        target_sections[line] = (section, int(target[1], 16))
     loads = [line for line in body if re.match(r"mov(?:sx|sxd|zx)? \w+,(?:BYTE|WORD|DWORD|QWORD) PTR \[", line)
              and not re.search(r"\[(rsp|rbp)", line)]
     if not loads:
@@ -352,15 +383,7 @@ def check_image_leaf(name, instructions, sections, config):
     if name == "image_loop" and not any(instructions[a] in loads for loop in natural_loops(graph)[0].values() for a in loop):
         raise ValueError("missing image load inside loop")
     if name == "image_target_join":
-        for edges in graph.values():
-            if len(edges) != 2:
-                continue
-            arms = [instructions[addr] for addr in edges]
-            if (all(line.startswith("lea r8,[rip") for line in arms)
-                    and target_sections[arms[0]] != target_sections[arms[1]]):
-                break
-        else:
-            raise ValueError("expected a branch selecting two distinct immutable sections")
+        check_target_join(instructions, graph, target_sections)
     if name == "image_spill":
         if len(references) < 2 or not any(len(edges) == 2 for edges in graph.values()):
             raise ValueError("missing branch-selected data addresses")
@@ -490,10 +513,18 @@ def check_global_leaf(path, instructions, sections, pe_report, config):
             raise ValueError("pointer initializer must point to the initial counter")
         if name == "global_pointer":
             check_pointer_spill(body)
-        elif (references[".other"][1][0] == references[initial][1][0]
-              or not any(line.startswith("mov QWORD PTR [rip") and line.endswith(f"],r9 # {slot:x} <.ptrslot>")
-                         for line in body)):
-            raise ValueError("missing writable pointer retargeting between different sections")
+        else:
+            if references[".other"][1][0] == references[initial][1][0]:
+                raise ValueError("retargeting must cross writable sections")
+            reload, switch = follow_assembly_path(instructions, graph, min(graph), "test rcx,rcx", "je")
+            store, reset = follow_assembly_path(instructions, graph, switch, f"lea r9,[{references['.other'][0]:x}]",
+                                                "cmp rcx,0x1", "je")
+            if follow_assembly_path(instructions, graph, reset, f"lea r9,[{references[initial][0]:x}]") != [store]:
+                raise ValueError("both retargeting paths must reach the same pointer store")
+            if follow_assembly_path(instructions, graph, store, f"mov QWORD PTR [{slot:x}],r9") != [reload]:
+                raise ValueError("retained and updated pointers must reach the same slot reload")
+            follow_assembly_path(instructions, graph, reload, f"mov r8,QWORD PTR [{slot:x}]", "lea r9,[r8+0x2]",
+                                 "add WORD PTR [r9],dx", "mov rax,QWORD PTR [r8]", "ret")
 
 
 def check_padding(path):

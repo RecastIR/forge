@@ -383,3 +383,47 @@ probe joined_stack_va
     movl (%r8), %eax
     ret
     .seh_endproc
+
+# A doubleword write discards the high bits of a known VA on either branch.
+probe low_image_offset
+    leaq literal(%rip), %rax
+    movabsq $0x100000000, %r8
+    addq %r8, %rax
+    testq %rcx, %rcx
+    je 1f
+    addl $4, %eax
+    jmp 2f
+1:
+    subl $-1, %eax
+2:
+    movl (%rax), %eax
+    ret
+    .seh_endproc
+
+.macro read_offset_from_rsp
+    leaq (%rsp,%r8), %r8
+    movabsq $0x123456789abcdef0, %r9
+    movl (%r8,%r9), %eax
+    ret
+    .seh_endproc
+.endm
+
+probe xor_zero_offset
+    xorq %r8, %r8
+    read_offset_from_rsp
+
+probe sub_zero_offset
+    subq %r8, %r8
+    read_offset_from_rsp
+
+probe sub32_offset
+    movabsq $0x100000001, %r8
+    subl $1, %r8d
+    read_offset_from_rsp
+
+probe constant_sub_offset
+    # Make the target accessible to generic image dispatch on this same invocation.
+    movl literal(%rip), %eax
+    movl $7, %r8d
+    subq %r8, %r8
+    read_offset_from_rsp

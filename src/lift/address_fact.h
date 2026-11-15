@@ -7,6 +7,7 @@
 
 #include <bit>
 #include <map>
+#include <memory>
 
 namespace forge::x86 {
     // Guest integer alternatives are sorted, unique, and wrap at 64 bits. The
@@ -147,37 +148,68 @@ namespace forge::x86 {
     };
 
     // Slots are exact, nonoverlapping eight-byte saves within one invocation's
-    // stack. Both RSP-derived and absolute numeric aliases use the same guest VA.
+    // stack. CFG states share the map until a write or join changes its contents.
     class StackSpills {
       public:
+        // The returned fact is borrowed until this snapshot is modified.
+        const AddressFact *find(uint64_t va) const {
+            if (!slots) {
+                return nullptr;
+            }
+
+            const auto it = slots->find(va);
+            return it == slots->end() ? nullptr : &it->second;
+        }
+
         bool merge(const StackSpills &other) {
-            bool changed = false;
-            for (auto it = slots.begin(); it != slots.end();) {
-                const auto incoming = other.slots.find(it->first);
-                auto value = incoming == other.slots.end() ? AddressFact{}
-                                                           : it->second.join(incoming->second);
+            if (!slots || slots == other.slots) {
+                return false;
+            }
+
+            if (!other.slots) {
+                slots.reset();
+                return true;
+            }
+
+            auto joined = [&other](const auto &slot) {
+                const auto *incoming = other.find(slot.first);
+                return incoming ? slot.second.join(*incoming) : AddressFact{};
+            };
+            const auto first = llvm::find_if(
+                *slots, [&](const auto &slot) { return joined(slot) != slot.second; });
+            if (first == slots->end()) {
+                return false;
+            }
+
+            // Reacquire iterators in the detached map. All preceding slots agree.
+            const auto va = first->first;
+            auto &updated = writable();
+            for (auto it = updated.lower_bound(va); it != updated.end();) {
+                auto value = joined(*it);
                 if (!value.known()) {
-                    it = slots.erase(it);
-                    changed = true;
+                    it = updated.erase(it);
                 } else {
-                    changed |= it->second != value;
                     it->second = std::move(value);
                     ++it;
                 }
             }
 
-            return changed;
+            if (updated.empty()) {
+                slots.reset();
+            }
+
+            return true;
         }
 
         AddressFact read(const AddressFact &address) const {
             AddressFact result;
             for (auto va : address.values()) {
-                const auto it = slots.find(va);
-                if (it == slots.end()) {
+                const auto *saved = find(va);
+                if (!saved) {
                     return {};
                 }
 
-                result = result.known() ? result.join(it->second) : it->second;
+                result = result.known() ? result.join(*saved) : *saved;
                 if (!result.known()) {
                     return {};
                 }
@@ -188,7 +220,7 @@ namespace forge::x86 {
 
         void write(const AddressFact &address, unsigned width, const AddressFact &value) {
             if (!address.known()) {
-                slots.clear();
+                slots.reset();
                 return;
             }
 
@@ -198,15 +230,45 @@ namespace forge::x86 {
                     continue;
                 }
 
-                slots.erase(slots.lower_bound(va - 7), slots.lower_bound(va + bytes));
-                if (address.values().size() == 1 && width == 64 && value.known() &&
-                    va - GuestMemory::base <= GuestMemory::capacity - bytes) {
-                    slots.emplace(va, value.computed());
-                }
+                const bool exact = address.values().size() == 1 && width == 64 &&
+                                   va - GuestMemory::base <= GuestMemory::capacity - bytes;
+                replace(va, bytes, exact ? value.computed() : AddressFact{});
             }
         }
 
       private:
-        std::map<uint64_t, AddressFact> slots;
+        using Slots = std::map<uint64_t, AddressFact>;
+        std::shared_ptr<Slots> slots;
+
+        Slots &writable() {
+            if (!slots) {
+                slots = std::make_shared<Slots>();
+            } else if (slots.use_count() > 1) {
+                slots = std::make_shared<Slots>(*slots);
+            }
+
+            return *slots;
+        }
+
+        void replace(uint64_t va, unsigned bytes, const AddressFact &saved) {
+            if (slots) {
+                const auto it = slots->lower_bound(va - 7);
+                const bool overlaps = it != slots->end() && it->first < va + bytes;
+                if ((!overlaps && !saved.known()) ||
+                    (overlaps && it->first == va && it->second == saved)) {
+                    return;
+                }
+            } else if (!saved.known()) {
+                return;
+            }
+
+            auto &updated = writable();
+            updated.erase(updated.lower_bound(va - 7), updated.lower_bound(va + bytes));
+            if (saved.known()) {
+                updated.emplace(va, saved);
+            } else if (updated.empty()) {
+                slots.reset();
+            }
+        }
     };
 } // namespace forge::x86

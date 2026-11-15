@@ -512,6 +512,15 @@ namespace forge {
             return !memoryDestination(op.form) && op.op != x86::Op::Cmp && op.op != x86::Op::Test;
         }
 
+        bool operandsCancel(const Step &s, const x86::IntegerInstruction &instruction) {
+            using x86::Op;
+            const auto op = instruction.op;
+            const auto &last = s.inst.getOperand(s.inst.getNumOperands() - 1);
+            return instruction.form == x86::Form::Pair &&
+                   (op == Op::Xor || op == Op::Sub || op == Op::Cmp || op == Op::Sbb) &&
+                   s.inst.getOperand(0).getReg() == last.getReg();
+        }
+
         void Translator::requireMemory(const Step &s) {
             if (!accessesMemory) {
                 imageMemory.checkStackMapping(s);
@@ -547,11 +556,19 @@ namespace forge {
             }
 
             const auto &lhs = facts.registers[dest.index];
+            if ((op.op == Op::Xor || op.op == Op::Sub) && operandsCancel(s, op)) {
+                // Known 64-bit constant subtraction already supplied a constant offset
+                // for the checked stack path. Newly proved zeros are computed facts.
+                return op.op == Op::Sub && dest.width == 64 && lhs.known()
+                           ? lhs.times(0)
+                           : AddressFact(0, AddressFact::Computed);
+            }
+
             if (op.op == Op::And && last.isImm()) {
                 return lhs.masked(static_cast<uint64_t>(last.getImm()) & dest.mask());
             }
 
-            if (dest.width == 32 && op.op != Op::Mov) {
+            if (dest.width == 32 && !last.isImm() && op.op != Op::Mov) {
                 return {};
             }
 
@@ -561,11 +578,12 @@ namespace forge {
                 return dest.width == 64 ? rhs : rhs.masked(dest.mask());
             }
 
-            if (op.op == Op::Sub) {
-                return lhs.plus(rhs.times(uint64_t(0) - 1));
+            if (op.op != Op::Add && op.op != Op::Sub) {
+                return {};
             }
 
-            return op.op == Op::Add ? lhs.plus(rhs) : AddressFact{};
+            auto sum = lhs.plus(op.op == Op::Sub ? rhs.times(uint64_t(0) - 1) : rhs);
+            return dest.width == 64 ? sum : sum.masked(dest.mask());
         }
 
         void Translator::planMemoryAccess(const Step &s, const x86::IntegerInstruction &op,
@@ -876,8 +894,7 @@ namespace forge {
 
             // Equal operands cancel even if the guest register has no incoming value.
             // SBB still subtracts CF, and CMP only updates flags.
-            bool cancel = (op == Op::Xor || op == Op::Sub || op == Op::Cmp || op == Op::Sbb) &&
-                          form == Form::Pair && i.getOperand(0).getReg() == last.getReg();
+            const bool cancel = operandsCancel(s, instruction);
             Value *lhs = cancel ? ir.getIntN(width, 0) : read(s, dest);
             Value *rhs = nullptr;
 

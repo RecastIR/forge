@@ -291,7 +291,7 @@ int main() { printf("%lld %lld\\n", first, forge_lifted(0, 0)); }
         image = self.edit("cross", cross)
         preferred = self.work / "cross-preferred.ll"
         preferred.write_bytes(run(*self.rebased_command("load64", self.base, image)))
-        original_bytes = image_stats(image, self.base, preferred)["initialized_bytes"]
+        preferred_stats = image_stats(image, self.base, preferred)
         for delta in (0x10000000, -0x10000000):
             addr = self.base + delta + page + raw
             for exe in self.rebased("load64", self.base+delta, image):
@@ -300,12 +300,56 @@ int main() { printf("%lld %lld\\n", first, forge_lifted(0, 0)); }
             original = 0xfffffffd + delta
             # Only the positive delta carries into the four tail bytes of the
             # straddling fixup. Both deltas materialize the second eight-byte fixup.
-            stats = image_stats(image, self.base+delta, self.work / "load64-rebased.ll")
-            self.assertEqual(stats["initialized_bytes"], original_bytes + (12 if delta > 0 else 8))
+            ir = self.work / "load64-rebased.ll"
+            stats = image_stats(image, self.base+delta, ir)
+            for key in ("budgeted_initialized_bytes", "emitted_initializer_bytes"):
+                self.assertEqual(stats[key], preferred_stats[key] + (12 if delta > 0 else 8))
+
+            if delta > 0:
+                # Omit the second tail write in a private copy of the raw module.
+                source = ir.read_text()
+                target = f"ptr @image_{page:x}, i64 {raw + 8})"
+                stores = [line for line in source.splitlines()
+                          if "store [8 x i8]" in line and target in line]
+                self.assertEqual(len(stores), 1)
+                omitted = self.work / "missing-tail-store.ll"
+                omitted.write_text(source.replace(stores[0], ""))
+                reduced = image_stats(image, self.base+delta, omitted)
+                self.assertEqual(reduced["budgeted_initialized_bytes"], stats["budgeted_initialized_bytes"])
+                self.assertEqual(reduced["emitted_initializer_bytes"], stats["emitted_initializer_bytes"] - 8)
+                for exe in self.compile_variants(omitted):
+                    self.expect(exe, addr-4, 0, original)
+                    self.expect(exe, addr+8, 0, 0)
+
+                redirected = self.work / "unexpected-tail-store.ll"
+                changed = stores[0].replace(f"@image_{page:x}", "@scratch")
+                redirected.write_text(source.replace(stores[0], changed) +
+                                      f"\n@scratch = private global [{raw+16} x i8] zeroinitializer\n")
+                with self.assertRaises(subprocess.CalledProcessError) as failure:
+                    image_stats(image, self.base+delta, redirected)
+                self.assertIn(b"unexpected image constructor destination", failure.exception.stderr)
             for exe in self.rebased("store_middle", self.base+delta, image):
                 self.sequence(exe, [(addr-4, 0x9876), (addr-4, 0xcafe)],
                               [(original & ~(0xffff << 24)) | (word << 24)
                                for word in (0x9876, 0xcafe)])
+
+    def test_zero_prefix_uses_no_explicit_initializer(self):
+        raw = self.sections[".mutable"]["raw_size"]
+        for zero in (False, True):
+            def tail(data, layout, headers):
+                header = headers[".mutable"]
+                struct.pack_into("<I", data, header+8, raw+16)
+                if zero:
+                    start = layout.u32(header+20)
+                    data[start:start+raw] = bytes(raw)
+            image = self.edit(f"prefix-{zero}", tail)
+            for exe in self.variants("increment_counter_reg", image=image):
+                self.expect(exe, 0, 0, 1 if zero else 0x1235)
+            stats = image_stats(image, self.base, self.work / "increment_counter_reg.ll")
+            self.assertEqual(stats["selected_sections"], 1)
+            self.assertEqual(stats["virtual_bytes"], raw + 16)
+            self.assertEqual(stats["budgeted_initialized_bytes"], raw)
+            self.assertEqual(stats["emitted_initializer_bytes"], 0 if zero else raw)
 
     def test_interval_ending_at_maximum_va(self):
         rva = 0x100000
@@ -533,8 +577,9 @@ int main() { printf("%lld %lld\\n", first, forge_lifted(0, 0)); }
 
     def test_provenance_keeps_runtime_bounds(self):
         addr = self.va(".literal")
+        computed = ("reloaded_stack_va", "xor_zero_offset", "sub_zero_offset", "sub32_offset")
         def distance(data, layout, headers):
-            for name in ("escape_stack", "reloaded_stack_va", "joined_stack_va"):
+            for name in (*computed, "escape_stack", "joined_stack_va", "constant_sub_offset"):
                 start = layout.file_offset(self.exports[name])
                 pos = data.index(struct.pack("<Q", 0x123456789abcdef0), start, start + 32)
                 struct.pack_into("<Q", data, pos, addr - RSP)
@@ -542,9 +587,11 @@ int main() { printf("%lld %lld\\n", first, forge_lifted(0, 0)); }
         for exe in self.variants("escape_stack", image=image):
             self.expect(exe, addr, 0, 0x78563412)
             self.trap(exe, [(addr, 1)])
-        # The original generic load can reach the image through the reloaded integer VA.
-        for exe in self.variants("reloaded_stack_va", image=image):
-            self.expect(exe, 0, 0, 0x78563412)
+        for exe in self.variants("constant_sub_offset", image=image):
+            self.trap(exe, [(0, 0)])
+        for name in computed:
+            for exe in self.variants(name, image=image):
+                self.expect(exe, 0, 0, 0x78563412)
         for exe in self.variants("joined_stack_va", image=image):
             self.expect(exe, 0, 23, 23)
             self.expect(exe, 1, 23, 0x78563412)
@@ -578,6 +625,11 @@ int main() { printf("%lld %lld\\n", first, forge_lifted(0, 0)); }
             struct.pack_into("<I", data, layout.opt+56, start+size)
 
         image = self.edit("unused-writable", unused_writable)
+        for exe in self.rebased("low_image_offset", 0x10000000, image):
+            self.expect(exe, 0, 0, 0x9a785634)
+            self.expect(exe, 1, 0, 0xf0debc9a)
+        stats = image_stats(image, 0x10000000, self.work / "low_image_offset-rebased.ll")
+        self.assertEqual((stats["selected_sections"], stats["virtual_bytes"]), (1, 7))
         for exe in self.variants("choose_local_or_image", image=image):
             self.expect(exe, 0, 51, 51)
             self.expect(exe, 1, 51, 0x9a785634)
