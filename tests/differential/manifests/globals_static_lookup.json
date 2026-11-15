@@ -1,0 +1,26 @@
+{
+  "schema_version": 1,
+  "id": "globals/static_lookup",
+  "description": "Accumulate immutable table entries into a persistent static local across loops and calls.",
+  "source": "fixtures/globals/static_lookup.cpp",
+  "binary": "global_static.exe",
+  "args": [
+    "0",
+    "0",
+    "0",
+    "1",
+    "1",
+    "2",
+    "3",
+    "3",
+    "2",
+    "0",
+    "-1",
+    "1"
+  ],
+  "expected": {
+    "exit_code": 0,
+    "stdout": "17\n24\n54\n75\n75\n78\n",
+    "stderr": ""
+  }
+}

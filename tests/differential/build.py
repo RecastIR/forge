@@ -48,6 +48,7 @@ def inspect_pe(path, fixture_id):
             if not re.search(rf"^\s*[0-9a-f]+\s+\d+\s+{name}$",
                              imports.get("kernel32.dll", ""), re.MULTILINE):
                 raise ValueError(f"{path}: missing KERNEL32.dll import {name}")
+    return report
 
 
 # Instruction-specific contracts are checked on the linked, callable leaf in
@@ -81,6 +82,8 @@ INTEGER_WITNESSES = {
     "stack_branch": ("jg ", "mov QWORD PTR [rsp+0x8],rdx", "jmp ", "mov QWORD PTR [rsp+0x8],rcx", "adc rax,r10"),
     "stack_loop": ("mov rax,QWORD PTR [rsp+0x10]", "mov QWORD PTR [rsp+0x10],rax", "jne ", "mov rax,QWORD PTR [rsp+0x10]"),
     "integer_mix": ("shl ", "xor ", "imul "),
+    "global_rmw": ("add BYTE PTR [rip", "seto ", "inc WORD PTR [rip", "dec BYTE PTR [rip", "setb ",
+                   "sub DWORD PTR [rip", "setb ", "mov r8,QWORD PTR [rip"),
 }
 
 
@@ -108,7 +111,7 @@ def reachable_leaf(instructions):
                   "jp", "jnp", "jl", "jge", "jle", "jg"}
     ordinary = {"mov", "movabs", "movzx", "movsx", "movsxd", "lea", "add", "sub", "xor",
                 "and", "or", "test", "cmp", "shl", "shr", "sar", "inc", "dec", "not", "neg", "imul",
-                "push", "pop", "cwde", "cdqe", "nop"}
+                "push", "pop", "cwde", "cdqe", "nop", "seto", "setb"}
     addresses = list(instructions)
     following = dict(zip(addresses, addresses[1:]))
     graph = {}
@@ -271,6 +274,9 @@ def check_frame(name, instructions, config):
 
 
 IMAGE_LEAVES = {"lookup", "image_direct", "image_spill", "image_loop", "image_widths"}
+GLOBAL_SYMBOLS = {"global_array": ("words",), "global_counters": ("warm", "cold"),
+                  "global_static": ("_ZZ13global_staticE5total", "_ZL7weights"),
+                  "global_pointer": ("_ZL7current", "_ZL7counter"), "global_rmw": (".cells",)}
 
 
 def indexed_lookup(instructions, graph, loads):
@@ -306,12 +312,18 @@ def indexed_lookup(instructions, graph, loads):
     return False
 
 
+def section_rows(sections):
+    return [(int(start, 16), int(size, 16), int(offset or "0", 16), flags)
+            for size, start, offset, flags in re.findall(
+                r"^\s*\d+\s+\S+\s+([0-9a-f]+)\s+([0-9a-f]+)\s+[0-9a-f]+(?:\s+([0-9a-f]+))?[^\n]*\n\s+([^\n]+)",
+                sections, re.MULTILINE)]
+
+
 def check_image_leaf(name, instructions, sections, config):
     graph = reachable_leaf(instructions)
     body = [instructions[address] for address in sorted(graph)]
     # Verify resolved VAs against the linked PE's section table, independently of Forge.
-    sections = [(int(start, 16), int(size, 16), flags) for size, start, flags in re.findall(
-        r"^\s*\d+\s+\S+\s+([0-9a-f]+)\s+([0-9a-f]+).*\n\s+([^\n]+)", sections, re.MULTILINE)]
+    sections = section_rows(sections)
     references = [line for line in body if "[rip" in line]
     if not references:
         raise ValueError("missing reachable RIP-relative data reference")
@@ -319,7 +331,7 @@ def check_image_leaf(name, instructions, sections, config):
         target = re.search(r"#\s*(?:0x)?([0-9a-f]+)", line)
         if not target or not any(start <= int(target[1], 16) < start + size and "READONLY" in flags
                                  and ("CODE" in flags) == (name == "image_widths")
-                                 for start, size, flags in sections):
+                                 for start, size, _, flags in sections):
             raise ValueError(f"missing immutable section target for {line}")
     loads = [line for line in body if re.match(r"mov(?:sx|sxd|zx)? \w+,(?:BYTE|WORD|DWORD|QWORD) PTR \[", line)
              and not re.search(r"\[(rsp|rbp)", line)]
@@ -347,6 +359,69 @@ def check_image_leaf(name, instructions, sections, config):
             raise ValueError("missing stack spill and reload of the table base")
 
 
+def check_global_leaf(path, instructions, sections, pe_report):
+    name = path.stem
+    graph = reachable_leaf(instructions)
+    body = [instructions[a] for a in sorted(graph)]
+    references = {}
+    for line in body:
+        if "[rip" not in line:
+            continue
+        match = re.search(r"#\s*([0-9a-f]+)\s+<([^>]+)>", line)
+        if not match:
+            raise ValueError(f"missing linked target for {line}")
+        address = int(match[1], 16)
+        row = next((r for r in sections if r[0] <= address < r[0] + r[1]), None)
+        if row is None or "ALLOC" not in row[3] or "CODE" in row[3]:
+            raise ValueError(f"missing mapped data section for {line}")
+        references[match[2]] = (address, row)
+
+    for symbol in GLOBAL_SYMBOLS[name]:
+        if symbol not in references:
+            raise ValueError(f"missing reachable reference to {symbol}")
+        flags = references[symbol][1][3]
+        if ("READONLY" in flags) != (symbol == "_ZL7weights") or ("CONTENTS" in flags) == (symbol == "cold"):
+            raise ValueError(f"unexpected section permissions or initialization for {symbol}")
+
+    memory_write = r"mov DWORD PTR \[rip[^]]*\],\w+"
+    if name == "global_counters":
+        if not any(len(edges) == 2 for edges in graph.values()) or any(
+                not any(re.match(memory_write, line) and line.endswith(f"<{symbol}>") for line in body)
+                for symbol in ("warm", "cold")):
+            raise ValueError("missing branch or counter writes")
+    elif name == "global_static":
+        for loop in natural_loops(graph)[0].values():
+            lines = [instructions[a] for a in loop]
+            if (any(re.match(memory_write, line) and line.endswith("<_ZZ13global_staticE5total>") for line in lines)
+                    and any(re.fullmatch(r"(?:mov|add) \w+,DWORD PTR \[r\w+\+r\w+\*[14]\]", line) for line in lines)):
+                break
+        else:
+            raise ValueError("missing table read and static local update inside one loop")
+    elif name == "global_array":
+        if (not any(re.fullmatch(r"mov BYTE PTR \[r\w+\],\w+", line) for line in body)
+                or not any(re.fullmatch(r"mov \w+,DWORD PTR \[r\w+\+r\w+\*[14]\]", line) for line in body)):
+            raise ValueError("missing narrow array store or indexed wide read")
+    elif name == "global_pointer":
+        slot, (start, size, offset, _) = references["_ZL7current"]
+        base = re.search(r"^ImageBase\s+([0-9a-f]+)$", pe_report, re.MULTILINE)
+        dir64 = [int(rva, 16) for rva in re.findall(r"\[([0-9a-f]+)\] DIR64\b", pe_report)]
+        if not base or dir64.count(slot - int(base[1], 16)) != 1:
+            raise ValueError("expected one DIR64 on the loaded pointer field")
+        if (slot + 8 > start + size or struct.unpack_from("<Q", path.read_bytes(), offset + slot - start)[0]
+                != references["_ZL7counter"][0]):
+            raise ValueError("pointer initializer must point to the directly addressed counter")
+        # Both pinned builds load the pointer into RAX, then spill and reload it
+        # from the same invocation-local slot immediately before indirect accesses.
+        load = next((i for i, line in enumerate(body)
+                     if re.match(r"mov rax,QWORD PTR \[rip", line) and line.endswith("<_ZL7current>")), None)
+        spill = (re.fullmatch(r"mov QWORD PTR (\[r[bs]p[^]]*\]),rax", body[load + 1])
+                 if load is not None and load + 1 < len(body) else None)
+        if not spill or not all(any(line == "mov rax,QWORD PTR " + spill[1] and re.fullmatch(use, following)
+                                    for line, following in zip(body, body[1:])) for use in (
+                r"mov \w+,QWORD PTR \[rax\]", r"mov QWORD PTR \[rax\],\w+")):
+            raise ValueError("missing stack-reloaded pointer read or write")
+
+
 def check_frame_padding(path):
     # BFD's -h shows virtual size even for an invalid nonzero SizeOfRawData
     # with a null file offset. Check the linked section header itself.
@@ -365,18 +440,21 @@ def check_frame_padding(path):
     raise ValueError("missing 33 MiB read-only zero-fill section")
 
 
-def check_leaf(path, config="debug"):
+def check_leaf(path, config="debug", pe_report=""):
     witnesses = INTEGER_WITNESSES.get(path.stem)
     if (witnesses is None and path.stem != "cfg_nested_exits"
-            and path.stem not in FRAME_LOCALS and path.stem not in IMAGE_LEAVES):
+            and path.stem not in FRAME_LOCALS and path.stem not in IMAGE_LEAVES and path.stem not in GLOBAL_SYMBOLS):
         return
     output = subprocess.check_output(["x86_64-w64-mingw32-objdump", "-d", "--no-show-raw-insn",
                                       "-Mintel", "--disassemble=" + path.stem, path], text=True)
     try:
         instructions = leaf_instructions(output, path.stem)
-        if path.stem in IMAGE_LEAVES:
+        if path.stem in IMAGE_LEAVES or path.stem in GLOBAL_SYMBOLS:
             sections = subprocess.check_output(["x86_64-w64-mingw32-objdump", "-h", path], text=True)
-            check_image_leaf(path.stem, instructions, sections, config)
+            if path.stem in IMAGE_LEAVES:
+                check_image_leaf(path.stem, instructions, sections, config)
+            else:
+                check_global_leaf(path, instructions, section_rows(sections), pe_report)
         if path.stem in ("branch_locals", "count_locals"):
             check_frame_padding(path)
         if path.stem in FRAME_LOCALS:
@@ -439,8 +517,8 @@ def build(config, cases, output):
             if data != (second / binary).read_bytes():
                 other = hashlib.sha256((second / binary).read_bytes()).hexdigest()
                 raise ValueError(f"{config}/{binary}: clean builds differ: {hashlib.sha256(data).hexdigest()} vs {other}")
-            inspect_pe(path, fixture_id)
-            check_leaf(path, config)
+            pe_report = inspect_pe(path, fixture_id)
+            check_leaf(path, config, pe_report)
             checksums.append(f"{hashlib.sha256(data).hexdigest()}  {binary}\n")
             shutil.copy2(path, staged / binary)
         (staged / "SHA256SUMS").write_text("".join(checksums), encoding="ascii")

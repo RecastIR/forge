@@ -52,6 +52,38 @@ namespace forge::x86 {
 
             return IntegerInstruction{op, form, width, width};
         }
+
+        std::optional<Form> arithmeticMemoryForm(Op op, unsigned width, StringRef suffix) {
+            if ((op == Op::Inc || op == Op::Dec) && suffix == "m") {
+                return Form::MemoryUnary;
+            }
+
+            if (op == Op::Add || op == Op::Sub) {
+                if (suffix == "mr") {
+                    return Form::MemoryRegister;
+                }
+
+                if (suffix == "rm") {
+                    return Form::Load;
+                }
+
+                if ((width < 64 && suffix == "mi") || (width == 64 && suffix == "mi32") ||
+                    (width > 8 && suffix == "mi8")) {
+                    return Form::MemoryImmediate;
+                }
+            }
+
+            if (op == Op::Cmp && (width == 32 || width == 64) && suffix == "mi8") {
+                return Form::MemoryImmediate;
+            }
+
+            if (suffix == "rm" &&
+                ((op == Op::Cmp && width == 32) || (op == Op::Imul && width == 64))) {
+                return Form::Load;
+            }
+
+            return std::nullopt;
+        }
     } // namespace
 
     std::optional<IntegerInstruction> integerInstruction(StringRef opcode) {
@@ -98,13 +130,12 @@ namespace forge::x86 {
             return moveInstruction(op, width, suffix);
         }
 
-        Form form;
+        if (auto form = arithmeticMemoryForm(op, width, suffix)) {
+            return IntegerInstruction{op, *form, width, width};
+        }
 
-        if (opcode == "CMP32rm" || opcode == "IMUL64rm" || opcode == "SUB64rm") {
-            form = Form::Load;
-        } else if (opcode == "CMP64mi8" || opcode == "ADD32mi8") {
-            form = Form::MemoryImmediate;
-        } else if (op == Op::Shl || op == Op::Shr || op == Op::Sar) {
+        Form form;
+        if (op == Op::Shl || op == Op::Shr || op == Op::Sar) {
             if (suffix == "r1") {
                 form = Form::ShiftOne;
             } else if (suffix == "ri") {

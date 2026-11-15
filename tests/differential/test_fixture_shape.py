@@ -1,9 +1,10 @@
 """Instruction and control-flow witnesses for the linked MinGW fixtures."""
 from pathlib import Path
+import tempfile
 import unittest
 from unittest.mock import patch
 
-from build import check_frame, check_image_leaf, check_leaf, check_nested_exits, leaf_instructions
+from build import check_frame, check_global_leaf, check_image_leaf, check_leaf, check_nested_exits, leaf_instructions
 
 
 # Both loops are laid out after a shared return. Absolute addresses are immaterial.
@@ -47,6 +48,26 @@ class FixtureShapeTests(unittest.TestCase):
             check_image_leaf("lookup", bypass, sections, "debug")
         with self.assertRaisesRegex(ValueError, "immutable section"):
             check_image_leaf("lookup", leaf, sections.replace("READONLY", "DATA"), "debug")
+
+    def test_global_pointer_requires_the_used_relocation_and_alias(self):
+        code = ["mov rax,QWORD PTR [rip+0x10] # 401010 <_ZL7current>", "mov QWORD PTR [rsp+0x8],rax",
+                "mov rax,QWORD PTR [rsp+0x8]", "mov rdx,QWORD PTR [rax]", "mov rax,QWORD PTR [rsp+0x8]",
+                "mov QWORD PTR [rax],rdx", "mov QWORD PTR [rip+0x8],rdx # 401008 <_ZL7counter>", "ret"]
+        sections = [(0x401000, 32, 0, "CONTENTS, ALLOC, LOAD, DATA")]
+        report = "ImageBase 400000\nreloc 0 offset 10 [1010] DIR64"
+        with tempfile.TemporaryDirectory() as tmp:
+            image = Path(tmp) / "global_pointer.exe"
+            image.write_bytes(bytes(16) + (0x401008).to_bytes(8, "little"))
+            check_global_leaf(image, dict(enumerate(code)), sections, report)
+            for broken in (report.replace("1010", "1018"), report.replace("DIR64", "ABSOLUTE")):
+                with self.assertRaisesRegex(ValueError, "DIR64"):
+                    check_global_leaf(image, dict(enumerate(code)), sections, broken)
+            with self.assertRaisesRegex(ValueError, "pointer read or write"):
+                check_global_leaf(image, dict(enumerate([line.replace("[rax],rdx", "[rcx],rdx") for line in code])),
+                                  sections, report)
+            image.write_bytes(bytes(32))
+            with self.assertRaisesRegex(ValueError, "pointer initializer"):
+                check_global_leaf(image, dict(enumerate(code)), sections, report)
 
     def test_frame_loop_must_store_inside_a_reachable_loop(self):
         instructions = dict(enumerate([

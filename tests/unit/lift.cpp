@@ -306,9 +306,34 @@ namespace {
                   "verifier failure lost its stage, category or provenance");
         }
     }
+
+    // The native image suite compiles this output with both LLVM pipelines. Printing
+    // after analysis destruction also exercises the returned module's ownership.
+    void emitRebased(const fs::path &path, llvm::StringRef entry, llvm::StringRef base) {
+        uint32_t rva;
+        uint64_t guestBase;
+        check(!entry.getAsInteger(0, rva) && !base.getAsInteger(0, guestBase),
+              "invalid rebase test arguments");
+        llvm::LLVMContext context;
+        std::unique_ptr<llvm::Module> module;
+        {
+            AnalyzedImage analysis(
+                std::make_unique<ParsedImage>(InputFile(path), ParsePolicy::FunctionAnalysis),
+                DebugInfo::Omit);
+            module = generateIR(analysis, {rva, EntryMode::WindowsX64I64Pair, guestBase}, context);
+        }
+
+        check(!llvm::verifyModule(*module), "rebased module lost its backing storage");
+        module->print(llvm::outs(), nullptr);
+    }
 } // namespace
 
 int main(int argc, char **argv) try {
+    if (argc == 5 && std::string_view(argv[1]) == "--emit-rebased") {
+        emitRebased(argv[2], argv[3], argv[4]);
+        return 0;
+    }
+
     check(argc == 4, "expected add.exe, cfg.exe and image.exe fixtures");
     checkControlFlow(argv[2]);
     checkControlFlowLeaves(argv[2]);

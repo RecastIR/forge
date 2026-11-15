@@ -12,8 +12,8 @@ namespace forge::x86 {
         llvm::Value *marks = nullptr;
     };
 
-    // IR storage belongs to the lifted function. The builder and its insertion
-    // point are shared with instruction lowering, including guard continuations.
+    // Each invocation owns its stack. The image resolver borrows the module's
+    // persistent storage. Guard continuations share the lowering builder.
     class GuestMemory {
       public:
         static constexpr uint64_t base = 0x70000000;
@@ -25,9 +25,9 @@ namespace forge::x86 {
         void allocate(llvm::Function *resolver);
         llvm::Value *load(llvm::Value *address, unsigned width, bool stackOnly);
         StoredValue loadSaved(llvm::Value *address, unsigned width, bool stackOnly);
-        llvm::Value *loadWritable(llvm::Value *address, unsigned width);
-        StoredValue loadStackSaved(llvm::Value *address, unsigned width);
-        void store(llvm::Value *address, StoredValue value);
+        void store(llvm::Value *address, StoredValue value, bool stackOnly);
+        void modify(llvm::Value *address, unsigned width, bool stackOnly,
+                    llvm::function_ref<llvm::Value *(llvm::Value *)> operation);
         void checkReturn(llvm::Value *rsp);
         void guard(llvm::Value *condition);
 
@@ -39,10 +39,18 @@ namespace forge::x86 {
 
         llvm::Function *imageResolver = nullptr;
 
-        StoredValue checkedLoad(llvm::Value *address, unsigned width, bool allowOpaque,
-                                bool stackOnly);
+        enum class Access { Read, ReadSaved, Write, Modify };
+
+        struct Location {
+            llvm::Value *data;
+            // Saved byte identities are only needed for plain copies.
+            llvm::Value *marks = nullptr;
+        };
+
+        Location resolve(llvm::Value *address, unsigned width, Access access, bool stackOnly,
+                         llvm::Value *storeMarks = nullptr);
         llvm::Value *checkedOffset(llvm::Value *address, unsigned width);
-        StoredValue loadAt(llvm::Value *offset, unsigned width, bool allowOpaque);
-        void storeAt(llvm::Value *offset, StoredValue value);
+        Location stackLocation(llvm::Value *offset, unsigned width, Access access,
+                               llvm::Value *storeMarks = nullptr);
     };
 } // namespace forge::x86

@@ -126,14 +126,36 @@ namespace {
         }
 
         for (const auto &[opcode, form] : {std::pair{"CMP32rm", Form::Load},
+                                           {"CMP32mi8", Form::MemoryImmediate},
                                            {"CMP64mi8", Form::MemoryImmediate},
+                                           {"ADD64rm", Form::Load},
                                            {"SUB64rm", Form::Load},
-                                           {"ADD32mi8", Form::MemoryImmediate}}) {
+                                           {"ADD8mi", Form::MemoryImmediate},
+                                           {"SUB16mi", Form::MemoryImmediate},
+                                           {"ADD32mi8", Form::MemoryImmediate},
+                                           {"SUB64mi32", Form::MemoryImmediate},
+                                           {"SUB8mr", Form::MemoryRegister},
+                                           {"ADD16mr", Form::MemoryRegister},
+                                           {"SUB32mr", Form::MemoryRegister},
+                                           {"ADD64mr", Form::MemoryRegister}}) {
             auto instruction = integerInstruction(opcode);
 
             if (!instruction || instruction->form != form ||
                 !flagEffect(instruction->op, instruction->width).generated.all()) {
                 throw std::runtime_error(std::string("incorrect arithmetic memory form ") + opcode);
+            }
+        }
+
+        for (StringRef opcode : {"INC8m", "DEC16m", "INC32m", "DEC64m"}) {
+            auto instruction = integerInstruction(opcode);
+            if (!instruction || instruction->form != Form::MemoryUnary) {
+                throw std::runtime_error("incorrect unary memory form " + opcode.str());
+            }
+
+            const auto effect = flagEffect(instruction->op, instruction->width);
+            if (effect.generated.count() != FlagCount - 1 || effect.generated[CF] ||
+                effect.carried != FlagSet(1U << CF)) {
+                throw std::runtime_error("incorrect unary memory flag effects " + opcode.str());
             }
         }
 
@@ -143,8 +165,8 @@ namespace {
             throw std::runtime_error("incorrect two-operand memory multiply");
         }
 
-        for (StringRef opcode :
-             {"ADD64rm", "MOVZX64rm32", "MOVSX16rm16", "MOVSX16rm32", "MOV64mi", "MOV8ao64"}) {
+        for (StringRef opcode : {"ADD64mi", "SUB8mi8", "INC64mr", "MOVZX64rm32", "MOVSX16rm16",
+                                 "MOVSX16rm32", "MOV64mi", "MOV8ao64"}) {
             if (integerInstruction(opcode)) {
                 throw std::runtime_error("accepted unsupported form " + opcode.str());
             }

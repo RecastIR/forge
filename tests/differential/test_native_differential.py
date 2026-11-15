@@ -38,6 +38,24 @@ class NativeDifferentialTests(unittest.TestCase):
                             result = subprocess.run([exe, *args], capture_output=True, timeout=10)
                             self.assertEqual((result.returncode, result.stdout, result.stderr), (status, stdout, b""))
 
+    def test_mutable_state_in_a_fresh_process(self):
+        fixture = "globals/counters"
+        manifest = next(m for m in diff.load_catalog() if m.case["id"] == fixture)
+        with tempfile.TemporaryDirectory(dir=self.tmp) as tmp:
+            output = Path(tmp)
+            for config in diff.CONFIGS:
+                self.assertEqual(diff.run(config, fixture, output=output, forge=self.forge), 0)
+                binary = diff.BINARIES / config / manifest.case["binary"]
+                observed, _ = diff.reference(diff.REFERENCES, manifest, config, diff.sha256(binary.read_bytes()))
+                # Both endpoints use a zero update. Their different values witness the intervening calls.
+                self.assertNotEqual(observed.stdout.splitlines()[0], observed.stdout.splitlines()[-1])
+                for variant in diff.VARIANTS:
+                    with self.subTest(config=config, variant=variant):
+                        exe = output / config / fixture / variant / "native/bin/differential_decimal_pairs"
+                        repeated = subprocess.run([exe, *manifest.case["args"]], capture_output=True, timeout=10)
+                        self.assertEqual((repeated.returncode, repeated.stdout, repeated.stderr),
+                                         (observed.exit_code, observed.stdout, observed.stderr))
+
     def negative(self, name, category, *, fixture=CASE, binaries=diff.BINARIES):
         output = OUTPUT / name
         self.assertEqual(diff.run("debug", fixture, binaries=binaries, output=output, forge=self.forge), 1)

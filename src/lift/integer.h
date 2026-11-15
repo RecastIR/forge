@@ -40,6 +40,8 @@ namespace forge::x86 {
         Load,
         Store,
         MemoryImmediate,
+        MemoryRegister,
+        MemoryUnary,
         ShiftOne,
         ShiftImmediate,
         ShiftCL

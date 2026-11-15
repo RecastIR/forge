@@ -1,0 +1,30 @@
+{
+  "schema_version": 1,
+  "id": "globals/counters",
+  "description": "Branch between an initialized counter and a zero-filled counter. Observe both on every call.",
+  "source": "fixtures/globals/counters.c",
+  "binary": "global_counters.exe",
+  "args": [
+    "0",
+    "0",
+    "1",
+    "0",
+    "0",
+    "3",
+    "1",
+    "5",
+    "1",
+    "-2",
+    "0",
+    "-4",
+    "1",
+    "10",
+    "0",
+    "0"
+  ],
+  "expected": {
+    "exit_code": 0,
+    "stdout": "42949672960\n42949672960\n55834574848\n55834574853\n55834574851\n38654705667\n38654705677\n38654705677\n",
+    "stderr": ""
+  }
+}

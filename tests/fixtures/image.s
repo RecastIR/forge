@@ -78,7 +78,7 @@ probe bad_write
     ret
     .seh_endproc
 
-probe bad_relocation
+probe partial_relocation
     movl pointer-1(%rip), %eax
     ret
     .seh_endproc
@@ -107,7 +107,10 @@ code_data:
     .byte 0x81,0x72,0x63,0x54
 
 .section .mutable,"dw"
+counter:
     .quad 0x1234
+counter_ptr:
+    .quad counter
 
 .text
 probe frame_join
@@ -214,5 +217,57 @@ probe escape_stack
     je 1f
     movl (%r8), %eax
 1:
+    ret
+    .seh_endproc
+
+probe pointer_va
+    movq counter_ptr(%rip), %rax
+    ret
+    .seh_endproc
+
+probe update_alias
+    movq counter_ptr(%rip), %r8
+    movq %r8, 8(%rsp)
+    movq 8(%rsp), %r9
+    addq %rcx, (%r9)
+    movq counter(%rip), %rax
+    ret
+    .seh_endproc
+
+probe increment_counter
+    incq counter(%rip)
+    movq counter(%rip), %rax
+    ret
+    .seh_endproc
+
+probe exchange_byte
+    movzbl (%rcx), %eax
+    movb %dl, (%rcx)
+    ret
+    .seh_endproc
+
+probe load64
+    movq (%rcx), %rax
+    ret
+    .seh_endproc
+
+probe opaque_store
+    movq %rbx, (%rcx)
+    xorl %eax, %eax
+    ret
+    .seh_endproc
+
+probe store_middle
+    movw %dx, 3(%rcx)
+    movq (%rcx), %rax
+    ret
+    .seh_endproc
+
+probe maybe_write
+    testq %rdx, %rdx
+    je 1f
+    movl $1, (%rcx)
+1:
+    xorl %eax, %eax
     ret
     .seh_endproc
