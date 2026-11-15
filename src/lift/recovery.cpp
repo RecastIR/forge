@@ -179,6 +179,14 @@ namespace forge::x86 {
 
             const auto code = validateCallee(entry.analysis, entry.relocations, step, target);
             if (!code) {
+                const auto &table = entry.analysis.module().exceptions;
+                if (table && table->trailingBytes()) {
+                    step.reject(
+                        FailureCode::UnsupportedControlFlow,
+                        "insufficient evidence for leaf recovery: partial runtime function record",
+                        target);
+                }
+
                 return false;
             }
 

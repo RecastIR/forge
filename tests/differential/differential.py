@@ -16,6 +16,7 @@ import sys
 import tempfile
 import time
 
+from build import CONDITIONS, FALLTHROUGH, direct_target, reachable_instructions
 from comparison import describe, differences
 from lift_diagnostics import SelectedFunction, parse_diagnostic
 from manifests import FIXTURE_ID, SUITE, field, load_catalog, unique_keys
@@ -132,18 +133,66 @@ def resolve_function(module, analysis, rva, description):
     return SelectedFunction(rva, end, offsets[0], module["image_kind"], relocated)
 
 
+def caller_decoder(image, begin, end):
+    bindir = subprocess.check_output(["cmake", "--log-level=ERROR", "-P",
+                                      SUITE.parents[1] / "cmake/llvm.cmake"], text=True, timeout=30)
+    tool = Path(bindir.strip()) / "llvm-objdump"
+    rows = {}
+    row = re.compile(r"^[ \t]*([0-9a-f]+):[ \t]+((?:[0-9a-f]{2} )*[0-9a-f]{2})[ \t]+(\S.*)$", re.MULTILINE)
+
+    def disassemble(first, limit):
+        # Include enough bytes to decode any instruction starting before the chunk limit.
+        stop = min(end, limit + 15)
+        listing = subprocess.check_output([tool, "-d", "--disassemble-zeroes", "--x86-asm-syntax=intel",
+                                           f"--start-address={first}", f"--stop-address={stop}", image],
+                                          text=True, timeout=30)
+        for address, raw, text in row.findall(listing):
+            address = int(address, 16)
+            following = address + len(bytes.fromhex(raw))
+            if first <= address < limit and following <= end:
+                rows[address] = (" ".join(text.split()), following)
+
+    disassemble(begin, end)
+
+    def decode(address):
+        if address not in rows:
+            # A branch can skip inline bytes whose linear disassembly hid the target.
+            disassemble(address, min(end, address + 256))
+        if address not in rows:
+            raise ValueError(f"no complete caller instruction at {address:#x}")
+        return rows[address]
+
+    return decode
+
+
+def verify_leaf_call(image, base, caller, site, target):
+    begin, end = base + caller.start, base + caller.end
+    try:
+        decode = caller_decoder(image, begin, end)
+        ordinary = FALLTHROUGH | {"adc", "sbb", "leave", "lahf", "sal"} | {
+            prefix + jump[1:] for prefix in ("cmov", "set") for jump in CONDITIONS}
+        graph = reachable_instructions(begin, decode, lambda a: begin <= a < end,
+                                       lambda _: True, ordinary, end=end)
+    except (OSError, subprocess.SubprocessError) as error:
+        raise ValueError(f"cannot disassemble the leaf caller: {error}") from error
+
+    addresses = sorted(graph)
+    if any(decode(a)[1] > b for a, b in zip(addresses, addresses[1:])):
+        raise ValueError("overlapping reachable instructions in the leaf caller")
+    address = base + site
+    if address in graph:
+        text, continuation = decode(address)
+        opcode, _, operands = text.partition(" ")
+        if opcode == "call" and continuation < end and direct_target(operands) == base + target:
+            return
+    raise ValueError("callee disagrees with reachable direct CALL evidence")
+
+
 def resolve_leaf_window(module, analysis, image, rva, caller_rva, site):
     caller = resolve_function(module, analysis, caller_rva, "leaf caller")
     if caller.entry_restriction() or not caller.start <= site < caller.end:
         raise ValueError("leaf call site outside eligible caller")
-    with Path(image).open("rb") as source:
-        source.seek(caller.file_offset + site - caller.start)
-        data = source.read(min(6, caller.end - site))
-    prefix = int(bool(data) and 0x40 <= data[0] <= 0x4f)
-    call = data[prefix:prefix+5]
-    if len(call) != 5 or call[0] != 0xe8 or site + prefix + 5 + int.from_bytes(
-            call[1:], "little", signed=True) != rva:
-        raise ValueError("callee disagrees with the source CALL displacement")
+    verify_leaf_call(image, int(field(module, "image_base_va", str), 16), caller, site, rva)
 
     # Bound a reported location independently. No gap becomes an analysis function.
     limit = min(0xffffffff, rva + 65536)

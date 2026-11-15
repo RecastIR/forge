@@ -2,6 +2,8 @@
 #include "analysis/analysis.h"
 #include "lift/operands.h"
 
+#include "llvm/MC/MCDisassembler/MCDisassembler.h"
+
 namespace forge::x86 {
     using namespace llvm;
 
@@ -67,9 +69,7 @@ namespace forge::x86 {
             std::optional<RegisterView> dest;
 
             if (auto op = integerInstruction(step.opcode)) {
-                if (hasMemoryOperand(op->form)) {
-                    operands.decodeAddress(step, memoryOperand(step, *op), true);
-                }
+                operands.validateIntegerOperands(step, *op);
 
                 if (writesRegister(*op)) {
                     dest = operands.destination(step, *op);
@@ -84,6 +84,8 @@ namespace forge::x86 {
 
                 if (step.opcode == "LEA64r" || step.opcode == "LEA64_32r") {
                     operands.decodeAddress(step, 1, false);
+                } else if (step.opcode.starts_with("CMOV")) {
+                    operands.reg(step, step.inst.getOperand(2), dest->width);
                 }
             }
 
@@ -98,6 +100,7 @@ namespace forge::x86 {
             std::map<uint32_t, RecoveredFunction> &functions;
             const std::map<uint32_t, const DirectCall *> &deferred;
             ArrayRef<RvaRange> recorded;
+            std::vector<RvaRange> loaderWrites;
             const MCDisassembler &dis;
             const MCInstrInfo &instructions;
             const InstructionOperands operands;
@@ -160,6 +163,13 @@ namespace forge::x86 {
                                 "leaf instruction overlaps base relocation at " + hex(rel->rva));
                 }
 
+                const auto writes = rangesIn(loaderWrites, {step.rva, step.next});
+                if (!writes.empty()) {
+                    step.reject(FailureCode::UnsupportedControlFlow,
+                                "leaf instruction overlaps loader-written bytes at " +
+                                    hex(std::max<uint64_t>(step.rva, writes.front().begin)));
+                }
+
                 checkLeafEffects(step, flow, operands);
                 returned |= flow == Flow::Return;
 
@@ -188,18 +198,31 @@ namespace forge::x86 {
                 throw;
             }
 
-            const bool prefixAtEnd = error.kind == FailureCode::UnsupportedPrefix &&
-                                     StringRef(error.context.opcode).ends_with("_PREFIX") &&
-                                     *location + error.context.bytes.size() / 2 == end;
-
-            if (error.kind == FailureCode::InvalidInstruction || prefixAtEnd) {
-                // Bytes beyond the policy fence cannot establish a complete instruction.
-                throw InspectionError(std::string(error.what()) +
-                                          ": insufficient evidence at decode boundary " + hex(end),
-                                      FailureCode::UnsupportedControlFlow);
+            if (error.kind != FailureCode::InvalidInstruction &&
+                error.kind != FailureCode::UnsupportedPrefix) {
+                throw;
             }
 
-            throw;
+            // Diagnostic lookahead only. No instruction past the fence enters the CFG.
+            const auto tail = entry.analysis.image().mapRva(*location);
+            MCInst probe;
+            uint64_t size = 0;
+            if (!tail || &tail->section != &code.section ||
+                dis.getInstruction(probe, size, arrayRefFromStringRef(tail->bytes.take_front(15)),
+                                   *location, nulls()) != MCDisassembler::Success ||
+                size <= end - *location) {
+                throw;
+            }
+
+            InspectionError failure(
+                hex(*location) + ": insufficient evidence: instruction crosses decode boundary " +
+                    hex(end),
+                FailureCode::UnsupportedControlFlow);
+            failure.context = error.context;
+            failure.context.functionRva = target;
+            failure.context.bytes = toHex(code.bytes.drop_front(*location - target), true);
+            failure.context.opcode.clear();
+            throw failure;
         }
 
         void LeafRecovery::recover(const DirectCall &call) try {
@@ -231,8 +254,9 @@ namespace forge::x86 {
             const bool localEdge = error.kind == FailureCode::UnsupportedControlFlow &&
                                    error.context.branchTarget.has_value();
 
-            if (localEdge || (error.kind != FailureCode::InvalidCallTarget &&
-                              error.kind != FailureCode::UnsupportedControlFlow)) {
+            if (error.context.functionRva || localEdge ||
+                (error.kind != FailureCode::InvalidCallTarget &&
+                 error.kind != FailureCode::UnsupportedControlFlow)) {
                 error.context.functionRva = call.callee;
                 error.context.sourceCall = CallLocation{call.caller, call.instruction};
                 throw;
@@ -266,6 +290,7 @@ namespace forge::x86 {
                               functions,
                               deferred,
                               ranges,
+                              entry.analysis.image().loaderWrittenRanges(),
                               dis,
                               instructions,
                               InstructionOperands(regs, entry.analysis.module().imageBase),

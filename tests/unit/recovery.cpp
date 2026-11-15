@@ -234,6 +234,30 @@ namespace {
         }
     }
 
+    void checkLeafRegisters(const AnalyzedImage &analysis) {
+        for (auto caller : {"recovery_mov_source", "recovery_cmp_input", "recovery_store_source",
+                            "recovery_extend_source", "recovery_cmov_source"}) {
+            const auto root = exportedRva(analysis, caller);
+            try {
+                const RecoveredFunctionGroup group(analysis, root);
+                throw std::runtime_error("recovery admitted an unmodeled source register");
+            } catch (const InspectionError &error) {
+                const auto &where = error.context;
+                check(error.kind == FailureCode::UnsupportedRegister && where.functionRva &&
+                          where.instructionRva == where.functionRva && where.sourceCall &&
+                          where.sourceCall->caller == root &&
+                          where.sourceCall->instruction == root + 4,
+                      "unmodeled leaf operand lost its classification or source call");
+            }
+        }
+
+        const auto root = exportedRva(analysis, "recovery_saved_input");
+        const RecoveredFunctionGroup group(analysis, root);
+        const auto target = group.function(root).calls.begin()->second.callee;
+        check(group.function(target).origin == x86::RecoveryOrigin::InferredLeaf,
+              "reading a supported nonvolatile source disqualified a leaf");
+    }
+
     void checkAnalysisFailure(const AnalyzedImage &analysis) {
         const auto root = exportedRva(analysis, "call_bad_teardown");
         const auto callee = exportedRva(analysis, "bad_teardown");
@@ -284,6 +308,7 @@ int main(int argc, char **argv) try {
     checkSelfRecursion(analysis);
     checkMutualRecursion(analysis);
     checkParallelEdges(analysis);
+    checkLeafRegisters(analysis);
     checkAnalysisFailure(analysis);
     const auto nested = exportedRva(analysis, "recovery_invalid_callee");
     checkFailure(analysis, exportedRva(analysis, "recovery_invalid_entry"), nested, nested + 1,

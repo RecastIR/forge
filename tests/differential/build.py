@@ -105,45 +105,59 @@ def leaf_instructions(output, symbol):
     return instructions
 
 
-def reachable_leaf(instructions, *, call_entries=()):
-    # This is a fixture-shape oracle over objdump output, independent of Forge's decoder.
-    conditions = {"jo", "jno", "jb", "jae", "je", "jne", "jbe", "ja", "js", "jns",
-                  "jp", "jnp", "jl", "jge", "jle", "jg"}
-    ordinary = {"mov", "movabs", "movzx", "movsx", "movsxd", "lea", "add", "sub", "xor",
-                "and", "or", "test", "cmp", "shl", "shr", "sar", "inc", "dec", "not", "neg", "imul",
-                "push", "pop", "cwde", "cdqe", "nop", "seto", "setb"}
-    addresses = list(instructions)
-    following = dict(zip(addresses, addresses[1:]))
+CONDITIONS = {"jo", "jno", "jb", "jae", "je", "jne", "jbe", "ja", "js", "jns",
+              "jp", "jnp", "jl", "jge", "jle", "jg"}
+FALLTHROUGH = {"mov", "movabs", "movzx", "movsx", "movsxd", "lea", "add", "sub", "xor",
+               "and", "or", "test", "cmp", "shl", "shr", "sar", "inc", "dec", "not", "neg", "imul",
+               "push", "pop", "cwde", "cdqe", "nop", "seto", "setb"}
+
+
+def direct_target(operands):
+    target = re.fullmatch(r"(?:0x)?([0-9a-f]+)(?: <[^>]+>)?", operands)
+    return int(target[1], 16) if target else None
+
+
+def reachable_instructions(entry, decode, in_body, allow_call, ordinary, *, end=None):
+    # Follow numeric disassembly addresses from the entry, including both conditional edges.
     graph = {}
-    pending = [addresses[0]]
+    pending = [entry]
     while pending:
         address = pending.pop()
         if address in graph:
             continue
-        text = instructions[address]
+        text, following = decode(address)
         opcode, _, operands = text.partition(" ")
         successors = []
         if opcode == "ret" and not operands:
             graph[address] = successors
             continue
-        if opcode == "jmp" or opcode in conditions:
-            target = re.fullmatch(r"([0-9a-f]+)(?: <[^>]+>)?", operands)
-            if target is None or int(target[1], 16) not in instructions:
+        if opcode == "jmp" or opcode in CONDITIONS:
+            target = direct_target(operands)
+            if target is None or not in_body(target):
                 raise ValueError(f"invalid direct target at {address:x}: {text}")
-            successors.append(int(target[1], 16))
-        elif opcode == "call" and call_entries:
-            match = re.fullmatch(r"([0-9a-f]+)(?: <[^>]+>)?", operands)
-            if not match or int(match[1], 16) not in call_entries:
+            successors.append(target)
+        elif opcode == "call":
+            target = direct_target(operands)
+            if target is None or not allow_call(target):
                 raise ValueError(f"unexpected direct call target at {address:x}: {text}")
-        elif opcode not in ordinary and not (call_entries and opcode == "adc"):
+        elif opcode not in ordinary:
             raise ValueError(f"unsupported instruction or transfer at {address:x}: {text}")
         if opcode != "jmp":
-            if address not in following:
+            if following is None or (following == end and opcode in CONDITIONS):
                 raise ValueError(f"fallthrough outside leaf at {address:x}")
-            successors.append(following[address])
+            if following != end:
+                successors.append(following)
         graph[address] = successors
         pending.extend(successors)
     return graph
+
+
+def reachable_leaf(instructions, *, call_entries=()):
+    addresses = list(instructions)
+    following = dict(zip(addresses, addresses[1:]))
+    return reachable_instructions(addresses[0], lambda a: (instructions[a], following.get(a)),
+                                  instructions.__contains__, call_entries.__contains__,
+                                  FALLTHROUGH | ({"adc"} if call_entries else set()))
 
 
 def natural_loops(graph):
