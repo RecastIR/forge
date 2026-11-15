@@ -52,22 +52,56 @@ class FixtureShapeTests(unittest.TestCase):
     def test_global_pointer_requires_the_used_relocation_and_alias(self):
         code = ["mov rax,QWORD PTR [rip+0x10] # 401010 <_ZL7current>", "mov QWORD PTR [rsp+0x8],rax",
                 "mov rax,QWORD PTR [rsp+0x8]", "mov rdx,QWORD PTR [rax]", "mov rax,QWORD PTR [rsp+0x8]",
-                "mov QWORD PTR [rax],rdx", "mov QWORD PTR [rip+0x8],rdx # 401008 <_ZL7counter>", "ret"]
+                "mov QWORD PTR [rax],rdx", "mov QWORD PTR [rip+0x8],rdx # 401008 <_ZL7counter>",
+                "mov rax,QWORD PTR [rsp+0x8]", "mov rax,QWORD PTR [rax]", "ret"]
         sections = [(0x401000, 32, 0, "CONTENTS, ALLOC, LOAD, DATA")]
         report = "ImageBase 400000\nreloc 0 offset 10 [1010] DIR64"
         with tempfile.TemporaryDirectory() as tmp:
             image = Path(tmp) / "global_pointer.exe"
             image.write_bytes(bytes(16) + (0x401008).to_bytes(8, "little"))
-            check_global_leaf(image, dict(enumerate(code)), sections, report)
+            def check(body, pe_report=report):
+                check_global_leaf(image, dict(enumerate(body)), sections, pe_report, "release")
+
+            check(code)
+            check([*code[:2], "nop", "sub r9,rcx", "cmp QWORD PTR [rsp+0x8],rdx", *code[2:]])
             for broken in (report.replace("1010", "1018"), report.replace("DIR64", "ABSOLUTE")):
                 with self.assertRaisesRegex(ValueError, "DIR64"):
-                    check_global_leaf(image, dict(enumerate(code)), sections, broken)
+                    check(code, broken)
             with self.assertRaisesRegex(ValueError, "pointer read or write"):
-                check_global_leaf(image, dict(enumerate([line.replace("[rax],rdx", "[rcx],rdx") for line in code])),
-                                  sections, report)
+                check([line.replace("[rax],rdx", "[rcx],rdx") for line in code])
+            for overwrite in ("mov QWORD PTR [rsp+0x8],rdx", "mov BYTE PTR [rsp+0xc],al",
+                              "add rsp,0x8", "seto spl", "push rdx", "pop r9"):
+                with self.subTest(overwrite=overwrite), self.assertRaisesRegex(ValueError, "overwritten"):
+                    check([*code[:2], overwrite, *code[2:]])
+            with self.assertRaisesRegex(ValueError, "straight-line"):
+                check(["je 3", *code])  # Reach the first reload without executing the spill.
+            with self.assertRaisesRegex(ValueError, "direct counter update"):
+                check([*code[:6], *code[7:9], code[6], code[9]])
             image.write_bytes(bytes(32))
             with self.assertRaisesRegex(ValueError, "pointer initializer"):
-                check_global_leaf(image, dict(enumerate(code)), sections, report)
+                check(code)
+
+    def test_global_static_uses_the_live_weights_base_in_the_loop(self):
+        sections = [(0x401000, 32, 0, "CONTENTS, ALLOC, READONLY, DATA"),
+                    (0x402000, 32, 32, "CONTENTS, ALLOC, DATA")]
+        store = "mov DWORD PTR [rip+0x8],eax # 402000 <_ZZ13global_staticE5total>"
+        weights = "[rip+0x10] # 401000 <_ZL7weights>"
+        debug = ["nop", "lea rax," + weights, "mov edx,DWORD PTR [rdx+rax*1]", store, "jne 1", "ret"]
+        release = ["lea r8," + weights, "je 6", "mov eax,ecx", "add eax,DWORD PTR [r8+rdx*4]", store,
+                   "jne 2", "ret"]
+
+        def check(code, config):
+            check_global_leaf(Path("global_static.exe"), dict(enumerate(code)), sections, "", config)
+
+        check(debug, "debug")
+        check(release, "release")
+        check([*release[:2], "cmp r8,rdx", *release[3:]], "release")
+        for config, broken in (("debug", ["je 2", *debug[1:]]),
+                               ("debug", [*debug[:2], "mov edx,DWORD PTR [rdx+rcx*1]", *debug[3:]]),
+                               ("release", [*release[:3], "add eax,DWORD PTR [rax+rdx*4]", *release[4:]]),
+                               ("release", [*release[:2], "mov r8d,ecx", *release[3:]])):
+            with self.subTest(config=config, body=broken), self.assertRaisesRegex(ValueError, "weights base"):
+                check(broken, config)
 
     def test_frame_loop_must_store_inside_a_reachable_loop(self):
         instructions = dict(enumerate([

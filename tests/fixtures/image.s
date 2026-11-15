@@ -271,3 +271,20 @@ probe maybe_write
     xorl %eax, %eax
     ret
     .seh_endproc
+
+probe increment_counter_reg
+    leaq counter(%rip), %r8
+    incq (%r8)
+    movq (%r8), %rax
+    ret
+    .seh_endproc
+
+probe maybe_write_literal
+    leaq literal(%rip), %r8
+    testq %rcx, %rcx
+    je 1f
+    movb %dl, (%r8)
+1:
+    movzbl (%r8), %eax
+    ret
+    .seh_endproc

@@ -351,6 +351,9 @@ int main(int argc, char **argv) try {
     check(!llvm::verifyModule(*artifact), "IR did not survive image destruction");
     checkRelativePublication(argv[1], directory, *artifact);
     checkVerifierFailure(context, directory / "input.exe");
+} catch (const forge::InspectionError &error) {
+    llvm::errs() << forge::failureKind(error.kind).code << ": " << error.what() << '\n';
+    return 1;
 } catch (const std::exception &error) {
     llvm::errs() << "lift contract: " << error.what() << '\n';
     return 1;

@@ -115,6 +115,7 @@ namespace forge {
         fs::path path;
         llvm::COFF::MachineTypes machine;
         bool dll;
+        bool relocationsStripped;
         uint64_t imageBase;
         uint32_t entryPoint;
         std::vector<Section> sections;

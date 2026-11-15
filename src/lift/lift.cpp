@@ -580,18 +580,20 @@ namespace forge {
         void Translator::planMemoryAccess(const Step &s, const x86::IntegerInstruction &op,
                                           const AddressFacts &facts) {
             const auto operand = decodeAddress(s, memoryOperand(s, op), true);
-            if (addressFact(operand, facts).kind == AddressFact::Stack) {
+            const auto fact = addressFact(operand, facts);
+            if (fact.kind == AddressFact::Stack) {
                 stackAccesses.insert(s.rva);
                 return;
             }
 
-            std::optional<uint64_t> fixed;
-            if (!operand.base && !operand.index) {
-                fixed = operand.displacement;
-            }
-
             const bool write = memoryDestination(op.form) && op.op != x86::Op::Cmp;
-            imageMemory.access(s, fixed, op.sourceWidth, write);
+            if (!operand.base && !operand.index) {
+                imageMemory.fixedAccess(s, operand.displacement, op.sourceWidth, write);
+            } else {
+                auto va =
+                    fact.kind == AddressFact::Constant ? std::optional(fact.offset) : std::nullopt;
+                imageMemory.computedAccess(s, va, op.sourceWidth, write);
+            }
         }
 
         void Translator::traceStackInstruction(const Step &s, StackOp op,
@@ -1170,6 +1172,12 @@ namespace forge {
             }
 
             const uint64_t guestBase = request.guestLoadBase.value_or(module.imageBase);
+            if (module.relocationsStripped && guestBase != module.imageBase) {
+                throw atRva(FailureCode::ImageMemory, rva,
+                            "base relocations are stripped: selected guest base " + hex(guestBase) +
+                                " differs from preferred image base " + hex(module.imageBase));
+            }
+
             for (const auto &section : module.sections) {
                 const uint64_t endRva = uint64_t(section.rva) + section.virtualSize;
                 if (section.virtualSize && endRva - 1 > UINT64_MAX - guestBase) {

@@ -3,6 +3,8 @@
 #include "lift/cfg.h"
 #include "pe/image.h"
 
+#include <map>
+
 namespace llvm {
     class Function;
     class IRBuilderBase;
@@ -20,7 +22,9 @@ namespace forge::x86 {
 
         void checkStackMapping(const Step &step) const;
         void addressTaken(const Step &step, uint64_t va);
-        void access(const Step &step, std::optional<uint64_t> va, unsigned width, bool write);
+        void fixedAccess(const Step &step, uint64_t va, unsigned width, bool write);
+        void computedAccess(const Step &step, std::optional<uint64_t> va, unsigned width,
+                            bool write);
         llvm::Function *emitResolver(llvm::Module &module, llvm::IRBuilderBase &entryIR);
 
       private:
@@ -35,10 +39,13 @@ namespace forge::x86 {
         const Step *indirectRead = nullptr;
         const Step *indirectWrite = nullptr;
         bool overlapsStack;
-        std::vector<Span> direct, executable;
+        std::vector<Span> direct;
+        std::map<uint32_t, Span> executable;
         std::optional<ImageInitialization> initialization;
 
         const ImageInitialization &contents();
+        void select(const Step &step, const Section &section, RvaRange access);
+        static void addExecutableSpan(std::vector<Span> &spans, const Span &span);
         void addIndirectSpans(std::vector<Span> &spans) const;
         std::vector<Span> selectedSpans();
     };

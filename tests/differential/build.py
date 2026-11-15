@@ -359,7 +359,72 @@ def check_image_leaf(name, instructions, sections, config):
             raise ValueError("missing stack spill and reload of the table base")
 
 
-def check_global_leaf(path, instructions, sections, pe_report):
+def written_operand(line):
+    # reachable_leaf checks the opcode set. These instructions only read their explicit operands.
+    opcode, _, operands = line.partition(" #")[0].partition(" ")
+    if (opcode.startswith("j") or opcode in {"cmp", "test", "nop", "push", "ret", "cwde", "cdqe"} or
+            (opcode == "imul" and "," not in operands)):
+        return ""
+    return operands.partition(",")[0]
+
+
+def check_static_lookup(instructions, graph, config):
+    loops, predecessors = natural_loops(graph)
+    entry = next(iter(graph))
+    for loop in loops.values():
+        if not any(instructions[a].startswith("mov DWORD PTR [rip") and
+                   instructions[a].endswith("<_ZZ13global_staticE5total>") for a in loop):
+            continue
+        if config == "debug":
+            # The unoptimized loop reloads the weights base immediately before using it.
+            for address in loop:
+                if instructions[address] == "mov edx,DWORD PTR [rdx+rax*1]" and len(predecessors[address]) == 1:
+                    source, = predecessors[address]
+                    if (source in loop and instructions[source].startswith("lea rax,[rip") and
+                            instructions[source].endswith("<_ZL7weights>")):
+                        return
+        else:
+            # Release hoists the LEA to the entry and keeps R8 live across every iteration.
+            if (instructions[entry].startswith("lea r8,[rip") and instructions[entry].endswith("<_ZL7weights>") and
+                    not any(written_operand(instructions[a]) in {"r8", "r8d", "r8w", "r8b"} for a in graph if a != entry) and
+                    any(instructions[a] == "add eax,DWORD PTR [r8+rdx*4]" for a in loop)):
+                return
+    raise ValueError("missing loop lookup through the weights base and static local update")
+
+
+def check_pointer_spill(body):
+    # The pinned leaves are straight-line. Between the spill and the final read the
+    # only stores are through the reloaded pointer and directly to the same counter.
+    if any(line.startswith("j") for line in body):
+        raise ValueError("expected a straight-line pointer spill and reload")
+    load = next((i for i, line in enumerate(body)
+                 if line.startswith("mov rax,QWORD PTR [rip") and line.endswith("<_ZL7current>")), None)
+    spill = (re.fullmatch(r"mov QWORD PTR (\[(r[bs]p)[+-]0x[0-9a-f]+\]),rax", body[load+1])
+             if load is not None and load+1 < len(body) else None)
+    if not spill:
+        raise ValueError("missing spill of the relocated pointer")
+    reload = "mov rax,QWORD PTR " + spill[1]
+    uses = [i+1 for i in range(load+2, len(body)-1) if body[i] == reload]
+    if (len(uses) != 3 or not re.fullmatch(r"mov \w+,QWORD PTR \[rax\]", body[uses[0]]) or
+            not re.fullmatch(r"mov QWORD PTR \[rax\],\w+", body[uses[1]]) or
+            body[uses[2]] != "mov rax,QWORD PTR [rax]"):
+        raise ValueError("missing ordered stack-reloaded pointer read or write")
+
+    counter_writes = [i for i in range(uses[1]+1, uses[2])
+                      if body[i].startswith("mov QWORD PTR [rip") and body[i].endswith("<_ZL7counter>")]
+    if len(counter_writes) != 1:
+        raise ValueError("missing direct counter update before the final pointer read")
+    frame = {"rsp", "esp", "sp", "spl"} if spill[2] == "rsp" else {"rbp", "ebp", "bp", "bpl"}
+    for i in range(load+2, uses[2]):
+        if i in (uses[1], counter_writes[0]):
+            continue
+        dest = written_operand(body[i])
+        if ("[" in dest or dest in frame or body[i].startswith("push ") or
+                (spill[2] == "rsp" and body[i].startswith("pop "))):
+            raise ValueError("pointer spill or its frame may be overwritten before reload")
+
+
+def check_global_leaf(path, instructions, sections, pe_report, config):
     name = path.stem
     graph = reachable_leaf(instructions)
     body = [instructions[a] for a in sorted(graph)]
@@ -390,13 +455,7 @@ def check_global_leaf(path, instructions, sections, pe_report):
                 for symbol in ("warm", "cold")):
             raise ValueError("missing branch or counter writes")
     elif name == "global_static":
-        for loop in natural_loops(graph)[0].values():
-            lines = [instructions[a] for a in loop]
-            if (any(re.match(memory_write, line) and line.endswith("<_ZZ13global_staticE5total>") for line in lines)
-                    and any(re.fullmatch(r"(?:mov|add) \w+,DWORD PTR \[r\w+\+r\w+\*[14]\]", line) for line in lines)):
-                break
-        else:
-            raise ValueError("missing table read and static local update inside one loop")
+        check_static_lookup(instructions, graph, config)
     elif name == "global_array":
         if (not any(re.fullmatch(r"mov BYTE PTR \[r\w+\],\w+", line) for line in body)
                 or not any(re.fullmatch(r"mov \w+,DWORD PTR \[r\w+\+r\w+\*[14]\]", line) for line in body)):
@@ -410,16 +469,7 @@ def check_global_leaf(path, instructions, sections, pe_report):
         if (slot + 8 > start + size or struct.unpack_from("<Q", path.read_bytes(), offset + slot - start)[0]
                 != references["_ZL7counter"][0]):
             raise ValueError("pointer initializer must point to the directly addressed counter")
-        # Both pinned builds load the pointer into RAX, then spill and reload it
-        # from the same invocation-local slot immediately before indirect accesses.
-        load = next((i for i, line in enumerate(body)
-                     if re.match(r"mov rax,QWORD PTR \[rip", line) and line.endswith("<_ZL7current>")), None)
-        spill = (re.fullmatch(r"mov QWORD PTR (\[r[bs]p[^]]*\]),rax", body[load + 1])
-                 if load is not None and load + 1 < len(body) else None)
-        if not spill or not all(any(line == "mov rax,QWORD PTR " + spill[1] and re.fullmatch(use, following)
-                                    for line, following in zip(body, body[1:])) for use in (
-                r"mov \w+,QWORD PTR \[rax\]", r"mov QWORD PTR \[rax\],\w+")):
-            raise ValueError("missing stack-reloaded pointer read or write")
+        check_pointer_spill(body)
 
 
 def check_frame_padding(path):
@@ -454,7 +504,7 @@ def check_leaf(path, config="debug", pe_report=""):
             if path.stem in IMAGE_LEAVES:
                 check_image_leaf(path.stem, instructions, sections, config)
             else:
-                check_global_leaf(path, instructions, section_rows(sections), pe_report)
+                check_global_leaf(path, instructions, section_rows(sections), pe_report, config)
         if path.stem in ("branch_locals", "count_locals"):
             check_frame_padding(path)
         if path.stem in FRAME_LOCALS:

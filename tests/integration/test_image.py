@@ -178,6 +178,25 @@ int main() { printf("%lld %lld\\n", first, forge_lifted(0, 0)); }
             self.assertNotEqual(proc.returncode, 0)
             self.assertIn(message, proc.stderr.decode())
 
+    def test_stripped_relocations(self):
+        image = Path(IMAGE).with_name("image-fixed.exe")
+        layout = Layout(image.read_bytes())
+        characteristics = struct.unpack_from("<H", layout.data, layout.pe + 22)[0]
+        self.assertTrue(characteristics & 1)  # IMAGE_FILE_RELOCS_STRIPPED
+        self.assertEqual(layout.directory(5), (0, 0))
+
+        for variants in (self.variants("pointer_va", image=image),
+                         self.rebased("pointer_va", self.base, image)):
+            for exe in variants:
+                self.expect(exe, 0, 0, self.va(".mutable"))
+
+        selected = self.base + 0x10000000
+        proc = subprocess.run(self.rebased_command("pointer_va", selected, image),
+                              capture_output=True, timeout=10)
+        self.assertEqual((proc.returncode, proc.stdout), (1, b""))
+        for detail in ("LIFT_IMAGE_MEMORY", "stripped", hex(selected), hex(self.base)):
+            self.assertIn(detail, proc.stderr.decode())
+
     def test_opaque_store(self):
         for exe in self.variants("opaque_store"):
             self.expect(exe, RSP + 8, 0, 0)
@@ -225,6 +244,39 @@ int main() { printf("%lld %lld\\n", first, forge_lifted(0, 0)); }
             struct.pack_into("<I", data, pos, layout.u32(headers[".reloc"]+12))
         for exe in self.variants("load32", image=self.edit("discarded-fixups", discarded)):
             self.expect(exe, self.va(".literal"), 0, 0x78563412)
+
+    def test_local_relocation_conflict(self):
+        addr = self.va(".mutable")
+
+        def conflict(data, layout, headers):
+            header = headers[".mutable"]
+            # The counter at +0 and a valid pointer at +16 surround a duplicate fixup at +8.
+            struct.pack_into("<I", data, header + 8, 24)
+            struct.pack_into("<Q", data, layout.u32(header + 20) + 16, addr)
+            rva, size = layout.directory(5)
+            pos = relocation_block(layout, addr - self.base)
+            self.assertEqual(pos + 12, layout.file_offset(rva) + size)
+            struct.pack_into("<I4H", data, pos + 4, 16, 0xa008, 0xa008, 0xa010, 0)
+            struct.pack_into("<I", data, headers[".reloc"] + 8, size + 4)
+            struct.pack_into("<I", data, layout.directories + 8*5 + 4, size + 4)
+
+        image = self.edit("local-relocation-conflict", conflict)
+        self.reject("pointer_va", "overlap", image, "INVALID_PE")
+        for exe in self.variants("increment_counter", image=image):
+            self.sequence(exe, [(0, 0)] * 3, [0x1235, 0x1236, 0x1237])
+
+        delta = 0x10000000
+        for exe in self.rebased("load64", self.base + delta, image):
+            self.expect(exe, addr + delta, 0, 0x1234)
+            self.expect(exe, addr + delta + 16, 0, addr + delta)
+        for exe in self.variants("maybe_read", image=image):
+            for bad in (addr + 7, addr + 8, addr + 15):
+                self.expect(exe, 0, bad, 0)
+                self.trap(exe, [(1, bad)])
+        for exe in self.variants("maybe_write", image=image):
+            for bad in (addr + 7, addr + 8, addr + 15):
+                self.expect(exe, bad, 0, 0)
+                self.trap(exe, [(bad, 1)])
 
     def test_relocation_across_zero_tail(self):
         section = self.sections[".mutable"]
@@ -465,6 +517,45 @@ int main() { printf("%lld %lld\\n", first, forge_lifted(0, 0)); }
         for exe in self.variants("escape_stack", image=self.edit("distance", distance)):
             self.expect(exe, addr, 0, 0x78563412)
             self.trap(exe, [(addr, 1)])
+
+    def test_proven_image_addresses_select_only_referenced_data(self):
+        def unused_writable(data, layout, headers):
+            start, size = 0x100000, 257 * 1024 * 1024
+            pool = headers[".pool"]
+            struct.pack_into("<II", data, pool+8, size, start)
+            struct.pack_into("<I", data, pool+36, layout.u32(headers[".mutable"]+36))
+            struct.pack_into("<I", data, layout.opt+56, start+size)
+
+        image = self.edit("unused-writable", unused_writable)
+        for leaf in ("increment_counter", "increment_counter_reg"):
+            for exe in self.variants(leaf, image=image):
+                self.sequence(exe, [(0, 0), (0, 0)], [0x1235, 0x1236])
+
+        self.reject("write32", "writable virtual limit", image)
+        for exe in self.variants("maybe_write_literal", image=image):
+            self.expect(exe, 0, 0, 0x12)
+            self.trap(exe, [(1, 0)])
+
+        # A register read of an executable literal still needs a RIP-relative LEA
+        # selecting that section; a known address alone does not make code readable.
+        def executable_read(data, layout, headers, selected):
+            header = headers[".literal"]
+            struct.pack_into("<I", data, header+36, layout.u32(headers[".pool"]+36))
+            if not selected:
+                entry = self.exports["maybe_write_literal"]
+                pos = layout.file_offset(entry)
+                self.assertEqual(data[pos:pos+3], b"\x4c\x8d\x05")
+                # MOV r8, imm32 has the same length as the LEA; use a low guest base.
+                addr = 0x10000000 + layout.u32(header+12)
+                data[pos:pos+7] = b"\x49\xc7\xc0" + struct.pack("<I", addr)
+
+        for selected in (False, True):
+            image = self.edit("known-executable", lambda *args: executable_read(*args, selected))
+            for exe in self.rebased("maybe_write_literal", 0x10000000, image):
+                if selected:
+                    self.expect(exe, 0, 0, 0x12)
+                else:
+                    self.trap(exe, [(0, 0)])
 
     def test_mapping_limits_and_permissions(self):
         def large(data, layout, headers):

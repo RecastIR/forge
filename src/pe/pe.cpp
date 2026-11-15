@@ -609,6 +609,8 @@ namespace forge {
             Module module{};
             module.machine = static_cast<COFF::MachineTypes>(object->getMachine());
             module.dll = object->getCharacteristics() & COFF::IMAGE_FILE_DLL;
+            module.relocationsStripped =
+                object->getCharacteristics() & COFF::IMAGE_FILE_RELOCS_STRIPPED;
             module.imageBase = object->getImageBase();
             module.entryPoint = header.AddressOfEntryPoint;
             size_t index = 0;
@@ -958,13 +960,15 @@ namespace forge {
         }
 
         unavailable.insert(unavailable.end(), result.excluded.begin(), result.excluded.end());
+        unavailable.insert(unavailable.end(), result.conflicts.begin(), result.conflicts.end());
         result.excluded = mergeRanges(std::move(unavailable));
         return result;
     }
 
     ImageBytes ParsedImage::imageBytes(RvaRange range, const ImageInitialization &init,
                                        uint64_t guestLoadBase) const {
-        init.validateRelocations(range);
+        // The backing can extend beyond the access that selected it. Conflicting fields
+        // have no fixup in the index and their bytes are excluded from the resolver.
         ImageBytes result{initializedBytes(range).str(), {}};
         const uint64_t delta = guestLoadBase - metadata.imageBase;
 

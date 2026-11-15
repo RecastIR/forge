@@ -202,8 +202,8 @@ namespace forge::x86 {
         const auto *section = source.sectionAtRva(va - loadBase);
 
         if (section && section->immutable() && section->permissions[2] == 'x') {
-            executable.push_back(
-                {section, {section->rva, uint64_t(section->rva) + section->virtualSize}, &step});
+            const RvaRange extent{section->rva, uint64_t(section->rva) + section->virtualSize};
+            executable.try_emplace(section->rva, Span{section, extent, &step});
         }
     }
 
@@ -213,23 +213,12 @@ namespace forge::x86 {
         }
     }
 
-    void ImageMemory::access(const Step &step, std::optional<uint64_t> va, unsigned width,
-                             bool write) {
-        if (!va) {
-            auto &origin = write ? indirectWrite : indirectRead;
-
-            if (!origin) {
-                origin = &step;
-            }
-
-            return;
-        }
-
+    void ImageMemory::fixedAccess(const Step &step, uint64_t va, unsigned width, bool write) {
         const unsigned bytes = width / 8;
 
-        if (*va - GuestMemory::base < GuestMemory::capacity) {
-            if (*va - GuestMemory::base > GuestMemory::capacity - bytes ||
-                (*va < GuestMemory::entryRsp + 8 && *va + bytes > GuestMemory::entryRsp)) {
+        if (va - GuestMemory::base < GuestMemory::capacity) {
+            if (va - GuestMemory::base > GuestMemory::capacity - bytes ||
+                (va < GuestMemory::entryRsp + 8 && va + bytes > GuestMemory::entryRsp)) {
                 step.reject(FailureCode::ImageMemory,
                             "fixed access crosses guest stack boundary or return slot");
             }
@@ -237,17 +226,17 @@ namespace forge::x86 {
             return;
         }
 
-        const auto rva = *va - loadBase;
+        const auto rva = va - loadBase;
         const auto *section = source.sectionAtRva(rva);
 
         if (!section || (!section->immutable() && !section->writableData()) ||
             rva + bytes > uint64_t(section->rva) + section->virtualSize) {
             step.reject(FailureCode::ImageMemory,
-                        "unmapped or unsupported image access at VA " + hex(*va));
+                        "unmapped or unsupported image access at VA " + hex(va));
         }
 
         if (write && !section->writableData()) {
-            step.reject(FailureCode::ImageMemory, "write to immutable image at VA " + hex(*va));
+            step.reject(FailureCode::ImageMemory, "write to immutable image at VA " + hex(va));
         }
 
         const RvaRange access{rva, rva + bytes};
@@ -275,26 +264,72 @@ namespace forge::x86 {
                     hex(holes.front().begin));
         }
 
-        // Every path into a selected writable section addresses the same module object.
-        // Fixed immutable reads retain their narrow embedding footprint.
+        select(step, *section, access);
+    }
+
+    void ImageMemory::computedAccess(const Step &step, std::optional<uint64_t> va, unsigned width,
+                                     bool write) {
+        if (!va) {
+            auto &origin = write ? indirectWrite : indirectRead;
+
+            if (!origin) {
+                origin = &step;
+            }
+
+            return;
+        }
+
+        // A proven register value narrows the image selection. An invalid access still
+        // goes through the runtime resolver if the guest executes the instruction.
+        const auto rva = *va - loadBase;
+        const auto *section = source.sectionAtRva(rva);
+
+        if (!section || (!section->writableData() && (write || !section->immutable()))) {
+            return;
+        }
+
+        const RvaRange access{rva, rva + width / 8};
+        if (access.end > uint64_t(section->rva) + section->virtualSize ||
+            !contents().exclusionsIn(access).empty()) {
+            return;
+        }
+
+        if (section->permissions[2] == 'x') {
+            if (auto literal = executable.find(section->rva); literal != executable.end()) {
+                addExecutableSpan(direct, literal->second);
+            }
+
+            return;
+        }
+
+        select(step, *section, access);
+    }
+
+    void ImageMemory::select(const Step &step, const Section &section, RvaRange access) {
+        // All aliases of a writable section share one backing. Known immutable reads
+        // only need storage for the selected bytes.
         const RvaRange selected =
-            section->writableData()
-                ? RvaRange{section->rva, uint64_t(section->rva) + section->virtualSize}
+            section.writableData()
+                ? RvaRange{section.rva, uint64_t(section.rva) + section.virtualSize}
                 : access;
-        direct.push_back({section, selected, &step});
+        direct.push_back({&section, selected, &step});
+    }
+
+    void ImageMemory::addExecutableSpan(std::vector<Span> &spans, const Span &span) {
+        if (span.section->virtualSize > executableLimit) {
+            span.origin->reject(FailureCode::ImageMemory,
+                                "executable section " + span.section->name + " extent " +
+                                    hex(span.section->virtualSize) +
+                                    " exceeds image mapping limit " + hex(executableLimit));
+        }
+
+        spans.push_back(span);
     }
 
     void ImageMemory::addIndirectSpans(std::vector<Span> &spans) const {
         if (indirectRead) {
-            for (const auto &span : executable) {
-                if (span.section->virtualSize > executableLimit) {
-                    span.origin->reject(FailureCode::ImageMemory,
-                                        "executable section " + span.section->name + " extent " +
-                                            hex(span.section->virtualSize) +
-                                            " exceeds image mapping limit " + hex(executableLimit));
-                }
-
-                spans.push_back(span);
+            for (const auto &[rva, span] : executable) {
+                addExecutableSpan(spans, span);
             }
         }
 
