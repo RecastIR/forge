@@ -2,6 +2,7 @@
 #include "lift/address_fact.h"
 
 #include "lift/memory.h"
+#include "lift/recovery.h"
 
 #include "llvm/IR/Intrinsics.h"
 #include "llvm/IR/Module.h"
@@ -305,7 +306,7 @@ namespace forge::x86 {
     }
 
     void ImageMemory::continuationAccess(const Step &step, const Continuation &origin,
-                                         llvm::ArrayRef<uint32_t> sites, unsigned width,
+                                         llvm::ArrayRef<const DirectCall *> sites, unsigned width,
                                          bool write) {
         // Repeated reads in a high-fan-in helper need only one expansion of its
         // call sites. The first selecting step owns the budget diagnostic.
@@ -313,8 +314,8 @@ namespace forge::x86 {
             return;
         }
 
-        for (auto site : sites) {
-            selectComputed(step, loadBase + site + origin.offset, width, write,
+        for (const auto *site : sites) {
+            selectComputed(step, loadBase + site->continuation + origin.offset, width, write,
                            ExecutableSelection::ContinuationBytes);
         }
     }
@@ -411,10 +412,9 @@ namespace forge::x86 {
         return merged;
     }
 
-    Function *ImageMemory::emitResolver(llvm::Module &module, IRBuilderBase &entryIR) {
-        IRBuilder<> ir(module.getContext());
-        IRBuilder<> init(module.getContext());
-        std::vector<Constant *> rows;
+    ImagePlan ImageMemory::finish() && {
+        ImagePlan plan;
+        plan.loadBase = loadBase;
         uint64_t embedded = 0;
         uint64_t immutableExtent = 0;
         uint64_t writableExtent = 0;
@@ -449,26 +449,42 @@ namespace forge::x86 {
                         "module limit for embedded bytes");
             }
 
-            auto *global = embed(module, init, span.range, writable, bytes);
-            auto append = [&](uint64_t begin, uint64_t end) {
-                if (begin < end) {
-                    auto *offset = ir.getInt64(begin - span.range.begin);
-                    auto *ptr =
-                        ConstantExpr::getInBoundsGetElementPtr(ir.getInt8Ty(), global, offset);
-                    rows.push_back(ConstantStruct::getAnon({ir.getInt64(loadBase + begin),
-                                                            ir.getInt64(end - begin), ptr,
-                                                            ir.getInt1(writable)}));
-                }
-            };
-
+            ImagePlan::Backing backing{span.range, writable, std::move(bytes), {}};
             uint64_t pos = span.range.begin;
 
             for (auto hole : view.exclusionsIn(span.range)) {
-                append(pos, hole.begin);
+                if (pos < hole.begin) {
+                    backing.intervals.push_back({pos, hole.begin});
+                }
+
                 pos = std::max(pos, hole.end);
             }
 
-            append(pos, span.range.end);
+            if (pos < span.range.end) {
+                backing.intervals.push_back({pos, span.range.end});
+            }
+
+            plan.backings.push_back(std::move(backing));
+        }
+
+        return plan;
+    }
+
+    Function *ImagePlan::emitResolver(llvm::Module &module, IRBuilderBase &entryIR) const {
+        IRBuilder<> ir(module.getContext());
+        IRBuilder<> init(module.getContext());
+        std::vector<Constant *> rows;
+
+        for (const auto &backing : backings) {
+            auto *global = embed(module, init, backing.range, backing.writable, backing.bytes);
+
+            for (auto interval : backing.intervals) {
+                auto *offset = ir.getInt64(interval.begin - backing.range.begin);
+                auto *ptr = ConstantExpr::getInBoundsGetElementPtr(ir.getInt8Ty(), global, offset);
+                rows.push_back(ConstantStruct::getAnon({ir.getInt64(loadBase + interval.begin),
+                                                        ir.getInt64(interval.end - interval.begin),
+                                                        ptr, ir.getInt1(backing.writable)}));
+            }
         }
 
         finishInitialization(init, entryIR);

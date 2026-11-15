@@ -20,7 +20,8 @@ namespace forge::x86 {
         llvm::StringRef opcode; // Borrows the decoder's instruction-name table.
         llvm::StringRef bytes;  // Borrows the analyzed image.
 
-        std::optional<int64_t> callTarget() const;
+        bool isDirectCall() const { return opcode == "CALL64pcrel32"; }
+
         [[noreturn]] void reject(FailureCode kind, const llvm::Twine &reason,
                                  std::optional<int64_t> target = {}) const;
     };

@@ -97,7 +97,8 @@ class BuildConfig(BuildCase):
                     "--no-tests=error")
         result = self.invoke(CMAKE.parent / "ctest", "--test-dir", build, "--show-only=json-v1")
         names = {test["name"] for test in json.loads(result)["tests"]}
-        self.assertTrue({"fixtures", "input_lifetime", "lift_contract", "lift_command", "build_config"} <= names)
+        self.assertTrue({"fixtures", "input_lifetime", "recovery_contract", "lift_contract",
+                         "lift_command", "build_config"} <= names)
         self.assertFalse({"cli", "codegen", "native", "differential", "build_provisioning"} & names)
 
     @unittest.skipUnless(WITH_CLI == "1", "requires a CLI-enabled parent toolchain")

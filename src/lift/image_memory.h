@@ -3,6 +3,8 @@
 #include "lift/cfg.h"
 #include "pe/image.h"
 
+#include "llvm/ADT/SmallVector.h"
+
 #include <map>
 #include <set>
 #include <tuple>
@@ -15,14 +17,35 @@ namespace llvm {
 
 namespace forge::x86 {
     struct Continuation;
+    struct DirectCall;
 
-    // Section plans and parsed relocation records borrow the image during translation.
-    // The LLVM module owns the shared section storage and its initialization independently.
+    // Each selected backing owns its relocated initialized bytes and accessible intervals.
+    // A plan can emit into independent modules after releasing the recovered steps and image.
+    class ImagePlan {
+      public:
+        uint64_t guestBase() const { return loadBase; }
+
+        llvm::Function *emitResolver(llvm::Module &module, llvm::IRBuilderBase &entryIR) const;
+
+      private:
+        friend class ImageMemory;
+
+        struct Backing {
+            RvaRange range;
+            bool writable;
+            ImageBytes bytes;
+            llvm::SmallVector<RvaRange, 1> intervals;
+        };
+
+        uint64_t loadBase = 0;
+        std::vector<Backing> backings;
+    };
+
+    // Selection borrows the group's steps for diagnostics and the image for section and
+    // relocation data. Finishing resolves the borrows into an independently owned plan.
     class ImageMemory {
       public:
         ImageMemory(const ParsedImage &image, uint64_t guestLoadBase);
-
-        uint64_t guestBase() const { return loadBase; }
 
         void checkStackMapping(const Step &step) const;
         void addressTaken(const Step &step, uint64_t va);
@@ -30,8 +53,9 @@ namespace forge::x86 {
         void computedAccess(const Step &step, std::optional<uint64_t> va, unsigned width,
                             bool write);
         void continuationAccess(const Step &step, const Continuation &origin,
-                                llvm::ArrayRef<uint32_t> sites, unsigned width, bool write);
-        llvm::Function *emitResolver(llvm::Module &module, llvm::IRBuilderBase &entryIR);
+                                llvm::ArrayRef<const DirectCall *> sites, unsigned width,
+                                bool write);
+        ImagePlan finish() &&;
 
       private:
         struct Span {
