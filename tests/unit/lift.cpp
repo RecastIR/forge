@@ -7,6 +7,7 @@
 #include "llvm/ADT/SmallString.h"
 #include "llvm/IR/BasicBlock.h"
 #include "llvm/IR/CFG.h"
+#include "llvm/IR/Constants.h"
 #include "llvm/IR/Function.h"
 #include "llvm/IR/Instructions.h"
 #include "llvm/IR/Module.h"
@@ -98,6 +99,45 @@ namespace {
               "verified module was not published");
 
         return module;
+    }
+
+    void checkImageConstants(const fs::path &fixture, const fs::path &directory,
+                             llvm::LLVMContext &context) {
+        const auto path = directory / "image.exe";
+        fs::copy_file(fixture, path);
+        std::unique_ptr<llvm::Module> module;
+        {
+            AnalyzedImage analysis(
+                std::make_unique<ParsedImage>(InputFile(path), ParsePolicy::Inspection),
+                DebugInfo::Omit);
+            fs::remove(path);
+            auto symbol = llvm::find_if(analysis.module().exports, [](const Export &item) {
+                return llvm::is_contained(item.names, "direct32");
+            });
+            check(symbol != analysis.module().exports.end(), "missing image-data export");
+            LiftRequest request{symbol->rva, EntryMode::WindowsX64I64Pair};
+            module = generateIR(analysis, request, context);
+            auto second = generateIR(analysis, request, context);
+            std::string firstIR, secondIR;
+            llvm::raw_string_ostream(firstIR) << *module;
+            llvm::raw_string_ostream(secondIR) << *second;
+            check(firstIR == secondIR, "image globals changed between lifts");
+        }
+
+        check(!llvm::verifyModule(*module), "image module lost its backing storage");
+        unsigned globals = 0;
+        for (const auto &global : module->globals()) {
+            if (global.getName().starts_with("image_")) {
+                const auto *bytes =
+                    llvm::dyn_cast<llvm::ConstantDataSequential>(global.getInitializer());
+                check(global.isConstant() && bytes &&
+                          bytes->getRawDataValues() == "\x34\x56\x78\x9a",
+                      "direct read did not retain exactly its four PE bytes");
+                ++globals;
+            }
+        }
+
+        check(globals == 1, "direct read embedded unrelated PE contents");
     }
 
     void checkRelativePublication(const fs::path &fixture, const fs::path &directory,
@@ -269,7 +309,7 @@ namespace {
 } // namespace
 
 int main(int argc, char **argv) try {
-    check(argc == 3, "expected add.exe and cfg.exe fixtures");
+    check(argc == 4, "expected add.exe, cfg.exe and image.exe fixtures");
     checkControlFlow(argv[2]);
     checkControlFlowLeaves(argv[2]);
     llvm::SmallString<128> temporary;
@@ -281,6 +321,7 @@ int main(int argc, char **argv) try {
     llvm::scope_exit cleanup([&] { (void)llvm::sys::fs::remove_directories(temporary); });
     llvm::LLVMContext context;
     const forge::fs::path directory(temporary.c_str());
+    checkImageConstants(argv[3], directory, context);
     const auto artifact = checkSnapshot(argv[1], directory, context);
     check(!llvm::verifyModule(*artifact), "IR did not survive image destruction");
     checkRelativePublication(argv[1], directory, *artifact);

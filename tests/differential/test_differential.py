@@ -494,6 +494,7 @@ class LiftDiagnosticTests(unittest.TestCase):
             record = dict(self.diagnostic, stage=stage, category=category, code=code, context=context)
             return lift_diagnostics.parse_diagnostic(self.encode(record), self.image, self.selected, self.ir)
 
+        parse("lifting", "unsupported", "LIFT_IMAGE_MEMORY", location)
         parse("lifting", "unsupported", "LIFT_UNSUPPORTED_INSTRUCTION", location)
         parse("lifting", "unsupported", "LIFT_UNSUPPORTED_INSTRUCTION", self.diagnostic["context"])
         for stage, category, code, context in (

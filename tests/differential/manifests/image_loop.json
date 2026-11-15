@@ -1,0 +1,34 @@
+{
+  "schema_version": 1,
+  "id": "image/loop",
+  "description": "Sum a bounded prefix of an unsigned word table.",
+  "source": "fixtures/image/image_loop.c",
+  "binary": "image_loop.exe",
+  "args": [
+    "0",
+    "5",
+    "1",
+    "-3",
+    "2",
+    "0",
+    "3",
+    "17",
+    "4",
+    "-1",
+    "5",
+    "9999999999",
+    "6",
+    "-9999999999",
+    "7",
+    "2",
+    "-1",
+    "1",
+    "-2",
+    "-4"
+  ],
+  "expected": {
+    "exit_code": 0,
+    "stdout": "5\n65532\n65552\n98337\n98328\n10000098328\n-9999901667\n98357\n98356\n98328\n",
+    "stderr": ""
+  }
+}

@@ -13,6 +13,7 @@ FORGE_FAILURE(RelocationOverlap, "ENTRY_RELOCATION_OVERLAP", "entry", "unsupport
 FORGE_FAILURE(FunctionSize, "LIFT_FUNCTION_SIZE", "lifting", "unsupported", "LIFT_ERROR")
 FORGE_FAILURE(InvalidInstruction, "LIFT_INVALID_ENCODING", "lifting", "invalid_input", "LIFT_ERROR")
 FORGE_FAILURE(UnsupportedInstruction, "LIFT_UNSUPPORTED_INSTRUCTION", "lifting", "unsupported", "LIFT_ERROR")
+FORGE_FAILURE(ImageMemory, "LIFT_IMAGE_MEMORY", "lifting", "unsupported", "LIFT_ERROR")
 FORGE_FAILURE(UnsupportedRegister, "LIFT_UNSUPPORTED_REGISTER", "lifting", "unsupported", "LIFT_ERROR")
 FORGE_FAILURE(UnsupportedPrefix, "LIFT_UNSUPPORTED_PREFIX", "lifting", "unsupported", "LIFT_ERROR")
 FORGE_FAILURE(UnsupportedControlFlow, "LIFT_UNSUPPORTED_CONTROL_FLOW", "lifting", "unsupported", "LIFT_ERROR")

@@ -367,7 +367,7 @@ class Lift(Case):
         output.write_text("sentinel")
         for code, expected in [
                 ("88 c8 c3", "undefined RAX"), ("66 89 c8 c3", "undefined RAX"), ("48 03 01 c3", "operand form"),
-                ("48 8b 45 00 c3", "undefined incoming RBP"), ("48 8d 05 00 00 00 00", "RIP"),
+                ("48 8b 45 00 c3", "undefined incoming RBP"),
                 ("f3 c3", "prefix"), ("48 48 89 c8 c3", "prefix"),
                 ("ff d0 c3", "unsupported"), ("ff e0", "unsupported"),
                 ("b8 01 00 00 00 31 c0", "outside"), ("eb 05", "outside"), ("74 01 48 89 c8 c3", "enters an instruction"),
@@ -443,6 +443,9 @@ class Lift(Case):
         # The RIZ spelling in a SIB with a redundant scale has no index.
         lift("48 89 4c 64 08 48 8b 44 64 08 c3")
         lift("48 89 e0 c3")
+        # Both the address and the eight bytes starting at the next RIP are in .text.
+        lift("48 8d 05 00 00 00 00 c3")
+        lift("48 8b 05 00 00 00 00 c3")
         for code, failure in (
                 ("66 50 c3", "LIFT_UNSUPPORTED_PREFIX"),
                 ("66 c9 c3", "LIFT_UNSUPPORTED_PREFIX"),
@@ -451,7 +454,6 @@ class Lift(Case):
                 ("cb", "LIFT_UNSUPPORTED_CONTROL_FLOW"),
                 ("67 48 8b 01 c3", "LIFT_UNSUPPORTED_PREFIX"),
                 ("65 48 8b 01 c3", "LIFT_UNSUPPORTED_PREFIX"),
-                ("48 8b 05 00 00 00 00 c3", "LIFT_UNSUPPORTED_REGISTER"),
                 ("48 8b 04 25 08 00 00 00 c3", "LIFT_UNSUPPORTED_INSTRUCTION"),
                 ("48 a1 00 00 00 70 00 00 00 00 c3", "LIFT_UNSUPPORTED_INSTRUCTION"),
                 ("48 8b 04 9c c3", "LIFT_UNDEFINED_REGISTER"),

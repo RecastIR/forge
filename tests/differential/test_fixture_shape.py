@@ -3,7 +3,7 @@ from pathlib import Path
 import unittest
 from unittest.mock import patch
 
-from build import check_frame, check_leaf, check_nested_exits, leaf_instructions
+from build import check_frame, check_image_leaf, check_leaf, check_nested_exits, leaf_instructions
 
 
 # Both loops are laid out after a shared return. Absolute addresses are immaterial.
@@ -30,6 +30,23 @@ class FixtureShapeTests(unittest.TestCase):
     def reject(self, listing):
         with self.assertRaisesRegex(ValueError, "nested natural loops"):
             self.check(listing)
+
+    def test_lookup_requires_a_reachable_load_through_the_table_base(self):
+        sections = "  0 .literal 00000020 00002000 00002000\n  CONTENTS, ALLOC, LOAD, READONLY, DATA"
+        leaf = dict(enumerate(["lea rax,[rip+0xff] # 2000", "mov eax,DWORD PTR [rax+rcx*4]", "ret"]))
+        check_image_leaf("lookup", leaf, sections, "release")
+        for load in ("mov eax,7", "mov eax,DWORD PTR [rdx+rcx*4]", "mov eax,DWORD PTR [rax+0x4]", "ret"):
+            with self.subTest(load=load), self.assertRaisesRegex(ValueError, "load|lookup"):
+                check_image_leaf("lookup", {**leaf, 1: load}, sections, "release")
+        for overwrite in ("mov rax,rdx", "mov eax,edx", "mov ah,dl", "and eax,0x7"):
+            body = [leaf[0], overwrite, leaf[1], "ret"]
+            with self.subTest(overwrite=overwrite), self.assertRaisesRegex(ValueError, "lookup"):
+                check_image_leaf("lookup", dict(enumerate(body)), sections, "release")
+        bypass = dict(enumerate(["je 2", leaf[0], leaf[1], "ret"]))
+        with self.assertRaisesRegex(ValueError, "lookup"):
+            check_image_leaf("lookup", bypass, sections, "debug")
+        with self.assertRaisesRegex(ValueError, "immutable section"):
+            check_image_leaf("lookup", leaf, sections.replace("READONLY", "DATA"), "debug")
 
     def test_frame_loop_must_store_inside_a_reachable_loop(self):
         instructions = dict(enumerate([
