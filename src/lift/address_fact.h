@@ -2,273 +2,95 @@
 
 #include "lift/memory.h"
 
-#include "llvm/ADT/STLExtras.h"
 #include "llvm/ADT/SmallVector.h"
 
-#include <bit>
+#include <compare>
 #include <map>
 #include <memory>
+#include <optional>
 
 namespace forge::x86 {
-    // Guest integer alternatives are sorted, unique, and wrap at 64 bits. The
-    // empty set denotes unknown. Widening bounds both loop convergence and storage.
+    // A group represents all direct call sites entering one callee. Keep their
+    // shared displacement symbolic until a guest access actually needs PE bytes.
+    struct Continuation {
+        uint32_t callee;
+        uint64_t offset;
+        auto operator<=>(const Continuation &) const = default;
+    };
+
     class AddressFact {
       public:
-        enum Origin : uint8_t { Computed, Constant, Stack };
+        enum Origin : uint8_t { Computed, Constant, Stack, FrameStack };
 
         static constexpr unsigned limit = 8;
 
         AddressFact() = default;
 
         explicit AddressFact(uint64_t value, Origin provenance = Constant)
-            : addresses{value}, origin(provenance) {}
+            : addresses{value}, origin(provenance), unknown(false) {}
 
         bool operator==(const AddressFact &) const = default;
 
         llvm::ArrayRef<uint64_t> values() const { return addresses; }
 
-        bool known() const { return !addresses.empty(); }
+        llvm::ArrayRef<Continuation> continuations() const { return returns; }
 
-        bool stackDerived() const { return origin == Stack; }
+        bool known() const { return !unknown && returns.empty() && !addresses.empty(); }
 
-        // Only the original single-origin proof can constrain an out-of-stack
-        // arithmetic result to the checked stack path. Newly proved alternatives
-        // guide image selection while retaining dispatch by the resulting VA.
-        AddressFact computed() const {
-            auto result = *this;
-            result.origin = Computed;
-            return result;
-        }
+        bool hasUnknown() const { return unknown; }
 
-        AddressFact join(const AddressFact &other) const {
-            if (!known() || !other.known()) {
-                return {};
-            }
+        // Widened symbolic alternatives must survive a loop join even though
+        // they authorize no new executable bytes.
+        bool tracksSpill() const { return !unknown || !returns.empty() || widenedReturns; }
 
-            if (*this == other) {
-                return *this;
-            }
+        static AddressFact frameStack(uint64_t offset = 0);
+        static AddressFact continuation(uint32_t callee);
 
-            auto result = computed();
-            if (!result.includeOffsets(0, other)) {
-                return {};
-            }
+        std::optional<uint64_t> frameOffset() const;
 
-            return result;
-        }
+        bool stackDerived() const { return origin == Stack || origin == FrameStack; }
 
-        AddressFact plus(const AddressFact &other) const {
-            AddressFact result;
-            for (auto lhs : addresses) {
-                if (!result.includeOffsets(lhs, other)) {
-                    return {};
-                }
-            }
-
-            if (origin == Constant) {
-                result.origin = other.origin;
-            } else if (other.origin == Constant) {
-                result.origin = origin;
-            }
-
-            return result;
-        }
-
-        AddressFact times(uint64_t factor) const {
-            if (factor == 1) {
-                return *this;
-            }
-
-            AddressFact result;
-            for (auto value : addresses) {
-                result.include(value * factor);
-            }
-
-            if (origin == Constant) {
-                result.origin = Constant;
-            }
-
-            return result;
-        }
-
-        AddressFact masked(uint64_t mask) const {
-            AddressFact result;
-            if (known()) {
-                for (auto value : addresses) {
-                    result.include(value & mask);
-                }
-
-                return result;
-            }
-
-            // An unconstrained input can produce all 2^popcount(mask) submasks.
-            if (std::popcount(mask) >= static_cast<int>(std::bit_width(limit))) {
-                return {};
-            }
-
-            auto submask = mask;
-            for (;;) {
-                result.include(submask);
-
-                if (submask == 0) {
-                    return result;
-                }
-
-                submask = (submask - 1) & mask;
-            }
-        }
+        AddressFact computed() const;
+        AddressFact project(const AddressFact &entryRsps) const;
+        AddressFact join(const AddressFact &other) const;
+        AddressFact plus(const AddressFact &other) const;
+        AddressFact times(uint64_t factor) const;
+        AddressFact masked(uint64_t mask) const;
 
       private:
         llvm::SmallVector<uint64_t, 1> addresses;
+        llvm::SmallVector<Continuation, 1> returns;
+        uint64_t displacement = 0;
         Origin origin = Computed;
+        bool unknown = true;
+        // Widening is absorbing at a join, including on a loop backedge.
+        bool widenedReturns = false;
 
-        bool includeOffsets(uint64_t base, const AddressFact &offsets) {
-            for (auto offset : offsets.addresses) {
-                if (!include(base + offset)) {
-                    return false;
-                }
-            }
-
-            return true;
-        }
-
-        bool include(uint64_t value) {
-            auto pos = llvm::lower_bound(addresses, value);
-            if (pos != addresses.end() && *pos == value) {
-                return true;
-            }
-
-            if (addresses.size() == limit) {
-                return false;
-            }
-
-            addresses.insert(pos, value);
-            return true;
-        }
+        void includeAddress(uint64_t va);
+        void includeReturn(Continuation source);
+        AddressFact addOffsets(const AddressFact &offsets) const;
     };
 
-    // Slots are exact, nonoverlapping eight-byte saves within one invocation's
-    // stack. CFG states share the map until a write or join changes its contents.
+    // Slots describe eight-byte saves. Distinct CFG paths can save at overlapping
+    // offsets, so a store must invalidate every overlap. Keys use either absolute
+    // stack VAs or signed offsets from the current activation's entry RSP. A
+    // write using one coordinate system may alias saves in the other.
     class StackSpills {
       public:
         // The returned fact is borrowed until this snapshot is modified.
-        const AddressFact *find(uint64_t va) const {
-            if (!slots) {
-                return nullptr;
-            }
-
-            const auto it = slots->find(va);
-            return it == slots->end() ? nullptr : &it->second;
-        }
-
-        bool merge(const StackSpills &other) {
-            if (!slots || slots == other.slots) {
-                return false;
-            }
-
-            if (!other.slots) {
-                slots.reset();
-                return true;
-            }
-
-            auto joined = [&other](const auto &slot) {
-                const auto *incoming = other.find(slot.first);
-                return incoming ? slot.second.join(*incoming) : AddressFact{};
-            };
-            const auto first = llvm::find_if(
-                *slots, [&](const auto &slot) { return joined(slot) != slot.second; });
-            if (first == slots->end()) {
-                return false;
-            }
-
-            // Reacquire iterators in the detached map. All preceding slots agree.
-            const auto va = first->first;
-            auto &updated = writable();
-            for (auto it = updated.lower_bound(va); it != updated.end();) {
-                auto value = joined(*it);
-                if (!value.known()) {
-                    it = updated.erase(it);
-                } else {
-                    it->second = std::move(value);
-                    ++it;
-                }
-            }
-
-            if (updated.empty()) {
-                slots.reset();
-            }
-
-            return true;
-        }
-
-        AddressFact read(const AddressFact &address) const {
-            AddressFact result;
-            for (auto va : address.values()) {
-                const auto *saved = find(va);
-                if (!saved) {
-                    return {};
-                }
-
-                result = result.known() ? result.join(*saved) : *saved;
-                if (!result.known()) {
-                    return {};
-                }
-            }
-
-            return result;
-        }
-
-        void write(const AddressFact &address, unsigned width, const AddressFact &value) {
-            if (!address.known()) {
-                slots.reset();
-                return;
-            }
-
-            const unsigned bytes = width / 8;
-            for (auto va : address.values()) {
-                if (va - GuestMemory::base >= GuestMemory::capacity) {
-                    continue;
-                }
-
-                const bool exact = address.values().size() == 1 && width == 64 &&
-                                   va - GuestMemory::base <= GuestMemory::capacity - bytes;
-                replace(va, bytes, exact ? value.computed() : AddressFact{});
-            }
-        }
+        const AddressFact *find(uint64_t va) const;
+        bool merge(const StackSpills &other);
+        AddressFact read(const AddressFact &address) const;
+        void write(const AddressFact &address, unsigned width, const AddressFact &value);
 
       private:
-        using Slots = std::map<uint64_t, AddressFact>;
-        std::shared_ptr<Slots> slots;
+        using Slots = std::map<int64_t, AddressFact>;
+        using Snapshot = std::shared_ptr<Slots>;
+        Snapshot absolute, relative;
 
-        Slots &writable() {
-            if (!slots) {
-                slots = std::make_shared<Slots>();
-            } else if (slots.use_count() > 1) {
-                slots = std::make_shared<Slots>(*slots);
-            }
-
-            return *slots;
-        }
-
-        void replace(uint64_t va, unsigned bytes, const AddressFact &saved) {
-            if (slots) {
-                const auto it = slots->lower_bound(va - 7);
-                const bool overlaps = it != slots->end() && it->first < va + bytes;
-                if ((!overlaps && !saved.known()) ||
-                    (overlaps && it->first == va && it->second == saved)) {
-                    return;
-                }
-            } else if (!saved.known()) {
-                return;
-            }
-
-            auto &updated = writable();
-            updated.erase(updated.lower_bound(va - 7), updated.lower_bound(va + bytes));
-            if (saved.known()) {
-                updated.emplace(va, saved);
-            } else if (updated.empty()) {
-                slots.reset();
-            }
-        }
+        static const AddressFact *lookup(const Snapshot &slots, int64_t key);
+        static Slots &writable(Snapshot &slots);
+        static bool mergeSlots(Snapshot &slots, const Snapshot &incoming);
+        static void replace(Snapshot &slots, int64_t key, unsigned bytes, const AddressFact &saved);
     };
 } // namespace forge::x86

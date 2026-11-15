@@ -1,6 +1,7 @@
 """Run the two lifted entry contracts on Apple Silicon, including isolated runtime traps."""
 from pathlib import Path
 import json
+import os
 import platform
 import re
 import signal
@@ -32,19 +33,29 @@ class GuestExecution(unittest.TestCase):
         cls.addClassCleanup(directory.cleanup)
         cls.work = Path(directory.name)
         report = json.loads(run(FORGE, "inspect", IMAGE, "--format", "json"))
-        cls.exports = {name: int(row["rva"], 16) for row in report["modules"][0]["exports"] for name in row["names"]}
+        module = report["modules"][0]
+        cls.image_base = int(module["image_base_va"], 16)
+        cls.exports = {name: int(row["rva"], 16) for row in module["exports"] for name in row["names"]}
 
-    def variants(self, name, *, state=False, corrupt_return=None, image=IMAGE):
+    def variants(self, name, *, state=False, corrupt_return=None, incoming_bits=None, image=IMAGE):
         rva = self.exports[name]
         ir = self.work / f"{name}.ll"
         signature = [] if state else ["--signature", "i64(i64,i64)"]
         run(FORGE, "lift", image, "--rva", hex(rva), "--output", ir, *signature)
+        if incoming_bits is not None:
+            # Choose a permitted numerical value for every opaque input. An
+            # equality check on just those bits cannot establish concreteness.
+            changed, count = re.subn(r"\bfreeze i64 poison\b", f"add i64 0, {incoming_bits}", ir.read_text())
+            self.assertGreater(count, 0)
+            ir.write_text(changed)
         if corrupt_return:
-            # Guest instructions cannot write the reserved slot. Corrupt one byte
-            # after synthetic entry to exercise RET's independent integrity check.
-            pattern = rf"^rva_{rva:x}:.*$"
-            injected = (rf"\g<0>\n  %bad.slot = getelementptr i8, ptr %stack.{corrupt_return}, "
-                        f"i64 {RSP - BASE}\n  store i8 0, ptr %bad.slot, align 1")
+            # Bypass normal guest access to exercise RET's independent integrity
+            # check, even when the guest continuation byte happens to be zero.
+            field, target_name, address = corrupt_return
+            pattern = rf"^rva_{self.exports[target_name]:x}:.*$(?:\n  %[^\n]+ = phi [^\n]+)*"
+            injected = (rf"\g<0>\n  %bad.slot = getelementptr i8, ptr %stack.{field}, "
+                        f"i64 {address - BASE}\n  %old.byte = load i8, ptr %bad.slot, align 1"
+                        "\n  %bad.byte = xor i8 %old.byte, 1\n  store i8 %bad.byte, ptr %bad.slot, align 1")
             changed, count = re.subn(pattern, injected, ir.read_text(), flags=re.MULTILINE)
             self.assertEqual(count, 1)
             ir.write_text(changed)
@@ -188,8 +199,92 @@ class StackTests(GuestExecution):
     def test_return_slot_integrity(self):
         for field in ("bytes", "valid"):
             for state in (False, True):
-                for exe in self.variants("restore_rsp", state=state, corrupt_return=field):
-                    self.trap(exe, [(9, 1)])
+                for name, callee, slot in (("restore_rsp", "restore_rsp", RSP),
+                                           ("call_stack_argument", "call_fifth", RSP - 64)):
+                    for exe in self.variants(name, state=state, corrupt_return=(field, callee, slot)):
+                        self.trap(exe, [(9, 1)])
+
+        for state in (False, True):
+            for exe in self.variants("opaque_return_rsp", state=state, incoming_bits=RSP):
+                self.trap(exe, [(9, 1)])
+
+    def test_active_call_slots(self):
+        for width, suffix in ((1, "b"), (2, "w"), (4, "l"), (8, "q")):
+            root, bridge = "call_slot_" + suffix, "call_bridge_" + suffix
+            for exe in self.variants(root):
+                # Innermost reads observe the precise guest continuation both in
+                # its own frame and in its caller's frame. Partial loads can mix
+                # protected and ordinary bytes, including unaligned intervals.
+                for slot, caller in ((RSP - 96, bridge), (RSP - 48, root)):
+                    address = self.image_base + self.exports[caller] + 9
+                    region = b"\xff" * 8 + address.to_bytes(8, "little") + b"\xff" * 8
+                    for displacement in (-width, -width + 1, 0, 7, 8):
+                        pos = 8 + displacement
+                        value = int.from_bytes(region[pos:pos + width], "little")
+                        self.expect(exe, slot + displacement, 0, value)
+                    for operation in (1, 2):
+                        for displacement in (-width + 1, 0, 7):
+                            self.trap(exe, [(slot + displacement, operation)])
+                    self.expect(exe, slot - width, 1, 1)
+                    self.expect(exe, slot + 8, 2, 0)
+                self.trap(exe, [(RSP, 0)])
+
+    def test_nested_call_boundaries(self):
+        for exe in self.variants("call_released"):
+            self.expect(exe, 91, -23, -23)
+        for exe in self.variants("call_return_copy"):
+            self.expect(exe, 0, 0, self.image_base + self.exports["call_return_copy"] + 9)
+        for exe in self.variants("call_pointer_alias"):
+            self.expect(exe, 0, 0, 2 * 0x12345678)
+        for name in ("call_bad_shadow", "call_misaligned", "call_bad_teardown"):
+            for exe in self.variants(name):
+                self.trap(exe, [(1, 2)])
+        for exe in self.variants("call_depth"):
+            for depth in (0, 1, 7, 84):
+                self.expect(exe, depth, 0, depth)
+            self.trap(exe, [(85, 0)])
+        for exe in self.variants("call_nonvolatile"):
+            self.expect(exe, 7, 7, 7)
+            self.trap(exe, [(7, 8)])
+        for exe in self.variants("call_stack_argument"):
+            self.expect(exe, 1, 91, 91)
+            self.trap(exe, [(0, 2)])
+            self.trap(exe, [(1, 91), (0, 2)])
+
+    def test_rebased_call_return_address(self):
+        rva = self.exports["call_return_copy"]
+        base = self.image_base + 0x54200000
+        ir = self.work / "rebased-return.ll"
+        ir.write_bytes(run(os.environ["FORGE_TEST_LIFT_CONTRACT"], "--emit-rebased",
+                           IMAGE, hex(rva), hex(base)))
+        for exe in self.compile_variants(ir):
+            self.expect(exe, 0, 0, base + rva + 9)
+
+    def test_call_implicit_state(self):
+        for exe in self.variants("call_carry"):
+            for a, b in ((1, 0), (2, 3), (0, MASK)):
+                total = a + b + int(a < b)
+                self.expect(exe, a, b, total + (total >> 64))
+        for exe in self.variants("call_preserves_carry"):
+            self.expect(exe, 7, 2, 7)
+            self.expect(exe, 2, 7, 3)
+        for exe in self.variants("call_join"):
+            for a, b in ((1, 0), (1, 7), (2, 0), (2, 7)):
+                self.expect(exe, a, b, int(a < b if a == 1 else b < 3))
+        for exe in self.variants("call_narrow"):
+            self.expect(exe, -2, 0, 254)
+
+        for name, code in (("call_missing_register", "LIFT_UNDEFINED_REGISTER"),
+                           ("call_missing_flag", "LIFT_UNDEFINED_FLAG"),
+                           ("call_undefined_join", "LIFT_UNDEFINED_FLAG")):
+            output = self.work / (name + ".ll")
+            child = subprocess.run([FORGE, "lift", IMAGE, "--rva", hex(self.exports[name]),
+                                    "--signature", "i64(i64,i64)", "--diagnostics-format", "json",
+                                    "--output", output], capture_output=True, timeout=30)
+            self.assertEqual(child.returncode, 1)
+            failure = json.loads(child.stderr)
+            self.assertEqual((failure["stage"], failure["code"]), ("lifting", code))
+            self.assertFalse(output.exists())
 
     def test_register_state(self):
         exposed = ("ax", "cx", "dx", "r8", "r9", "r10", "r11")

@@ -5,6 +5,7 @@
 #include "llvm/ADT/ArrayRef.h"
 #include "llvm/Object/COFF.h"
 #include "llvm/Support/Endian.h"
+#include "llvm/Support/ErrorHandling.h"
 #include "llvm/Support/JSON.h"
 #include "llvm/Support/Win64EH.h"
 
@@ -823,6 +824,38 @@ namespace forge {
             return {begin, end};
         }
     } // namespace
+
+    RelocationIndex::RelocationIndex(llvm::ArrayRef<RelocationBlock> blocks) : blocks(blocks) {
+        std::vector<RvaRange> fields;
+        for (const auto &block : blocks) {
+            for (const auto &rel : block.entries) {
+                if (auto width = relocationWidth(rel.type)) {
+                    fields.push_back({rel.rva, uint64_t(rel.rva) + width});
+                }
+            }
+        }
+
+        ranges = mergeRanges(std::move(fields));
+    }
+
+    const Relocation *RelocationIndex::firstOverlap(RvaRange range) const {
+        if (range.begin >= range.end || rangesIn(ranges, range).empty()) {
+            return nullptr;
+        }
+
+        // An overlap ends the lift. Only this failing query needs an original
+        // record rather than a yes/no answer from the merged interval index.
+        for (const auto &block : blocks) {
+            for (const auto &rel : block.entries) {
+                const auto width = relocationWidth(rel.type);
+                if (width && rel.rva < range.end && uint64_t(rel.rva) + width > range.begin) {
+                    return &rel;
+                }
+            }
+        }
+
+        llvm_unreachable("relocation interval must contain an original fixup");
+    }
 
     void ImageInitialization::validateRelocations(RvaRange range) const {
         auto malformed = rangesIn(conflicts, range);

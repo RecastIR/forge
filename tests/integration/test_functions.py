@@ -256,9 +256,15 @@ class Lift(Case):
         self.invoke("lift", FIXTURES / "arithmetic.exe", "--rva", "0x1000", "--output", output)
         module = output.read_text()
         self.assertIn('target triple = "arm64-apple-macosx11.0.0"', module)
+        adapter = module.split("define internal void @forge_lifted_1000(", 1)[1].split("\n}", 1)[0]
+        pointers = {"%state"}
+        for line in adapter.splitlines():
+            if "getelementptr" in line and ", ptr %state," in line:
+                pointers.add(line.split(" = ", 1)[0].strip())
         for instruction in ("load i64", "store i64"):
-            accesses = [line for line in module.splitlines() if instruction in line]
-            self.assertTrue(accesses, instruction)
+            accesses = [line for line in adapter.splitlines()
+                        if instruction in line and any(f", ptr {ptr}," in line for ptr in pointers)]
+            self.assertEqual(len(accesses), 7, instruction)
             for line in accesses:
                 self.assertIn(", align 4", line)
 
@@ -509,6 +515,165 @@ class Lift(Case):
         self.assertEqual(lift("eb 01 cc 0f", "LIFT_INVALID_ENCODING", category="invalid_input")["bytes"], "0f")
         self.assertEqual(lift("ff e0", "LIFT_UNSUPPORTED_CONTROL_FLOW")["bytes"], "ffe0")
 
+    def test_call_targets_and_callee_locations(self):
+        original = (FIXTURES / "cfg.exe").read_bytes()
+        layout = Layout(original)
+        records = layout.file_offset(layout.directory(3)[0])
+        helper, helper_end, unwind = struct.unpack_from("<III", original, records)
+        caller, caller_end, _ = struct.unpack_from("<III", original, records + 24)
+        image, output = self.dir / "calls.exe", self.dir / "calls.ll"
+
+        def write_body(data, rva, body):
+            pos = layout.file_offset(rva)
+            data[pos:pos + len(body)] = body
+
+        def call(at, target):
+            return b"\xe8" + struct.pack("<i", target - (at + 5))
+
+        def diagnose(data):
+            image.write_bytes(data)
+            output.write_text("previous IR")
+            p = self.invoke("lift", image, "--rva", hex(caller), "--signature", "i64(i64,i64)",
+                            "--output", output, "--diagnostics-format", "json", code=1)
+            self.assertEqual(output.read_text(), "previous IR")
+            return json.loads(p.stderr)
+
+        # The two function bodies are deliberately in reverse RVA order.
+        def recursive_body(rva, target):
+            prefix = bytes.fromhex("85 c9 74 10 48 83 ec 28 ff c9")
+            return prefix + call(rva + len(prefix), target) + bytes.fromhex("48 83 c4 28 c3 89 c8 c3")
+
+        cycle = bytearray(original)
+        write_body(cycle, caller, recursive_body(caller, helper))
+        write_body(cycle, helper, recursive_body(helper, caller))
+        image.write_bytes(cycle)
+        args = ("lift", image, "--rva", hex(caller), "--signature", "i64(i64,i64)", "--output", output)
+        self.invoke(*args)
+        first = output.read_bytes()
+        self.invoke(*args)
+        self.assertEqual(output.read_bytes(), first)
+        for start in (caller, helper):
+            self.assertEqual(first.count(f"\nrva_{start:x}:".encode()), 1)
+
+        for target, code in ((caller + 1, "LIFT_INVALID_CALL_TARGET"),
+                             (helper + 1, "LIFT_UNSUPPORTED_CONTROL_FLOW"),
+                             (-100, "LIFT_INVALID_CALL_TARGET"),
+                             (0x70000000, "LIFT_INVALID_CALL_TARGET")):
+            with self.subTest(target=target):
+                data = bytearray(original)
+                write_body(data, caller, call(caller, target) + b"\xc3")
+                diagnostic = diagnose(data)
+                context = diagnostic["context"]
+                self.assertEqual((diagnostic["code"], context["branch_target"]), (code, target))
+                if target == caller + 1:
+                    self.assertIn(f"enters decoded instruction at {caller:#x}", diagnostic["message"])
+                self.assertEqual((context["block_rva"], context["instruction_rva"],
+                                  context["opcode"], context["bytes"]),
+                                 (hex(caller), hex(caller), "CALL64pcrel32", call(caller, target).hex()))
+
+        # The peer calls into a reachable helper. Classify using the full set
+        # of decoded instructions for either ordering of their metadata RVAs.
+        peer = layout.u32(records + 12)
+        for leaf, source in ((helper, peer), (peer, helper)):
+            for delta, code in ((1, "LIFT_INVALID_CALL_TARGET"), (3, "LIFT_UNSUPPORTED_CONTROL_FLOW")):
+                with self.subTest(leaf=leaf, delta=delta):
+                    data = bytearray(original)
+                    write_body(data, caller, call(caller, leaf) + call(caller + 5, source) + b"\xc3")
+                    write_body(data, leaf, bytes.fromhex("48 89 c8 c3"))
+                    target = leaf + delta
+                    branch = call(source, target)
+                    write_body(data, source, branch + b"\xc3")
+                    diagnostic = diagnose(data)
+                    context = diagnostic["context"]
+                    self.assertEqual(diagnostic["code"], code)
+                    self.assertEqual((context["function_rva"], context["block_rva"], context["instruction_rva"],
+                                      context["file_offset"], context["bytes"], context["branch_target"]),
+                                     (hex(source), hex(source), hex(source), layout.file_offset(source),
+                                      branch.hex(), target))
+
+        # Jumping to the same proven function entry remains an unsupported tail jump.
+        data = bytearray(original)
+        write_body(data, caller, b"\xe9" + struct.pack("<i", helper - (caller + 5)))
+        jump = diagnose(data)
+        self.assertEqual((jump["code"], jump["context"]["branch_target"], jump["context"]["opcode"]),
+                         ("LIFT_UNSUPPORTED_CONTROL_FLOW", helper, "JMP_4"))
+        write_body(data, caller, bytes.fromhex("ff d1"))
+        indirect = diagnose(data)
+        self.assertEqual((indirect["code"], indirect["context"]["opcode"]),
+                         ("LIFT_UNSUPPORTED_CONTROL_FLOW", "CALL64r"))
+
+        # A last-in-range CALL may target a valid helper but lacks a continuation.
+        data = bytearray(original)
+        struct.pack_into("<I", data, records + 24 + 4, caller + 5)
+        write_body(data, helper, bytes.fromhex("89 c8 c3"))
+        write_body(data, caller, call(caller, helper))
+        end = diagnose(data)
+        self.assertEqual((end["code"], end["context"]["opcode"], end["context"]["branch_target"]),
+                         ("LIFT_UNSUPPORTED_CONTROL_FLOW", "CALL64pcrel32", caller + 5))
+
+        # Overlapping records describe no unique callee even when an exact start exists.
+        data = bytearray(cycle)
+        struct.pack_into("<III", data, records + 12, helper + 1, helper_end, unwind)
+        invalid = diagnose(data)
+        self.assertEqual((invalid["code"], invalid["context"]["branch_target"]),
+                         ("LIFT_INVALID_CALL_TARGET", helper))
+
+        # Removing the helper's metadata leaves executable bytes with no proven boundary.
+        data = bytearray(cycle)
+        data[records:records + 12] = data[records + 12:records + 24]
+        missing = diagnose(data)
+        self.assertEqual((missing["code"], missing["context"]["branch_target"]),
+                         ("LIFT_UNSUPPORTED_CONTROL_FLOW", helper))
+
+        # Reachable, unsupported callee instruction with an RVA below the external entry.
+        data = bytearray(cycle)
+        write_body(data, helper, bytes.fromhex("f7 f1 c3"))
+        failure = diagnose(data)
+        context = failure["context"]
+        self.assertEqual(failure["code"], "LIFT_UNSUPPORTED_INSTRUCTION")
+        self.assertEqual((context["entry_rva"], context["end_rva"], context["function_rva"]),
+                         (hex(caller), hex(caller_end), hex(helper)))
+        self.assertEqual((context["block_rva"], context["instruction_rva"], context["file_offset"],
+                          context["bytes"]), (hex(helper), hex(helper), layout.file_offset(helper), "f7f1"))
+
+    def test_imported_call(self):
+        data = bytearray((FIXTURES / "metadata.exe").read_bytes())
+        layout = Layout(data)
+        entry = layout.u32(layout.opt + 16)
+        iat, size = layout.directory(12)
+        self.assertGreaterEqual(size, 8)
+        encoded = b"\xff\x15" + struct.pack("<i", iat - (entry + 6))
+        pos = layout.file_offset(entry)
+        data[pos:pos + len(encoded)] = encoded
+        image = self.dir / "import.exe"
+        image.write_bytes(data)
+        failure = self.invoke("lift", image, "--rva", hex(entry), "--output", self.dir / "import.ll",
+                              "--diagnostics-format", "json", code=1)
+        diagnostic = json.loads(failure.stderr)
+        self.assertEqual((diagnostic["code"], diagnostic["context"]["opcode"], diagnostic["context"]["bytes"]),
+                         ("LIFT_UNSUPPORTED_CONTROL_FLOW", "CALL64m", encoded.hex()))
+
+    def test_direct_call_to_linker_import_thunk(self):
+        image = FIXTURES / "import-call.exe"
+        data = image.read_bytes()
+        layout = Layout(data)
+        entry = layout.u32(layout.opt + 16)
+        call = entry + 4  # SUB RSP, 40 precedes the direct CALL.
+        site = layout.file_offset(call)
+        self.assertEqual(data[site], 0xe8)
+        target = call + 5 + struct.unpack_from("<i", data, site + 1)[0]
+        thunk = layout.file_offset(target)
+        self.assertEqual(data[thunk:thunk + 2], b"\xff\x25")
+        slot = target + 6 + struct.unpack_from("<i", data, thunk + 2)[0]
+        iat, size = layout.directory(12)
+        self.assertTrue(iat <= slot < iat + size)
+        failure = self.invoke("lift", image, "--rva", hex(entry), "--output", self.dir / "import.ll",
+                              "--diagnostics-format", "json", code=1)
+        diagnostic = json.loads(failure.stderr)
+        self.assertEqual((diagnostic["code"], diagnostic["context"]["opcode"],
+                          diagnostic["context"]["branch_target"]),
+                         ("LIFT_UNSUPPORTED_CONTROL_FLOW", "CALL64pcrel32", target))
+
     def test_flag_missing_at_forward_join(self):
         image = FIXTURES / "arithmetic.exe"
         export = next(e for e in self.report(image)["modules"][0]["exports"] if "immediates" in e["names"])
@@ -596,6 +761,66 @@ class Lift(Case):
         exe.write_bytes(data)
         p = self.invoke("lift", exe, "--rva", "0x1000", "--output", self.dir/"rel.ll", code=1)
         self.assertIn(b"base relocation at 0x1000", p.stderr)
+
+    def test_function_relocation_intervals(self):
+        original = (FIXTURES / "metadata.exe").read_bytes()
+        layout = Layout(original)
+        entry = 0x1004
+        record = layout.file_offset(layout.directory(3)[0])
+        table, size = layout.directory(5)
+        reloc = layout.file_offset(table)
+        program = self.dir / "relocated.exe"
+        output = self.dir / "function.ll"
+
+        # The selected function occupies [0x1004, 0x1007). Zero-width padding,
+        # fields ending at its start, and fields starting at its end are harmless.
+        # Disjoint malformed data fields must not force image initialization.
+        for fields, witness in (
+                ((0x0004, 0x3000, 0xa007), None),
+                ((0x3001,), 0x1001),
+                ((0x7000,), 0x1000),
+                ((0x1006, 0xa000, 0x1006), 0x1006),
+                ((0x1001, 0x2005, 0x2005, 0xa002), 0x1005)):
+            with self.subTest(fields=fields):
+                data = bytearray(original)
+                struct.pack_into("<II", data, record, entry, entry + 3)
+                start = layout.file_offset(entry)
+                data[start:start + 3] = bytes.fromhex("31 c0 c3")
+                count = (size - 8) // 2
+                struct.pack_into("<I", data, reloc, 0x1000)
+                struct.pack_into("<" + "H" * count, data, reloc + 8, *fields, *([0] * (count - len(fields))))
+                program.write_bytes(data)
+                p = self.invoke("lift", program, "--rva", hex(entry), "--output", output,
+                                "--diagnostics-format", "json", code=int(witness is not None))
+                if witness is not None:
+                    failure = json.loads(p.stderr)
+                    self.assertEqual(failure["code"], "ENTRY_RELOCATION_OVERLAP")
+                    self.assertIn(f"base relocation at {witness:#x}", failure["message"])
+
+    def test_relocated_callee_preserves_call_site(self):
+        data = bytearray((FIXTURES / "image.exe").read_bytes())
+        layout = Layout(data)
+        records = layout.file_offset(layout.directory(3)[0])
+        callee, caller = layout.u32(records), layout.u32(records + 12)
+        # The fixup touches only the callee and ends exactly at the caller.
+        witness = caller - 2
+        self.assertLessEqual(callee, witness)
+        reloc = layout.file_offset(layout.directory(5)[0])
+        struct.pack_into("<I", data, reloc, witness & ~0xfff)
+        struct.pack_into("<H", data, reloc + 8, 0x1000 | (witness & 0xfff))
+        call = b"\xe8" + struct.pack("<i", callee - caller - 5)
+        start = layout.file_offset(caller)
+        data[start:start + 6] = call + b"\xc3"
+        program = self.dir / "relocated-callee.exe"
+        program.write_bytes(data)
+        p = self.invoke("lift", program, "--rva", hex(caller), "--output", self.dir / "calls.ll",
+                        "--diagnostics-format", "json", code=1)
+        failure = json.loads(p.stderr)
+        self.assertEqual(failure["code"], "LIFT_UNSUPPORTED_CONTROL_FLOW")
+        self.assertIn(f"base relocation at {witness:#x}", failure["message"])
+        context = failure["context"]
+        self.assertEqual((context["instruction_rva"], context["branch_target"], context["bytes"]),
+                         (hex(caller), callee, call.hex()))
 
 
 if __name__ == "__main__":

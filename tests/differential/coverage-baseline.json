@@ -500,6 +500,56 @@
       "id": "globals/retarget",
       "config": "release",
       "target": "macos-arm64"
+    },
+    {
+      "id": "functions/recursive",
+      "config": "debug",
+      "target": "macos-arm64"
+    },
+    {
+      "id": "functions/recursive",
+      "config": "release",
+      "target": "macos-arm64"
+    },
+    {
+      "id": "functions/mutual",
+      "config": "debug",
+      "target": "macos-arm64"
+    },
+    {
+      "id": "functions/mutual",
+      "config": "release",
+      "target": "macos-arm64"
+    },
+    {
+      "id": "functions/sequence",
+      "config": "debug",
+      "target": "macos-arm64"
+    },
+    {
+      "id": "functions/sequence",
+      "config": "release",
+      "target": "macos-arm64"
+    },
+    {
+      "id": "functions/flags",
+      "config": "debug",
+      "target": "macos-arm64"
+    },
+    {
+      "id": "functions/flags",
+      "config": "release",
+      "target": "macos-arm64"
+    },
+    {
+      "id": "functions/continuations",
+      "config": "debug",
+      "target": "macos-arm64"
+    },
+    {
+      "id": "functions/continuations",
+      "config": "release",
+      "target": "macos-arm64"
     }
   ]
 }

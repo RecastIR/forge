@@ -1,0 +1,24 @@
+{
+  "schema_version": 1,
+  "id": "functions/sequence",
+  "description": "Call the same global updater from two functions, inside a loop and on a conditional path. The pair helper loads a live caller local through its second argument. Successive inputs observe earlier updates.",
+  "source": "fixtures/functions/sequence.cpp",
+  "binary": "call_sequence.exe",
+  "args": [
+    "0",
+    "1",
+    "2",
+    "4",
+    "-1",
+    "2",
+    "1",
+    "0",
+    "0",
+    "1"
+  ],
+  "expected": {
+    "exit_code": 0,
+    "stdout": "33\n105\n301\n183\n141\n",
+    "stderr": ""
+  }
+}

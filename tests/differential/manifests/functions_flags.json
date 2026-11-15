@@ -1,0 +1,26 @@
+{
+  "schema_version": 1,
+  "id": "functions/flags",
+  "description": "Pass carry into and out of a direct call, preserve RBX, and read the next guest instruction address from the nested return slot.",
+  "source": "fixtures/arithmetic/integer_driver.c",
+  "binary": "call_flags.exe",
+  "args": [
+    "0",
+    "1",
+    "-1",
+    "1",
+    "1",
+    "-1",
+    "7",
+    "3",
+    "-3",
+    "-5",
+    "0",
+    "0"
+  ],
+  "expected": {
+    "exit_code": 0,
+    "stdout": "4\n1\n3\n20\n-15\n0\n",
+    "stderr": ""
+  }
+}

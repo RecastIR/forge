@@ -596,6 +596,113 @@ int main() { printf("%lld %lld\\n", first, forge_lifted(0, 0)); }
             self.expect(exe, 0, 23, 23)
             self.expect(exe, 1, 23, 0x78563412)
 
+    def test_nested_addresses(self):
+        def displacements(data, layout, headers):
+            literal = self.va(".literal")
+            for helper, pointer in (("joined_stack_va", RSP-48), ("displace_argument", RSP-56+32)):
+                pos = layout.file_offset(self.exports[helper])
+                pos = data.index(struct.pack("<Q", 0x123456789abcdef0), pos, pos+40)
+                struct.pack_into("<Q", data, pos, literal - pointer)
+
+        image = self.edit("nested-distance", displacements)
+        for exe in self.variants("nested_join", image=image):
+            self.expect(exe, 0, 23, 23)
+            self.expect(exe, 1, 23, 0x78563412)
+        for exe in self.variants("argument_to_image", image=image):
+            self.expect(exe, 0, 27, 0x78563412)
+        for exe in self.variants("recursive_argument"):
+            for depth in (1, 2, 9, 17):
+                self.expect(exe, depth, 0, 1)
+
+        def unused_section(data, layout, headers):
+            start, size = 0x100000, 33 * 1024 * 1024
+            header = headers[".pool"]
+            struct.pack_into("<II", data, header+8, size, start)
+            struct.pack_into("<I", data, header+36, layout.u32(headers[".literal"]+36))
+            struct.pack_into("<I", data, layout.opt+56, start+size)
+
+        padded = self.edit("padded-calls", unused_section)
+        for name in ("caller_local", "mixed_argument"):
+            for exe in self.variants(name, image=padded):
+                self.expect(exe, 0, 27, 27)
+                self.expect(exe, 1, 27, 27 if name == "caller_local" else 0x78563412)
+            stats = image_stats(padded, self.base, self.work / (name + ".ll"))
+            self.assertEqual(stats["virtual_bytes"], 0 if name == "caller_local" else 4)
+
+    def test_widened_return_pointer_in_successor(self):
+        # The second caller reads the last literal byte in a separate CFG block.
+        for exe in self.variants("widened_return"):
+            self.expect(exe, 0, 0, 0x12 + 0xf0)
+        stats = image_stats(IMAGE, self.base, self.work / "widened_return.ll")
+        self.assertEqual(stats["virtual_bytes"], 2)
+
+    def test_continuation_image_ranges(self):
+        layout = Layout(Path(IMAGE).read_bytes())
+        for base in (self.base, self.base + 0x12000000):
+            for name, size in (("inspect_saved", 2), ("unused_saved", 0)):
+                # The selected bytes are part of the instruction following the direct call.
+                resume = self.exports[name] + 9
+                pos = layout.file_offset(resume)
+                expected = (int.from_bytes(layout.data[pos+1:pos+3], "little") if size else base + resume)
+                for exe in self.rebased(name, base):
+                    self.expect(exe, 0, 0, expected)
+                stats = image_stats(IMAGE, base, self.work / (name + "-rebased.ll"))
+                self.assertEqual(stats["virtual_bytes"], size)
+
+        for exe in self.variants("argument_return_slot"):
+            self.expect(exe, 0, 0, 0x48)
+        for exe in self.variants("unknown_saved"):
+            self.trap(exe, [(0, 0)])
+        for exe in self.variants("conditional_saved"):
+            self.expect(exe, 0, 0, 0x48)
+            self.expect(exe, 1, self.va(".literal"), 0x12)
+            self.trap(exe, [(1, self.base + self.exports["conditional_saved"])])
+        for exe in self.variants("recursive_slot"):
+            self.expect(exe, 12, 0, 0x48)
+            self.trap(exe, [(0, 0)])
+
+    def test_continuation_window_in_large_code_section(self):
+        # Move the linked code intact so its virtual tail has room to exceed the
+        # whole-executable-section limit. The selected caller uses only rel32 calls.
+        new_rva, extent = 0x100000, 9 * 1024 * 1024
+        delta = new_rva - int(self.sections[".text"]["rva"], 16)
+
+        def enlarge(data, layout, headers):
+            code = headers[".text"]
+            struct.pack_into("<II", data, code+8, extent, new_rva)
+            struct.pack_into("<I", data, layout.opt+56, new_rva+extent)
+            for field in (layout.opt+16, layout.opt+20):
+                struct.pack_into("<I", data, field, layout.u32(field)+delta)
+            table, size = layout.directory(3)
+            for p in range(layout.file_offset(table), layout.file_offset(table)+size, 12):
+                begin, end = struct.unpack_from("<II", data, p)
+                struct.pack_into("<II", data, p, begin+delta, end+delta)
+            exports = layout.file_offset(layout.directory(0)[0])
+            functions = layout.file_offset(layout.u32(exports+28))
+            for p in range(functions, functions+4*layout.u32(exports+20), 4):
+                struct.pack_into("<I", data, p, layout.u32(p)+delta)
+
+        image = self.edit("large-code", enlarge)
+        for name, size in (("inspect_saved", 2), ("unused_saved", 0)):
+            entry = self.exports[name]+delta
+            ir = self.work / (name + "-large.ll")
+            ir.write_bytes(run(os.environ["FORGE_TEST_LIFT_CONTRACT"], "--emit-rebased",
+                               image, hex(entry), hex(self.base)))
+            self.assertEqual(image_stats(image, self.base, ir)["virtual_bytes"], size)
+            pos = Layout(image.read_bytes()).file_offset(entry+10)
+            expected = int.from_bytes(image.read_bytes()[pos:pos+2], "little") if size else self.base+entry+9
+            for exe in self.compile_variants(ir):
+                self.expect(exe, 0, 0, expected)
+
+    def test_protected_continuation_bytes(self):
+        def protect(data, layout, headers):
+            # The IAT is a loader-written interval. The word read starts one
+            # byte before it, so selecting solely by the first byte is unsound.
+            struct.pack_into("<II", data, layout.directories+12*8, self.exports["inspect_saved"]+11, 8)
+        image = self.edit("protected-continuation", protect)
+        for exe in self.variants("inspect_saved", image=image):
+            self.trap(exe, [(0, 0)])
+
     def test_spill_invalidation_and_widening(self):
         literal = self.va(".literal")
         writable = self.va(".mutable")

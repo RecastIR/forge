@@ -356,5 +356,40 @@
     "export": "global_retarget",
     "signature": "i64(i64,i64)",
     "harness": "decimal_pairs"
+  },
+  {
+    "fixture_id": "functions/recursive",
+    "scope": "function",
+    "export": "call_recursive",
+    "signature": "i64(i64,i64)",
+    "harness": "decimal_pairs"
+  },
+  {
+    "fixture_id": "functions/mutual",
+    "scope": "function",
+    "export": "call_mutual",
+    "signature": "i64(i64,i64)",
+    "harness": "decimal_pairs"
+  },
+  {
+    "fixture_id": "functions/sequence",
+    "scope": "function",
+    "export": "call_sequence",
+    "signature": "i64(i64,i64)",
+    "harness": "decimal_pairs"
+  },
+  {
+    "fixture_id": "functions/flags",
+    "scope": "function",
+    "export": "call_flags",
+    "signature": "i64(i64,i64)",
+    "harness": "decimal_pairs"
+  },
+  {
+    "fixture_id": "functions/continuations",
+    "scope": "function",
+    "export": "call_continuations",
+    "signature": "i64(i64,i64)",
+    "harness": "decimal_pairs"
   }
 ]

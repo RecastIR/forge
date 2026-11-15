@@ -77,8 +77,8 @@ namespace forge::x86 {
                 return Form::MemoryImmediate;
             }
 
-            if (suffix == "rm" &&
-                ((op == Op::Cmp && width == 32) || (op == Op::Imul && width == 64))) {
+            if (suffix == "rm" && (((op == Op::Cmp || op == Op::Xor) && width == 32) ||
+                                   (op == Op::Imul && width == 64))) {
                 return Form::Load;
             }
 

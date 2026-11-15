@@ -159,6 +159,12 @@ namespace {
             }
         }
 
+        const auto bitwise = integerInstruction("XOR32rm");
+        if (!bitwise || bitwise->op != Op::Xor || bitwise->form != Form::Load ||
+            bitwise->width != 32 || integerInstruction("XOR64rm")) {
+            throw std::runtime_error("incorrect doubleword memory XOR form");
+        }
+
         const auto multiply = integerInstruction("IMUL64rm");
         if (!multiply || multiply->op != Op::Imul || multiply->form != Form::Load ||
             multiply->width != 64 || multiply->sourceWidth != 64) {

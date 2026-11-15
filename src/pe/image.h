@@ -95,6 +95,18 @@ namespace forge {
         std::vector<Relocation> entries;
     };
 
+    // Code validation only needs fixup footprints. Borrow the parsed image's
+    // records so diagnostics can identify the first overlap in PE order.
+    class RelocationIndex {
+      public:
+        explicit RelocationIndex(llvm::ArrayRef<RelocationBlock> blocks);
+        const Relocation *firstOverlap(RvaRange range) const;
+
+      private:
+        llvm::ArrayRef<RelocationBlock> blocks;
+        std::vector<RvaRange> ranges;
+    };
+
     struct TLS {
         uint32_t rva;
         uint64_t start, end, index, callbacks;

@@ -4,7 +4,7 @@ import tempfile
 import unittest
 from unittest.mock import patch
 
-from build import check_frame, check_global_leaf, check_image_leaf, check_leaf, check_nested_exits, leaf_instructions
+from build import check_call_group, check_frame, check_global_leaf, check_image_leaf, check_leaf, check_nested_exits, leaf_instructions
 
 
 # Both loops are laid out after a shared return. Absolute addresses are immaterial.
@@ -268,6 +268,21 @@ class FixtureShapeTests(unittest.TestCase):
         self.check(NESTED + adjacent)
         with self.assertRaisesRegex(ValueError, "invalid direct target"):
             self.check(NESTED.replace("40: je 80", "40: je a0") + adjacent)
+
+    def test_call_group_requires_reachable_exact_targets_and_range_entries(self):
+        listing = ("10 <call_mutual>:\n10: call 20 <even_step>\n15: ret\n"
+                   "20 <even_step>:\n20: call 30 <odd_step>\n25: ret\n"
+                   "30 <odd_step>:\n30: call 20 <even_step>\n35: ret\n")
+        ranges = " 70: 10 16 60\n 7c: 20 26 60\n 88: 30 36 60\n"
+        check_call_group("call_mutual", listing, ranges, "release")
+        for body, metadata, reason in (
+                (listing.replace("20: call 30", "20: call 31"), ranges, "direct call target"),
+                (listing.replace("30: call 20", "30: jmp 35\n31: call 20"), ranges, "expected calls"),
+                (listing.replace("20: call 30", "20: jmp 30"), ranges, "invalid direct target"),
+                (listing, ranges.replace("20 26", "21 26"), "unwind entry"),
+                (listing, ranges.replace("20 26", "20 25"), "outside its unwind range")):
+            with self.subTest(body=body, metadata=metadata), self.assertRaisesRegex(ValueError, reason):
+                check_call_group("call_mutual", body, metadata, "release")
 
     def test_malformed_or_unsupported_transfers_keep_provenance(self):
         for transfer in ("jmp 71", "jne nowhere", "jmp rax", "call 11", "ret 8", "loop 40", "syscall"):

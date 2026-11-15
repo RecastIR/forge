@@ -523,6 +523,38 @@ class LiftDiagnosticTests(unittest.TestCase):
             with self.subTest(code=code, context=context), self.assertRaises(ValueError):
                 parse(stage, category, code, context)
 
+    def test_invalid_call_target_verifies_displacement(self):
+        self.image.write_bytes(b"MZ\xe8\x00\x00\x00\x80")
+        context = dict(self.diagnostic["context"], instruction_rva="0x10", opcode="CALL64pcrel32",
+                       bytes="e800000080", branch_target=0x15 - (1 << 31))
+        record = dict(self.diagnostic, category="invalid_input", code="LIFT_INVALID_CALL_TARGET",
+                      context=context)
+        self.assertEqual(lift_diagnostics.parse_diagnostic(self.encode(record), self.image,
+                         self.selected, self.ir), record)
+        for bad in (dict(branch_target=0x15 + (1 << 31)), dict(opcode="CALL64r")):
+            with self.subTest(bad=bad), self.assertRaises(ValueError):
+                changed = dict(record, context=dict(context, **bad))
+                lift_diagnostics.parse_diagnostic(self.encode(changed), self.image, self.selected, self.ir)
+
+    def test_callee_location_uses_independent_reports(self):
+        self.image.write_bytes(self.image.read_bytes() + b"\x0f\x0b")
+        module = dict(sections=[dict(rva="0x8", virtual_size=2, raw_size=2, permissions="r-x",
+                                     file_offset=7)], image_kind="exe", relocations=[])
+        (self.work / "inspect.json").write_text(json.dumps(dict(modules=[module])))
+        row = dict(start_rva="0x8", end_rva="0xa", liftable=True, status="valid")
+        (self.work / "analysis.json").write_text(json.dumps(dict(functions=[row])))
+        context = dict(self.diagnostic["context"], function_rva="0x8", block_rva="0x8",
+                       instruction_rva="0x8", file_offset=7, opcode="TRAP", bytes="0f0b")
+
+        with self.assertRaises(diff.Unsupported):
+            self.lift(1, self.encode(dict(self.diagnostic, context=context)))
+
+        for bad in (dict(function_rva="0x9"), dict(block_rva="0x7"), dict(file_offset=0),
+                    dict(instruction_rva="0xa"), dict(bytes="0f90"), dict(end_rva="0xa")):
+            with self.subTest(bad=bad), self.assertRaises(ValueError) as error:
+                self.lift(1, self.encode(dict(self.diagnostic, context=dict(context, **bad))))
+            self.assertNotIsInstance(error.exception, diff.Unsupported)
+
     def test_size_limit_uses_discovered_extent(self):
         context = dict(input=str(self.image), entry_rva=self.rva)
         diagnostic = dict(self.diagnostic, code="LIFT_FUNCTION_SIZE", context=context)

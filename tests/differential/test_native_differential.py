@@ -3,6 +3,7 @@ import argparse
 import os
 from pathlib import Path
 import re
+import signal
 import struct
 import subprocess
 import sys
@@ -37,6 +38,23 @@ class NativeDifferentialTests(unittest.TestCase):
                         with self.subTest(config=config, variant=variant, args=args):
                             result = subprocess.run([exe, *args], capture_output=True, timeout=10)
                             self.assertEqual((result.returncode, result.stdout, result.stderr), (status, stdout, b""))
+
+    def test_continuation_faults(self):
+        fixture = "functions/continuations"
+        with tempfile.TemporaryDirectory(dir=self.tmp) as tmp:
+            output = Path(tmp).resolve()
+            for config in diff.CONFIGS:
+                # The ordinary reads must match Wine in these exact native binaries.
+                self.assertEqual(diff.run(config, fixture, output=output, forge=self.forge), 0)
+                for variant in diff.VARIANTS:
+                    work = output / config / fixture / variant
+                    exe = work / "native/bin/differential_decimal_pairs"
+                    for mode in ("3", "4"):
+                        with self.subTest(config=config, variant=variant, mode=mode):
+                            with self.assertRaises(diff.native.ExecutionFailure) as raised:
+                                diff.native.execute(exe, ["0", mode], output)
+                            self.assertEqual((raised.exception.outcome, raised.exception.status),
+                                             ("signaled", -signal.SIGTRAP))
 
     def test_mutable_state_in_a_fresh_process(self):
         fixture = "globals/counters"
@@ -179,12 +197,15 @@ class NativeDifferentialTests(unittest.TestCase):
         def truncate_right(source):
             # Change the incoming RDX bits once. The weighted term already uses
             # only EDX, so the only behavior affected is the signed comparison.
+            # SSA argument numbers are local to each function in the module.
+            start = source.index(" @forge_lifted(")
+            end = source.index("\n}", start)
             pattern = r"^(  store i64 )%1(, ptr %\w+, align \d+)$"
             changed, count = re.subn(pattern, r"  %low = trunc i64 %1 to i32\n"
-                                     r"  %right = sext i32 %low to i64\n\1%right\2", source,
+                                     r"  %right = sext i32 %low to i64\n\1%right\2", source[start:end],
                                      flags=re.MULTILINE)
             self.assertEqual(count, 1, "expected the wrapper to initialize RDX once")
-            return changed
+            return source[:start] + changed + source[end:]
 
         report = self.modified_ir(WEIGHTED, "truncated-right", "stdout_mismatch", truncate_right)
         self.assertEqual(report["stages"]["native_execution"], "passed")

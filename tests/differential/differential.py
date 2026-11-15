@@ -97,14 +97,18 @@ def resolve_export(inspection, analysis, name):
     if len(exports) != 1 or "forwarder" in exports[0]:
         raise ValueError(f"expected one local export named {name}, found {exports!r}")
     rva = int(exports[0]["rva"], 16)
+    return resolve_function(module, analysis, rva, f"export {name}")
+
+
+def resolve_function(module, analysis, rva, description):
     rows = [row for row in analysis["functions"] if int(row["start_rva"], 16) == rva]
     if not rows:
-        raise ValueError(f"export {name} at {rva:#x} has no discovered function range")
+        raise ValueError(f"{description} at {rva:#x} has no discovered function range")
     if len(rows) != 1 or "overlap_diagnostic" in rows[0]:
-        raise ValueError(f"ambiguous or invalid function range for {name} at {rva:#x}")
+        raise ValueError(f"ambiguous or invalid function range for {description} at {rva:#x}")
     if (rows[0]["liftable"] is not True or rows[0]["status"] != "valid"
             or rows[0].get("chained_fragment") or "unwind_version" in rows[0]):
-        raise ValueError(f"export {name} at {rva:#x} is ineligible for lifting: {rows[0]}")
+        raise ValueError(f"{description} at {rva:#x} is ineligible for lifting: {rows[0]}")
     end = int(field(rows[0], "end_rva", str), 16)
     if not 0 <= rva < end <= 0xffffffff:
         raise ValueError("invalid discovered function extent")
@@ -156,8 +160,12 @@ def lift(forge, image, case, selected, ir):
         return
     if status != 1 or os.path.lexists(ir):
         raise ValueError(f"unexpected forge lift status {status} or output after failure ({log.name})")
+    def resolve_callee(rva):
+        module = read_json(work / "inspect.json")["modules"][0]
+        return resolve_function(module, read_json(work / "analysis.json"), rva, "callee")
+
     try:
-        diagnostic = parse_diagnostic(log.read_bytes(), image, selected, ir)
+        diagnostic = parse_diagnostic(log.read_bytes(), image, selected, ir, resolve_callee)
     except ValueError as error:
         raise ValueError(f"invalid forge lift diagnostic ({log.name}): {error}") from error
     detail = f"{diagnostic['stage']}/{diagnostic['code']}: {diagnostic['message']} ({log.name})"

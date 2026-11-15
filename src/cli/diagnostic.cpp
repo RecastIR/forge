@@ -31,6 +31,10 @@ namespace forge {
             fields["block_rva"] = hex(*context.blockRva);
         }
 
+        if (context.functionRva) {
+            fields["function_rva"] = hex(*context.functionRva);
+        }
+
         if (context.branchTarget) {
             fields["branch_target"] = *context.branchTarget;
         }

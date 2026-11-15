@@ -105,7 +105,7 @@ def leaf_instructions(output, symbol):
     return instructions
 
 
-def reachable_leaf(instructions):
+def reachable_leaf(instructions, *, call_entries=()):
     # This is a fixture-shape oracle over objdump output, independent of Forge's decoder.
     conditions = {"jo", "jno", "jb", "jae", "je", "jne", "jbe", "ja", "js", "jns",
                   "jp", "jnp", "jl", "jge", "jle", "jg"}
@@ -131,7 +131,11 @@ def reachable_leaf(instructions):
             if target is None or int(target[1], 16) not in instructions:
                 raise ValueError(f"invalid direct target at {address:x}: {text}")
             successors.append(int(target[1], 16))
-        elif opcode not in ordinary:
+        elif opcode == "call" and call_entries:
+            match = re.fullmatch(r"([0-9a-f]+)(?: <[^>]+>)?", operands)
+            if not match or int(match[1], 16) not in call_entries:
+                raise ValueError(f"unexpected direct call target at {address:x}: {text}")
+        elif opcode not in ordinary and not (call_entries and opcode == "adc"):
             raise ValueError(f"unsupported instruction or transfer at {address:x}: {text}")
         if opcode != "jmp":
             if address not in following:
@@ -549,7 +553,84 @@ def check_padding(path):
         raise ValueError(f"missing required virtual-only section layout for {list(expected)}")
 
 
+# Numeric CALL targets must identify the linked helper entry even if the
+# disassembler's printed symbol happens to look right.
+CALL_GRAPHS = {
+    "call_continuations": {"call_continuations": ["read_continuation"] * 9 + ["return_continuation"],
+                           "read_continuation": [], "return_continuation": []},
+    "call_recursive": {"call_recursive": ["descend"], "descend": ["descend", "combine"], "combine": []},
+    "call_mutual": {"call_mutual": ["even_step"], "even_step": ["odd_step"], "odd_step": ["even_step"]},
+    "call_sequence": {"call_sequence": ["pair", "increment", "pair"], "pair": ["increment", "increment"],
+                      "increment": []},
+    "call_flags": {"call_flags": ["add_carry", "inspect_return"], "add_carry": [], "inspect_return": []},
+}
+
+
+def check_call_group(name, listing, pe_report, config):
+    expected = CALL_GRAPHS[name]
+    bodies = {symbol: leaf_instructions(listing, symbol) for symbol in expected}
+    entries = {next(iter(body)): symbol for symbol, body in bodies.items()}
+    ranges = [(int(start, 16), int(end, 16)) for start, end in re.findall(
+        r"^ [0-9a-f]+:[ \t]+([0-9a-f]+) ([0-9a-f]+) [0-9a-f]+$", pe_report, re.MULTILINE)]
+    for symbol, body in bodies.items():
+        start = next(iter(body))
+        containing = [(a, b) for a, b in ranges if a <= start < b]
+        if len(containing) != 1 or containing[0][0] != start:
+            raise ValueError(f"{symbol} needs a unique linked unwind entry")
+        graph = reachable_leaf(body, call_entries=entries)
+        if max(graph) >= containing[0][1]:
+            raise ValueError(f"{symbol} has reachable code outside its unwind range")
+        calls = {a: entries[int(body[a].split()[1], 16)] for a in graph if body[a].startswith("call ")}
+        if sorted(calls.values()) != sorted(expected[symbol]):
+            raise ValueError(f"{symbol} expected calls to {expected[symbol]}, found {list(calls.values())}")
+        live = [body[a] for a in sorted(graph)]
+        if name == "call_continuations" and any("[rip" in text for text in live):
+            raise ValueError("continuation bytes must be selected without a RIP-relative address")
+        if symbol == "call_continuations":
+            # R9D's MOV imm32 has a two-byte opcode followed by the site-specific bytes.
+            after = dict(zip(body, list(body)[1:]))
+            markers = {body[after[a]] for a, target in calls.items() if target == "read_continuation"}
+            if markers != {f"mov r9d,{0x1200 + i:#x}" for i in range(9)}:
+                raise ValueError("all nine continuation immediates must be distinguishable")
+        if symbol == "read_continuation" and (live[0] != "mov r8,QWORD PTR [rsp]" or
+                not {"movzx eax,BYTE PTR [r8+0x2]", "movzx eax,WORD PTR [r8+0x2]"} <= set(live)):
+            raise ValueError("helper must dereference its saved return VA at both widths")
+        if symbol == "return_continuation" and live != ["mov rax,QWORD PTR [rsp]", "ret"]:
+            raise ValueError("helper must return its saved continuation VA in RAX")
+        if symbol == "call_sequence":
+            loops, _ = natural_loops(graph)
+            if not any(target == "increment" and any(a in loop for loop in loops.values())
+                       for a, target in calls.items()):
+                raise ValueError("increment must be called from inside a reachable loop")
+        if symbol == "add_carry" and live != ["push rbx", "mov rbx,rdx", "mov rax,rcx", "adc rax,rbx",
+                                              "pop rbx", "ret"]:
+            raise ValueError("helper must consume carry and save and restore its incoming RBX")
+        if symbol == "inspect_return":
+            parent = bodies["call_flags"]
+            site, = (a for a, text in parent.items() if text.startswith("call ")
+                     and int(text.split()[1], 16) == start)
+            resume = min(a for a in parent if a > site)
+            if (len(live) != 5 or live[0] != "mov rax,QWORD PTR [rsp]"
+                    or not re.fullmatch(rf"lea rdx,\[rip[^]]*\] # {resume:x}(?: <[^>]+>)?", live[1])
+                    or live[2:] != ["sub rax,rdx", "add rax,rcx", "ret"]):
+                raise ValueError("nested return slot must be compared with the caller's actual continuation")
+        if symbol == "combine":
+            base, slots = ("rbp", {0x30, 0x38}) if config == "debug" else ("rsp", {0x28, 0x30})
+            if not slots <= frame_slots(live, "mov", "DWORD", base):
+                raise ValueError("combine must read the fifth and sixth incoming arguments")
+        if symbol == "descend" and not {0x20, 0x28} <= frame_slots(live, "mov", "DWORD", "rsp", store=True):
+            raise ValueError("descend must write both outgoing stack arguments")
+
+
 def check_leaf(path, config="debug", pe_report=""):
+    if path.stem in CALL_GRAPHS:
+        listing = subprocess.check_output(["x86_64-w64-mingw32-objdump", "-d", "--no-show-raw-insn",
+                                           "-Mintel", path], text=True)
+        try:
+            check_call_group(path.stem, listing, pe_report, config)
+        except ValueError as error:
+            raise ValueError(f"{path}: {path.stem} instruction contract: {error}") from error
+        return
     witnesses = INTEGER_WITNESSES.get(path.stem)
     if (witnesses is None and path.stem != "cfg_nested_exits"
             and path.stem not in FRAME_LOCALS and path.stem not in IMAGE_LEAVES and path.stem not in GLOBAL_SYMBOLS):
