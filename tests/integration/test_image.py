@@ -8,7 +8,7 @@ import sys
 import unittest
 
 from pe_layout import Layout
-from test_stack import BASE, FORGE, GuestExecution, IMAGE, MASK, initial_slots, run
+from test_stack import BASE, FORGE, GuestExecution, IMAGE, MASK, RSP, initial_slots, run
 
 
 class ImageTests(GuestExecution):
@@ -133,6 +133,95 @@ class ImageTests(GuestExecution):
             data[pos+128:pos+134] = b"x.dll\0"
         self.reject("direct32", "loader-written", self.edit("iat-descriptor", descriptor))
 
+    def test_guard_slots(self):
+        addr = self.va(".literal")
+        # A load config in unused raw storage points at a slot without a base relocation.
+        def config(field, size, va):
+            def edit(data, layout, headers):
+                h = headers[".literal"]
+                pos, rva = layout.u32(h+20)+64, layout.u32(h+12)+64
+                struct.pack_into("<I", data, h+8, 256)
+                struct.pack_into("<II", data, layout.directories+8*10, rva, 152)
+                struct.pack_into("<I", data, pos, size)
+                struct.pack_into("<Q", data, pos+field, va)
+            return self.edit("guard", edit)
+
+        for field in (112, 120):
+            image = config(field, field+8, addr)
+            self.reject("direct32", "loader-written", image)
+            for exe in self.variants("load32", image=image):
+                self.trap(exe, [(addr, 0)])
+                self.trap(exe, [(addr+7, 0)])
+                self.expect(exe, addr+16, 0, 0)
+            # Put the slot after the fixture's unrelated relocation so both
+            # immediately neighboring doublewords are independently readable.
+            for exe in self.variants("load32", image=config(field, field+8, addr+24)):
+                self.expect(exe, addr+20, 0, 0)
+                self.trap(exe, [(addr+21, 0)])
+                self.expect(exe, addr+32, 0, 0)
+            for exe in self.variants("direct32", image=config(field, field+4, addr)):
+                self.expect(exe, 0, 0, 0x9a785634)
+        self.reject("direct32", "guard slot", config(112, 120, addr-1), "INVALID_PE")
+        self.reject("direct32", "guard slot", config(120, 128, addr+252), "INVALID_PE")
+        for exe in self.variants("direct32", image=config(112, 120, 0)):
+            self.expect(exe, 0, 0, 0x9a785634)
+
+    def test_import_thunk_virtual_extent(self):
+        def descriptor(delayed, terminator, extent):
+            def edit(data, layout, headers):
+                h = headers[".literal"]
+                raw, pos, rva = layout.u32(h+16), layout.u32(h+20), layout.u32(h+12)
+                stub = raw + terminator - 8
+                struct.pack_into("<I", data, h+8, raw+extent)
+                if delayed:
+                    struct.pack_into("<II", data, layout.directories+8*13, rva+32, 64)
+                    struct.pack_into("<8I", data, pos+32, 1, rva+128, rva+192, rva+160, rva+stub, 0, 0, 0)
+                else:
+                    struct.pack_into("<II", data, layout.directories+8, rva+32, 40)
+                    struct.pack_into("<5I", data, pos+32, rva+stub, 0, 0, rva+128, rva+160)
+                data[pos+128:pos+134] = b"x.dll\0"
+                struct.pack_into("<Q", data, pos+stub, (1 << 63) | 1)
+                struct.pack_into("<Q", data, pos+160, (1 << 63) | 1)
+            return self.edit("thunks", edit)
+
+        for delayed in (False, True):
+            for offset in (-8, -4, 0):
+                image = descriptor(delayed, offset, 8)
+                module = json.loads(run(FORGE, "inspect", image, "--format", "json"))["modules"][0]
+                self.assertEqual(module["imports"][0]["symbols"], [{"ordinal": 1}])
+                for exe in self.variants("direct32", image=image):
+                    self.expect(exe, 0, 0, 0x9a785634)
+            image = descriptor(delayed, 0, 7)
+            inspect = subprocess.run([FORGE, "inspect", image], capture_output=True, timeout=10)
+            self.assertNotEqual(inspect.returncode, 0)
+            self.assertIn(b"virtual section", inspect.stderr)
+            self.reject("direct32", "virtual section", image, "INVALID_PE")
+
+    def test_stack_origins(self):
+        addr = self.va(".literal")
+        for name in ("mixed_join", "loop_pointer"):
+            for exe in self.variants(name):
+                self.expect(exe, 0, 19, 19)
+                self.expect(exe, addr, 19, 0x78563412)
+        for name in ("new_rsp", "lost_origin"):
+            for exe in self.variants(name):
+                self.expect(exe, addr, 0, 0x78563412)
+        for exe in self.variants("different_offsets"):
+            self.expect(exe, 0, 17, 17)
+            self.expect(exe, 1, 17, 1)
+        for exe in self.variants("stack_fault"):
+            self.trap(exe, [(0, 0)])
+
+    def test_provenance_keeps_runtime_bounds(self):
+        addr = self.va(".literal")
+        def distance(data, layout, headers):
+            pos = layout.file_offset(self.exports["escape_stack"]) + 2
+            self.assertEqual(struct.unpack_from("<Q", data, pos)[0], 0x123456789abcdef0)
+            struct.pack_into("<Q", data, pos, addr - RSP)
+        for exe in self.variants("escape_stack", image=self.edit("distance", distance)):
+            self.expect(exe, addr, 0, 0x78563412)
+            self.trap(exe, [(addr, 1)])
+
     def test_mapping_limits_and_permissions(self):
         def large(data, layout, headers):
             # Move the last executable pool into an empty RVA range and retarget
@@ -152,7 +241,12 @@ class ImageTests(GuestExecution):
             header = headers[".literal"]
             struct.pack_into("<II", data, header+8, 32*1024*1024+1, 0x100000)
             struct.pack_into("<I", data, layout.opt+56, 0x2200000)
-        self.reject("load32", "exceeds module limit", self.edit("budget", budget))
+        large = self.edit("budget", budget)
+        self.reject("load32", "exceeds module limit", large)
+        self.reject("different_offsets", "exceeds module limit", large)
+        for exe in self.variants("frame_join", image=large):
+            self.expect(exe, 0, 71, 71)
+            self.expect(exe, 1, 72, 72)
         def aliases(data, layout, headers):
             struct.pack_into("<I", data, headers[".pool"]+20, layout.u32(headers[".literal"]+20))
         self.reject("load32", "overlaps another section", self.edit("raw-overlap", aliases), "INVALID_PE")
@@ -168,7 +262,9 @@ class ImageTests(GuestExecution):
         self.reject("direct32", "overflow", self.edit("overflow", wrap), "INVALID_PE")
         def collision(data, layout, headers):
             struct.pack_into("<Q", data, layout.opt+24, BASE-layout.u32(headers[".literal"]+12))
-        self.reject("load32", "overlaps the guest stack", self.edit("collision", collision))
+        image = self.edit("collision", collision)
+        for leaf in ("load32", "implicit_push", "implicit_pop", "implicit_leave"):
+            self.reject(leaf, "overlaps the guest stack", image)
 
     def test_overrides(self):
         for prefix in (0x64, 0x67):

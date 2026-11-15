@@ -39,6 +39,13 @@ foreach(i RANGE 0 ${last})
   string(JSON binary GET "${catalog}" ${i} binary)
   get_filename_component(name "${binary}" NAME_WE)
   add_executable("fixture_${name}" "${suite}/${source}")
+  if(name MATCHES "^(branch_locals|count_locals)$")
+    target_sources("fixture_${name}" PRIVATE frames/framepad.S)
+    # GNU as marks BSS writable. Give the linked virtual-only section read permission.
+    add_custom_command(TARGET "fixture_${name}" POST_BUILD
+      COMMAND "${CMAKE_OBJCOPY}" --set-section-flags ".frpad=alloc,readonly" "$<TARGET_FILE:fixture_${name}>"
+      VERBATIM)
+  endif()
   if(source STREQUAL "fixtures/arithmetic/integer_driver.c")
     if(name STREQUAL "image_widths")
       target_sources("fixture_${name}" PRIVATE image/image_widths.S)

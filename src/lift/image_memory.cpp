@@ -111,13 +111,15 @@ namespace forge::x86 {
         }
     }
 
-    void ImageMemory::access(const Step &step, std::optional<uint64_t> va, unsigned width,
-                             bool write) {
-        const auto base = source.module().imageBase;
-
+    void ImageMemory::checkStackMapping(const Step &step) const {
         if (overlapsStack) {
             step.reject(FailureCode::ImageMemory, "PE image overlaps the guest stack");
         }
+    }
+
+    void ImageMemory::access(const Step &step, std::optional<uint64_t> va, unsigned width,
+                             bool write) {
+        const auto base = source.module().imageBase;
 
         if (!va) {
             if (!write && !indirectRead) {

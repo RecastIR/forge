@@ -63,8 +63,9 @@ namespace forge::x86 {
         return {ir.CreateAlignedLoad(type, data, Align(1)), marks};
     }
 
-    StoredValue GuestMemory::checkedLoad(Value *address, unsigned width, bool allowOpaque) {
-        if (!imageResolver) {
+    StoredValue GuestMemory::checkedLoad(Value *address, unsigned width, bool allowOpaque,
+                                         bool stackOnly) {
+        if (stackOnly || !imageResolver) {
             return loadAt(checkedOffset(address, width), width, allowOpaque);
         }
 
@@ -100,12 +101,12 @@ namespace forge::x86 {
         return {bits, marks};
     }
 
-    Value *GuestMemory::load(Value *address, unsigned width) {
-        return checkedLoad(address, width, false).bits;
+    Value *GuestMemory::load(Value *address, unsigned width, bool stackOnly) {
+        return checkedLoad(address, width, false, stackOnly).bits;
     }
 
-    StoredValue GuestMemory::loadSaved(Value *address, unsigned width) {
-        return checkedLoad(address, width, true);
+    StoredValue GuestMemory::loadSaved(Value *address, unsigned width, bool stackOnly) {
+        return checkedLoad(address, width, true, stackOnly);
     }
 
     Value *GuestMemory::loadWritable(Value *address, unsigned width) {

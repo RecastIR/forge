@@ -259,11 +259,11 @@ RIP-relative operands use the preferred PE image base plus the **next** instruct
 
 For a readable, non-writable, non-discardable section, the mapped extent is its virtual size. The initialized prefix comes from its raw file offset, up to the smaller of raw and virtual size. The remaining virtual bytes read as zero. A little-endian unaligned read can straddle the prefix and zero tail within one section. Alignment padding after the virtual extent is unmapped. [PE section layout](https://learn.microsoft.com/en-us/windows/win32/debug/pe-format#section-table-section-headers)
 
-LEA alone embeds no bytes. A fixed load embeds its requested bytes. For a computed load, Forge includes eligible data sections and any eligible executable section identified by a reachable RIP-relative LEA. Whole executable sections are limited to 8 MiB each. The module budget is 32 MiB of distinct mapped extent, including zero tails. Exceeding a budget fails lifting. These are limits of the current embedding implementation.
+LEA alone embeds no bytes. A fixed load embeds its requested bytes. A load proven to use the invocation stack uses its checked stack storage and consumes no image budget. For a computed load with unresolved origin, Forge includes eligible data sections and any eligible executable section identified by a reachable RIP-relative LEA. Whole executable sections are limited to 8 MiB each. The module budget is 32 MiB of distinct mapped extent, including zero tails. Exceeding a budget fails lifting. These are limits of the current embedding implementation.
 
 The generated module owns the selected bytes in private LLVM constants. Each invocation shares these constants and allocates its own stack. Guest VAs remain integers until a whole access fits a readable interval. A checked offset then addresses native storage. An image store, cross-boundary read, or unmapped read fails. A fixed violation produces a lift diagnostic, and a value-dependent violation traps on the executed path.
 
-Forge uses preferred-base addresses, applies no base relocations and rejects reads that touch a base-relocation field, import address slot, delay-import handle or TLS index. Other bytes in that section remain available. Loader services, writable globals, external modules, and arbitrary process memory are outside this model.
+Forge uses preferred-base addresses, applies no base relocations and rejects reads that touch a base-relocation field, import address slot, delay-import handle, TLS index, or check/dispatch pointer slot identified by Control Flow Guard metadata. Other bytes in that section remain available. Loader services, writable globals, external modules, and arbitrary process memory are outside this model.
 
 ### Lifting interface and targets
 

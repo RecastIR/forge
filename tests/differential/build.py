@@ -6,6 +6,7 @@ import os
 from pathlib import Path
 import re
 import shutil
+import struct
 import subprocess
 import sys
 import tempfile
@@ -272,6 +273,39 @@ def check_frame(name, instructions, config):
 IMAGE_LEAVES = {"lookup", "image_direct", "image_spill", "image_loop", "image_widths"}
 
 
+def indexed_lookup(instructions, graph, loads):
+    # The pinned compiler emits the LEA and read in one basic block. Release
+    # masks the index between them; Debug scales it before taking the base.
+    incoming = {addr: 0 for addr in graph}
+    for edges in graph.values():
+        for target in edges:
+            incoming[target] += 1
+    for addr in graph:
+        match = re.match(r"lea (r\w+),\[rip", instructions[addr])
+        if not match:
+            continue
+        base = match[1]
+        mask = None
+        while len(graph[addr]) == 1:
+            addr = graph[addr][0]
+            if incoming[addr] != 1:
+                break
+            line = instructions[addr]
+            if line in loads and "DWORD PTR [" in line:
+                address = line.partition("[")[2].partition("]")[0]
+                terms = [term.removesuffix("*1") for term in address.split("+")]
+                if len(terms) == 2 and base in terms:
+                    index = terms[1 - terms.index(base)].removesuffix("*4")
+                    if (index != base and re.fullmatch(r"r(?:[abcd]x|[sb]p|[sd]i|[89]|1[0-5])", index)
+                            and mask in (None, index, "e" + index[1:], index + "d")):
+                        return True
+            change = re.fullmatch(r"and (\w+),0x7", line)
+            if not change or mask is not None:
+                break
+            mask = change[1]
+    return False
+
+
 def check_image_leaf(name, instructions, sections, config):
     graph = reachable_leaf(instructions)
     body = [instructions[address] for address in sorted(graph)]
@@ -291,11 +325,8 @@ def check_image_leaf(name, instructions, sections, config):
              and not re.search(r"\[(rsp|rbp)", line)]
     if not loads:
         raise ValueError("missing reachable image load")
-    if name == "lookup":
-        bases = {line.split()[1].split(",")[0] for line in references if line.startswith("lea ")}
-        indexed = [line.partition("[")[2].partition("]")[0] for line in loads if "DWORD PTR [" in line]
-        if not any("+" in operand and bases.intersection(re.findall(r"\br\w+\b", operand)) for operand in indexed):
-            raise ValueError("missing indexed doubleword lookup through the table base")
+    if name == "lookup" and not indexed_lookup(instructions, graph, loads):
+        raise ValueError("missing indexed doubleword lookup through the live table base")
     if name == "image_direct" and config == "release" and not any(line in loads for line in references):
         raise ValueError("missing direct RIP-relative load")
     if name == "image_loop" and not any(instructions[a] in loads for loop in natural_loops(graph)[0].values() for a in loop):
@@ -316,6 +347,24 @@ def check_image_leaf(name, instructions, sections, config):
             raise ValueError("missing stack spill and reload of the table base")
 
 
+def check_frame_padding(path):
+    # BFD's -h shows virtual size even for an invalid nonzero SizeOfRawData
+    # with a null file offset. Check the linked section header itself.
+    data = path.read_bytes()
+    pe, = struct.unpack_from("<I", data, 60)
+    count, = struct.unpack_from("<H", data, pe + 6)
+    optional_size, = struct.unpack_from("<H", data, pe + 20)
+    table = pe + 24 + optional_size
+    for pos in range(table, table + 40 * count, 40):
+        if data[pos:pos+8].rstrip(b"\0") == b".frpad":
+            extent, _, raw, offset = struct.unpack_from("<4I", data, pos + 8)
+            flags, = struct.unpack_from("<I", data, pos + 36)
+            # IMAGE_SCN_MEM_READ | IMAGE_SCN_CNT_UNINITIALIZED_DATA
+            if (extent, raw, offset, flags) == (33 * 1024 * 1024, 0, 0, 0x40000080):
+                return
+    raise ValueError("missing 33 MiB read-only zero-fill section")
+
+
 def check_leaf(path, config="debug"):
     witnesses = INTEGER_WITNESSES.get(path.stem)
     if (witnesses is None and path.stem != "cfg_nested_exits"
@@ -328,6 +377,8 @@ def check_leaf(path, config="debug"):
         if path.stem in IMAGE_LEAVES:
             sections = subprocess.check_output(["x86_64-w64-mingw32-objdump", "-h", path], text=True)
             check_image_leaf(path.stem, instructions, sections, config)
+        if path.stem in ("branch_locals", "count_locals"):
+            check_frame_padding(path)
         if path.stem in FRAME_LOCALS:
             check_frame(path.stem, instructions, config)
         if path.stem == "cfg_nested_exits":

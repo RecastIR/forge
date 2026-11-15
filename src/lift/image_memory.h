@@ -14,6 +14,7 @@ namespace forge::x86 {
       public:
         explicit ImageMemory(const ParsedImage &image);
 
+        void checkStackMapping(const Step &step) const;
         void addressTaken(const Step &step, uint64_t va);
         void access(const Step &step, std::optional<uint64_t> va, unsigned width, bool write);
         llvm::Function *emitResolver(llvm::Module &module);

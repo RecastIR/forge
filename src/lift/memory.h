@@ -23,8 +23,8 @@ namespace forge::x86 {
         explicit GuestMemory(llvm::IRBuilder<> &builder) : ir(builder) {}
 
         void allocate(llvm::Function *resolver);
-        llvm::Value *load(llvm::Value *address, unsigned width);
-        StoredValue loadSaved(llvm::Value *address, unsigned width);
+        llvm::Value *load(llvm::Value *address, unsigned width, bool stackOnly);
+        StoredValue loadSaved(llvm::Value *address, unsigned width, bool stackOnly);
         llvm::Value *loadWritable(llvm::Value *address, unsigned width);
         StoredValue loadStackSaved(llvm::Value *address, unsigned width);
         void store(llvm::Value *address, StoredValue value);
@@ -39,7 +39,8 @@ namespace forge::x86 {
 
         llvm::Function *imageResolver = nullptr;
 
-        StoredValue checkedLoad(llvm::Value *address, unsigned width, bool allowOpaque);
+        StoredValue checkedLoad(llvm::Value *address, unsigned width, bool allowOpaque,
+                                bool stackOnly);
         llvm::Value *checkedOffset(llvm::Value *address, unsigned width);
         StoredValue loadAt(llvm::Value *offset, unsigned width, bool allowOpaque);
         void storeAt(llvm::Value *offset, StoredValue value);

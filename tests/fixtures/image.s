@@ -108,3 +108,111 @@ code_data:
 
 .section .mutable,"dw"
     .quad 0x1234
+
+.text
+probe frame_join
+    pushq %rbp
+    movq %rsp, %rbp
+    subq $16, %rsp
+    movq %rdx, -8(%rbp)
+    testq %rcx, %rcx
+    je 1f
+    movq %rbp, %r8
+    subq $8, %r8
+    jmp 2f
+1:
+    movl $2, %eax
+    leaq (%rsp,%rax,4), %r8
+2:
+    movq (%r8), %rax
+    leave
+    ret
+    .seh_endproc
+
+probe mixed_join
+    movq %rdx, 8(%rsp)
+    leaq 8(%rsp), %r8
+    testq %rcx, %rcx
+    je 1f
+    movq %rcx, %r8
+1:
+    movl (%r8), %eax
+    ret
+    .seh_endproc
+
+probe loop_pointer
+    movq %rdx, 8(%rsp)
+    leaq 8(%rsp), %r8
+1:
+    movl (%r8), %eax
+    testq %rcx, %rcx
+    je 2f
+    movq %rcx, %r8
+    xorl %ecx, %ecx
+    jmp 1b
+2:
+    ret
+    .seh_endproc
+
+probe new_rsp
+    movq %rsp, %r9
+    movq %rcx, %rsp
+    movl (%rsp), %eax
+    movq %r9, %rsp
+    ret
+    .seh_endproc
+
+probe lost_origin
+    movq %rsp, %r8
+    movl %edx, %r8d
+    leaq literal(%rip), %rax
+    addq %r8, %rax
+    movl (%rax), %eax
+    ret
+    .seh_endproc
+
+probe stack_fault
+    movq %rsp, %r8
+    movq (%r8), %rax
+    ret
+    .seh_endproc
+
+probe implicit_push
+    pushq %rsp
+    popq %rax
+    ret
+    .seh_endproc
+
+probe implicit_pop
+    popq %rax
+    ret
+    .seh_endproc
+
+probe implicit_leave
+    leave
+    ret
+    .seh_endproc
+
+probe different_offsets
+    movq %rdx, 8(%rsp)
+    movq %rcx, 16(%rsp)
+    leaq 8(%rsp), %r8
+    testq %rcx, %rcx
+    je 1f
+    addq $8, %r8
+1:
+    movq (%r8), %rax
+    ret
+    .seh_endproc
+
+probe escape_stack
+    # The test supplies the distance from entry RSP to an actual PE constant.
+    movabsq $0x123456789abcdef0, %r8
+    addq %rsp, %r8
+    movl (%rcx), %eax
+    testq %rdx, %rdx
+    je 1f
+    movl (%r8), %eax
+1:
+    ret
+    .seh_endproc
