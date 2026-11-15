@@ -602,10 +602,10 @@ namespace forge {
         const auto entry = x86::validateEntry(analysis, request.startRva);
         const auto guestBase = x86::validateGuestBase(entry, request.guestLoadBase);
         const x86::RecoveredFunctionGroup group(entry);
+        const auto prepared = x86::analyzeGroup(group, guestBase, request.mode);
         auto stage = FailureCode::LiftingInternal;
 
         try {
-            const auto prepared = x86::analyzeGroup(group, guestBase, request.mode);
             auto module = emitGroup(group, prepared, request.mode, context);
             stage = FailureCode::VerificationInternal;
             verifyLiftedIR(*module, analysis.module().path, group.root());

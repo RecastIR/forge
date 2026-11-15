@@ -419,7 +419,10 @@ namespace forge::x86 {
         uint64_t immutableExtent = 0;
         uint64_t writableExtent = 0;
 
-        for (const auto &span : selectedSpans()) {
+        const auto spans = selectedSpans();
+        plan.backings.reserve(spans.size());
+
+        for (const auto &span : spans) {
             const bool writable = span.section->writableData();
             const uint64_t length = span.range.end - span.range.begin;
             auto reserve = [&](uint64_t &used, uint64_t amount, uint64_t limit, StringRef label) {

@@ -567,7 +567,7 @@ namespace forge::x86 {
     } // namespace
 
     GroupAnalysis analyzeGroup(const RecoveredFunctionGroup &group, uint64_t guestBase,
-                               EntryMode mode) {
+                               EntryMode mode) try {
         GroupAnalysis result;
         ImageMemory image(group.image(), guestBase);
         const InstructionOperands operands(group.registers(), guestBase);
@@ -607,5 +607,12 @@ namespace forge::x86 {
 
         result.image = std::move(image).finish();
         return result;
+    } catch (InspectionError &failure) {
+        group.annotateFailure(failure);
+        throw;
+    } catch (const std::exception &error) {
+        InspectionError failure(error.what(), FailureCode::LiftingInternal);
+        group.annotateFailure(failure);
+        throw failure;
     }
 } // namespace forge::x86

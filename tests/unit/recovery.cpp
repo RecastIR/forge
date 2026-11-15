@@ -1,16 +1,37 @@
 #include "lift/recovery.h"
 #include "analysis/analysis.h"
 #include "lift/group_analysis.h"
+#include "lift/memory.h"
 
 #include "llvm/ADT/STLExtras.h"
 #include "llvm/ADT/StringExtras.h"
 #include "llvm/Support/raw_ostream.h"
 
 #include <array>
+#include <type_traits>
+#include <utility>
 
 namespace {
     using namespace forge;
     using x86::RecoveredFunctionGroup;
+    using x86::ValidatedEntry;
+
+    static_assert(!std::is_aggregate_v<ValidatedEntry> &&
+                  !std::is_constructible_v<ValidatedEntry, const AnalyzedImage &, uint32_t,
+                                           MappedRange, RelocationIndex &&>);
+    static_assert(!std::is_copy_constructible_v<ValidatedEntry> &&
+                  !std::is_move_constructible_v<ValidatedEntry>);
+    static_assert(std::is_const_v<decltype(ValidatedEntry::rva)> &&
+                  std::is_const_v<decltype(ValidatedEntry::code)> &&
+                  std::is_const_v<decltype(ValidatedEntry::relocations)>);
+
+    template <class Group>
+    constexpr bool borrowsFromTemporary = requires { std::declval<Group &&>().functions(); } ||
+                                          requires { std::declval<Group &&>().function(0); } ||
+                                          requires { std::declval<Group &&>().registers(); };
+
+    static_assert(!borrowsFromTemporary<RecoveredFunctionGroup> &&
+                  !borrowsFromTemporary<const RecoveredFunctionGroup>);
 
     void check(bool condition, const char *message) {
         if (!condition) {
@@ -166,6 +187,36 @@ namespace {
                   "bad call lost its owning guest function");
         }
     }
+
+    void checkAnalysisFailure(const AnalyzedImage &analysis) {
+        const auto root = exportedRva(analysis, "call_bad_teardown");
+        const auto callee = exportedRva(analysis, "bad_teardown");
+        const auto entry = x86::validateEntry(analysis, root);
+        const RecoveredFunctionGroup group(entry);
+
+        // Placing .text on the guest stack rejects the first PUSH in the lower-RVA callee.
+        const auto requestedBase = x86::GuestMemory::base - entry.code.section.rva;
+        const auto base = x86::validateGuestBase(entry, requestedBase);
+        const auto instruction = analysis.image().mapRva(callee, 1);
+
+        try {
+            x86::analyzeGroup(group, base, EntryMode::WindowsX64I64Pair);
+            throw std::runtime_error("analysis accepted overlapping guest image and stack");
+        } catch (const InspectionError &error) {
+            const auto &location = error.context;
+            check(error.kind == FailureCode::ImageMemory &&
+                      llvm::StringRef(error.what()).contains("PE image overlaps the guest stack"),
+                  "standalone analysis changed the image overlap diagnostic");
+            check(location.input == analysis.module().path && location.entryRva == root &&
+                      location.endRva == root + entry.code.bytes.size(),
+                  "standalone analysis lost the requested entry range");
+            check(instruction && location.functionRva == callee && location.blockRva == callee &&
+                      location.instructionRva == callee &&
+                      location.fileOffset == instruction->fileOffset &&
+                      location.opcode == "PUSH64r" && location.bytes == "51",
+                  "standalone analysis lost the failing nested instruction");
+        }
+    }
 } // namespace
 
 int main(int argc, char **argv) try {
@@ -187,6 +238,7 @@ int main(int argc, char **argv) try {
     checkSelfRecursion(analysis);
     checkMutualRecursion(analysis);
     checkParallelEdges(analysis);
+    checkAnalysisFailure(analysis);
     const auto nested = exportedRva(analysis, "recovery_invalid_callee");
     checkFailure(analysis, exportedRva(analysis, "recovery_invalid_entry"), nested, nested + 1,
                  FailureCode::InvalidCallTarget);

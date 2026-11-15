@@ -13,10 +13,19 @@ namespace forge {
 
 namespace forge::x86 {
     struct ValidatedEntry {
+        ValidatedEntry(const ValidatedEntry &) = delete;
+        ValidatedEntry &operator=(const ValidatedEntry &) = delete;
+
         const AnalyzedImage &analysis;
-        uint32_t rva;
-        MappedRange code;
-        RelocationIndex relocations;
+        const uint32_t rva;
+        const MappedRange code;
+        const RelocationIndex relocations;
+
+      private:
+        // The range and relocation index must come from validation of the same snapshot.
+        friend ValidatedEntry validateEntry(const AnalyzedImage &analysis, uint32_t rva);
+        ValidatedEntry(const AnalyzedImage &analysis, uint32_t rva, MappedRange code,
+                       RelocationIndex &&relocations);
     };
 
     ValidatedEntry validateEntry(const AnalyzedImage &analysis, uint32_t rva);
@@ -57,11 +66,16 @@ namespace forge::x86 {
 
         const ParsedImage &image() const { return source; }
 
-        const llvm::MCRegisterInfo &registers() const;
+        const llvm::MCRegisterInfo &registers() const &;
+        const llvm::MCRegisterInfo &registers() const && = delete;
 
-        const std::map<uint32_t, RecoveredFunction> &functions() const { return recovered; }
+        const std::map<uint32_t, RecoveredFunction> &functions() const & { return recovered; }
 
-        const RecoveredFunction &function(uint32_t rva) const { return recovered.at(rva); }
+        const std::map<uint32_t, RecoveredFunction> &functions() const && = delete;
+
+        const RecoveredFunction &function(uint32_t rva) const & { return recovered.at(rva); }
+
+        const RecoveredFunction &function(uint32_t rva) const && = delete;
 
         void annotateFailure(InspectionError &failure) const;
 

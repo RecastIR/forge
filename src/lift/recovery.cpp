@@ -11,6 +11,7 @@
 #include "llvm/Support/TargetSelect.h"
 
 #include <mutex>
+#include <utility>
 
 namespace forge::x86 {
     using namespace llvm;
@@ -287,6 +288,10 @@ namespace forge::x86 {
         }
     } // namespace
 
+    ValidatedEntry::ValidatedEntry(const AnalyzedImage &analysis, uint32_t rva, MappedRange code,
+                                   RelocationIndex &&relocations)
+        : analysis(analysis), rva(rva), code(code), relocations(std::move(relocations)) {}
+
     ValidatedEntry validateEntry(const AnalyzedImage &analysis, uint32_t rva) {
         auto location = entryLocation(analysis.image(), rva);
         return withLocation(analysis.image(), location, FailureCode::EntryInternal, [&] {
@@ -401,7 +406,7 @@ namespace forge::x86 {
 
     RecoveredFunctionGroup::~RecoveredFunctionGroup() = default;
 
-    const MCRegisterInfo &RecoveredFunctionGroup::registers() const { return *decoder->regs; }
+    const MCRegisterInfo &RecoveredFunctionGroup::registers() const & { return *decoder->regs; }
 
     void RecoveredFunctionGroup::annotateFailure(InspectionError &failure) const {
         if (failure.context.instructionRva) {
