@@ -24,7 +24,7 @@ namespace forge {
     // Errors can outlive the file, MC decoder and IR that supplied their context.
     struct FailureContext {
         std::filesystem::path input, output;
-        std::optional<uint32_t> entryRva, endRva, instructionRva, blockRva;
+        std::optional<uint32_t> entryRva, endRva, instructionRva, blockRva, functionRva;
         std::optional<int64_t> branchTarget;
         std::optional<uint64_t> fileOffset;
         std::string opcode, bytes, architecture;

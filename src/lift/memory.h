@@ -22,13 +22,22 @@ namespace forge::x86 {
 
         explicit GuestMemory(llvm::IRBuilder<> &builder) : ir(builder) {}
 
-        void allocate(llvm::Function *resolver);
+        // Only the entry adapter initializes storage. Each body binds views
+        // into the same invocation without clearing bytes or origin marks.
+        void initialize(llvm::Value *stackBytes, llvm::Value *stackValidity);
+        void bind(llvm::Value *stackBytes, llvm::Value *stackValidity, llvm::Function *resolver);
         llvm::Value *load(llvm::Value *address, unsigned width, bool stackOnly);
         StoredValue loadSaved(llvm::Value *address, unsigned width, bool stackOnly);
         void store(llvm::Value *address, StoredValue value, bool stackOnly);
         void modify(llvm::Value *address, unsigned width, bool stackOnly,
                     llvm::function_ref<llvm::Value *(llvm::Value *)> operation);
         void checkReturn(llvm::Value *rsp);
+        // Keep the pushed entry RSP in the caller's native activation and use
+        // that same value for popReturn, even when guest code has changed RSP.
+        llvm::Value *pushReturn(llvm::Value *callRsp, llvm::Value *callerEntryRsp,
+                                uint64_t nextGuestVA);
+        llvm::Value *popReturn(llvm::Value *rsp, llvm::Value *expectedEntryRsp,
+                               uint64_t nextGuestVA);
         void guard(llvm::Value *condition);
 
       private:
@@ -50,6 +59,8 @@ namespace forge::x86 {
         Location resolve(llvm::Value *address, unsigned width, Access access, bool stackOnly,
                          llvm::Value *storeMarks = nullptr);
         llvm::Value *checkedOffset(llvm::Value *address, unsigned width);
+        void installReturn(llvm::Value *offset, uint64_t address);
+        void verifyReturn(llvm::Value *offset, uint64_t address);
         Location stackLocation(llvm::Value *offset, unsigned width, Access access,
                                llvm::Value *storeMarks = nullptr);
     };

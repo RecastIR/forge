@@ -395,3 +395,260 @@ probe implicit_extensions
     adcq $0, %rax
     ret
     .seh_endproc
+
+.macro direct_caller name, target
+probe \name
+    subq $40, %rsp
+    callq \target
+    addq $40, %rsp
+    ret
+    .seh_endproc
+.endm
+
+# Each caller resumes nine bytes after its entry. Both active nested return
+# slots have initialized neighbors to distinguish overlap checks from validity.
+.macro call_boundary suffix, src, dst
+direct_caller call_slot_\suffix, call_bridge_\suffix
+direct_caller call_bridge_\suffix, call_access_\suffix
+probe call_access_\suffix
+    movq $-1, -8(%rsp)
+    movq $-1, 8(%rsp)
+    movq $-1, 40(%rsp)
+    movq $-1, 56(%rsp)
+    testq %rdx, %rdx
+    je 1f
+    cmpq $2, %rdx
+    je 2f
+    mov\suffix %\src, (%rcx)
+    jmp 1f
+2:
+    inc\suffix (%rcx)
+1:
+    xorl %eax, %eax
+    mov\suffix (%rcx), %\dst
+    ret
+    .seh_endproc
+.endm
+
+call_boundary b, dl, al
+call_boundary w, dx, ax
+call_boundary l, edx, eax
+call_boundary q, rdx, rax
+
+probe call_released
+    subq $40, %rsp
+    callq call_result
+1:
+    movq -8(%rsp), %r10
+    movq %rdx, -8(%rsp)
+    movq -8(%rsp), %rax
+    leaq 1b(%rip), %rdx
+    subq %rdx, %r10
+    addq %r10, %rax
+    addq $40, %rsp
+    ret
+    .seh_endproc
+
+probe call_result
+    movq %rcx, %rax
+    ret
+    .seh_endproc
+
+direct_caller call_bad_teardown, bad_teardown
+
+probe call_bad_shadow
+    subq $8, %rsp
+    callq call_result
+    addq $8, %rsp
+    ret
+    .seh_endproc
+
+probe call_misaligned
+    subq $32, %rsp
+    callq call_result
+    addq $32, %rsp
+    ret
+    .seh_endproc
+
+probe call_depth
+    testq %rcx, %rcx
+    je 1f
+    subq $40, %rsp
+    decq %rcx
+    callq call_depth
+    addq $40, %rsp
+    incq %rax
+    ret
+1:
+    xorl %eax, %eax
+    ret
+    .seh_endproc
+
+probe call_nonvolatile
+    pushq %rbx
+    subq $32, %rsp
+    movq %rcx, %rbx
+    callq call_clobber
+    addq $32, %rsp
+    popq %rbx
+    ret
+    .seh_endproc
+
+probe call_clobber
+    movq %rdx, %rbx
+    movq %rcx, %rax
+    ret
+    .seh_endproc
+
+probe call_stack_argument
+    subq $56, %rsp
+    testq %rcx, %rcx
+    je 1f
+    movq %rdx, 32(%rsp)
+1:
+    callq call_fifth
+    addq $56, %rsp
+    ret
+    .seh_endproc
+
+probe call_fifth
+    movq 40(%rsp), %rax
+    ret
+    .seh_endproc
+
+probe call_carry
+    leaq -40(%rsp), %rsp
+    cmpq %rdx, %rcx
+    callq call_add_carry
+    leaq 40(%rsp), %rsp
+    adcq $0, %rax
+    ret
+    .seh_endproc
+
+probe call_add_carry
+    movq %rcx, %rax
+    adcq %rdx, %rax
+    ret
+    .seh_endproc
+
+probe call_preserves_carry
+    leaq -40(%rsp), %rsp
+    callq call_result
+    cmpq %rdx, %rcx
+    callq call_result
+    leaq 40(%rsp), %rsp
+    adcq $0, %rax
+    ret
+    .seh_endproc
+
+probe call_narrow
+    subq $40, %rsp
+    callq call_byte
+    movzbl %al, %eax
+    addq $40, %rsp
+    ret
+    .seh_endproc
+
+probe call_byte
+    movb %cl, %al
+    ret
+    .seh_endproc
+
+direct_caller call_missing_register, call_fourth
+
+probe call_fourth
+    movq %r9, %rax
+    ret
+    .seh_endproc
+
+probe call_missing_flag
+    subq $40, %rsp
+    cmpq %rdx, %rcx
+    callq call_clear_af
+    lahf
+    addq $40, %rsp
+    ret
+    .seh_endproc
+
+probe call_clear_af
+    movq %rcx, %rax
+    andq %rdx, %rax
+    ret
+    .seh_endproc
+
+probe opaque_return_rsp
+    movq %rcx, %rax
+    movq %rbx, %rsp
+    ret
+    .seh_endproc
+
+# The first call can enter with no defined CF; the second has a known CF.
+# One return path preserves it and the other produces a different value.
+probe call_join
+    leaq -40(%rsp), %rsp
+    movq %rcx, %r9
+    callq call_join_helper
+    movq %r9, %rcx
+    cmpq %rdx, %rcx
+    callq call_join_helper
+    setb %al
+    movzbl %al, %eax
+    leaq 40(%rsp), %rsp
+    ret
+    .seh_endproc
+
+probe call_undefined_join
+    leaq -40(%rsp), %rsp
+    callq call_join_helper
+    setb %al
+    movzbl %al, %eax
+    leaq 40(%rsp), %rsp
+    ret
+    .seh_endproc
+
+probe call_join_helper
+    decq %rcx
+    je 1f
+    cmpq $3, %rdx
+    movq %rdx, 8(%rsp)
+1:
+    ret
+    .seh_endproc
+
+direct_caller call_return_copy, call_copy_slot
+
+probe call_copy_slot
+    pushq %rbx
+    movq 8(%rsp), %rbx
+    movq %rbx, 16(%rsp)
+    xorl %eax, %eax
+    addq 16(%rsp), %rax
+    popq %rbx
+    ret
+    .seh_endproc
+
+# A callee can replace both a volatile register and a caller's saved pointer
+# through an alias. Neither access after CALL may retain its old stack routing.
+probe call_pointer_alias
+    subq $56, %rsp
+    leaq 48(%rsp), %r8
+    movq %r8, 40(%rsp)
+    leaq 40(%rsp), %rcx
+    leaq call_constant(%rip), %rdx
+    callq call_redirect
+    movq 40(%rsp), %r10
+    movq (%r8), %rax
+    addq (%r10), %rax
+    addq $56, %rsp
+    ret
+    .seh_endproc
+
+probe call_redirect
+    movq %rdx, (%rcx)
+    movq %rdx, %r8
+    ret
+    .seh_endproc
+
+.section .rdata,"dr"
+call_constant:
+    .quad 0x12345678

@@ -179,12 +179,15 @@ class NativeDifferentialTests(unittest.TestCase):
         def truncate_right(source):
             # Change the incoming RDX bits once. The weighted term already uses
             # only EDX, so the only behavior affected is the signed comparison.
+            # SSA argument numbers are local to each function in the module.
+            start = source.index(" @forge_lifted(")
+            end = source.index("\n}", start)
             pattern = r"^(  store i64 )%1(, ptr %\w+, align \d+)$"
             changed, count = re.subn(pattern, r"  %low = trunc i64 %1 to i32\n"
-                                     r"  %right = sext i32 %low to i64\n\1%right\2", source,
+                                     r"  %right = sext i32 %low to i64\n\1%right\2", source[start:end],
                                      flags=re.MULTILINE)
             self.assertEqual(count, 1, "expected the wrapper to initialize RDX once")
-            return changed
+            return source[:start] + changed + source[end:]
 
         report = self.modified_ir(WEIGHTED, "truncated-right", "stdout_mismatch", truncate_right)
         self.assertEqual(report["stages"]["native_execution"], "passed")

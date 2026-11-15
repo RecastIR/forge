@@ -20,7 +20,7 @@ FAILURE_KINDS = {
     ("entry", "unsupported"): {"ENTRY_DLL", "ENTRY_UNWIND_VERSION", "ENTRY_CHAINED_FRAGMENT",
                                "ENTRY_RELOCATION_OVERLAP"},
     ("entry", "internal"): {"ENTRY_INTERNAL"},
-    ("lifting", "invalid_input"): {"LIFT_INVALID_ENCODING"},
+    ("lifting", "invalid_input"): {"LIFT_INVALID_ENCODING", "LIFT_INVALID_CALL_TARGET"},
     ("lifting", "unsupported"): {"LIFT_FUNCTION_SIZE", *INSTRUCTION_FAILURES},
     ("lifting", "internal"): {"LIFT_BACKEND_SETUP", "LIFTING_INTERNAL"},
     ("verification", "internal"): {"IR_VERIFICATION_FAILED", "VERIFICATION_INTERNAL"},
@@ -56,22 +56,37 @@ def context_rva(context, name):
     return int(text, 16)
 
 
-def validate_context(context, stage, category, code, image, selected, ir):
+def validate_context(context, stage, category, code, image, selected, ir, resolve_callee):
     allowed = {"input", "entry_rva", "signature"}
+    owner = selected
+    instruction_failure = code in INSTRUCTION_FAILURES or code in ("LIFT_INVALID_CALL_TARGET", "LIFT_INVALID_ENCODING")
+    if "function_rva" in context and (instruction_failure or code == "LIFT_FUNCTION_SIZE"):
+        start = context_rva(context, "function_rva")
+        if resolve_callee is None or start == selected.start or selected.entry_restriction():
+            raise ValueError("diagnostic requires an independently discovered callee")
+        if instruction_failure and "instruction_rva" not in context:
+            raise ValueError("callee instruction diagnostic lacks the instruction RVA")
+        owner = resolve_callee(start)
+        if owner.start != start:
+            raise ValueError("diagnostic disagrees with the discovered callee")
+        allowed.add("function_rva")
     if "signature" in context and field(context, "signature", str) != "i64(i64,i64)":
         raise ValueError("diagnostic signature disagrees with the function harness")
-    if code in INSTRUCTION_FAILURES or code == "LIFT_INVALID_ENCODING":
+    if instruction_failure:
         allowed.add("block_rva")
         if "block_rva" in context:
             start = context_rva(context, "block_rva")
-            if not selected.start <= start <= context_rva(context, "instruction_rva"):
+            if not owner.start <= start <= context_rva(context, "instruction_rva"):
                 raise ValueError("basic block disagrees with the instruction location")
-    if code == "LIFT_UNSUPPORTED_CONTROL_FLOW":
+    if code in ("LIFT_UNSUPPORTED_CONTROL_FLOW", "LIFT_INVALID_CALL_TARGET"):
         allowed.add("branch_target")
         if "branch_target" in context:
             target = field(context, "branch_target", int)
             if not -(1 << 31) <= target < (1 << 32) + (1 << 31):
                 raise ValueError("invalid direct branch destination")
+    if code == "LIFT_INVALID_CALL_TARGET" and (context.get("opcode") != "CALL64pcrel32"
+            or not {"instruction_rva", "branch_target", "bytes"} <= context.keys()):
+        raise ValueError("invalid call target diagnostic lacks a direct call site")
     if stage in ("pe", "entry", "lifting", "verification"):
         allowed.add("file_offset")
     if stage in ("entry", "lifting", "verification"):
@@ -81,10 +96,10 @@ def validate_context(context, stage, category, code, image, selected, ir):
         if field(context, "output", str) != str(ir):
             raise ValueError("diagnostic disagrees with the output path")
     if category == "unsupported":
-        restriction = selected.entry_restriction()
+        restriction = owner.entry_restriction()
         if code != restriction and (restriction is not None or code not in INSTRUCTION_FAILURES):
             raise ValueError("capability diagnostic contradicts inspection or discovery")
-    if code in INSTRUCTION_FAILURES:
+    if code in INSTRUCTION_FAILURES or code == "LIFT_INVALID_CALL_TARGET":
         allowed.update(("instruction_rva", "bytes", "opcode"))
     elif code == "LIFT_INVALID_ENCODING":
         allowed.update(("instruction_rva", "bytes"))
@@ -95,12 +110,12 @@ def validate_context(context, stage, category, code, image, selected, ir):
         raise ValueError("diagnostic disagrees with the requested image or RVA")
     if "end_rva" in context and context_rva(context, "end_rva") != selected.end:
         raise ValueError("diagnostic disagrees with the discovered function end")
-    offset = selected.file_offset
+    offset = owner.file_offset
     if "instruction_rva" in context:
         instruction = context_rva(context, "instruction_rva")
-        if not entry <= instruction < selected.end:
+        if not owner.start <= instruction < owner.end:
             raise ValueError("instruction RVA outside the discovered function range")
-        offset += instruction - entry
+        offset += instruction - owner.start
     elif "opcode" in context or "bytes" in context:
         raise ValueError("instruction detail without an instruction RVA")
     if "opcode" in context and not field(context, "opcode", str).strip().encode("utf-8"):
@@ -116,15 +131,21 @@ def validate_context(context, stage, category, code, image, selected, ir):
         if not re.fullmatch(r"(?:[0-9a-f]{2}){1,15}", text):
             raise ValueError("invalid instruction bytes")
         encoded = bytes.fromhex(text)
-        if instruction + len(encoded) > selected.end:
+        if instruction + len(encoded) > owner.end:
             raise ValueError("instruction bytes extend beyond the diagnostic function range")
+        if code == "LIFT_INVALID_CALL_TARGET":
+            if len(encoded) < 5 or encoded[-5] != 0xe8:
+                raise ValueError("invalid direct call encoding")
+            target = instruction + len(encoded) + int.from_bytes(encoded[-4:], "little", signed=True)
+            if target != context["branch_target"]:
+                raise ValueError("call target disagrees with the signed displacement")
         with Path(image).open("rb") as source:
             source.seek(offset)
             if source.read(len(encoded)) != encoded:
                 raise ValueError("instruction bytes disagree with the PE snapshot")
 
 
-def parse_diagnostic(raw, image, selected, ir):
+def parse_diagnostic(raw, image, selected, ir, resolve_callee=None):
     if not raw.endswith(b"\n") or raw.count(b"\n") != 1:
         raise ValueError("expected one newline-terminated JSON record")
     try:
@@ -143,5 +164,6 @@ def parse_diagnostic(raw, image, selected, ir):
         raise ValueError("empty diagnostic message")
     # Escaped unpaired surrogates can survive JSON parsing but cannot be reported as UTF-8.
     message.encode("utf-8")
-    validate_context(field(diagnostic, "context", dict), *kind, diagnostic["code"], image, selected, ir)
+    validate_context(field(diagnostic, "context", dict), *kind, diagnostic["code"], image,
+                     selected, ir, resolve_callee)
     return diagnostic

@@ -260,7 +260,7 @@ namespace {
             DebugInfo::Omit);
         llvm::LLVMContext context;
         auto module = generateIR(analysis, {0x1000, EntryMode::WindowsX64I64Pair}, context);
-        const auto &body = *module->getFunction("forge_lifted_1000");
+        const auto &body = *module->getFunction("forge_guest_1000");
         // Synthetic entry, setup, header, sign test, two latches, two returns.
         const std::map<std::string, std::vector<std::string>> expected{
             {"entry", {"rva_1000"}},
@@ -340,7 +340,7 @@ namespace {
             auto module =
                 generateIR(analysis, {symbol->rva, EntryMode::WindowsX64I64Pair}, context);
             const auto *body =
-                module->getFunction("forge_lifted_" + llvm::utohexstr(symbol->rva, true));
+                module->getFunction("forge_guest_" + llvm::utohexstr(symbol->rva, true));
             check(body && !llvm::verifyModule(*module), "CFG regression failed LLVM verification");
             const auto &entry = body->getEntryBlock();
             const auto *start = llvm::dyn_cast<llvm::UncondBrInst>(entry.getTerminator());
@@ -363,6 +363,78 @@ namespace {
                           llvm::isa<llvm::ReturnInst>(left->getSuccessor()->getTerminator()),
                       "partial register return must join both writing paths");
             }
+        }
+    }
+
+    uint32_t exportedRva(const AnalyzedImage &analysis, llvm::StringRef name) {
+        const auto &exports = analysis.module().exports;
+        auto symbol = llvm::find_if(
+            exports, [&](const Export &item) { return llvm::is_contained(item.names, name); });
+        check(symbol != exports.end(), "missing direct-call fixture export");
+        return symbol->rva;
+    }
+
+    std::string moduleText(const llvm::Module &module) {
+        std::string text;
+        llvm::raw_string_ostream output(text);
+        module.print(output, nullptr);
+        return text;
+    }
+
+    void checkDirectCalls(const fs::path &fixture) {
+        AnalyzedImage analysis(
+            std::make_unique<ParsedImage>(InputFile(fixture), ParsePolicy::Inspection),
+            DebugInfo::Omit);
+        llvm::LLVMContext context;
+
+        struct Pair {
+            llvm::StringRef caller, callee;
+            unsigned count;
+        };
+
+        for (const Pair pair : {Pair{"call_preserves_carry", "call_result", 2},
+                                Pair{"call_stack_argument", "call_fifth", 1}}) {
+            const uint32_t rva = exportedRva(analysis, pair.caller);
+            const LiftRequest request{rva, EntryMode::WindowsX64I64Pair};
+            const auto module = generateIR(analysis, request, context);
+            const auto suffix = llvm::utohexstr(rva, true);
+            const auto *caller = module->getFunction("forge_guest_" + suffix);
+            const auto *callee = module->getFunction(
+                "forge_guest_" + llvm::utohexstr(exportedRva(analysis, pair.callee), true));
+            const auto *adapter = module->getFunction("forge_lifted_" + suffix);
+            check(caller && callee && adapter && module->getFunction("forge_lifted"),
+                  "missing guest body or selected entry adapter");
+            unsigned bodies = 0, adapters = 0, calls = 0, invocations = 0;
+
+            for (const auto &function : *module) {
+                bodies += function.getName().starts_with("forge_guest_");
+                adapters += function.getName().starts_with("forge_lifted_");
+
+                for (const auto &instruction : llvm::instructions(function)) {
+                    if (const auto *allocation = llvm::dyn_cast<llvm::AllocaInst>(&instruction)) {
+                        if (allocation->getAllocatedType()->isStructTy()) {
+                            check(&function == adapter, "guest body allocated an invocation");
+                            ++invocations;
+                        }
+                    }
+
+                    const auto *call = llvm::dyn_cast<llvm::CallBase>(&instruction);
+
+                    if (call && call->getCalledFunction() == callee) {
+                        check(&function == caller && call->arg_size() == 1 &&
+                                  call->getArgOperand(0) == caller->getArg(0),
+                              "callee received a separate invocation context");
+                        ++calls;
+                    }
+                }
+            }
+
+            check(caller->hasInternalLinkage() && callee->hasInternalLinkage() && bodies == 2 &&
+                      adapters == 1 && invocations == 1 && calls == pair.count,
+                  "wrong number of bodies, adapters, invocation allocations, or direct calls");
+            const auto repeated = generateIR(analysis, request, context);
+            check(moduleText(*repeated) == moduleText(*module),
+                  "repeated generation changed the linked guest module");
         }
     }
 
@@ -590,11 +662,12 @@ int main(int argc, char **argv) try {
         return 0;
     }
 
-    check(argc == 4, "expected add.exe, cfg.exe and image.exe fixtures");
+    check(argc == 5, "expected add.exe, cfg.exe, image.exe and stack.exe fixtures");
     checkAddressAlternatives();
     checkSpillSnapshots();
     checkControlFlow(argv[2]);
     checkControlFlowLeaves(argv[2]);
+    checkDirectCalls(argv[4]);
     llvm::SmallString<128> temporary;
 
     if (auto error = llvm::sys::fs::createUniqueDirectory("forge-lift", temporary)) {

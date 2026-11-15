@@ -14,7 +14,7 @@ namespace forge::x86 {
     // empty set denotes unknown. Widening bounds both loop convergence and storage.
     class AddressFact {
       public:
-        enum Origin : uint8_t { Computed, Constant, Stack };
+        enum Origin : uint8_t { Computed, Constant, Stack, FrameStack };
 
         static constexpr unsigned limit = 8;
 
@@ -29,7 +29,15 @@ namespace forge::x86 {
 
         bool known() const { return !addresses.empty(); }
 
-        bool stackDerived() const { return origin == Stack; }
+        // A nested entry has a checked but invocation-dependent stack address.
+        // Only a copy or constant displacement retains this routing proof.
+        static AddressFact frameStack() {
+            AddressFact result;
+            result.origin = FrameStack;
+            return result;
+        }
+
+        bool stackDerived() const { return origin == Stack || origin == FrameStack; }
 
         // Only the original single-origin proof can constrain an out-of-stack
         // arithmetic result to the checked stack path. Newly proved alternatives
@@ -41,12 +49,12 @@ namespace forge::x86 {
         }
 
         AddressFact join(const AddressFact &other) const {
-            if (!known() || !other.known()) {
-                return {};
-            }
-
             if (*this == other) {
                 return *this;
+            }
+
+            if (!known() || !other.known()) {
+                return {};
             }
 
             auto result = computed();
@@ -58,6 +66,15 @@ namespace forge::x86 {
         }
 
         AddressFact plus(const AddressFact &other) const {
+            if ((origin == FrameStack && other.origin == Constant && other.known()) ||
+                (other.origin == FrameStack && origin == Constant && known())) {
+                return frameStack();
+            }
+
+            if (origin == FrameStack || other.origin == FrameStack) {
+                return {};
+            }
+
             AddressFact result;
             for (auto lhs : addresses) {
                 if (!result.includeOffsets(lhs, other)) {

@@ -6,17 +6,24 @@ namespace forge::x86 {
     using namespace llvm;
 
     namespace {
-        // An isolated invocation owns this token; it never dispatches to a guest PC.
+        // Only the outer slot holds a synthetic token. Nested slots hold real guest VAs.
         constexpr uint64_t returnMarker = 0x4652474552455401ULL;
+        // Incoming nonvolatile identities occupy 1..64. A nested return slot
+        // may be inspected by guest code but must never be overwritten.
+        constexpr uint8_t returnMark = 0xfe;
+        constexpr uint64_t returnMarks = 0x0101010101010101ULL * returnMark;
     } // namespace
 
-    void GuestMemory::allocate(Function *resolver) {
-        imageResolver = resolver;
-        bytes = ir.CreateAlloca(ir.getInt8Ty(), ir.getInt32(capacity), "stack.bytes");
-        validity = ir.CreateAlloca(ir.getInt8Ty(), ir.getInt32(capacity), "stack.valid");
+    void GuestMemory::initialize(Value *stackBytes, Value *stackValidity) {
+        bind(stackBytes, stackValidity, nullptr);
         ir.CreateMemSet(validity, ir.getInt8(0), capacity, Align(1));
-        auto marker = stackLocation(ir.getInt64(entryRsp - base), 64, Access::Write);
-        ir.CreateAlignedStore(ir.getInt64(returnMarker), marker.data, Align(1));
+        installReturn(ir.getInt64(entryRsp - base), returnMarker);
+    }
+
+    void GuestMemory::bind(Value *stackBytes, Value *stackValidity, Function *resolver) {
+        bytes = stackBytes;
+        validity = stackValidity;
+        imageResolver = resolver;
     }
 
     void GuestMemory::guard(Value *condition) {
@@ -52,23 +59,37 @@ namespace forge::x86 {
         auto *type = ir.getIntNTy(width);
         auto *data = ir.CreateInBoundsGEP(ir.getInt8Ty(), bytes, offset);
         auto *markPtr = ir.CreateInBoundsGEP(ir.getInt8Ty(), validity, offset);
+        auto *marks = ir.CreateAlignedLoad(type, markPtr, Align(1));
+
+        if (access == Access::Modify) {
+            guard(ir.CreateICmpEQ(marks, ConstantInt::getAllOnesValue(type)));
+            return {data};
+        }
+
+        auto *byteType = FixedVectorType::get(ir.getInt8Ty(), width / 8);
+        auto *lanes = ir.CreateBitCast(marks, byteType);
+        auto *protectedLanes = ir.CreateICmpEQ(
+            lanes, ConstantVector::getSplat(byteType->getElementCount(), ir.getInt8(returnMark)));
 
         if (access == Access::Write) {
+            guard(ir.CreateNot(ir.CreateOrReduce(protectedLanes)));
             ir.CreateAlignedStore(storeMarks ? storeMarks : ConstantInt::getAllOnesValue(type),
                                   markPtr, Align(1));
             return {data};
         }
 
-        auto *marks = ir.CreateAlignedLoad(type, markPtr, Align(1));
+        // A plain read of a nested guest return address produces concrete bytes.
+        // Its write protection belongs to the stack slot and cannot follow a copy.
+        auto *readable =
+            ir.CreateSelect(protectedLanes, Constant::getAllOnesValue(byteType), lanes);
+
         if (access == Access::ReadSaved) {
-            auto *byteType = FixedVectorType::get(ir.getInt8Ty(), width / 8);
-            auto *lanes = ir.CreateBitCast(marks, byteType);
-            guard(ir.CreateAndReduce(ir.CreateIsNotNull(lanes)));
-            return {data, marks};
+            guard(ir.CreateAndReduce(ir.CreateIsNotNull(readable)));
+            return {data, ir.CreateBitCast(readable, type)};
         }
 
-        // Arithmetic reads concrete bytes and leaves their stack marks concrete.
-        guard(ir.CreateICmpEQ(marks, ConstantInt::getAllOnesValue(type)));
+        guard(
+            ir.CreateICmpEQ(ir.CreateBitCast(readable, type), ConstantInt::getAllOnesValue(type)));
         return {data};
     }
 
@@ -145,9 +166,46 @@ namespace forge::x86 {
         guard(ir.CreateICmpEQ(rsp, ir.getInt64(entryRsp)));
 
         if (bytes) {
-            auto marker = stackLocation(ir.getInt64(entryRsp - base), 64, Access::Read);
-            auto *value = ir.CreateAlignedLoad(ir.getInt64Ty(), marker.data, Align(1));
-            guard(ir.CreateICmpEQ(value, ir.getInt64(returnMarker)));
+            verifyReturn(ir.getInt64(entryRsp - base), returnMarker);
         }
+    }
+
+    void GuestMemory::installReturn(Value *offset, uint64_t address) {
+        auto *slot = ir.CreateInBoundsGEP(ir.getInt8Ty(), bytes, offset);
+        auto *marks = ir.CreateInBoundsGEP(ir.getInt8Ty(), validity, offset);
+        ir.CreateAlignedStore(ir.getInt64(address), slot, Align(1));
+        ir.CreateAlignedStore(ir.getInt64(returnMarks), marks, Align(1));
+    }
+
+    void GuestMemory::verifyReturn(Value *offset, uint64_t address) {
+        auto *slot = ir.CreateInBoundsGEP(ir.getInt8Ty(), bytes, offset);
+        auto *marks = ir.CreateInBoundsGEP(ir.getInt8Ty(), validity, offset);
+        auto *value = ir.CreateAlignedLoad(ir.getInt64Ty(), slot, Align(1));
+        auto *identity = ir.CreateAlignedLoad(ir.getInt64Ty(), marks, Align(1));
+        auto *sameVA = ir.CreateICmpEQ(value, ir.getInt64(address));
+        auto *protectedSlot = ir.CreateICmpEQ(identity, ir.getInt64(returnMarks));
+        guard(ir.CreateAnd(sameVA, protectedSlot));
+    }
+
+    Value *GuestMemory::pushReturn(Value *callRsp, Value *callerEntryRsp, uint64_t nextGuestVA) {
+        // Caller-owned shadow space ends at or below its live return slot. Even
+        // after a guest RSP pivot, every nested frame strictly descends.
+        auto *aligned = ir.CreateIsNull(ir.CreateAnd(callRsp, ir.getInt64(15)));
+        auto *shadowLimit = ir.CreateSub(callerEntryRsp, ir.getInt64(32));
+        auto *hasShadow = ir.CreateICmpULE(callRsp, shadowLimit);
+        guard(ir.CreateAnd(aligned, hasShadow));
+
+        auto *nextRsp = ir.CreateSub(callRsp, ir.getInt64(8));
+        installReturn(checkedOffset(nextRsp, 64), nextGuestVA);
+        return nextRsp;
+    }
+
+    Value *GuestMemory::popReturn(Value *rsp, Value *expectedEntryRsp, uint64_t nextGuestVA) {
+        guard(ir.CreateICmpEQ(rsp, expectedEntryRsp));
+        auto *offset = ir.CreateSub(expectedEntryRsp, ir.getInt64(base));
+        verifyReturn(offset, nextGuestVA);
+        auto *marks = ir.CreateInBoundsGEP(ir.getInt8Ty(), validity, offset);
+        ir.CreateAlignedStore(ir.getInt64(UINT64_MAX), marks, Align(1));
+        return ir.CreateAdd(rsp, ir.getInt64(8));
     }
 } // namespace forge::x86
