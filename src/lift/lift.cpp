@@ -2,6 +2,7 @@
 
 #include "analysis/analysis.h"
 #include "diagnostic.h"
+#include "lift/address_fact.h"
 #include "lift/asm_info.h"
 #include "lift/cfg.h"
 #include "lift/image_memory.h"
@@ -38,6 +39,7 @@ namespace forge {
             return InspectionError(hex(rva) + ": " + why.str(), kind);
         }
 
+        using x86::AddressFact;
         using x86::Step;
         using x86::StoredValue;
 
@@ -111,25 +113,10 @@ namespace forge {
 
         using Defined = std::array<uint64_t, std::size(registerNames)>;
 
-        // The offset is relative to entry RSP only for a Stack fact. Arithmetic
-        // uses the same modulo-2^64 representation as guest address lowering.
-        struct AddressFact {
-            enum Kind { Unknown, Constant, Stack } kind = Unknown;
-
-            uint64_t offset = 0;
-            bool operator==(const AddressFact &) const = default;
-
-            AddressFact plus(AddressFact rhs) const {
-                if (kind == Unknown || rhs.kind == Unknown ||
-                    (kind == Stack && rhs.kind == Stack)) {
-                    return {};
-                }
-
-                return {kind == Stack || rhs.kind == Stack ? Stack : Constant, offset + rhs.offset};
-            }
+        struct AddressFacts {
+            std::array<AddressFact, std::size(registerNames)> registers;
+            x86::StackSpills spills;
         };
-
-        using AddressFacts = std::array<AddressFact, std::size(registerNames)>;
 
         struct Availability {
             Defined registers{};
@@ -137,17 +124,19 @@ namespace forge {
             AddressFacts addresses{};
 
             bool intersect(const Availability &other) {
-                auto before = *this;
+                bool changed = (flags & other.flags) != flags;
                 flags &= other.flags;
                 for (size_t i = 0; i < registers.size(); ++i) {
+                    changed |= (registers[i] & other.registers[i]) != registers[i];
                     registers[i] &= other.registers[i];
-                    if (addresses[i] != other.addresses[i]) {
-                        addresses[i] = {};
-                    }
+                    auto &fact = addresses.registers[i];
+                    auto joined = fact.join(other.addresses.registers[i]);
+                    changed |= fact != joined;
+                    fact = std::move(joined);
                 }
 
-                return registers != before.registers || flags != before.flags ||
-                       addresses != before.addresses;
+                changed |= addresses.spills.merge(other.addresses.spills);
+                return changed;
             }
         };
 
@@ -273,10 +262,12 @@ namespace forge {
             std::optional<RegisterView> resultRegister(const Step &s) const;
             void requireMemory(const Step &s);
             void planMemoryAccess(const Step &s, const x86::IntegerInstruction &op,
-                                  const AddressFacts &facts);
+                                  const AddressOperand &operand, const AddressFact &address);
             void traceStackInstruction(const Step &s, StackOp op, AddressFacts &facts) const;
             AddressFact integerFact(const Step &s, const x86::IntegerInstruction &op,
                                     RegisterView dest, const AddressFacts &facts) const;
+            void traceInteger(const Step &s, const x86::IntegerInstruction &op, AddressFacts &facts,
+                              bool collect);
             void traceAddresses(const x86::GuestBlock &block, AddressFacts &facts, bool collect);
             void proveAvailability(const x86::ControlFlowGraph &graph, BlockStates &states);
             void summarize(const Step &s, BlockState &state);
@@ -529,19 +520,13 @@ namespace forge {
         }
 
         AddressFact addressFact(const AddressOperand &operand, const AddressFacts &facts) {
-            AddressFact result{AddressFact::Constant, operand.displacement};
+            AddressFact result(operand.displacement);
             if (operand.base) {
-                result = result.plus(facts[operand.base->index]);
+                result = result.plus(facts.registers[operand.base->index]);
             }
 
             if (operand.index) {
-                auto term = facts[operand.index->index];
-                if (operand.scale != 1 && term.kind != AddressFact::Constant) {
-                    return {};
-                }
-
-                term.offset *= operand.scale;
-                result = result.plus(term);
+                result = result.plus(facts.registers[operand.index->index].times(operand.scale));
             }
 
             return result;
@@ -553,60 +538,119 @@ namespace forge {
             using x86::Op;
             const auto &last = s.inst.getOperand(s.inst.getNumOperands() - 1);
             if (op.op == Op::Mov && op.form == Form::Immediate && dest.width >= 32) {
-                return {AddressFact::Constant, static_cast<uint64_t>(last.getImm()) & dest.mask()};
+                return AddressFact(static_cast<uint64_t>(last.getImm()) & dest.mask());
             }
 
-            if (dest.width != 64 || (op.form != Form::Pair && op.form != Form::Immediate &&
-                                     op.form != Form::Accumulator)) {
+            if (dest.width < 32 || (op.form != Form::Pair && op.form != Form::Immediate &&
+                                    op.form != Form::Accumulator)) {
                 return {};
             }
 
-            auto rhs = last.isImm() ? AddressFact{AddressFact::Constant,
-                                                  static_cast<uint64_t>(last.getImm())}
-                                    : facts[reg(s, last, 64).index];
+            const auto &lhs = facts.registers[dest.index];
+            if (op.op == Op::And && last.isImm()) {
+                return lhs.masked(static_cast<uint64_t>(last.getImm()) & dest.mask());
+            }
+
+            if (dest.width == 32 && op.op != Op::Mov) {
+                return {};
+            }
+
+            auto rhs = last.isImm() ? AddressFact(static_cast<uint64_t>(last.getImm()))
+                                    : facts.registers[reg(s, last, dest.width).index];
             if (op.op == Op::Mov) {
-                return rhs;
+                return dest.width == 64 ? rhs : rhs.masked(dest.mask());
             }
 
-            if (op.op == Op::Sub && rhs.kind == AddressFact::Constant) {
-                rhs.offset = 0 - rhs.offset;
-            } else if (op.op != Op::Add) {
-                return {};
+            if (op.op == Op::Sub) {
+                return lhs.plus(rhs.times(uint64_t(0) - 1));
             }
 
-            return facts[dest.index].plus(rhs);
+            return op.op == Op::Add ? lhs.plus(rhs) : AddressFact{};
         }
 
         void Translator::planMemoryAccess(const Step &s, const x86::IntegerInstruction &op,
-                                          const AddressFacts &facts) {
-            const auto operand = decodeAddress(s, memoryOperand(s, op), true);
-            const auto fact = addressFact(operand, facts);
-            if (fact.kind == AddressFact::Stack) {
+                                          const AddressOperand &operand,
+                                          const AddressFact &address) {
+            const bool write = memoryDestination(op.form) && op.op != x86::Op::Cmp;
+            if (!operand.base && !operand.index) {
+                imageMemory.fixedAccess(s, operand.displacement, op.sourceWidth, write);
+                return;
+            }
+
+            if (!address.known()) {
+                imageMemory.computedAccess(s, std::nullopt, op.sourceWidth, write);
+                return;
+            }
+
+            auto onStack = [](uint64_t va) {
+                return va - x86::GuestMemory::base < x86::GuestMemory::capacity;
+            };
+            if (address.stackDerived() || llvm::all_of(address.values(), onStack)) {
                 stackAccesses.insert(s.rva);
                 return;
             }
 
-            const bool write = memoryDestination(op.form) && op.op != x86::Op::Cmp;
-            if (!operand.base && !operand.index) {
-                imageMemory.fixedAccess(s, operand.displacement, op.sourceWidth, write);
-            } else {
-                auto va =
-                    fact.kind == AddressFact::Constant ? std::optional(fact.offset) : std::nullopt;
+            for (auto va : address.values()) {
                 imageMemory.computedAccess(s, va, op.sourceWidth, write);
             }
         }
 
         void Translator::traceStackInstruction(const Step &s, StackOp op,
                                                AddressFacts &facts) const {
-            auto &rsp = facts[rspIndex];
+            auto &rsp = facts.registers[rspIndex];
             if (op == StackOp::Leave) {
-                rsp = facts[framePointer.index].plus({AddressFact::Constant, 8});
-                facts[framePointer.index] = {};
-            } else if (op == StackOp::Pop) {
-                rsp = rsp.plus({AddressFact::Constant, 8});
-                facts[reg(s, s.inst.getOperand(0), 64).index] = {};
+                rsp = facts.registers[framePointer.index];
+            }
+
+            if (op == StackOp::Pop || op == StackOp::Leave) {
+                const auto dest =
+                    op == StackOp::Pop ? reg(s, s.inst.getOperand(0), 64) : framePointer;
+                auto saved = facts.spills.read(rsp);
+                rsp = rsp.plus(AddressFact(8));
+                facts.registers[dest.index] = std::move(saved);
             } else {
-                rsp = rsp.plus({AddressFact::Constant, uint64_t(0) - 8});
+                const auto &operand = s.inst.getOperand(0);
+                auto saved = op == StackOp::PushRegister
+                                 ? facts.registers[reg(s, operand, 64).index]
+                                 : AddressFact(static_cast<uint64_t>(operand.getImm()));
+                rsp = rsp.plus(AddressFact(uint64_t(0) - 8));
+                facts.spills.write(rsp, 64, saved);
+            }
+        }
+
+        void Translator::traceInteger(const Step &s, const x86::IntegerInstruction &op,
+                                      AddressFacts &facts, bool collect) {
+            using x86::Form;
+            using x86::Op;
+            if (!hasMemoryOperand(op.form)) {
+                if (writesRegister(op)) {
+                    auto dest = destination(s, op);
+                    facts.registers[dest.index] = integerFact(s, op, dest, facts);
+                }
+
+                return;
+            }
+
+            const auto operand = decodeAddress(s, memoryOperand(s, op), true);
+            const auto address = addressFact(operand, facts);
+            if (collect) {
+                planMemoryAccess(s, op, operand, address);
+            }
+
+            if (writesRegister(op)) {
+                auto dest = destination(s, op);
+                facts.registers[dest.index] = op.op == Op::Mov && dest.width == 64
+                                                  ? facts.spills.read(address)
+                                                  : AddressFact{};
+            } else if (memoryDestination(op.form) && op.op != Op::Cmp) {
+                AddressFact stored;
+                if (op.form == Form::Store && op.width == 64) {
+                    const auto &src = s.inst.getOperand(s.inst.getNumOperands() - 1);
+                    stored = src.isReg() ? facts.registers[reg(s, src, 64).index]
+                                         : AddressFact(static_cast<uint64_t>(src.getImm()));
+                }
+
+                facts.spills.write(address, op.width, stored);
             }
         }
 
@@ -619,18 +663,24 @@ namespace forge {
                 }
 
                 if (auto op = x86::integerInstruction(s.opcode)) {
-                    if (collect && hasMemoryOperand(op->form)) {
-                        planMemoryAccess(s, *op, facts);
-                    }
+                    traceInteger(s, *op, facts, collect);
+                    continue;
+                }
 
-                    if (writesRegister(*op)) {
-                        auto dest = destination(s, *op);
-                        facts[dest.index] = integerFact(s, *op, dest, facts);
-                    }
-                } else if (auto dest = resultRegister(s)) {
-                    facts[dest->index] = s.opcode == "LEA64r"
-                                             ? addressFact(decodeAddress(s, 1, false), facts)
-                                             : AddressFact{};
+                auto dest = resultRegister(s);
+                if (!dest) {
+                    continue;
+                }
+
+                auto &result = facts.registers[dest->index];
+                if (s.opcode == "LEA64r" || s.opcode == "LEA64_32r") {
+                    auto value = addressFact(decodeAddress(s, 1, false), facts);
+                    result = dest->width == 64 ? value : value.masked(dest->mask());
+                } else if (s.opcode == "CMOV64rr") {
+                    const auto src = reg(s, s.inst.getOperand(2), 64);
+                    result = result.join(facts.registers[src.index]).computed();
+                } else {
+                    result = {};
                 }
             }
         } catch (InspectionError &failure) {
@@ -646,7 +696,8 @@ namespace forge {
             auto &entry = states.begin()->second;
             entry.reached = entry.queued = true;
             entry.incoming.registers[rspIndex] = UINT64_MAX;
-            entry.incoming.addresses[rspIndex] = {AddressFact::Stack, 0};
+            entry.incoming.addresses.registers[rspIndex] =
+                AddressFact(x86::GuestMemory::entryRsp, AddressFact::Stack);
 
             if (mode == EntryMode::RegisterState) {
                 std::fill_n(entry.incoming.registers.begin(), callerSlots, UINT64_MAX);
@@ -654,8 +705,8 @@ namespace forge {
                 entry.incoming.registers[1] = entry.incoming.registers[2] = UINT64_MAX;
             }
 
-            // The first edge seeds the successor. Later edges (including entry
-            // backedges) can only remove facts that no longer agree.
+            // Later edges (including entry backedges) widen address alternatives
+            // and intersect register, flag, and spill-slot availability.
             std::deque<uint32_t> pending{states.begin()->first};
             while (!pending.empty()) {
                 auto addr = pending.front();

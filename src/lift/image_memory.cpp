@@ -129,8 +129,41 @@ namespace forge::x86 {
             entryIR.CreateCall(function);
         }
 
-        // Each table entry describes one readable interval inside one backing global.
-        // Protected fields separate intervals even within the same section.
+        // Find the last interval start at or below the unsigned guest address. Section
+        // validation and span merging guarantee disjoint intervals in ascending order.
+        Value *findInterval(IRBuilder<> &ir, GlobalVariable *table, StructType *row,
+                            BasicBlock *fault) {
+            auto *entry = ir.GetInsertBlock();
+            auto *function = entry->getParent();
+            auto *loop = BasicBlock::Create(ir.getContext(), "range", function);
+            auto *exit = BasicBlock::Create(ir.getContext(), "range.end", function);
+            auto *candidate = BasicBlock::Create(ir.getContext(), "candidate", function);
+            auto count = cast<ArrayType>(table->getValueType())->getNumElements();
+            ir.CreateBr(loop);
+
+            ir.SetInsertPoint(loop);
+            auto *low = ir.CreatePHI(ir.getInt64Ty(), 2, "low");
+            auto *high = ir.CreatePHI(ir.getInt64Ty(), 2, "high");
+            low->addIncoming(ir.getInt64(0), entry);
+            high->addIncoming(ir.getInt64(count), entry);
+            auto *half = ir.CreateLShr(ir.CreateSub(high, low), 1);
+            auto *mid = ir.CreateAdd(low, half, "mid");
+            auto *probe = ir.CreateInBoundsGEP(row, table, mid);
+            auto *base = ir.CreateLoad(ir.getInt64Ty(), ir.CreateStructGEP(row, probe, 0));
+            auto *before = ir.CreateICmpULT(function->getArg(0), base);
+            auto *nextLow = ir.CreateSelect(before, low, ir.CreateAdd(mid, ir.getInt64(1)));
+            auto *nextHigh = ir.CreateSelect(before, mid, high);
+            low->addIncoming(nextLow, loop);
+            high->addIncoming(nextHigh, loop);
+            ir.CreateCondBr(ir.CreateICmpULT(nextLow, nextHigh), loop, exit);
+
+            ir.SetInsertPoint(exit);
+            ir.CreateCondBr(ir.CreateICmpNE(nextLow, ir.getInt64(0)), candidate, fault);
+
+            ir.SetInsertPoint(candidate);
+            return ir.CreateInBoundsGEP(row, table, ir.CreateSub(nextLow, ir.getInt64(1)));
+        }
+
         Function *resolver(llvm::Module &module, ArrayRef<Constant *> rows) {
             IRBuilder<> ir(module.getContext());
             auto *type = FunctionType::get(
@@ -138,9 +171,7 @@ namespace forge::x86 {
             auto *function =
                 Function::Create(type, GlobalValue::InternalLinkage, "forge_image_address", module);
             auto *entry = BasicBlock::Create(module.getContext(), "entry", function);
-            auto *loop = BasicBlock::Create(module.getContext(), "range", function);
             auto *found = BasicBlock::Create(module.getContext(), "mapped", function);
-            auto *advance = BasicBlock::Create(module.getContext(), "advance", function);
             auto *fault = BasicBlock::Create(module.getContext(), "fault", function);
             auto *row = cast<StructType>(rows.front()->getType());
             auto *tableType = ArrayType::get(row, rows.size());
@@ -148,12 +179,7 @@ namespace forge::x86 {
                                              ConstantArray::get(tableType, rows), "image.ranges");
 
             ir.SetInsertPoint(entry);
-            ir.CreateBr(loop);
-
-            ir.SetInsertPoint(loop);
-            auto *index = ir.CreatePHI(ir.getInt64Ty(), 2);
-            index->addIncoming(ir.getInt64(0), entry);
-            auto *record = ir.CreateInBoundsGEP(row, table, index);
+            auto *record = findInterval(ir, table, row, fault);
             auto *base = ir.CreateLoad(ir.getInt64Ty(), ir.CreateStructGEP(row, record, 0));
             auto *size = ir.CreateLoad(ir.getInt64Ty(), ir.CreateStructGEP(row, record, 1));
             auto *width = function->getArg(1);
@@ -162,16 +188,11 @@ namespace forge::x86 {
             auto *writable = ir.CreateLoad(ir.getInt1Ty(), ir.CreateStructGEP(row, record, 3));
             auto *permitted = ir.CreateOr(ir.CreateNot(function->getArg(2)), writable);
             auto *inRange = ir.CreateAnd(ir.CreateICmpUGE(size, width), fits);
-            ir.CreateCondBr(ir.CreateAnd(inRange, permitted), found, advance);
+            ir.CreateCondBr(ir.CreateAnd(inRange, permitted), found, fault);
 
             ir.SetInsertPoint(found);
             auto *bytes = ir.CreateLoad(ir.getPtrTy(), ir.CreateStructGEP(row, record, 2));
             ir.CreateRet(ir.CreateInBoundsGEP(ir.getInt8Ty(), bytes, offset));
-
-            ir.SetInsertPoint(advance);
-            auto *next = ir.CreateAdd(index, ir.getInt64(1));
-            index->addIncoming(next, advance);
-            ir.CreateCondBr(ir.CreateICmpULT(next, ir.getInt64(rows.size())), loop, fault);
 
             ir.SetInsertPoint(fault);
             ir.CreateIntrinsic(Intrinsic::trap, {});

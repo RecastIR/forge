@@ -1,10 +1,12 @@
 #include "lift/lift.h"
 #include "analysis/analysis.h"
 #include "diagnostic.h"
+#include "lift/address_fact.h"
 #include "output/publication.h"
 
 #include "llvm/ADT/ScopeExit.h"
 #include "llvm/ADT/SmallString.h"
+#include "llvm/AsmParser/Parser.h"
 #include "llvm/IR/BasicBlock.h"
 #include "llvm/IR/CFG.h"
 #include "llvm/IR/Constants.h"
@@ -12,9 +14,12 @@
 #include "llvm/IR/Instructions.h"
 #include "llvm/IR/Module.h"
 #include "llvm/IR/Verifier.h"
+#include "llvm/Support/JSON.h"
+#include "llvm/Support/SourceMgr.h"
 
 #include <fstream>
 #include <map>
+#include <set>
 #include <string_view>
 #include <type_traits>
 
@@ -28,6 +33,20 @@ namespace {
         if (!condition) {
             throw std::runtime_error(message);
         }
+    }
+
+    void checkAddressAlternatives() {
+        using x86::AddressFact;
+        constexpr uint64_t high = uint64_t{1} << 63;
+        const uint64_t expected[] = {0, 1, 4, 5, high, high + 1, high + 4, high + 5};
+        const auto bounded = AddressFact{}.masked(high | 5);
+        check(bounded.values() == llvm::ArrayRef(expected), "lost a sparse masked index");
+        check(bounded.join(AddressFact(5)) == bounded, "duplicate widened an exact address set");
+        check(!bounded.join(AddressFact(6)).known() && !AddressFact{}.masked(high | 7).known(),
+              "truncated an over-cap address set");
+        check(!bounded.join(AddressFact{}).known(), "discarded an unknown predecessor");
+        check(AddressFact(UINT64_MAX).plus(AddressFact(1)) == AddressFact(0),
+              "guest address arithmetic did not wrap");
     }
 
     void checkAlias(const llvm::Module &module, const ParsedImage &image, const fs::path &path) {
@@ -326,6 +345,59 @@ namespace {
         check(!llvm::verifyModule(*module), "rebased module lost its backing storage");
         module->print(llvm::outs(), nullptr);
     }
+
+    // Read the published, unoptimized IR so the same measurement can inspect an earlier
+    // Forge build. Backing sizes include protected holes and virtual zero-filled tails.
+    void imageStats(const fs::path &path, llvm::StringRef base, const fs::path &irPath) {
+        uint64_t guestBase;
+        check(!base.getAsInteger(0, guestBase), "invalid measurement load base");
+        ParsedImage image(InputFile(path), ParsePolicy::FunctionAnalysis);
+        const auto initialization = image.imageInitialization();
+        llvm::LLVMContext context;
+        llvm::SMDiagnostic diagnostic;
+        auto module = llvm::parseAssemblyFile(irPath.string(), diagnostic, context);
+
+        if (!module) {
+            diagnostic.print("image stats", llvm::errs());
+            throw std::runtime_error("invalid measurement IR");
+        }
+
+        std::set<uint32_t> sections;
+        uint64_t initialized = 0;
+        uint64_t extent = 0;
+        for (const auto &global : module->globals()) {
+            auto name = global.getName();
+            if (!name.consume_front("image_")) {
+                continue;
+            }
+
+            uint32_t rva;
+            check(!name.getAsInteger(16, rva), "invalid backing RVA");
+            const auto *section = image.sectionAtRva(rva);
+            check(section != nullptr, "missing PE section for image backing");
+            sections.insert(section->rva);
+            const auto size = module->getDataLayout().getTypeAllocSize(global.getValueType());
+            const auto bytes =
+                image.imageBytes({rva, rva + size.getFixedValue()}, initialization, guestBase);
+            extent += size.getFixedValue();
+            initialized += bytes.prefix.size();
+
+            for (const auto &fragment : bytes.tail) {
+                initialized += fragment.bytes.size();
+            }
+        }
+
+        const auto *ranges = module->getNamedGlobal("image.ranges");
+        const auto *resolver = module->getFunction("forge_image_address");
+        llvm::json::Object stats{
+            {"selected_sections", sections.size()},
+            {"initialized_bytes", initialized},
+            {"virtual_bytes", extent},
+            {"intervals", ranges ? ranges->getValueType()->getArrayNumElements() : 0},
+            {"resolver_blocks", resolver ? resolver->size() : 0},
+            {"ir_bytes", fs::file_size(irPath)}};
+        llvm::outs() << llvm::json::Value(std::move(stats)) << '\n';
+    }
 } // namespace
 
 int main(int argc, char **argv) try {
@@ -334,7 +406,13 @@ int main(int argc, char **argv) try {
         return 0;
     }
 
+    if (argc == 5 && std::string_view(argv[1]) == "--image-stats") {
+        imageStats(argv[2], argv[3], argv[4]);
+        return 0;
+    }
+
     check(argc == 4, "expected add.exe, cfg.exe and image.exe fixtures");
+    checkAddressAlternatives();
     checkControlFlow(argv[2]);
     checkControlFlowLeaves(argv[2]);
     llvm::SmallString<128> temporary;

@@ -8,6 +8,7 @@ import subprocess
 import sys
 import unittest
 
+from image_scaling import ImageScaling, image_stats
 from pe_layout import Layout
 from test_stack import BASE, FORGE, GuestExecution, IMAGE, LINKER, MASK, RSP, initial_slots, run
 
@@ -23,7 +24,7 @@ def relocation_block(layout, page):
     raise ValueError(f"missing relocation block for page {page:x}")
 
 
-class ImageTests(GuestExecution):
+class ImageTests(ImageScaling, GuestExecution):
     @classmethod
     def setUpClass(cls):
         super().setUpClass()
@@ -288,16 +289,38 @@ int main() { printf("%lld %lld\\n", first, forge_lifted(0, 0)); }
             pos = relocation_block(layout, page)
             struct.pack_into("<HH", data, pos+8, 0xa000 + raw-4, 0xa000 + raw+8)
         image = self.edit("cross", cross)
+        preferred = self.work / "cross-preferred.ll"
+        preferred.write_bytes(run(*self.rebased_command("load64", self.base, image)))
+        original_bytes = image_stats(image, self.base, preferred)["initialized_bytes"]
         for delta in (0x10000000, -0x10000000):
             addr = self.base + delta + page + raw
             for exe in self.rebased("load64", self.base+delta, image):
                 self.expect(exe, addr-4, 0, 0xfffffffd + delta)
                 self.expect(exe, addr+8, 0, delta)
             original = 0xfffffffd + delta
+            # Only the positive delta carries into the four tail bytes of the
+            # straddling fixup. Both deltas materialize the second eight-byte fixup.
+            stats = image_stats(image, self.base+delta, self.work / "load64-rebased.ll")
+            self.assertEqual(stats["initialized_bytes"], original_bytes + (12 if delta > 0 else 8))
             for exe in self.rebased("store_middle", self.base+delta, image):
                 self.sequence(exe, [(addr-4, 0x9876), (addr-4, 0xcafe)],
                               [(original & ~(0xffff << 24)) | (word << 24)
                                for word in (0x9876, 0xcafe)])
+
+    def test_interval_ending_at_maximum_va(self):
+        rva = 0x100000
+        def highest(data, layout, headers):
+            header = headers[".pool"]
+            struct.pack_into("<II", data, header+8, 8, rva)
+            struct.pack_into("<I", data, header+36, layout.u32(headers[".literal"]+36))
+            struct.pack_into("<Q", data, layout.u32(header+20), 0x8877665544332211)
+            struct.pack_into("<I", data, layout.opt+56, rva+0x1000)
+
+        image = self.edit("highest", highest)
+        for exe in self.rebased("load32", MASK-rva-7, image):
+            self.expect(exe, MASK-3, 0, 0x88776655)
+            self.trap(exe, [(MASK-2, 0)])
+            self.trap(exe, [(0, 0)])
 
     def test_large_writable_virtual_extent(self):
         start = 0x100000
@@ -511,12 +534,40 @@ int main() { printf("%lld %lld\\n", first, forge_lifted(0, 0)); }
     def test_provenance_keeps_runtime_bounds(self):
         addr = self.va(".literal")
         def distance(data, layout, headers):
-            pos = layout.file_offset(self.exports["escape_stack"]) + 2
-            self.assertEqual(struct.unpack_from("<Q", data, pos)[0], 0x123456789abcdef0)
-            struct.pack_into("<Q", data, pos, addr - RSP)
-        for exe in self.variants("escape_stack", image=self.edit("distance", distance)):
+            for name in ("escape_stack", "reloaded_stack_va", "joined_stack_va"):
+                start = layout.file_offset(self.exports[name])
+                pos = data.index(struct.pack("<Q", 0x123456789abcdef0), start, start + 32)
+                struct.pack_into("<Q", data, pos, addr - RSP)
+        image = self.edit("distance", distance)
+        for exe in self.variants("escape_stack", image=image):
             self.expect(exe, addr, 0, 0x78563412)
             self.trap(exe, [(addr, 1)])
+        # The original generic load can reach the image through the reloaded integer VA.
+        for exe in self.variants("reloaded_stack_va", image=image):
+            self.expect(exe, 0, 0, 0x78563412)
+        for exe in self.variants("joined_stack_va", image=image):
+            self.expect(exe, 0, 23, 23)
+            self.expect(exe, 1, 23, 0x78563412)
+
+    def test_spill_invalidation_and_widening(self):
+        literal = self.va(".literal")
+        writable = self.va(".mutable")
+        for exe in self.variants("partial_spill"):
+            self.expect(exe, (writable >> 8) & 0xff, 0, 0x1234)
+        for exe in self.variants("spill_numeric_alias"):
+            self.expect(exe, 0, 0, 0xf0debc9a)
+        for exe in self.variants("indirect_spill_store"):
+            self.expect(exe, RSP+8, literal+4, 0xf0debc9a)
+            self.expect(exe, writable, 0, 0x78563412)
+        for exe in self.variants("incomplete_spill_join"):
+            self.expect(exe, 0, writable, 0x1234)
+            self.expect(exe, 1, writable, 0x78563412)
+        for exe in self.variants("walk_image"):
+            self.expect(exe, writable - literal, 0, 0x1234)
+            self.trap(exe, [(16, 0)])
+        for exe in self.variants("wide_mask"):
+            self.expect(exe, 8, 0, literal & 0xff)
+            self.expect(exe, 1, 0, 0x34)
 
     def test_proven_image_addresses_select_only_referenced_data(self):
         def unused_writable(data, layout, headers):
@@ -527,6 +578,11 @@ int main() { printf("%lld %lld\\n", first, forge_lifted(0, 0)); }
             struct.pack_into("<I", data, layout.opt+56, start+size)
 
         image = self.edit("unused-writable", unused_writable)
+        for exe in self.variants("choose_local_or_image", image=image):
+            self.expect(exe, 0, 51, 51)
+            self.expect(exe, 1, 51, 0x9a785634)
+        for leaf in ("partial_spill", "incomplete_spill_join", "walk_image", "wide_mask"):
+            self.reject(leaf, "writable virtual limit", image)
         for leaf in ("increment_counter", "increment_counter_reg"):
             for exe in self.variants(leaf, image=image):
                 self.sequence(exe, [(0, 0), (0, 0)], [0x1235, 0x1236])
@@ -579,7 +635,10 @@ int main() { printf("%lld %lld\\n", first, forge_lifted(0, 0)); }
             struct.pack_into("<I", data, layout.opt+56, 0x2200000)
         large = self.edit("budget", budget)
         self.reject("load32", "exceeds module limit", large)
-        self.reject("different_offsets", "exceeds module limit", large)
+        for exe in self.variants("different_offsets", image=large):
+            self.expect(exe, 0, 17, 17)
+            self.expect(exe, 1, 17, 1)
+        self.assertNotIn(b"@image.ranges", (self.work / "different_offsets.ll").read_bytes())
         for exe in self.variants("frame_join", image=large):
             self.expect(exe, 0, 71, 71)
             self.expect(exe, 1, 72, 72)

@@ -480,6 +480,26 @@
       "id": "globals/rmw",
       "config": "release",
       "target": "macos-arm64"
+    },
+    {
+      "id": "image/target_join",
+      "config": "debug",
+      "target": "macos-arm64"
+    },
+    {
+      "id": "image/target_join",
+      "config": "release",
+      "target": "macos-arm64"
+    },
+    {
+      "id": "globals/retarget",
+      "config": "debug",
+      "target": "macos-arm64"
+    },
+    {
+      "id": "globals/retarget",
+      "config": "release",
+      "target": "macos-arm64"
     }
   ]
 }

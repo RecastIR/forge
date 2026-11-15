@@ -99,6 +99,21 @@ class NativeDifferentialTests(unittest.TestCase):
                               failure["context"]["bytes"]), (hex(selected.start), entry.file_offset, "ff31"))
             self.assertFalse(ir.exists())
 
+    def test_image_spill_selects_only_the_table(self):
+        for config in diff.CONFIGS:
+            with self.subTest(config=config), tempfile.TemporaryDirectory(dir=self.tmp) as tmp:
+                work = Path(tmp)
+                image = diff.BINARIES / config / "image_spill.exe"
+                selected = diff.analyze(self.forge, image, "image_spill", work)
+                ir = work / diff.CANONICAL_IR
+                ir.parent.mkdir()
+                diff.lift(self.forge, image, {"signature": "i64(i64,i64)"}, selected, ir)
+                source = ir.read_text()
+                backings = re.findall(r"^@image_[0-9a-f]+ = private constant \[(\d+) x i8\]", source, re.M)
+                self.assertEqual(backings, ["8"])
+                ranges = next(line for line in source.splitlines() if line.startswith("@image.ranges = "))
+                self.assertIn("constant [1 x", ranges)
+
     def test_original_image_table(self):
         manifest = next(m for m in diff.load_catalog() if m.case["id"] == "image/lookup")
         with tempfile.TemporaryDirectory(dir=self.tmp) as tmp:

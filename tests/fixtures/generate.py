@@ -69,6 +69,10 @@ def generate(output, mc, link, dlltool, clang):
         image_assembly = (sources / "image.s").read_text()
         image("image.exe", image_assembly)
         image("image-fixed.exe", image_assembly, link_flags=["/fixed"])
+        ranges = (sources / "image-ranges.s").read_text()
+        for fields in (8, 64, 512):
+            image(f"image-ranges-{fields}.exe", f".set fields, {fields}\n" + ranges,
+                  exports=["entry"], link_flags=["/base:0x10000000"])
         image("stack.exe", (sources / "stack.s").read_text())
         image("chained.exe", (sources / "chained.s").read_text())
         image("unicode.exe", stub + '.section ".donnée","dr"\n.byte 1\n.section ".界区","dr"\n.byte 1\n')

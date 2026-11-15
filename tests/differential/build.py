@@ -84,6 +84,10 @@ INTEGER_WITNESSES = {
     "integer_mix": ("shl ", "xor ", "imul "),
     "global_rmw": ("add BYTE PTR [rip", "seto ", "inc WORD PTR [rip", "dec BYTE PTR [rip", "setb ",
                    "sub DWORD PTR [rip", "setb ", "mov r8,QWORD PTR [rip"),
+    "image_target_join": ("mov r9,r8", "add r9,0x3", "mov QWORD PTR [rsp+0x8],r9",
+                          "mov r10,QWORD PTR [rsp+0x8]", "movzx eax,WORD PTR [r10+0x1]"),
+    "global_retarget": ("mov QWORD PTR [rip", "mov r8,QWORD PTR [rip", "lea r9,[r8+0x2]",
+                        "add WORD PTR [r9],dx", "mov rax,QWORD PTR [r8]"),
 }
 
 
@@ -273,10 +277,11 @@ def check_frame(name, instructions, config):
             raise ValueError("missing three return paths into the shared epilogue")
 
 
-IMAGE_LEAVES = {"lookup", "image_direct", "image_spill", "image_loop", "image_widths"}
+IMAGE_LEAVES = {"lookup", "image_direct", "image_spill", "image_loop", "image_widths", "image_target_join"}
 GLOBAL_SYMBOLS = {"global_array": ("words",), "global_counters": ("warm", "cold"),
                   "global_static": ("_ZZ13global_staticE5total", "_ZL7weights"),
-                  "global_pointer": ("_ZL7current", "_ZL7counter"), "global_rmw": (".cells",)}
+                  "global_pointer": ("_ZL7current", "_ZL7counter"), "global_rmw": (".cells",),
+                  "global_retarget": (".initial", ".other", ".ptrslot")}
 
 
 def indexed_lookup(instructions, graph, loads):
@@ -327,12 +332,15 @@ def check_image_leaf(name, instructions, sections, config):
     references = [line for line in body if "[rip" in line]
     if not references:
         raise ValueError("missing reachable RIP-relative data reference")
+    target_sections = {}
     for line in references:
         target = re.search(r"#\s*(?:0x)?([0-9a-f]+)", line)
-        if not target or not any(start <= int(target[1], 16) < start + size and "READONLY" in flags
-                                 and ("CODE" in flags) == (name == "image_widths")
-                                 for start, size, _, flags in sections):
+        section = next((start for start, size, _, flags in sections if target
+                        and start <= int(target[1], 16) < start + size and "READONLY" in flags
+                        and ("CODE" in flags) == (name == "image_widths")), None)
+        if section is None:
             raise ValueError(f"missing immutable section target for {line}")
+        target_sections[line] = section
     loads = [line for line in body if re.match(r"mov(?:sx|sxd|zx)? \w+,(?:BYTE|WORD|DWORD|QWORD) PTR \[", line)
              and not re.search(r"\[(rsp|rbp)", line)]
     if not loads:
@@ -343,6 +351,16 @@ def check_image_leaf(name, instructions, sections, config):
         raise ValueError("missing direct RIP-relative load")
     if name == "image_loop" and not any(instructions[a] in loads for loop in natural_loops(graph)[0].values() for a in loop):
         raise ValueError("missing image load inside loop")
+    if name == "image_target_join":
+        for edges in graph.values():
+            if len(edges) != 2:
+                continue
+            arms = [instructions[addr] for addr in edges]
+            if (all(line.startswith("lea r8,[rip") for line in arms)
+                    and target_sections[arms[0]] != target_sections[arms[1]]):
+                break
+        else:
+            raise ValueError("expected a branch selecting two distinct immutable sections")
     if name == "image_spill":
         if len(references) < 2 or not any(len(edges) == 2 for edges in graph.values()):
             raise ValueError("missing branch-selected data addresses")
@@ -460,19 +478,25 @@ def check_global_leaf(path, instructions, sections, pe_report, config):
         if (not any(re.fullmatch(r"mov BYTE PTR \[r\w+\],\w+", line) for line in body)
                 or not any(re.fullmatch(r"mov \w+,DWORD PTR \[r\w+\+r\w+\*[14]\]", line) for line in body)):
             raise ValueError("missing narrow array store or indexed wide read")
-    elif name == "global_pointer":
-        slot, (start, size, offset, _) = references["_ZL7current"]
+    elif name in ("global_pointer", "global_retarget"):
+        pointer, initial = (("_ZL7current", "_ZL7counter") if name == "global_pointer" else (".ptrslot", ".initial"))
+        slot, (start, size, offset, _) = references[pointer]
         base = re.search(r"^ImageBase\s+([0-9a-f]+)$", pe_report, re.MULTILINE)
         dir64 = [int(rva, 16) for rva in re.findall(r"\[([0-9a-f]+)\] DIR64\b", pe_report)]
         if not base or dir64.count(slot - int(base[1], 16)) != 1:
             raise ValueError("expected one DIR64 on the loaded pointer field")
         if (slot + 8 > start + size or struct.unpack_from("<Q", path.read_bytes(), offset + slot - start)[0]
-                != references["_ZL7counter"][0]):
-            raise ValueError("pointer initializer must point to the directly addressed counter")
-        check_pointer_spill(body)
+                != references[initial][0]):
+            raise ValueError("pointer initializer must point to the initial counter")
+        if name == "global_pointer":
+            check_pointer_spill(body)
+        elif (references[".other"][1][0] == references[initial][1][0]
+              or not any(line.startswith("mov QWORD PTR [rip") and line.endswith(f"],r9 # {slot:x} <.ptrslot>")
+                         for line in body)):
+            raise ValueError("missing writable pointer retargeting between different sections")
 
 
-def check_frame_padding(path):
+def check_padding(path):
     # BFD's -h shows virtual size even for an invalid nonzero SizeOfRawData
     # with a null file offset. Check the linked section header itself.
     data = path.read_bytes()
@@ -480,14 +504,18 @@ def check_frame_padding(path):
     count, = struct.unpack_from("<H", data, pe + 6)
     optional_size, = struct.unpack_from("<H", data, pe + 20)
     table = pe + 24 + optional_size
+    expected = {b".frpad": (33 * 1024 * 1024, 0, 0, 0x40000080)}
+    if path.stem == "image_target_join":
+        expected[b".wrpad"] = (257 * 1024 * 1024, 0, 0, 0xc0000080)
     for pos in range(table, table + 40 * count, 40):
-        if data[pos:pos+8].rstrip(b"\0") == b".frpad":
+        name = data[pos:pos+8].rstrip(b"\0")
+        if name in expected:
             extent, _, raw, offset = struct.unpack_from("<4I", data, pos + 8)
             flags, = struct.unpack_from("<I", data, pos + 36)
-            # IMAGE_SCN_MEM_READ | IMAGE_SCN_CNT_UNINITIALIZED_DATA
-            if (extent, raw, offset, flags) == (33 * 1024 * 1024, 0, 0, 0x40000080):
-                return
-    raise ValueError("missing 33 MiB read-only zero-fill section")
+            if (extent, raw, offset, flags) == expected[name]:
+                del expected[name]
+    if expected:
+        raise ValueError(f"missing required virtual-only section layout for {list(expected)}")
 
 
 def check_leaf(path, config="debug", pe_report=""):
@@ -505,8 +533,8 @@ def check_leaf(path, config="debug", pe_report=""):
                 check_image_leaf(path.stem, instructions, sections, config)
             else:
                 check_global_leaf(path, instructions, section_rows(sections), pe_report, config)
-        if path.stem in ("branch_locals", "count_locals"):
-            check_frame_padding(path)
+        if path.stem in ("branch_locals", "count_locals", "image_target_join"):
+            check_padding(path)
         if path.stem in FRAME_LOCALS:
             check_frame(path.stem, instructions, config)
         if path.stem == "cfg_nested_exits":

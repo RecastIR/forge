@@ -288,3 +288,98 @@ probe maybe_write_literal
     movzbl (%r8), %eax
     ret
     .seh_endproc
+
+# A local and an immutable field reach the same load through CMOV and a stack save.
+probe choose_local_or_image
+    movq %rdx, 8(%rsp)
+    leaq 8(%rsp), %r8
+    leaq literal+1(%rip), %r9
+    testq %rcx, %rcx
+    cmovneq %r9, %r8
+    pushq %r8
+    popq %r9
+    movl (%r9), %eax
+    ret
+    .seh_endproc
+
+probe partial_spill
+    leaq literal(%rip), %r8
+    movq %r8, 8(%rsp)
+    movb %cl, 9(%rsp)
+    movq 8(%rsp), %r9
+    movl (%r9), %eax
+    ret
+    .seh_endproc
+
+probe spill_numeric_alias
+    leaq literal(%rip), %r8
+    movq %r8, 8(%rsp)
+    # A numeric guest VA aliases the first shadow slot.
+    movl $0x70000fe0, %r9d
+    addl $4, (%r9)
+    movq 8(%rsp), %rax
+    movl (%rax), %eax
+    ret
+    .seh_endproc
+
+probe indirect_spill_store
+    leaq literal(%rip), %r8
+    movq %r8, 8(%rsp)
+    movq %rdx, (%rcx)
+    movq 8(%rsp), %rax
+    movl (%rax), %eax
+    ret
+    .seh_endproc
+
+probe incomplete_spill_join
+    movq %rdx, 8(%rsp)
+    testq %rcx, %rcx
+    je 1f
+    leaq literal(%rip), %r8
+    movq %r8, 8(%rsp)
+1:
+    movq 8(%rsp), %rax
+    movl (%rax), %eax
+    ret
+    .seh_endproc
+
+probe walk_image
+    leaq literal(%rip), %r8
+    testq %rcx, %rcx
+    je 2f
+1:
+    addq $1, %r8
+    subq $1, %rcx
+    jne 1b
+2:
+    movl (%r8), %eax
+    ret
+    .seh_endproc
+
+probe wide_mask
+    andl $15, %ecx
+    leaq literal(%rip), %r8
+    movzbl (%r8,%rcx), %eax
+    ret
+    .seh_endproc
+
+probe reloaded_stack_va
+    movq %rsp, 8(%rsp)
+    movq 8(%rsp), %r8
+    movabsq $0x123456789abcdef0, %rax
+    addq %rax, %r8
+    movl (%r8), %eax
+    ret
+    .seh_endproc
+
+probe joined_stack_va
+    movq %rdx, 8(%rsp)
+    leaq 8(%rsp), %r8
+    testq %rcx, %rcx
+    je 1f
+    movabsq $0x123456789abcdef0, %rax
+    leaq (%rsp,%rax), %r8
+1:
+    movl (%r8), %eax
+    ret
+    .seh_endproc

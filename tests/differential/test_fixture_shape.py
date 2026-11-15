@@ -81,6 +81,36 @@ class FixtureShapeTests(unittest.TestCase):
             with self.assertRaisesRegex(ValueError, "pointer initializer"):
                 check(code)
 
+    def test_image_target_join_requires_distinct_sections_on_branch_arms(self):
+        sections = ("  0 .choicea 00000008 00002000 00002000\n  CONTENTS, ALLOC, LOAD, READONLY, DATA\n"
+                    "  1 .choiceb 00000008 00003000 00003000\n  CONTENTS, ALLOC, LOAD, READONLY, DATA")
+        body = ["je 3", "lea r8,[rip+0x10] # 2000", "jmp 4", "lea r8,[rip+0x20] # 3000",
+                "movzx eax,WORD PTR [r8+0x4]", "ret"]
+        check_image_leaf("image_target_join", dict(enumerate(body)), sections, "debug")
+        for index, change in ((0, "jmp 3"), (3, "lea r8,[rip+0x20] # 2004"), (3, "lea r9,[rip+0x20] # 3000")):
+            modified = dict(enumerate(body))
+            modified[index] = change
+            with self.subTest(change=change), self.assertRaisesRegex(ValueError, "branch selecting two distinct"):
+                check_image_leaf("image_target_join", modified, sections, "release")
+
+    def test_retarget_requires_a_writable_relocated_slot_and_distinct_targets(self):
+        body = ["lea r9,[rip+0x8] # 401000 <.initial>", "lea r9,[rip+0x8] # 402000 <.other>",
+                "mov QWORD PTR [rip+0x8],r9 # 403000 <.ptrslot>", "mov r8,QWORD PTR [rip+0x8] # 403000 <.ptrslot>",
+                "lea r9,[r8+0x2]", "add WORD PTR [r9],dx", "mov rax,QWORD PTR [r8]", "ret"]
+        sections = [(0x401000 + n * 4096, 8, n * 8, "CONTENTS, ALLOC, LOAD, DATA") for n in range(3)]
+        report = "ImageBase 400000\nreloc 0 offset 0 [3000] DIR64"
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "global_retarget.exe"
+            path.write_bytes(bytes(16) + (0x401000).to_bytes(8, "little"))
+            def check(code):
+                check_global_leaf(path, dict(enumerate(code)), sections, report, "debug")
+
+            check(body)
+            for index, change in ((1, body[1].replace("402000", "401000")),
+                                  (2, body[2].replace(",r9", ",rdx"))):
+                with self.subTest(change=change), self.assertRaisesRegex(ValueError, "retargeting"):
+                    check([*body[:index], change, *body[index + 1:]])
+
     def test_global_static_uses_the_live_weights_base_in_the_loop(self):
         sections = [(0x401000, 32, 0, "CONTENTS, ALLOC, READONLY, DATA"),
                     (0x402000, 32, 32, "CONTENTS, ALLOC, DATA")]
