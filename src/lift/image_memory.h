@@ -4,6 +4,8 @@
 #include "pe/image.h"
 
 #include <map>
+#include <set>
+#include <tuple>
 
 namespace llvm {
     class Function;
@@ -12,6 +14,8 @@ namespace llvm {
 } // namespace llvm
 
 namespace forge::x86 {
+    struct Continuation;
+
     // Section plans and parsed relocation records borrow the image during translation.
     // The LLVM module owns the shared section storage and its initialization independently.
     class ImageMemory {
@@ -25,6 +29,8 @@ namespace forge::x86 {
         void fixedAccess(const Step &step, uint64_t va, unsigned width, bool write);
         void computedAccess(const Step &step, std::optional<uint64_t> va, unsigned width,
                             bool write);
+        void continuationAccess(const Step &step, const Continuation &origin,
+                                llvm::ArrayRef<uint32_t> sites, unsigned width, bool write);
         llvm::Function *emitResolver(llvm::Module &module, llvm::IRBuilderBase &entryIR);
 
       private:
@@ -41,9 +47,14 @@ namespace forge::x86 {
         bool overlapsStack;
         std::vector<Span> direct;
         std::map<uint32_t, Span> executable;
+        std::set<std::tuple<uint32_t, uint64_t, unsigned, bool>> continuationAccesses;
         std::optional<ImageInitialization> initialization;
 
+        enum class ExecutableSelection : uint8_t { AddressTakenSection, ContinuationBytes };
+
         const ImageInitialization &contents();
+        void selectComputed(const Step &step, uint64_t va, unsigned width, bool write,
+                            ExecutableSelection executableSelection);
         void select(const Step &step, const Section &section, RvaRange access);
         static void addExecutableSpan(std::vector<Span> &spans, const Span &span);
         void addIndirectSpans(std::vector<Span> &spans) const;

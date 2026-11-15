@@ -384,5 +384,12 @@
     "export": "call_flags",
     "signature": "i64(i64,i64)",
     "harness": "decimal_pairs"
+  },
+  {
+    "fixture_id": "functions/continuations",
+    "scope": "function",
+    "export": "call_continuations",
+    "signature": "i64(i64,i64)",
+    "harness": "decimal_pairs"
   }
 ]

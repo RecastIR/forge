@@ -556,6 +556,8 @@ def check_padding(path):
 # Numeric CALL targets must identify the linked helper entry even if the
 # disassembler's printed symbol happens to look right.
 CALL_GRAPHS = {
+    "call_continuations": {"call_continuations": ["read_continuation"] * 9 + ["return_continuation"],
+                           "read_continuation": [], "return_continuation": []},
     "call_recursive": {"call_recursive": ["descend"], "descend": ["descend", "combine"], "combine": []},
     "call_mutual": {"call_mutual": ["even_step"], "even_step": ["odd_step"], "odd_step": ["even_step"]},
     "call_sequence": {"call_sequence": ["pair", "increment", "pair"], "pair": ["increment", "increment"],
@@ -582,6 +584,19 @@ def check_call_group(name, listing, pe_report, config):
         if sorted(calls.values()) != sorted(expected[symbol]):
             raise ValueError(f"{symbol} expected calls to {expected[symbol]}, found {list(calls.values())}")
         live = [body[a] for a in sorted(graph)]
+        if name == "call_continuations" and any("[rip" in text for text in live):
+            raise ValueError("continuation bytes must be selected without a RIP-relative address")
+        if symbol == "call_continuations":
+            # R9D's MOV imm32 has a two-byte opcode followed by the site-specific bytes.
+            after = dict(zip(body, list(body)[1:]))
+            markers = {body[after[a]] for a, target in calls.items() if target == "read_continuation"}
+            if markers != {f"mov r9d,{0x1200 + i:#x}" for i in range(9)}:
+                raise ValueError("all nine continuation immediates must be distinguishable")
+        if symbol == "read_continuation" and (live[0] != "mov r8,QWORD PTR [rsp]" or
+                not {"movzx eax,BYTE PTR [r8+0x2]", "movzx eax,WORD PTR [r8+0x2]"} <= set(live)):
+            raise ValueError("helper must dereference its saved return VA at both widths")
+        if symbol == "return_continuation" and live != ["mov rax,QWORD PTR [rsp]", "ret"]:
+            raise ValueError("helper must return its saved continuation VA in RAX")
         if symbol == "call_sequence":
             loops, _ = natural_loops(graph)
             if not any(target == "increment" and any(a in loop for loop in loops.values())

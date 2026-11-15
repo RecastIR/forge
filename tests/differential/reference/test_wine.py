@@ -21,6 +21,15 @@ class WineTests(unittest.TestCase):
                     result = execute(image, BINARIES / config / "calculate.exe", args)
                     self.assertEqual((result.exit_code, result.stdout, result.stderr), (status, stdout, b""))
 
+    def test_continuation_faults(self):
+        image = reference_environment(SUITE)["container_image_id"]
+        for config in ("debug", "release"):
+            for mode in ("3", "4"):
+                with self.subTest(config=config, mode=mode):
+                    # Read an unmapped VA or write to read-only executable bytes.
+                    result = execute(image, BINARIES / config / "call_continuations.exe", ["0", mode])
+                    self.assertEqual(result.exit_code, 0xc0000005)  # STATUS_ACCESS_VIOLATION
+
     def test_complete_matrix(self):
         catalog = load_catalog()
         for config in ("debug", "release"):

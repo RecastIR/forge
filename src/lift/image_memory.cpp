@@ -1,4 +1,5 @@
 #include "lift/image_memory.h"
+#include "lift/address_fact.h"
 
 #include "lift/memory.h"
 
@@ -300,9 +301,29 @@ namespace forge::x86 {
             return;
         }
 
+        selectComputed(step, *va, width, write, ExecutableSelection::AddressTakenSection);
+    }
+
+    void ImageMemory::continuationAccess(const Step &step, const Continuation &origin,
+                                         llvm::ArrayRef<uint32_t> sites, unsigned width,
+                                         bool write) {
+        // Repeated reads in a high-fan-in helper need only one expansion of its
+        // call sites. The first selecting step owns the budget diagnostic.
+        if (!continuationAccesses.emplace(origin.callee, origin.offset, width, write).second) {
+            return;
+        }
+
+        for (auto site : sites) {
+            selectComputed(step, loadBase + site + origin.offset, width, write,
+                           ExecutableSelection::ContinuationBytes);
+        }
+    }
+
+    void ImageMemory::selectComputed(const Step &step, uint64_t va, unsigned width, bool write,
+                                     ExecutableSelection executableSelection) {
         // A proven register value narrows the image selection. An invalid access still
         // goes through the runtime resolver if the guest executes the instruction.
-        const auto rva = *va - loadBase;
+        const auto rva = va - loadBase;
         const auto *section = source.sectionAtRva(rva);
 
         if (!section || (!section->writableData() && (write || !section->immutable()))) {
@@ -315,7 +336,8 @@ namespace forge::x86 {
             return;
         }
 
-        if (section->permissions[2] == 'x') {
+        if (section->permissions[2] == 'x' &&
+            executableSelection == ExecutableSelection::AddressTakenSection) {
             if (auto literal = executable.find(section->rva); literal != executable.end()) {
                 addExecutableSpan(direct, literal->second);
             }

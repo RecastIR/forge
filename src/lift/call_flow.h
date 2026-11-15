@@ -3,6 +3,8 @@
 #include "lift/cfg.h"
 #include "lift/integer.h"
 
+#include <set>
+
 namespace forge::x86 {
     inline constexpr unsigned registerCount = 16;
     inline constexpr unsigned callerSlots = 7;
@@ -28,7 +30,7 @@ namespace forge::x86 {
     };
 
     struct CallSiteEffect {
-        uint32_t target;
+        uint32_t target, continuation;
         DefinitionEffect prefix;
     };
 
@@ -43,7 +45,8 @@ namespace forge::x86 {
         std::map<uint32_t, BlockEffects> blocks;
         DefinitionEffect returns;
         Definitions entry;
-        bool called = false;
+        std::set<uint32_t> callers;
+        std::vector<uint32_t> continuations;
     };
 
     using FunctionGraphs = std::map<uint32_t, ControlFlowGraph>;

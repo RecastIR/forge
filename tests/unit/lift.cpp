@@ -62,6 +62,87 @@ namespace {
               "self-subtraction changed its legacy stack proof");
     }
 
+    void checkFrameAndContinuationFacts() {
+        using x86::AddressFact;
+        const auto entry = AddressFact::frameStack();
+        const auto below = entry.plus(AddressFact(uint64_t{0} - 40));
+        const auto above = entry.plus(AddressFact(8));
+        check(below.plus(AddressFact(40)) == entry && below.values().empty(),
+              "frame displacement was treated as an absolute VA");
+        check(above.join(above).stackDerived() && below.join(above).hasUnknown() &&
+                  !below.join(above).stackDerived(),
+              "joined distinct frame offsets retained forced stack routing");
+
+        const auto callerRsps = AddressFact(0x1008).join(AddressFact(0x2008));
+        const auto addresses = AddressFact(0x1010).join(AddressFact(0x2010));
+        check(above.project(callerRsps) == addresses && above.project({}).hasUnknown(),
+              "a transferred frame address was evaluated against the wrong activation");
+
+        const auto ret = AddressFact::continuation(0x2400);
+        const auto advanced = ret.plus(AddressFact(4));
+        const auto mixed = advanced.join(AddressFact(0x701234));
+        check(!advanced.known() && advanced.continuations().front() == x86::Continuation{0x2400, 4},
+              "a call-group displacement became a numeric or unrelated pointer");
+        check(!mixed.hasUnknown() && mixed.values().size() == 1 &&
+                  mixed.values().front() == 0x701234 &&
+                  mixed.continuations() == advanced.continuations(),
+              "a numeric alternative acquired executable-byte selection privileges");
+        const auto withUnknown = mixed.join(AddressFact{});
+        check(withUnknown.hasUnknown() && withUnknown.continuations() == advanced.continuations(),
+              "an unknown predecessor erased reachable continuation reads");
+        check(advanced.masked(UINT32_MAX).continuations().empty() &&
+                  advanced.times(2).continuations().empty(),
+              "a truncated or scaled code pointer kept an unproved source");
+
+        auto loop = ret;
+        for (unsigned i = 0; i <= AddressFact::limit; ++i) {
+            loop = loop.join(loop.plus(AddressFact(1)));
+        }
+
+        check(loop.hasUnknown() && loop.continuations().empty() && loop.join(ret) == loop,
+              "continuation displacement widening did not converge");
+    }
+
+    void checkFrameSpillAliases() {
+        using x86::AddressFact;
+        using x86::StackSpills;
+        const auto slot = AddressFact::frameStack(uint64_t{0} - 16);
+        const auto ret = AddressFact::continuation(0x2400);
+        StackSpills frame;
+        frame.write(slot, 64, ret);
+        check(frame.read(slot) == ret && frame.read(slot.plus(AddressFact(1))).hasUnknown(),
+              "nested full-width spill lost the return-address source");
+        auto otherPath = frame;
+        otherPath.write(slot.plus(AddressFact(7)), 16, {});
+        check(otherPath.read(slot).hasUnknown() && frame.read(slot) == ret,
+              "partial overlapping write left a stale frame save or mutated a sibling");
+        const auto numeric = AddressFact(x86::GuestMemory::base + 0x100);
+        otherPath = frame;
+        otherPath.write(numeric, 64, ret);
+        check(otherPath.read(slot).hasUnknown() && otherPath.read(numeric) == ret,
+              "numeric store retained a possibly aliased frame save");
+        otherPath.write(slot, 64, ret);
+        check(otherPath.read(slot) == ret && otherPath.read(numeric).hasUnknown(),
+              "frame store retained a possibly aliased numeric save");
+
+        StackSpills absent;
+        const auto partial = ret.join(AddressFact{});
+        check(absent.merge(frame) && absent.read(slot) == partial && !absent.merge(frame),
+              "unknown spill path discarded a known continuation or failed to converge");
+        check(frame.merge({}) && frame.read(slot) == partial && !frame.merge({}),
+              "partial spill join depended on predecessor order");
+
+        StackSpills shifted;
+        const auto adjacent = slot.plus(AddressFact(1));
+        shifted.write(adjacent, 64, ret);
+        check(absent.merge(shifted) && absent.read(adjacent) == partial &&
+                  absent.read(slot) == partial,
+              "alternative overlapping saves lost their continuation reads");
+        absent.write(slot, 64, partial);
+        check(absent.read(adjacent).continuations().empty() && absent.read(slot) == partial,
+              "repeated full-width save left an overlapping partial provenance");
+    }
+
     void checkSpillSnapshots() {
         using x86::AddressFact;
         using x86::StackSpills;
@@ -664,6 +745,8 @@ int main(int argc, char **argv) try {
 
     check(argc == 5, "expected add.exe, cfg.exe, image.exe and stack.exe fixtures");
     checkAddressAlternatives();
+    checkFrameAndContinuationFacts();
+    checkFrameSpillAliases();
     checkSpillSnapshots();
     checkControlFlow(argv[2]);
     checkControlFlowLeaves(argv[2]);

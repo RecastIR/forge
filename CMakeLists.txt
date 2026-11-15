@@ -60,7 +60,7 @@ add_library(forge_core STATIC
   src/diagnostic.cpp
   src/pe/input.cpp src/pe/pe.cpp src/pe/dependencies.cpp
   src/analysis/analysis.cpp
-  src/lift/cfg.cpp src/lift/call_flow.cpp src/lift/execution_context.cpp
+  src/lift/address_fact.cpp src/lift/cfg.cpp src/lift/call_flow.cpp src/lift/execution_context.cpp
   src/lift/integer.cpp src/lift/memory.cpp src/lift/image_memory.cpp src/lift/lift.cpp
   src/output/publication.cpp)
 target_include_directories(forge_core PUBLIC src)

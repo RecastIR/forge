@@ -540,6 +540,16 @@
       "id": "functions/flags",
       "config": "release",
       "target": "macos-arm64"
+    },
+    {
+      "id": "functions/continuations",
+      "config": "debug",
+      "target": "macos-arm64"
+    },
+    {
+      "id": "functions/continuations",
+      "config": "release",
+      "target": "macos-arm64"
     }
   ]
 }

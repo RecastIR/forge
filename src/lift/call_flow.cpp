@@ -1,7 +1,5 @@
 #include "lift/call_flow.h"
 
-#include <set>
-
 namespace forge::x86 {
     bool Definitions::intersect(const Definitions &other) {
         const auto before = *this;
@@ -113,7 +111,6 @@ namespace forge::x86 {
 
     void proveCallFlow(const FunctionGraphs &graphs, FunctionFlows &flows, uint32_t root,
                        const Definitions &initial) {
-        std::map<uint32_t, std::set<uint32_t>> callers;
         std::set<uint32_t> pending;
 
         for (auto &[address, function] : flows) {
@@ -122,8 +119,9 @@ namespace forge::x86 {
 
             for (const auto &[leader, block] : function.blocks) {
                 for (const auto &call : block.calls) {
-                    callers[call.target].insert(address);
-                    flows.at(call.target).called = true;
+                    auto &callee = flows.at(call.target);
+                    callee.callers.insert(address);
+                    callee.continuations.push_back(call.continuation);
                 }
             }
         }
@@ -135,7 +133,7 @@ namespace forge::x86 {
 
             if (function.returns != returns) {
                 function.returns = returns;
-                const auto &parents = callers[address];
+                const auto &parents = function.callers;
                 pending.insert(parents.begin(), parents.end());
             }
         }

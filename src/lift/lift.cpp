@@ -115,6 +115,80 @@ namespace forge {
             }
         };
 
+        struct CallInputs {
+            AddressFact rsp;
+            std::array<AddressFact, 4> arguments;
+
+            bool merge(const CallInputs &other) {
+                const auto before = *this;
+                rsp = rsp.join(other.rsp);
+
+                for (size_t i = 0; i < arguments.size(); ++i) {
+                    arguments[i] = arguments[i].join(other.arguments[i]);
+                }
+
+                return rsp != before.rsp || arguments != before.arguments;
+            }
+        };
+
+        // A missing entry or return means no such path has reached the worklist.
+        // An observed call or return may carry a genuinely unknown guest value.
+        struct CallAddresses {
+            struct FunctionState {
+                explicit FunctionState(const CallInputs &inputs) : entry(inputs) {}
+
+                CallInputs entry;
+                std::optional<AddressFact> returned;
+                bool restart = false;
+                std::set<uint32_t> readyBlocks;
+                // (caller, block) pairs suspended before this function's first return.
+                std::set<std::pair<uint32_t, uint32_t>> waiting;
+            };
+
+            std::map<uint32_t, FunctionState> functions;
+            std::set<uint32_t> pending;
+
+            void enter(uint32_t target, const CallInputs &inputs) {
+                auto [it, inserted] = functions.try_emplace(target, inputs);
+                if (!inserted && !it->second.entry.merge(inputs)) {
+                    return;
+                }
+
+                it->second.restart = true;
+                pending.insert(target);
+            }
+
+            void recordReturn(uint32_t rva, const AddressFact &value,
+                              const std::set<uint32_t> &callers) {
+                auto &state = functions.at(rva);
+                if (!state.returned) {
+                    state.returned = value;
+                    for (auto [caller, block] : state.waiting) {
+                        functions.at(caller).readyBlocks.insert(block);
+                        pending.insert(caller);
+                    }
+
+                    state.waiting.clear();
+                    return;
+                }
+
+                const auto joined = state.returned->join(value);
+                if (*state.returned == joined) {
+                    return;
+                }
+
+                // Earlier caller prefixes may already have used the old return fact.
+                state.returned = joined;
+                for (auto caller : callers) {
+                    const auto parent = functions.find(caller);
+                    if (parent != functions.end()) {
+                        parent->second.restart = true;
+                        pending.insert(caller);
+                    }
+                }
+            }
+        };
+
         struct BlockState {
             BasicBlock *irBlock = nullptr;
             BasicBlock *exitBlock = nullptr;
@@ -146,13 +220,15 @@ namespace forge {
 
         class Translator {
           public:
-            Translator(const MCRegisterInfo &regs, x86::ImageMemory &image, GuestBody &body,
-                       const GuestBodies &bodies, const x86::FunctionFlows &flows)
+            Translator(uint32_t functionRva, const MCRegisterInfo &regs, x86::ImageMemory &image,
+                       GuestBody &body, const GuestBodies &bodies, const x86::FunctionFlows &flows)
                 : ir(body.function->getContext()), semantics(ir), memory(ir), imageMemory(image),
-                  regs(regs), body(body), bodies(bodies), flows(flows), impl(body.function) {}
+                  regs(regs), body(body), bodies(bodies), flows(flows), impl(body.function),
+                  rva(functionRva) {}
 
             void summarizeFunction(const x86::ControlFlowGraph &graph, x86::FunctionFlow &flow);
-            void planAddresses(const x86::ControlFlowGraph &graph, bool nested);
+            void analyzeAddresses(const x86::ControlFlowGraph &graph, CallAddresses &calls);
+            void collectAddresses(const x86::ControlFlowGraph &graph, CallAddresses &calls);
             void translate(const x86::ControlFlowGraph &graph, const x86::FunctionFlow &flow,
                            const x86::ContextLayout &layout, Function *resolver, bool typedRoot);
 
@@ -170,6 +246,16 @@ namespace forge {
             const GuestBodies &bodies;
             const x86::FunctionFlows &flows;
             Function *impl;
+            uint32_t rva;
+            AddressFact entryAddresses;
+            std::map<uint32_t, AddressFacts> blockAddresses;
+
+            struct AddressCursor {
+                size_t index;
+                AddressFacts facts;
+            };
+
+            std::map<uint32_t, AddressCursor> suspendedBlocks;
             bool accessesMemory = false;
             DenseSet<uint32_t> stackAccesses;
             bool tracksOrigins = false;
@@ -222,7 +308,11 @@ namespace forge {
                                     RegisterView dest, const AddressFacts &facts) const;
             void traceInteger(const Step &s, const x86::IntegerInstruction &op, AddressFacts &facts,
                               bool collect);
-            void traceAddresses(const x86::GuestBlock &block, AddressFacts &facts, bool collect);
+            AddressFact savedAddress(const AddressFacts &facts, const AddressFact &address) const;
+            bool traceCall(uint32_t target, uint32_t block, AddressFacts &facts,
+                           CallAddresses &calls, bool collect) const;
+            size_t traceAddresses(const x86::GuestBlock &block, AddressFacts &facts,
+                                  CallAddresses &calls, bool collect, size_t start = 0);
             void summarize(const Step &s, x86::DefinitionEffect &state);
             void emitBlock(const x86::GuestBlock &block, const BlockStates &states);
         };
@@ -553,15 +643,19 @@ namespace forge {
                 return;
             }
 
-            if (!address.known()) {
+            for (const auto &origin : address.continuations()) {
+                imageMemory.continuationAccess(s, origin, flows.at(origin.callee).continuations,
+                                               op.sourceWidth, write);
+            }
+
+            if (address.hasUnknown()) {
                 imageMemory.computedAccess(s, std::nullopt, op.sourceWidth, write);
-                return;
             }
 
             auto onStack = [](uint64_t va) {
                 return va - x86::GuestMemory::base < x86::GuestMemory::capacity;
             };
-            if (llvm::all_of(address.values(), onStack)) {
+            if (address.known() && llvm::all_of(address.values(), onStack)) {
                 stackAccesses.insert(s.rva);
                 return;
             }
@@ -569,6 +663,23 @@ namespace forge {
             for (auto va : address.values()) {
                 imageMemory.computedAccess(s, va, op.sourceWidth, write);
             }
+        }
+
+        AddressFact Translator::savedAddress(const AddressFacts &facts,
+                                             const AddressFact &address) const {
+            // An argument can also carry the exact absolute address of the slot.
+            // Equal sets with several alternatives need not agree on a given path.
+            const bool absoluteSlot = address.known() && entryAddresses.known() &&
+                                      entryAddresses.values().size() == 1 &&
+                                      address.values() == entryAddresses.values();
+
+            if (!flows.at(rva).callers.empty() && (address.frameOffset() == 0 || absoluteSlot)) {
+                // The current activation protects all eight bytes until its RET.
+                // At the external entry the synthetic slot still faults on access.
+                return AddressFact::continuation(rva);
+            }
+
+            return facts.spills.read(address);
         }
 
         void Translator::traceStackInstruction(const Step &s, StackOp op,
@@ -581,7 +692,7 @@ namespace forge {
             if (op == StackOp::Pop || op == StackOp::Leave) {
                 const auto dest =
                     op == StackOp::Pop ? reg(s, s.inst.getOperand(0), 64) : framePointer;
-                auto saved = facts.spills.read(rsp);
+                auto saved = savedAddress(facts, rsp);
                 rsp = rsp.plus(AddressFact(8));
                 facts.registers[dest.index] = std::move(saved);
             } else {
@@ -616,7 +727,7 @@ namespace forge {
             if (writesRegister(op)) {
                 auto dest = destination(s, op);
                 facts.registers[dest.index] = op.op == Op::Mov && dest.width == 64
-                                                  ? facts.spills.read(address)
+                                                  ? savedAddress(facts, address)
                                                   : AddressFact{};
             } else if (memoryDestination(op.form) && op.op != Op::Cmp) {
                 AddressFact stored;
@@ -630,15 +741,48 @@ namespace forge {
             }
         }
 
-        void Translator::traceAddresses(const x86::GuestBlock &block, AddressFacts &facts,
-                                        bool collect) try {
-            for (const auto &s : block.steps) {
-                if (s.callTarget()) {
-                    // A callee may update any volatile register or write through a
-                    // pointer into the caller's stack. Checked returns preserve RSP
-                    // and nonvolatile register values.
-                    std::fill_n(facts.registers.begin(), callerSlots, AddressFact{});
-                    facts.spills = {};
+        bool Translator::traceCall(uint32_t target, uint32_t block, AddressFacts &facts,
+                                   CallAddresses &calls, bool collect) const {
+            if (!collect) {
+                CallInputs inputs;
+                inputs.rsp = facts.registers[rspIndex]
+                                 .project(entryAddresses)
+                                 .plus(AddressFact(uint64_t(0) - 8));
+
+                for (size_t i = 0; i < inputs.arguments.size(); ++i) {
+                    inputs.arguments[i] = facts.registers[i + 1].project(entryAddresses);
+                }
+
+                calls.enter(target, inputs);
+            }
+
+            auto &callee = calls.functions.at(target);
+            if (!callee.returned) {
+                if (!collect) {
+                    callee.waiting.emplace(rva, block);
+                }
+
+                return false;
+            }
+
+            // Checked returns preserve RSP and nonvolatiles. Any other volatile
+            // or saved stack value can have changed through a register or alias.
+            std::fill_n(facts.registers.begin(), callerSlots, AddressFact{});
+            facts.registers[0] = *callee.returned;
+            facts.spills = {};
+            return true;
+        }
+
+        size_t Translator::traceAddresses(const x86::GuestBlock &block, AddressFacts &facts,
+                                          CallAddresses &calls, bool collect, size_t start) try {
+            for (size_t index = start; index < block.steps.size(); ++index) {
+                const auto &s = block.steps[index];
+                if (auto target = s.callTarget()) {
+                    if (!traceCall(static_cast<uint32_t>(*target), block.steps.front().rva, facts,
+                                   calls, collect)) {
+                        return index;
+                    }
+
                     continue;
                 }
 
@@ -668,6 +812,8 @@ namespace forge {
                     result = {};
                 }
             }
+
+            return block.steps.size();
         } catch (InspectionError &failure) {
             if (failureKind(failure.kind).stage == "lifting") {
                 failure.context.blockRva = block.steps.front().rva;
@@ -676,36 +822,63 @@ namespace forge {
             throw;
         }
 
-        void Translator::planAddresses(const x86::ControlFlowGraph &graph, bool nested) {
-            if (!accessesMemory) {
-                return;
-            }
+        void Translator::analyzeAddresses(const x86::ControlFlowGraph &graph,
+                                          CallAddresses &calls) {
+            auto &state = calls.functions.at(rva);
+            const auto &callers = flows.at(rva).callers;
+            auto pending = std::exchange(state.readyBlocks, {});
+            if (std::exchange(state.restart, false)) {
+                blockAddresses.clear();
+                suspendedBlocks.clear();
+                pending = {rva};
 
-            const auto start = graph.begin()->first;
-            std::map<uint32_t, AddressFacts> incoming;
-            incoming[start].registers[rspIndex] =
-                nested ? AddressFact::frameStack()
-                       : AddressFact(x86::GuestMemory::entryRsp, AddressFact::Stack);
-            std::set<uint32_t> pending{start};
+                entryAddresses = state.entry.rsp;
+                auto &registers = blockAddresses[rva].registers;
+                const auto &arguments = state.entry.arguments;
+                std::copy(arguments.begin(), arguments.end(), registers.begin() + 1);
+                registers[rspIndex] =
+                    callers.empty() ? AddressFact(x86::GuestMemory::entryRsp, AddressFact::Stack)
+                                    : AddressFact::frameStack();
+            }
 
             while (!pending.empty()) {
                 const auto address = pending.extract(pending.begin()).value();
-                auto out = incoming.at(address);
                 const auto &block = graph.at(address);
-                traceAddresses(block, out, false);
+                auto suspended = suspendedBlocks.extract(address);
+                auto cursor = suspended.empty() ? AddressCursor{0, blockAddresses.at(address)}
+                                                : std::move(suspended.mapped());
+                cursor.index = traceAddresses(block, cursor.facts, calls, false, cursor.index);
+                if (cursor.index != block.steps.size()) {
+                    // A first return resumes this exact prefix. A widened input,
+                    // successor state or previous return invalidates the prefix.
+                    suspendedBlocks.emplace(address, std::move(cursor));
+                    continue;
+                }
+
+                if (block.exit == x86::Flow::Return) {
+                    calls.recordReturn(rva, cursor.facts.registers[0].project(entryAddresses),
+                                       callers);
+                }
 
                 for (auto successor : block.successors) {
-                    auto [it, inserted] = incoming.try_emplace(successor, out);
+                    auto [it, inserted] = blockAddresses.try_emplace(successor, cursor.facts);
 
-                    if (inserted || it->second.merge(out)) {
+                    if (inserted || it->second.merge(cursor.facts)) {
+                        suspendedBlocks.erase(successor);
                         pending.insert(successor);
                     }
                 }
             }
+        }
 
-            for (const auto &[address, block] : graph) {
-                traceAddresses(block, incoming.at(address), true);
+        void Translator::collectAddresses(const x86::ControlFlowGraph &graph,
+                                          CallAddresses &calls) {
+            for (auto &[address, facts] : blockAddresses) {
+                traceAddresses(graph.at(address), facts, calls, true);
             }
+
+            blockAddresses.clear();
+            suspendedBlocks.clear();
         }
 
         void Translator::summarize(const Step &s, x86::DefinitionEffect &state) {
@@ -1055,8 +1228,8 @@ namespace forge {
                     for (const auto &s : block.steps) {
                         if (auto target = s.callTarget()) {
                             requireMemory(s);
-                            effects.calls.push_back(
-                                {static_cast<uint32_t>(*target), std::exchange(effects.tail, {})});
+                            effects.calls.push_back({static_cast<uint32_t>(*target), s.next,
+                                                     std::exchange(effects.tail, {})});
                         } else {
                             summarize(s, effects.tail);
                         }
@@ -1072,7 +1245,7 @@ namespace forge {
                                    const x86::FunctionFlow &flow, const x86::ContextLayout &layout,
                                    Function *resolver, bool typedRoot) {
             requiresFullReturn = typedRoot;
-            hasGuestCaller = flow.called;
+            hasGuestCaller = !flow.callers.empty();
             tracksOrigins = layout.origins;
             BlockStates states;
             auto *entry = BasicBlock::Create(ir.getContext(), "entry", impl);
@@ -1087,7 +1260,7 @@ namespace forge {
             x86::FlagSet physicalEntry;
             x86::Flags incomingFlags{};
 
-            if (flow.called) {
+            if (hasGuestCaller) {
                 physicalEntry.set();
 
                 for (unsigned f = 0; f < x86::FlagCount; ++f) {
@@ -1154,7 +1327,7 @@ namespace forge {
                                                  "forge_guest_" + utohexstr(address, true), module);
                 body.function->getArg(0)->setName("context");
                 auto &translator =
-                    translators.try_emplace(address, regs, image, body, bodies, flows)
+                    translators.try_emplace(address, address, regs, image, body, bodies, flows)
                         .first->second;
                 translator.summarizeFunction(graph, flows[address]);
             }
@@ -1169,10 +1342,18 @@ namespace forge {
             }
 
             x86::proveCallFlow(graphs, flows, root, initial);
+            CallAddresses calls;
+            calls.enter(root, {AddressFact(x86::GuestMemory::entryRsp), {}});
+
+            while (!calls.pending.empty()) {
+                const auto address = calls.pending.extract(calls.pending.begin()).value();
+                translators.at(address).analyzeAddresses(graphs.at(address), calls);
+            }
+
             bool stack = false, origins = false;
 
             for (auto &[address, translator] : translators) {
-                translator.planAddresses(graphs.at(address), flows.at(address).called);
+                translator.collectAddresses(graphs.at(address), calls);
                 stack |= translator.usesStack();
                 origins |= translator.usesOrigins();
             }
@@ -1193,10 +1374,15 @@ namespace forge {
             uint64_t guestBase;
             // The analyzed image owns both the section and its bytes through generation.
             MappedRange code;
+            RelocationIndex relocations;
         };
 
-        MappedRange validateFunction(const AnalyzedImage &analysis, uint32_t rva,
-                                     FailureContext &location, bool callee) {
+        constexpr StringLiteral invalidFunctionStart =
+            "expected an exact, valid, unambiguous discovered function start";
+
+        std::optional<MappedRange> validateFunction(const AnalyzedImage &analysis, uint32_t rva,
+                                                    const RelocationIndex &relocations,
+                                                    FailureContext &location) {
             const auto &functions = analysis.functions();
             auto it = llvm::lower_bound(functions, rva, [](const auto &function, uint32_t address) {
                 return function.record.begin < address;
@@ -1210,10 +1396,8 @@ namespace forge {
             }
 
             if (it == functions.end() || it->record.begin != rva) {
-                if (callee && first == it) {
-                    throw atRva(FailureCode::UnsupportedControlFlow, rva,
-                                "unsupported direct call target without an exact discovered "
-                                "function start");
+                if (first == it) {
+                    return std::nullopt;
                 }
 
                 auto kind = FailureCode::InvalidEntry;
@@ -1224,8 +1408,7 @@ namespace forge {
                     location.endRva = first->record.end;
                 }
 
-                throw atRva(kind, rva,
-                            "expected an exact, valid, unambiguous discovered function start");
+                throw atRva(kind, rva, invalidFunctionStart);
             }
 
             const auto end = it->record.end;
@@ -1250,18 +1433,12 @@ namespace forge {
 
             location.fileOffset = code->fileOffset;
 
-            for (const auto &block : analysis.module().relocations) {
-                for (const auto &rel : block.entries) {
-                    const auto width = relocationWidth(rel.type);
-
-                    if (width && rel.rva < end && uint64_t(rel.rva) + width > rva) {
-                        throw atRva(FailureCode::RelocationOverlap, rva,
-                                    "function bytes overlap base relocation at " + hex(rel.rva));
-                    }
-                }
+            if (const auto *rel = relocations.firstOverlap({rva, end})) {
+                throw atRva(FailureCode::RelocationOverlap, rva,
+                            "function bytes overlap base relocation at " + hex(rel->rva));
             }
 
-            return *code;
+            return code;
         }
 
         ValidatedEntry validateEntry(const AnalyzedImage &analysis, LiftRequest request,
@@ -1273,7 +1450,12 @@ namespace forge {
                 throw atRva(FailureCode::DllLift, rva, "DLL lifting is unsupported");
             }
 
-            auto code = validateFunction(analysis, rva, location, false);
+            RelocationIndex relocations(module.relocations);
+            auto code = validateFunction(analysis, rva, relocations, location);
+            if (!code) {
+                throw atRva(FailureCode::InvalidEntry, rva, invalidFunctionStart);
+            }
+
             const uint64_t guestBase = request.guestLoadBase.value_or(module.imageBase);
             if (module.relocationsStripped && guestBase != module.imageBase) {
                 throw atRva(FailureCode::ImageMemory, rva,
@@ -1289,7 +1471,7 @@ namespace forge {
                 }
             }
 
-            return {request, guestBase, code};
+            return {request, guestBase, *code, std::move(relocations)};
         }
 
         const Step *instructionInterior(const x86::FunctionGraphs &graphs, uint32_t target) {
@@ -1307,8 +1489,9 @@ namespace forge {
             return found != steps.end() && found->rva < target ? &*found : nullptr;
         }
 
-        MappedRange validateCallee(const AnalyzedImage &analysis, const x86::FunctionGraphs &graphs,
-                                   const Step &step, uint32_t target) {
+        std::optional<MappedRange> validateCallee(const AnalyzedImage &analysis,
+                                                  const RelocationIndex &relocations,
+                                                  const Step &step, uint32_t target) {
             const auto *section = analysis.image().sectionAtRva(target);
 
             if (!section || section->permissions[2] != 'x') {
@@ -1318,17 +1501,8 @@ namespace forge {
 
             FailureContext location;
             try {
-                return validateFunction(analysis, target, location, true);
+                return validateFunction(analysis, target, relocations, location);
             } catch (const InspectionError &error) {
-                if (error.kind == FailureCode::UnsupportedControlFlow) {
-                    if (const auto *containing = instructionInterior(graphs, target)) {
-                        step.reject(FailureCode::InvalidCallTarget,
-                                    "direct call enters decoded instruction at " +
-                                        hex(containing->rva),
-                                    target);
-                    }
-                }
-
                 const auto kind = failureKind(error.kind).category == "invalid_input"
                                       ? FailureCode::InvalidCallTarget
                                       : FailureCode::UnsupportedControlFlow;
@@ -1336,9 +1510,38 @@ namespace forge {
             }
         }
 
-        void scheduleCallees(const AnalyzedImage &analysis, const x86::GuestBlock &block,
-                             const x86::FunctionGraphs &discovered,
-                             std::map<uint32_t, MappedRange> &pending) {
+        struct UnresolvedCall {
+            // The discovered CFG owns this step through final target classification.
+            const Step &step;
+            uint32_t target, function, block;
+
+            [[noreturn]] void reject(const x86::FunctionGraphs &graphs, uint32_t root) const try {
+                if (const auto *containing = instructionInterior(graphs, target)) {
+                    step.reject(FailureCode::InvalidCallTarget,
+                                "direct call enters decoded instruction at " + hex(containing->rva),
+                                target);
+                }
+
+                step.reject(FailureCode::UnsupportedControlFlow,
+                            hex(target) + ": unsupported direct call target without an exact "
+                                          "discovered function start",
+                            target);
+            } catch (InspectionError &error) {
+                error.context.blockRva = block;
+                if (function != root) {
+                    error.context.functionRva = function;
+                }
+
+                throw;
+            }
+        };
+
+        std::optional<UnresolvedCall>
+        scheduleCallees(const AnalyzedImage &analysis, uint32_t function,
+                        const x86::GuestBlock &block, const RelocationIndex &relocations,
+                        const x86::FunctionGraphs &discovered,
+                        std::map<uint32_t, MappedRange> &pending) try {
+            std::optional<UnresolvedCall> unresolved;
             for (const auto &step : block.steps) {
                 const auto target = step.callTarget();
 
@@ -1353,10 +1556,21 @@ namespace forge {
 
                 const auto address = static_cast<uint32_t>(*target);
 
-                if (!discovered.contains(address) && !pending.contains(address)) {
-                    pending.emplace(address, validateCallee(analysis, discovered, step, address));
+                if (discovered.contains(address) || pending.contains(address)) {
+                    continue;
+                }
+
+                if (auto code = validateCallee(analysis, relocations, step, address)) {
+                    pending.emplace(address, *code);
+                } else if (!unresolved) {
+                    unresolved.emplace(step, address, function, block.steps.front().rva);
                 }
             }
+
+            return unresolved;
+        } catch (InspectionError &error) {
+            error.context.blockRva = block.steps.front().rva;
+            throw;
         }
 
         x86::FunctionGraphs discoverGroup(const AnalyzedImage &analysis,
@@ -1364,6 +1578,7 @@ namespace forge {
                                           const MCInstrInfo &instructions) {
             x86::FunctionGraphs graphs;
             std::map<uint32_t, MappedRange> pending{{entry.request.startRva, entry.code}};
+            std::optional<UnresolvedCall> unresolved;
 
             while (!pending.empty()) {
                 auto function = pending.extract(pending.begin());
@@ -1374,11 +1589,10 @@ namespace forge {
                     graph = x86::discoverCFG(function.mapped().bytes, rva, dis, instructions);
 
                     for (const auto &[blockRva, block] : graph) {
-                        try {
-                            scheduleCallees(analysis, block, graphs, pending);
-                        } catch (InspectionError &error) {
-                            error.context.blockRva = blockRva;
-                            throw;
+                        const auto missing = scheduleCallees(analysis, rva, block,
+                                                             entry.relocations, graphs, pending);
+                        if (missing && !unresolved) {
+                            unresolved.emplace(*missing);
                         }
                     }
                 } catch (InspectionError &error) {
@@ -1388,6 +1602,10 @@ namespace forge {
 
                     throw;
                 }
+            }
+
+            if (unresolved) {
+                unresolved->reject(graphs, entry.request.startRva);
             }
 
             return graphs;

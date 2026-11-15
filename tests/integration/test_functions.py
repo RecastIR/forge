@@ -571,6 +571,26 @@ class Lift(Case):
                                   context["opcode"], context["bytes"]),
                                  (hex(caller), hex(caller), "CALL64pcrel32", call(caller, target).hex()))
 
+        # The peer calls into a reachable helper. Classify using the full set
+        # of decoded instructions for either ordering of their metadata RVAs.
+        peer = layout.u32(records + 12)
+        for leaf, source in ((helper, peer), (peer, helper)):
+            for delta, code in ((1, "LIFT_INVALID_CALL_TARGET"), (3, "LIFT_UNSUPPORTED_CONTROL_FLOW")):
+                with self.subTest(leaf=leaf, delta=delta):
+                    data = bytearray(original)
+                    write_body(data, caller, call(caller, leaf) + call(caller + 5, source) + b"\xc3")
+                    write_body(data, leaf, bytes.fromhex("48 89 c8 c3"))
+                    target = leaf + delta
+                    branch = call(source, target)
+                    write_body(data, source, branch + b"\xc3")
+                    diagnostic = diagnose(data)
+                    context = diagnostic["context"]
+                    self.assertEqual(diagnostic["code"], code)
+                    self.assertEqual((context["function_rva"], context["block_rva"], context["instruction_rva"],
+                                      context["file_offset"], context["bytes"], context["branch_target"]),
+                                     (hex(source), hex(source), hex(source), layout.file_offset(source),
+                                      branch.hex(), target))
+
         # Jumping to the same proven function entry remains an unsupported tail jump.
         data = bytearray(original)
         write_body(data, caller, b"\xe9" + struct.pack("<i", helper - (caller + 5)))
@@ -741,6 +761,66 @@ class Lift(Case):
         exe.write_bytes(data)
         p = self.invoke("lift", exe, "--rva", "0x1000", "--output", self.dir/"rel.ll", code=1)
         self.assertIn(b"base relocation at 0x1000", p.stderr)
+
+    def test_function_relocation_intervals(self):
+        original = (FIXTURES / "metadata.exe").read_bytes()
+        layout = Layout(original)
+        entry = 0x1004
+        record = layout.file_offset(layout.directory(3)[0])
+        table, size = layout.directory(5)
+        reloc = layout.file_offset(table)
+        program = self.dir / "relocated.exe"
+        output = self.dir / "function.ll"
+
+        # The selected function occupies [0x1004, 0x1007). Zero-width padding,
+        # fields ending at its start, and fields starting at its end are harmless.
+        # Disjoint malformed data fields must not force image initialization.
+        for fields, witness in (
+                ((0x0004, 0x3000, 0xa007), None),
+                ((0x3001,), 0x1001),
+                ((0x7000,), 0x1000),
+                ((0x1006, 0xa000, 0x1006), 0x1006),
+                ((0x1001, 0x2005, 0x2005, 0xa002), 0x1005)):
+            with self.subTest(fields=fields):
+                data = bytearray(original)
+                struct.pack_into("<II", data, record, entry, entry + 3)
+                start = layout.file_offset(entry)
+                data[start:start + 3] = bytes.fromhex("31 c0 c3")
+                count = (size - 8) // 2
+                struct.pack_into("<I", data, reloc, 0x1000)
+                struct.pack_into("<" + "H" * count, data, reloc + 8, *fields, *([0] * (count - len(fields))))
+                program.write_bytes(data)
+                p = self.invoke("lift", program, "--rva", hex(entry), "--output", output,
+                                "--diagnostics-format", "json", code=int(witness is not None))
+                if witness is not None:
+                    failure = json.loads(p.stderr)
+                    self.assertEqual(failure["code"], "ENTRY_RELOCATION_OVERLAP")
+                    self.assertIn(f"base relocation at {witness:#x}", failure["message"])
+
+    def test_relocated_callee_preserves_call_site(self):
+        data = bytearray((FIXTURES / "image.exe").read_bytes())
+        layout = Layout(data)
+        records = layout.file_offset(layout.directory(3)[0])
+        callee, caller = layout.u32(records), layout.u32(records + 12)
+        # The fixup touches only the callee and ends exactly at the caller.
+        witness = caller - 2
+        self.assertLessEqual(callee, witness)
+        reloc = layout.file_offset(layout.directory(5)[0])
+        struct.pack_into("<I", data, reloc, witness & ~0xfff)
+        struct.pack_into("<H", data, reloc + 8, 0x1000 | (witness & 0xfff))
+        call = b"\xe8" + struct.pack("<i", callee - caller - 5)
+        start = layout.file_offset(caller)
+        data[start:start + 6] = call + b"\xc3"
+        program = self.dir / "relocated-callee.exe"
+        program.write_bytes(data)
+        p = self.invoke("lift", program, "--rva", hex(caller), "--output", self.dir / "calls.ll",
+                        "--diagnostics-format", "json", code=1)
+        failure = json.loads(p.stderr)
+        self.assertEqual(failure["code"], "LIFT_UNSUPPORTED_CONTROL_FLOW")
+        self.assertIn(f"base relocation at {witness:#x}", failure["message"])
+        context = failure["context"]
+        self.assertEqual((context["instruction_rva"], context["branch_target"], context["bytes"]),
+                         (hex(caller), callee, call.hex()))
 
 
 if __name__ == "__main__":

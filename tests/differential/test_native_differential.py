@@ -3,6 +3,7 @@ import argparse
 import os
 from pathlib import Path
 import re
+import signal
 import struct
 import subprocess
 import sys
@@ -37,6 +38,23 @@ class NativeDifferentialTests(unittest.TestCase):
                         with self.subTest(config=config, variant=variant, args=args):
                             result = subprocess.run([exe, *args], capture_output=True, timeout=10)
                             self.assertEqual((result.returncode, result.stdout, result.stderr), (status, stdout, b""))
+
+    def test_continuation_faults(self):
+        fixture = "functions/continuations"
+        with tempfile.TemporaryDirectory(dir=self.tmp) as tmp:
+            output = Path(tmp).resolve()
+            for config in diff.CONFIGS:
+                # The ordinary reads must match Wine in these exact native binaries.
+                self.assertEqual(diff.run(config, fixture, output=output, forge=self.forge), 0)
+                for variant in diff.VARIANTS:
+                    work = output / config / fixture / variant
+                    exe = work / "native/bin/differential_decimal_pairs"
+                    for mode in ("3", "4"):
+                        with self.subTest(config=config, variant=variant, mode=mode):
+                            with self.assertRaises(diff.native.ExecutionFailure) as raised:
+                                diff.native.execute(exe, ["0", mode], output)
+                            self.assertEqual((raised.exception.outcome, raised.exception.status),
+                                             ("signaled", -signal.SIGTRAP))
 
     def test_mutable_state_in_a_fresh_process(self):
         fixture = "globals/counters"

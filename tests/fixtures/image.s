@@ -427,3 +427,177 @@ probe constant_sub_offset
     movl $7, %r8d
     subq %r8, %r8
     read_offset_from_rsp
+
+probe nested_join
+    subq $40, %rsp
+    call joined_stack_va
+    addq $40, %rsp
+    ret
+    .seh_endproc
+
+probe caller_local
+    subq $56, %rsp
+    movq %rdx, 32(%rsp)
+    leaq 32(%rsp), %r9
+    call read_argument
+    addq $56, %rsp
+    ret
+    .seh_endproc
+
+probe mixed_argument
+    subq $56, %rsp
+    testq %rcx, %rcx
+    jnz 1f
+    movq %rdx, 32(%rsp)
+    leaq 32(%rsp), %r9
+    call read_argument
+    jmp 2f
+1:
+    leaq literal(%rip), %r9
+    call read_argument
+2:
+    addq $56, %rsp
+    ret
+    .seh_endproc
+
+probe read_argument
+    movl (%r9), %eax
+    ret
+    .seh_endproc
+
+probe argument_to_image
+    subq $56, %rsp
+    leaq 32(%rsp), %rdx
+    call displace_argument
+    addq $56, %rsp
+    ret
+    .seh_endproc
+
+probe displace_argument
+    movabsq $0x123456789abcdef0, %r8
+    movl (%rdx,%r8), %eax
+    ret
+    .seh_endproc
+
+probe recursive_argument
+    testq %rcx, %rcx
+    jz 1f
+    subq $56, %rsp
+    movq %rcx, 32(%rsp)
+    leaq 32(%rsp), %rdx
+    decq %rcx
+    call recursive_argument
+    addq $56, %rsp
+    ret
+1:
+    movq (%rdx), %rax
+    ret
+    .seh_endproc
+
+# Return a copied continuation through RAX after reloading a nested local.
+probe return_saved
+    pushq %rbp
+    movq %rsp, %rbp
+    subq $16, %rsp
+    movq 8(%rbp), %r8
+    movq %r8, 8(%rsp)
+    movq 8(%rsp), %rax
+    leave
+    ret
+    .seh_endproc
+
+probe inspect_saved
+    subq $40, %rsp
+    call return_saved
+    movzwl 1(%rax), %eax
+    addq $40, %rsp
+    ret
+    .seh_endproc
+
+probe unused_saved
+    subq $40, %rsp
+    call return_saved
+    addq $40, %rsp
+    ret
+    .seh_endproc
+
+probe unknown_saved
+    subq $40, %rsp
+    call return_saved
+    xorq %rcx, %rax
+    movzbl (%rax), %eax
+    addq $40, %rsp
+    ret
+    .seh_endproc
+
+probe conditional_saved
+    subq $40, %rsp
+    call return_saved
+    testq %rcx, %rcx
+    cmovneq %rdx, %rax
+    movzbl (%rax), %eax
+    addq $40, %rsp
+    ret
+    .seh_endproc
+
+probe recursive_slot
+    testq %rcx, %rcx
+    jz 1f
+    subq $40, %rsp
+    decq %rcx
+    call recursive_slot
+    addq $40, %rsp
+    ret
+1:
+    movq (%rsp), %rax
+    movzbl (%rax), %eax
+    ret
+    .seh_endproc
+
+probe argument_return_slot
+    subq $40, %rsp
+    leaq -8(%rsp), %rdx
+    call read_argument_slot
+    addq $40, %rsp
+    ret
+    .seh_endproc
+
+probe read_argument_slot
+    movq (%rdx), %r9
+    movzbl (%r9), %eax
+    ret
+    .seh_endproc
+
+# A later caller adds a second possible return pointer to the identity helper.
+probe widened_return
+    subq $56, %rsp
+    leaq literal(%rip), %rcx
+    call pointer_identity
+    movzbl (%rax), %eax
+    movl %eax, 40(%rsp)
+    call read_second_pointer
+    addl 40(%rsp), %eax
+    addq $56, %rsp
+    ret
+    .seh_endproc
+
+.seh_proc pointer_identity
+pointer_identity:
+    .seh_endprologue
+    movq %rcx, %rax
+    ret
+    .seh_endproc
+
+.seh_proc read_second_pointer
+read_second_pointer:
+    subq $40, %rsp
+    .seh_stackalloc 40
+    .seh_endprologue
+    leaq literal+7(%rip), %rcx
+    call pointer_identity
+    jmp 1f
+1:
+    movzbl (%rax), %eax
+    addq $40, %rsp
+    ret
+    .seh_endproc
