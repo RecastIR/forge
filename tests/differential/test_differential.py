@@ -555,6 +555,29 @@ class LiftDiagnosticTests(unittest.TestCase):
                 self.lift(1, self.encode(dict(self.diagnostic, context=dict(context, **bad))))
             self.assertNotIsInstance(error.exception, diff.Unsupported)
 
+    def test_unrecorded_callee_requires_linked_call_evidence(self):
+        self.image.write_bytes(b"MZ\xe8\x0b\x00\x00\x00\x0f\x0b")
+        module = dict(sections=[dict(rva="0x10", virtual_size=5, raw_size=5, permissions="r-x", file_offset=2),
+                                dict(rva="0x20", virtual_size=2, raw_size=2, permissions="r-x", file_offset=7)],
+                      image_kind="exe", relocations=[])
+        (self.work / "inspect.json").write_text(json.dumps(dict(modules=[module])))
+        row = dict(start_rva="0x10", end_rva="0x15", liftable=True, status="valid")
+        (self.work / "analysis.json").write_text(json.dumps(dict(functions=[row])))
+        context = dict(self.diagnostic["context"], function_rva="0x20", block_rva="0x20",
+                       instruction_rva="0x20", file_offset=7, opcode="TRAP", bytes="0f0b",
+                       caller_rva="0x10", call_site_rva="0x10")
+
+        def lift(**changes):
+            self.lift(1, self.encode(dict(self.diagnostic, context=dict(context, **changes))))
+
+        with self.assertRaises(diff.Unsupported):
+            lift()
+        for changes in (dict(caller_rva="0x20"), dict(call_site_rva="0x11"),
+                        dict(function_rva="0x21"), dict(instruction_rva="0x22"), dict(bytes="ffff")):
+            with self.subTest(changes=changes), self.assertRaises(ValueError) as error:
+                lift(**changes)
+            self.assertNotIsInstance(error.exception, diff.Unsupported)
+
     def test_size_limit_uses_discovered_extent(self):
         context = dict(input=str(self.image), entry_rva=self.rva)
         diagnostic = dict(self.diagnostic, code="LIFT_FUNCTION_SIZE", context=context)

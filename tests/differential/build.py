@@ -562,6 +562,8 @@ CALL_GRAPHS = {
     "call_mutual": {"call_mutual": ["even_step"], "even_step": ["odd_step"], "odd_step": ["even_step"]},
     "call_sequence": {"call_sequence": ["pair", "increment", "pair"], "pair": ["increment", "increment"],
                       "increment": []},
+    "call_leaves": {"call_leaves": ["leaf_add", "leaf_add", "leaf_abs", "leaf_count", "leaf_store"],
+                    "leaf_add": [], "leaf_abs": [], "leaf_count": [], "leaf_store": []},
     "call_flags": {"call_flags": ["add_carry", "inspect_return"], "add_carry": [], "inspect_return": []},
 }
 
@@ -574,12 +576,26 @@ def check_call_group(name, listing, pe_report, config):
         r"^ [0-9a-f]+:[ \t]+([0-9a-f]+) ([0-9a-f]+) [0-9a-f]+$", pe_report, re.MULTILINE)]
     for symbol, body in bodies.items():
         start = next(iter(body))
-        containing = [(a, b) for a, b in ranges if a <= start < b]
-        if len(containing) != 1 or containing[0][0] != start:
-            raise ValueError(f"{symbol} needs a unique linked unwind entry")
         graph = reachable_leaf(body, call_entries=entries)
-        if max(graph) >= containing[0][1]:
-            raise ValueError(f"{symbol} has reachable code outside its unwind range")
+        containing = [(a, b) for a, b in ranges if a <= start < b]
+        if name == "call_leaves" and symbol != name:
+            # Objdump addresses include each linked instruction's exact start. RET is one byte.
+            after = dict(zip(body, list(body)[1:]))
+            for address in graph:
+                end = address + 1 if body[address] == "ret" else after[address]
+                if any(a < end and address < b for a, b in ranges):
+                    raise ValueError(f"{symbol} overlaps a linked unwind range")
+            if symbol == "leaf_abs" and sum(body[a] == "ret" for a in graph) != 2:
+                raise ValueError("leaf_abs needs two reachable returns")
+            if symbol == "leaf_count" and not natural_loops(graph)[0]:
+                raise ValueError("leaf_count needs a reachable loop")
+            if symbol == "leaf_store" and "add QWORD PTR [rcx],0x7" not in (body[a] for a in graph):
+                raise ValueError("leaf_store must update the caller's memory")
+        else:
+            if len(containing) != 1 or containing[0][0] != start:
+                raise ValueError(f"{symbol} needs a unique linked unwind entry")
+            if max(graph) >= containing[0][1]:
+                raise ValueError(f"{symbol} has reachable code outside its unwind range")
         calls = {a: entries[int(body[a].split()[1], 16)] for a in graph if body[a].startswith("call ")}
         if sorted(calls.values()) != sorted(expected[symbol]):
             raise ValueError(f"{symbol} expected calls to {expected[symbol]}, found {list(calls.values())}")

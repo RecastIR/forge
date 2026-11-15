@@ -66,7 +66,11 @@ def validate_context(context, stage, category, code, image, selected, ir, resolv
             raise ValueError("diagnostic requires an independently discovered callee")
         if instruction_failure and "instruction_rva" not in context:
             raise ValueError("callee instruction diagnostic lacks the instruction RVA")
-        owner = resolve_callee(start)
+        if "call_site_rva" in context:
+            owner = resolve_callee(start, context_rva(context, "caller_rva"), context_rva(context, "call_site_rva"))
+            allowed.update(("caller_rva", "call_site_rva"))
+        else:
+            owner = resolve_callee(start)
         if owner.start != start:
             raise ValueError("diagnostic disagrees with the discovered callee")
         allowed.add("function_rva")

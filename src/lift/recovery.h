@@ -37,17 +37,24 @@ namespace forge::x86 {
         uint32_t caller, block, instruction, callee, continuation;
     };
 
+    enum class RecoveryOrigin { UnwindBacked, InferredLeaf };
+
     struct RecoveredFunction {
-        explicit RecoveredFunction(MappedRange mapped) : code(mapped) {}
+        RecoveredFunction(uint32_t entry, RecoveryOrigin origin, MappedRange code)
+            : entry(entry), origin(origin), code(code) {}
 
         RecoveredFunction(const RecoveredFunction &) = delete;
         RecoveredFunction &operator=(const RecoveredFunction &) = delete;
 
+        const uint32_t entry;
+        const RecoveryOrigin origin;
+        // For an inferred leaf this is the bounded decode window. Only graph steps claim bytes.
         MappedRange code;
         ControlFlowGraph graph;
         std::map<uint32_t, DirectCall> calls;
         // References the callers' records in caller, block and instruction order.
         std::vector<const DirectCall *> incoming;
+        const Step *instructionContaining(uint32_t rva) const;
         const DirectCall *callAt(uint32_t instructionRva) const;
     };
 

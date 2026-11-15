@@ -13,7 +13,15 @@ namespace forge {
             err << input.string() << ": ";
         }
 
-        err << prefix << ": " << error.what() << '\n';
+        err << prefix << ": " << error.what();
+
+        const auto callee = error.context.functionRva;
+        if (const auto site = error.context.sourceCall; site && callee) {
+            err << " (leaf " << hex(*callee) << " called at " << hex(site->instruction) << " in "
+                << hex(site->caller) << ")";
+        }
+
+        err << '\n';
     }
 
     void printLiftDiagnostic(const InspectionError &error, const fs::path &input,
@@ -33,6 +41,11 @@ namespace forge {
 
         if (context.functionRva) {
             fields["function_rva"] = hex(*context.functionRva);
+        }
+
+        if (const auto site = context.sourceCall) {
+            fields["caller_rva"] = hex(site->caller);
+            fields["call_site_rva"] = hex(site->instruction);
         }
 
         if (context.branchTarget) {

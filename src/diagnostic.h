@@ -22,9 +22,15 @@ namespace forge {
     const FailureKind &failureKind(FailureCode code);
 
     // Errors can outlive the file, MC decoder and IR that supplied their context.
+    struct CallLocation {
+        uint32_t caller, instruction;
+    };
+
     struct FailureContext {
         std::filesystem::path input, output;
         std::optional<uint32_t> entryRva, endRva, instructionRva, blockRva, functionRva;
+        // Source call evidence when the primary instruction belongs to an inferred callee.
+        std::optional<CallLocation> sourceCall;
         std::optional<int64_t> branchTarget;
         std::optional<uint64_t> fileOffset;
         std::string opcode, bytes, architecture;

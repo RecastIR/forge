@@ -73,7 +73,12 @@ def generate(output, mc, link, dlltool, clang):
         for fields in (8, 64, 512):
             image(f"image-ranges-{fields}.exe", f".set fields, {fields}\n" + ranges,
                   exports=["entry"], link_flags=["/base:0x10000000"])
+        leaf_calls = sources.parent / "differential/fixtures/functions/call_leaves.S"
         image("stack.exe", (sources / "stack.s").read_text())
+        # A separate file-backed section lets CLI tests exercise both limits and boundary types.
+        probe = ('.section .probe,"xr"\n.space 65568, 0xcc\n.quad entry\n.space 12, 0xcc\n'
+                 '.seh_proc leaf_fence\nleaf_fence:\n.seh_endprologue\nret\n.seh_endproc\n.byte 0x0f\n')
+        image("leaves.exe", stub + leaf_calls.read_text() + probe)
         image("import-call.exe", (sources / "import-call.s").read_text(), [("Physics.DLL", "Named")])
         image("chained.exe", (sources / "chained.s").read_text())
         image("unicode.exe", stub + '.section ".donnée","dr"\n.byte 1\n.section ".界区","dr"\n.byte 1\n')

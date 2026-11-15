@@ -29,6 +29,9 @@ namespace forge::x86 {
     enum class StackOp : uint8_t { PushRegister, PushImmediate, Pop, Leave };
     std::optional<StackOp> stackInstruction(llvm::StringRef opcode);
     std::optional<uint8_t> shiftCount(const Step &s, Form form);
+
+    inline bool isNoop(llvm::StringRef opcode) { return opcode == "NOOPW" || opcode == "NOOPL"; }
+
     bool memoryDestination(Form form);
     unsigned memoryOperand(const Step &s, const IntegerInstruction &instruction);
     bool hasMemoryOperand(Form form);

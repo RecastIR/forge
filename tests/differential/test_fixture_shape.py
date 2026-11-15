@@ -284,6 +284,18 @@ class FixtureShapeTests(unittest.TestCase):
             with self.subTest(body=body, metadata=metadata), self.assertRaisesRegex(ValueError, reason):
                 check_call_group("call_mutual", body, metadata, "release")
 
+    def test_called_leaves_require_absent_unwind_even_inside_instruction(self):
+        listing = ("10 <call_leaves>:\n10: call 40\n15: call 40\n1a: call 50\n1f: call 60\n"
+                   "24: call 70\n29: ret\n40 <leaf_add>:\n40: lea rax,[rcx+rdx]\n44: ret\n"
+                   "50 <leaf_abs>:\n50: test rcx,rcx\n53: js 57\n55: ret\n57: ret\n"
+                   "60 <leaf_count>:\n60: dec edx\n62: jne 60\n64: ret\n"
+                   "70 <leaf_store>:\n70: add QWORD PTR [rcx],0x7\n74: ret\n")
+        ranges = " a0: 10 2a b0\n"
+        check_call_group("call_leaves", listing, ranges, "debug")
+        for extra in (" a4: 40 45 b0\n", " a4: 42 43 b0\n", " a4: 57 58 b0\n"):
+            with self.subTest(extra=extra), self.assertRaisesRegex(ValueError, "overlaps a linked unwind range"):
+                check_call_group("call_leaves", listing, ranges + extra, "debug")
+
     def test_malformed_or_unsupported_transfers_keep_provenance(self):
         for transfer in ("jmp 71", "jne nowhere", "jmp rax", "call 11", "ret 8", "loop 40", "syscall"):
             output = "10 <cfg_nested_exits>:\n" + NESTED.replace("40: je 80", "40: " + transfer)

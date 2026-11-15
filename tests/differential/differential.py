@@ -132,6 +132,36 @@ def resolve_function(module, analysis, rva, description):
     return SelectedFunction(rva, end, offsets[0], module["image_kind"], relocated)
 
 
+def resolve_leaf_window(module, analysis, image, rva, caller_rva, site):
+    caller = resolve_function(module, analysis, caller_rva, "leaf caller")
+    if caller.entry_restriction() or not caller.start <= site < caller.end:
+        raise ValueError("leaf call site outside eligible caller")
+    with Path(image).open("rb") as source:
+        source.seek(caller.file_offset + site - caller.start)
+        data = source.read(min(6, caller.end - site))
+    prefix = int(bool(data) and 0x40 <= data[0] <= 0x4f)
+    call = data[prefix:prefix+5]
+    if len(call) != 5 or call[0] != 0xe8 or site + prefix + 5 + int.from_bytes(
+            call[1:], "little", signed=True) != rva:
+        raise ValueError("callee disagrees with the source CALL displacement")
+
+    # Bound a reported location independently. No gap becomes an analysis function.
+    limit = min(0xffffffff, rva + 65536)
+    for record in analysis["functions"]:
+        begin, end = (int(record[key], 16) for key in ("start_rva", "end_rva"))
+        if begin == rva or begin <= rva < end:
+            raise ValueError("inferred callee conflicts with an observed record")
+        if begin > rva:
+            limit = min(limit, begin)
+    for section in module["sections"]:
+        start = int(section["rva"], 16)
+        end = start + min(section["raw_size"], section["virtual_size"])
+        if start <= rva < end and section["permissions"].endswith("x"):
+            return SelectedFunction(rva, min(end, limit), section["file_offset"] + rva - start,
+                                    module["image_kind"], False)
+    raise ValueError("inferred callee requires file-backed executable bytes")
+
+
 def analyze(forge, image, symbol, work):
     inspect_path, analysis_path = work / "inspect.json", work / "analysis.json"
     native.command([forge, "inspect", image, "--format", "json"], work / "inspect.log", inspect_path)
@@ -160,9 +190,12 @@ def lift(forge, image, case, selected, ir):
         return
     if status != 1 or os.path.lexists(ir):
         raise ValueError(f"unexpected forge lift status {status} or output after failure ({log.name})")
-    def resolve_callee(rva):
+    def resolve_callee(rva, caller=None, site=None):
         module = read_json(work / "inspect.json")["modules"][0]
-        return resolve_function(module, read_json(work / "analysis.json"), rva, "callee")
+        analysis = read_json(work / "analysis.json")
+        if caller is not None:
+            return resolve_leaf_window(module, analysis, image, rva, caller, site)
+        return resolve_function(module, analysis, rva, "callee")
 
     try:
         diagnostic = parse_diagnostic(log.read_bytes(), image, selected, ir, resolve_callee)

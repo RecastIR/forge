@@ -2,6 +2,7 @@
 
 #include "diagnostic.h"
 
+#include "llvm/ADT/STLFunctionalExtras.h"
 #include "llvm/ADT/SmallVector.h"
 #include "llvm/MC/MCInst.h"
 
@@ -37,6 +38,11 @@ namespace forge::x86 {
 
     using ControlFlowGraph = std::map<uint32_t, GuestBlock>;
 
+    inline constexpr unsigned maxFunctionBytes = 64 * 1024;
+
+    using LeafStepCheck = llvm::function_ref<void(const Step &, Flow)>;
+
     ControlFlowGraph discoverCFG(llvm::StringRef bytes, uint32_t begin,
-                                 const llvm::MCDisassembler &dis, const llvm::MCInstrInfo &info);
+                                 const llvm::MCDisassembler &dis, const llvm::MCInstrInfo &info,
+                                 LeafStepCheck validateLeaf = {});
 } // namespace forge::x86
