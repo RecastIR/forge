@@ -1,0 +1,18 @@
+{
+  "schema_version": 1,
+  "id": "image/target_join",
+  "description": "Join pointers from two immutable sections, offset and spill the result, and read it with unrelated large virtual sections present.",
+  "source": "fixtures/arithmetic/integer_driver.c",
+  "binary": "image_target_join.exe",
+  "args": [
+    "0", "5",
+    "1", "-7",
+    "0", "-21",
+    "-1", "2"
+  ],
+  "expected": {
+    "exit_code": 0,
+    "stdout": "26\n39993\n0\n40002\n",
+    "stderr": ""
+  }
+}

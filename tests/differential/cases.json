@@ -307,5 +307,54 @@
     "export": "image_widths",
     "signature": "i64(i64,i64)",
     "harness": "decimal_pairs"
+  },
+  {
+    "fixture_id": "globals/counters",
+    "scope": "function",
+    "export": "global_counters",
+    "signature": "i64(i64,i64)",
+    "harness": "decimal_pairs"
+  },
+  {
+    "fixture_id": "globals/static_lookup",
+    "scope": "function",
+    "export": "global_static",
+    "signature": "i64(i64,i64)",
+    "harness": "decimal_pairs"
+  },
+  {
+    "fixture_id": "globals/array",
+    "scope": "function",
+    "export": "global_array",
+    "signature": "i64(i64,i64)",
+    "harness": "decimal_pairs"
+  },
+  {
+    "fixture_id": "globals/pointer",
+    "scope": "function",
+    "export": "global_pointer",
+    "signature": "i64(i64,i64)",
+    "harness": "decimal_pairs"
+  },
+  {
+    "fixture_id": "globals/rmw",
+    "scope": "function",
+    "export": "global_rmw",
+    "signature": "i64(i64,i64)",
+    "harness": "decimal_pairs"
+  },
+  {
+    "fixture_id": "image/target_join",
+    "scope": "function",
+    "export": "image_target_join",
+    "signature": "i64(i64,i64)",
+    "harness": "decimal_pairs"
+  },
+  {
+    "fixture_id": "globals/retarget",
+    "scope": "function",
+    "export": "global_retarget",
+    "signature": "i64(i64,i64)",
+    "harness": "decimal_pairs"
   }
 ]

@@ -15,11 +15,14 @@ These C11 and C++20 console programs provide Windows x64 inputs for whole-execut
 | `control_flow/branches` | One pass covers the early return, even and odd digits, three switch arms, and the default. Each input byte has its own output line. |
 | Stack fixtures | Six `memory/` leaves cover independent quadwords, signed and unsigned narrow loads, overlapping unaligned accesses, scaled RBP/RSP addresses, conditional stores with live flags, and loop-carried memory. Each selected leaf uses the caller-provided shadow space. The indexed leaf selects one of four adjacent doublewords initialized at fixed offsets and returns it through EAX. The indexed export saves and restores its caller’s RBP. The Windows driver calls that export directly. |
 | Image data fixtures | `image/lookup` multiplies one of eight PE doublewords by the second argument. `direct` loads a high-bit constant, `spill` reloads a branch-selected pointer from the stack, and `loop` reads a bounded word array. The assembly `widths` leaf reads an executable literal pool using backward RIP references and a computed address. Debug and Release linked-export checks inspect reachable instructions and their target sections before Wine capture. |
+| `image/target_join` | Two paths select addresses in different immutable sections. Self-XOR, self-SUB and wrapping 32-bit arithmetic supply the offset applied to the selected pointer before its spill, reload and final read. Separate 33 MiB read-only and 257 MiB writable virtual sections make an unnecessarily broad mapping fail during lifting. |
 | `frames/calculate` | A C++ export homes the two arguments, writes a three-element volatile array, and returns its product plus sum. The Windows driver and native `calculate_pairs` harness validate every operand against the inclusive ±1,000,000,000 bounds before printing. Invalid input exits 2 with empty output. Release stores and reloads all three RSP-relative array slots before returning the result. |
 | `frames/branch_locals` | A C export uses byte, signed word, and doubleword locals. Three Debug paths converge on one RBP epilogue. Release uses extending loads from its byte, word and doubleword locals and has two reachable returns. |
 | `frames/count_locals` | A C export adds the loop index to a stack accumulator over zero to seven iterations. The linked loop loads and stores the same quadword at an RBP-relative slot in Debug and an RSP-relative slot in Release. |
 | `functions/calls` | Recursive calls return into a six-argument call that uses four Windows x64 argument registers and two stack slots. |
 | `memory/arrays` | Stack struct fields supply products written through a pointer into a heap allocation. The program sums the products and frees the allocation. |
+| Stateful globals | `globals/counters` follows branch-selected updates to initialized and zero-initialized globals. `static_lookup` accumulates immutable table entries into a C++ static local. `array` updates one byte, then observes the entire indexed word. `pointer` reloads a relocated data pointer through the stack and observes updates through both aliases. `rmw` exercises overlapping ADD, SUB, INC and DEC and exposes their flags. The Windows and native decimal-pair drivers reuse one module for the ordered input sequence. |
+| `globals/retarget` | A writable pointer initialized by a `DIR64` relocation switches between two writable sections. An interior word update changes the quadword returned through its base alias. Later calls reuse both the pointer and the stored bytes. |
 | `globals/state` | An initialized global, a zero-initialized global, and a static local change across iterations. Input bytes select weights from read-only data. |
 | `imports/kernel32` | Process and module validity and a last-error round trip yield three Boolean results. |
 | `cpp/lifetime` | The input selects both derived types. The program prints the result of virtual dispatch and the order of construction and destruction after each scope ends. |
@@ -183,6 +186,23 @@ A full run accepts `--jobs N` (default 1). Each worker configures its own fresh 
 To add coverage, capture passing Debug and Release Wine references, identify the callable export and its declared signature, then add the contract to `cases.json`. Use the decimal-pairs harness when the invocation fits. Harnesses in `tests/support/` parse inputs and format observations. The linked Forge output performs the computation.
 
 Use `python3 -B tests/differential/test_differential.py` for the Wine-free comparator, validator, supervisor and runner tests. With the full local artifacts available, `python3 -B tests/differential/test_native_differential.py` lifts and runs the weighted case twice in fresh directories and compares the generated IR and process observations. It checks instrumented harness linking with Unix Makefiles and Xcode. In private IR copies, it changes a return value in only one variant, truncates the right operand of the signed comparison, injects invalid IR, replaces signed word extension with zero extension, changes the indexed stack load’s stride from four bytes to one, and renames the callable wrapper to exercise mismatch, compilation, and link failures. It also sends a private baseline IR copy into a nonterminating loop, checks the native deadline and the independently passing O2 execution, and tests a failed harness invocation and a mismatched PE. The image provenance test changes one table element in a private copy of the Release PE, lifts it, removes the file, and checks the independently compiled baseline and O2 observations against the corresponding change to the Wine result. The negative reports live under `build/differential/negative-tests/`.
+
+### Inspecting image selection and resolver work
+
+The native `guest_image` CTest uses synthetic PEs with 8, 64 and 512 protected relocation fields interleaved with valid `DIR64` fields. It checks unaligned reads, protected holes and relocated values with both native optimization pipelines. A private copy counts visits to the resolver's basic blocks before optimization. Baseline and O2 execute that instrumented copy for every mapped interval. The binary search visits at most `intervals.bit_length() + 4` blocks per successful lookup. A linear scan using a moving row pointer must exceed that bound. The measurement helper rejects calls that could move lookup work outside the counted body. Run the test verbosely from a built Apple Silicon checkout to print the measurements.
+
+```sh
+FORGE_IMAGE_METRICS=1 ctest --test-dir build/dev -R '^guest_image$' -V
+```
+
+For a before/after comparison, also set `FORGE_TEST_PREVIOUS_LIFT_CONTRACT` to the absolute path of a saved earlier `lift_contract` executable supporting `--emit-rebased`. An existing differential run supplies the PE snapshot and guest load base needed to measure its raw module.
+
+```sh
+case_dir=build/differential/windows-x64/release/image/spill
+build/dev/tests/lift_contract --image-stats "$case_dir/image_spill.exe" 0x140000000 "$case_dir/generated/lifted.ll"
+```
+
+The JSON reports selected PE sections, full virtual backing bytes, intervals, resolver blocks and IR file bytes. `budgeted_initialized_bytes` counts the PE prefix and relocated tail fragments charged to the mapping budget. `emitted_initializer_bytes` counts explicit data in raw LLVM backing initializers and the payload written by the image constructor. A writable backing with an all-zero file prefix can have a nonzero budget charge and zero emitted payload. The native object-size check separately verifies compact zero-filled tails. `max_resolver_block_visits` gives the largest count across successful lookups. Code-generation and execution timings are observational.
 
 ## Regression CI and local reproduction
 

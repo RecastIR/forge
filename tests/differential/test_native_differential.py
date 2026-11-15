@@ -38,6 +38,24 @@ class NativeDifferentialTests(unittest.TestCase):
                             result = subprocess.run([exe, *args], capture_output=True, timeout=10)
                             self.assertEqual((result.returncode, result.stdout, result.stderr), (status, stdout, b""))
 
+    def test_mutable_state_in_a_fresh_process(self):
+        fixture = "globals/counters"
+        manifest = next(m for m in diff.load_catalog() if m.case["id"] == fixture)
+        with tempfile.TemporaryDirectory(dir=self.tmp) as tmp:
+            output = Path(tmp)
+            for config in diff.CONFIGS:
+                self.assertEqual(diff.run(config, fixture, output=output, forge=self.forge), 0)
+                binary = diff.BINARIES / config / manifest.case["binary"]
+                observed, _ = diff.reference(diff.REFERENCES, manifest, config, diff.sha256(binary.read_bytes()))
+                # Both endpoints use a zero update. Their different values witness the intervening calls.
+                self.assertNotEqual(observed.stdout.splitlines()[0], observed.stdout.splitlines()[-1])
+                for variant in diff.VARIANTS:
+                    with self.subTest(config=config, variant=variant):
+                        exe = output / config / fixture / variant / "native/bin/differential_decimal_pairs"
+                        repeated = subprocess.run([exe, *manifest.case["args"]], capture_output=True, timeout=10)
+                        self.assertEqual((repeated.returncode, repeated.stdout, repeated.stderr),
+                                         (observed.exit_code, observed.stdout, observed.stderr))
+
     def negative(self, name, category, *, fixture=CASE, binaries=diff.BINARIES):
         output = OUTPUT / name
         self.assertEqual(diff.run("debug", fixture, binaries=binaries, output=output, forge=self.forge), 1)
@@ -80,6 +98,21 @@ class NativeDifferentialTests(unittest.TestCase):
             self.assertEqual((failure["context"]["instruction_rva"], failure["context"]["file_offset"],
                               failure["context"]["bytes"]), (hex(selected.start), entry.file_offset, "ff31"))
             self.assertFalse(ir.exists())
+
+    def test_image_spill_selects_only_the_table(self):
+        for config in diff.CONFIGS:
+            with self.subTest(config=config), tempfile.TemporaryDirectory(dir=self.tmp) as tmp:
+                work = Path(tmp)
+                image = diff.BINARIES / config / "image_spill.exe"
+                selected = diff.analyze(self.forge, image, "image_spill", work)
+                ir = work / diff.CANONICAL_IR
+                ir.parent.mkdir()
+                diff.lift(self.forge, image, {"signature": "i64(i64,i64)"}, selected, ir)
+                source = ir.read_text()
+                backings = re.findall(r"^@image_[0-9a-f]+ = private constant \[(\d+) x i8\]", source, re.M)
+                self.assertEqual(backings, ["8"])
+                ranges = next(line for line in source.splitlines() if line.startswith("@image.ranges = "))
+                self.assertIn("constant [1 x", ranges)
 
     def test_original_image_table(self):
         manifest = next(m for m in diff.load_catalog() if m.case["id"] == "image/lookup")

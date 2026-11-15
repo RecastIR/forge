@@ -366,7 +366,9 @@ class Lift(Case):
         output = self.dir/"existing.ll"
         output.write_text("sentinel")
         for code, expected in [
-                ("88 c8 c3", "undefined RAX"), ("66 89 c8 c3", "undefined RAX"), ("48 03 01 c3", "operand form"),
+                ("88 c8 c3", "undefined RAX"), ("66 89 c8 c3", "undefined RAX"),
+                ("48 03 01 c3", "undefined incoming RAX"),  # ADD64rm consumes its old destination.
+                ("48 13 01 c3", "operand form"), ("f0 48 01 11 c3", "prefix"),
                 ("48 8b 45 00 c3", "undefined incoming RBP"),
                 ("f3 c3", "prefix"), ("48 48 89 c8 c3", "prefix"),
                 ("ff d0 c3", "unsupported"), ("ff e0", "unsupported"),

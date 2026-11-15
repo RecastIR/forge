@@ -2,6 +2,7 @@
 
 #include "analysis/analysis.h"
 #include "diagnostic.h"
+#include "lift/address_fact.h"
 #include "lift/asm_info.h"
 #include "lift/cfg.h"
 #include "lift/image_memory.h"
@@ -38,6 +39,7 @@ namespace forge {
             return InspectionError(hex(rva) + ": " + why.str(), kind);
         }
 
+        using x86::AddressFact;
         using x86::Step;
         using x86::StoredValue;
 
@@ -111,25 +113,10 @@ namespace forge {
 
         using Defined = std::array<uint64_t, std::size(registerNames)>;
 
-        // The offset is relative to entry RSP only for a Stack fact. Arithmetic
-        // uses the same modulo-2^64 representation as guest address lowering.
-        struct AddressFact {
-            enum Kind { Unknown, Constant, Stack } kind = Unknown;
-
-            uint64_t offset = 0;
-            bool operator==(const AddressFact &) const = default;
-
-            AddressFact plus(AddressFact rhs) const {
-                if (kind == Unknown || rhs.kind == Unknown ||
-                    (kind == Stack && rhs.kind == Stack)) {
-                    return {};
-                }
-
-                return {kind == Stack || rhs.kind == Stack ? Stack : Constant, offset + rhs.offset};
-            }
+        struct AddressFacts {
+            std::array<AddressFact, std::size(registerNames)> registers;
+            x86::StackSpills spills;
         };
-
-        using AddressFacts = std::array<AddressFact, std::size(registerNames)>;
 
         struct Availability {
             Defined registers{};
@@ -137,17 +124,19 @@ namespace forge {
             AddressFacts addresses{};
 
             bool intersect(const Availability &other) {
-                auto before = *this;
+                bool changed = (flags & other.flags) != flags;
                 flags &= other.flags;
                 for (size_t i = 0; i < registers.size(); ++i) {
+                    changed |= (registers[i] & other.registers[i]) != registers[i];
                     registers[i] &= other.registers[i];
-                    if (addresses[i] != other.addresses[i]) {
-                        addresses[i] = {};
-                    }
+                    auto &fact = addresses.registers[i];
+                    auto joined = fact.join(other.addresses.registers[i]);
+                    changed |= fact != joined;
+                    fact = std::move(joined);
                 }
 
-                return registers != before.registers || flags != before.flags ||
-                       addresses != before.addresses;
+                changed |= addresses.spills.merge(other.addresses.spills);
+                return changed;
             }
         };
 
@@ -190,9 +179,9 @@ namespace forge {
         class Translator {
           public:
             Translator(llvm::Module &module, uint32_t rva, EntryMode mode,
-                       const MCRegisterInfo &regs, const ParsedImage &image)
+                       const MCRegisterInfo &regs, x86::ImageMemory &image)
                 : ir(module.getContext()), semantics(ir), memory(ir), imageMemory(image),
-                  imageBase(image.module().imageBase), regs(regs), mode(mode) {
+                  regs(regs), mode(mode) {
                 auto *type = FunctionType::get(ir.getVoidTy(), ir.getPtrTy(), false);
                 impl = Function::Create(type, Function::InternalLinkage,
                                         "forge_lifted_" + utohexstr(rva, true), module);
@@ -223,14 +212,13 @@ namespace forge {
             IRBuilder<> ir;
             x86::IntegerSemantics semantics;
             x86::GuestMemory memory;
-            x86::ImageMemory imageMemory;
-            uint64_t imageBase;
+            x86::ImageMemory &imageMemory;
             const MCRegisterInfo &regs;
             EntryMode mode;
             Function *impl;
             Value *localRegisters = nullptr;
             bool accessesMemory = false;
-            DenseSet<uint32_t> stackReads;
+            DenseSet<uint32_t> stackAccesses;
             bool tracksOrigins = false;
             std::bitset<std::size(registerNames)> modified;
             Value *registerMarks = nullptr;
@@ -263,7 +251,7 @@ namespace forge {
             Value *require(const Step &s, x86::Flag flag) const;
             Value *condition(const Step &s);
             void move(const Step &s, const x86::IntegerInstruction &instruction);
-            void memoryImmediate(const Step &s, const x86::IntegerInstruction &instruction);
+            void memoryArithmetic(const Step &s, const x86::IntegerInstruction &instruction);
             void integer(const Step &s, const x86::IntegerInstruction &instruction);
             void lower(const Step &s);
             std::optional<uint64_t> ripAddress(const Step &s, unsigned first) const;
@@ -274,10 +262,12 @@ namespace forge {
             std::optional<RegisterView> resultRegister(const Step &s) const;
             void requireMemory(const Step &s);
             void planMemoryAccess(const Step &s, const x86::IntegerInstruction &op,
-                                  const AddressFacts &facts);
+                                  const AddressOperand &operand, const AddressFact &address);
             void traceStackInstruction(const Step &s, StackOp op, AddressFacts &facts) const;
             AddressFact integerFact(const Step &s, const x86::IntegerInstruction &op,
                                     RegisterView dest, const AddressFacts &facts) const;
+            void traceInteger(const Step &s, const x86::IntegerInstruction &op, AddressFacts &facts,
+                              bool collect);
             void traceAddresses(const x86::GuestBlock &block, AddressFacts &facts, bool collect);
             void proveAvailability(const x86::ControlFlowGraph &graph, BlockStates &states);
             void summarize(const Step &s, BlockState &state);
@@ -405,7 +395,7 @@ namespace forge {
 
             const auto displacement = s.inst.getOperand(first + 3).getImm();
             const auto signedOffset = llvm::SignExtend64<32>(static_cast<uint64_t>(displacement));
-            return imageBase + s.next + static_cast<uint64_t>(signedOffset);
+            return imageMemory.guestBase() + s.next + static_cast<uint64_t>(signedOffset);
         }
 
         AddressOperand Translator::decodeAddress(const Step &s, unsigned first, bool access) const {
@@ -504,24 +494,31 @@ namespace forge {
             tracksOrigins |= nonvolatile(view.index);
         }
 
-        unsigned memoryOperand(const Step &s, const x86::IntegerInstruction &instruction) {
-            if (instruction.form == x86::Form::Store ||
-                instruction.form == x86::Form::MemoryImmediate) {
-                return 0;
-            }
+        bool memoryDestination(x86::Form form) {
+            return form == x86::Form::MemoryImmediate || form == x86::Form::MemoryRegister ||
+                   form == x86::Form::MemoryUnary || form == x86::Form::Store;
+        }
 
-            // Destructive arithmetic encodes both the output and its tied input before the tuple.
-            return s.inst.getNumOperands() - 5;
+        unsigned memoryOperand(const Step &s, const x86::IntegerInstruction &instruction) {
+            // In register-destination arithmetic, the output and tied input precede the tuple.
+            return memoryDestination(instruction.form) ? 0 : s.inst.getNumOperands() - 5;
         }
 
         bool hasMemoryOperand(x86::Form form) {
-            return form == x86::Form::Store || form == x86::Form::Load ||
-                   form == x86::Form::MemoryImmediate;
+            return memoryDestination(form) || form == x86::Form::Load;
         }
 
         bool writesRegister(const x86::IntegerInstruction &op) {
-            return op.form != x86::Form::Store && op.form != x86::Form::MemoryImmediate &&
-                   op.op != x86::Op::Cmp && op.op != x86::Op::Test;
+            return !memoryDestination(op.form) && op.op != x86::Op::Cmp && op.op != x86::Op::Test;
+        }
+
+        bool operandsCancel(const Step &s, const x86::IntegerInstruction &instruction) {
+            using x86::Op;
+            const auto op = instruction.op;
+            const auto &last = s.inst.getOperand(s.inst.getNumOperands() - 1);
+            return instruction.form == x86::Form::Pair &&
+                   (op == Op::Xor || op == Op::Sub || op == Op::Cmp || op == Op::Sbb) &&
+                   s.inst.getOperand(0).getReg() == last.getReg();
         }
 
         void Translator::requireMemory(const Step &s) {
@@ -532,19 +529,13 @@ namespace forge {
         }
 
         AddressFact addressFact(const AddressOperand &operand, const AddressFacts &facts) {
-            AddressFact result{AddressFact::Constant, operand.displacement};
+            AddressFact result(operand.displacement);
             if (operand.base) {
-                result = result.plus(facts[operand.base->index]);
+                result = result.plus(facts.registers[operand.base->index]);
             }
 
             if (operand.index) {
-                auto term = facts[operand.index->index];
-                if (operand.scale != 1 && term.kind != AddressFact::Constant) {
-                    return {};
-                }
-
-                term.offset *= operand.scale;
-                result = result.plus(term);
+                result = result.plus(facts.registers[operand.index->index].times(operand.scale));
             }
 
             return result;
@@ -556,59 +547,128 @@ namespace forge {
             using x86::Op;
             const auto &last = s.inst.getOperand(s.inst.getNumOperands() - 1);
             if (op.op == Op::Mov && op.form == Form::Immediate && dest.width >= 32) {
-                return {AddressFact::Constant, static_cast<uint64_t>(last.getImm()) & dest.mask()};
+                return AddressFact(static_cast<uint64_t>(last.getImm()) & dest.mask());
             }
 
-            if (dest.width != 64 || (op.form != Form::Pair && op.form != Form::Immediate &&
-                                     op.form != Form::Accumulator)) {
+            if (dest.width < 32 || (op.form != Form::Pair && op.form != Form::Immediate &&
+                                    op.form != Form::Accumulator)) {
                 return {};
             }
 
-            auto rhs = last.isImm() ? AddressFact{AddressFact::Constant,
-                                                  static_cast<uint64_t>(last.getImm())}
-                                    : facts[reg(s, last, 64).index];
+            const auto &lhs = facts.registers[dest.index];
+            if ((op.op == Op::Xor || op.op == Op::Sub) && operandsCancel(s, op)) {
+                // Known 64-bit constant subtraction already supplied a constant offset
+                // for the checked stack path. Newly proved zeros are computed facts.
+                return op.op == Op::Sub && dest.width == 64 && lhs.known()
+                           ? lhs.times(0)
+                           : AddressFact(0, AddressFact::Computed);
+            }
+
+            if (op.op == Op::And && last.isImm()) {
+                return lhs.masked(static_cast<uint64_t>(last.getImm()) & dest.mask());
+            }
+
+            if (dest.width == 32 && !last.isImm() && op.op != Op::Mov) {
+                return {};
+            }
+
+            auto rhs = last.isImm() ? AddressFact(static_cast<uint64_t>(last.getImm()))
+                                    : facts.registers[reg(s, last, dest.width).index];
             if (op.op == Op::Mov) {
-                return rhs;
+                return dest.width == 64 ? rhs : rhs.masked(dest.mask());
             }
 
-            if (op.op == Op::Sub && rhs.kind == AddressFact::Constant) {
-                rhs.offset = 0 - rhs.offset;
-            } else if (op.op != Op::Add) {
+            if (op.op != Op::Add && op.op != Op::Sub) {
                 return {};
             }
 
-            return facts[dest.index].plus(rhs);
+            auto sum = lhs.plus(op.op == Op::Sub ? rhs.times(uint64_t(0) - 1) : rhs);
+            return dest.width == 64 ? sum : sum.masked(dest.mask());
         }
 
         void Translator::planMemoryAccess(const Step &s, const x86::IntegerInstruction &op,
-                                          const AddressFacts &facts) {
-            const auto operand = decodeAddress(s, memoryOperand(s, op), true);
-            const bool write = op.form == x86::Form::Store ||
-                               (op.form == x86::Form::MemoryImmediate && op.op != x86::Op::Cmp);
-            if (!write && addressFact(operand, facts).kind == AddressFact::Stack) {
-                stackReads.insert(s.rva);
+                                          const AddressOperand &operand,
+                                          const AddressFact &address) {
+            const bool write = memoryDestination(op.form) && op.op != x86::Op::Cmp;
+            if (!operand.base && !operand.index) {
+                imageMemory.fixedAccess(s, operand.displacement, op.sourceWidth, write);
                 return;
             }
 
-            std::optional<uint64_t> fixed;
-            if (!operand.base && !operand.index) {
-                fixed = operand.displacement;
+            if (!address.known()) {
+                imageMemory.computedAccess(s, std::nullopt, op.sourceWidth, write);
+                return;
             }
 
-            imageMemory.access(s, fixed, op.sourceWidth, write);
+            auto onStack = [](uint64_t va) {
+                return va - x86::GuestMemory::base < x86::GuestMemory::capacity;
+            };
+            if (address.stackDerived() || llvm::all_of(address.values(), onStack)) {
+                stackAccesses.insert(s.rva);
+                return;
+            }
+
+            for (auto va : address.values()) {
+                imageMemory.computedAccess(s, va, op.sourceWidth, write);
+            }
         }
 
         void Translator::traceStackInstruction(const Step &s, StackOp op,
                                                AddressFacts &facts) const {
-            auto &rsp = facts[rspIndex];
+            auto &rsp = facts.registers[rspIndex];
             if (op == StackOp::Leave) {
-                rsp = facts[framePointer.index].plus({AddressFact::Constant, 8});
-                facts[framePointer.index] = {};
-            } else if (op == StackOp::Pop) {
-                rsp = rsp.plus({AddressFact::Constant, 8});
-                facts[reg(s, s.inst.getOperand(0), 64).index] = {};
+                rsp = facts.registers[framePointer.index];
+            }
+
+            if (op == StackOp::Pop || op == StackOp::Leave) {
+                const auto dest =
+                    op == StackOp::Pop ? reg(s, s.inst.getOperand(0), 64) : framePointer;
+                auto saved = facts.spills.read(rsp);
+                rsp = rsp.plus(AddressFact(8));
+                facts.registers[dest.index] = std::move(saved);
             } else {
-                rsp = rsp.plus({AddressFact::Constant, uint64_t(0) - 8});
+                const auto &operand = s.inst.getOperand(0);
+                auto saved = op == StackOp::PushRegister
+                                 ? facts.registers[reg(s, operand, 64).index]
+                                 : AddressFact(static_cast<uint64_t>(operand.getImm()));
+                rsp = rsp.plus(AddressFact(uint64_t(0) - 8));
+                facts.spills.write(rsp, 64, saved);
+            }
+        }
+
+        void Translator::traceInteger(const Step &s, const x86::IntegerInstruction &op,
+                                      AddressFacts &facts, bool collect) {
+            using x86::Form;
+            using x86::Op;
+            if (!hasMemoryOperand(op.form)) {
+                if (writesRegister(op)) {
+                    auto dest = destination(s, op);
+                    facts.registers[dest.index] = integerFact(s, op, dest, facts);
+                }
+
+                return;
+            }
+
+            const auto operand = decodeAddress(s, memoryOperand(s, op), true);
+            const auto address = addressFact(operand, facts);
+            if (collect) {
+                planMemoryAccess(s, op, operand, address);
+            }
+
+            if (writesRegister(op)) {
+                auto dest = destination(s, op);
+                facts.registers[dest.index] = op.op == Op::Mov && dest.width == 64
+                                                  ? facts.spills.read(address)
+                                                  : AddressFact{};
+            } else if (memoryDestination(op.form) && op.op != Op::Cmp) {
+                AddressFact stored;
+                if (op.form == Form::Store && op.width == 64) {
+                    const auto &src = s.inst.getOperand(s.inst.getNumOperands() - 1);
+                    stored = src.isReg() ? facts.registers[reg(s, src, 64).index]
+                                         : AddressFact(static_cast<uint64_t>(src.getImm()));
+                }
+
+                facts.spills.write(address, op.width, stored);
             }
         }
 
@@ -621,18 +681,24 @@ namespace forge {
                 }
 
                 if (auto op = x86::integerInstruction(s.opcode)) {
-                    if (collect && hasMemoryOperand(op->form)) {
-                        planMemoryAccess(s, *op, facts);
-                    }
+                    traceInteger(s, *op, facts, collect);
+                    continue;
+                }
 
-                    if (writesRegister(*op)) {
-                        auto dest = destination(s, *op);
-                        facts[dest.index] = integerFact(s, *op, dest, facts);
-                    }
-                } else if (auto dest = resultRegister(s)) {
-                    facts[dest->index] = s.opcode == "LEA64r"
-                                             ? addressFact(decodeAddress(s, 1, false), facts)
-                                             : AddressFact{};
+                auto dest = resultRegister(s);
+                if (!dest) {
+                    continue;
+                }
+
+                auto &result = facts.registers[dest->index];
+                if (s.opcode == "LEA64r" || s.opcode == "LEA64_32r") {
+                    auto value = addressFact(decodeAddress(s, 1, false), facts);
+                    result = dest->width == 64 ? value : value.masked(dest->mask());
+                } else if (s.opcode == "CMOV64rr") {
+                    const auto src = reg(s, s.inst.getOperand(2), 64);
+                    result = result.join(facts.registers[src.index]).computed();
+                } else {
+                    result = {};
                 }
             }
         } catch (InspectionError &failure) {
@@ -648,7 +714,8 @@ namespace forge {
             auto &entry = states.begin()->second;
             entry.reached = entry.queued = true;
             entry.incoming.registers[rspIndex] = UINT64_MAX;
-            entry.incoming.addresses[rspIndex] = {AddressFact::Stack, 0};
+            entry.incoming.addresses.registers[rspIndex] =
+                AddressFact(x86::GuestMemory::entryRsp, AddressFact::Stack);
 
             if (mode == EntryMode::RegisterState) {
                 std::fill_n(entry.incoming.registers.begin(), callerSlots, UINT64_MAX);
@@ -656,8 +723,8 @@ namespace forge {
                 entry.incoming.registers[1] = entry.incoming.registers[2] = UINT64_MAX;
             }
 
-            // The first edge seeds the successor. Later edges (including entry
-            // backedges) can only remove facts that no longer agree.
+            // Later edges (including entry backedges) widen address alternatives
+            // and intersect register, flag, and spill-slot availability.
             std::deque<uint32_t> pending{states.begin()->first};
             while (!pending.empty()) {
                 auto addr = pending.front();
@@ -752,7 +819,7 @@ namespace forge {
                 auto *address = effectiveAddress(s, 0, true);
                 auto source = last.isReg() ? readSaved(s, reg(s, last, width), true)
                                            : StoredValue{value(s, last, width)};
-                memory.store(address, source);
+                memory.store(address, source, stackAccesses.contains(s.rva));
                 return;
             }
 
@@ -763,31 +830,37 @@ namespace forge {
                 // use read(), which requires concrete bytes.
                 auto source = form == Form::Load
                                   ? memory.loadSaved(effectiveAddress(s, 1, true), width,
-                                                     stackReads.contains(s.rva))
+                                                     stackAccesses.contains(s.rva))
                                   : readSaved(s, reg(s, last, width), true);
                 writeSaved(dest, source);
                 return;
             }
 
-            auto *source = form == Form::Load ? memory.load(effectiveAddress(s, 1, true),
-                                                            sourceWidth, stackReads.contains(s.rva))
-                                              : value(s, last, sourceWidth);
+            auto *source = form == Form::Load
+                               ? memory.load(effectiveAddress(s, 1, true), sourceWidth,
+                                             stackAccesses.contains(s.rva))
+                               : value(s, last, sourceWidth);
             write(dest, ir.CreateIntCast(source, ir.getIntNTy(width), op == x86::Op::Movsx));
         }
 
-        void Translator::memoryImmediate(const Step &s,
-                                         const x86::IntegerInstruction &instruction) {
+        void Translator::memoryArithmetic(const Step &s,
+                                          const x86::IntegerInstruction &instruction) {
             auto *address = effectiveAddress(s, 0, true);
-            auto *lhs = instruction.op == x86::Op::Cmp
-                            ? memory.load(address, instruction.width, stackReads.contains(s.rva))
-                            : memory.loadWritable(address, instruction.width);
-            const auto &immediate = s.inst.getOperand(s.inst.getNumOperands() - 1);
-            auto *rhs = value(s, immediate, instruction.width);
-            auto *result = semantics.arithmetic(instruction.op, lhs, rhs);
-
-            if (instruction.op != x86::Op::Cmp) {
-                memory.store(address, {result});
+            const bool stackOnly = stackAccesses.contains(s.rva);
+            Value *rhs = nullptr;
+            if (instruction.form != x86::Form::MemoryUnary) {
+                rhs = value(s, s.inst.getOperand(s.inst.getNumOperands() - 1), instruction.width);
             }
+
+            if (instruction.op == x86::Op::Cmp) {
+                auto *lhs = memory.load(address, instruction.width, stackOnly);
+                semantics.arithmetic(instruction.op, lhs, rhs);
+                return;
+            }
+
+            memory.modify(address, instruction.width, stackOnly, [&](Value *lhs) {
+                return semantics.arithmetic(instruction.op, lhs, rhs);
+            });
         }
 
         void Translator::integer(const Step &s, const x86::IntegerInstruction &instruction) {
@@ -802,8 +875,8 @@ namespace forge {
                 return;
             }
 
-            if (form == Form::MemoryImmediate) {
-                memoryImmediate(s, instruction);
+            if (memoryDestination(form)) {
+                memoryArithmetic(s, instruction);
                 return;
             }
 
@@ -821,14 +894,13 @@ namespace forge {
 
             // Equal operands cancel even if the guest register has no incoming value.
             // SBB still subtracts CF, and CMP only updates flags.
-            bool cancel = (op == Op::Xor || op == Op::Sub || op == Op::Cmp || op == Op::Sbb) &&
-                          form == Form::Pair && i.getOperand(0).getReg() == last.getReg();
+            const bool cancel = operandsCancel(s, instruction);
             Value *lhs = cancel ? ir.getIntN(width, 0) : read(s, dest);
             Value *rhs = nullptr;
 
             if (form == Form::Load) {
                 rhs = memory.load(effectiveAddress(s, memoryOperand(s, instruction), true), width,
-                                  stackReads.contains(s.rva));
+                                  stackAccesses.contains(s.rva));
             } else if (form != Form::Reg) {
                 rhs = cancel ? lhs : value(s, last, width);
             }
@@ -850,7 +922,7 @@ namespace forge {
                                                           : StoredValue{value(s, operand, 64)};
                 auto *next = ir.CreateSub(read(s, stackPointer), ir.getInt64(8));
                 write(stackPointer, next);
-                memory.store(next, source);
+                memory.store(next, source, true);
                 return;
             }
 
@@ -859,7 +931,7 @@ namespace forge {
             }
 
             auto *address = read(s, stackPointer);
-            auto saved = memory.loadStackSaved(address, 64);
+            auto saved = memory.loadSaved(address, 64, true);
             write(stackPointer, ir.CreateAdd(address, ir.getInt64(8)));
             auto destination =
                 op == StackOp::Leave ? framePointer : reg(s, s.inst.getOperand(0), 64);
@@ -1060,7 +1132,7 @@ namespace forge {
                     traceAddresses(block, facts, true);
                 }
 
-                memory.allocate(imageMemory.emitResolver(*impl->getParent()));
+                memory.allocate(imageMemory.emitResolver(*impl->getParent(), ir));
             }
 
             ir.CreateBr(states.begin()->second.irBlock);
@@ -1095,6 +1167,7 @@ namespace forge {
 
         struct ValidatedEntry {
             LiftRequest request;
+            uint64_t guestBase;
             // The analyzed image owns both the section and its bytes through generation.
             MappedRange code;
         };
@@ -1166,7 +1239,22 @@ namespace forge {
                 }
             }
 
-            return {request, *code};
+            const uint64_t guestBase = request.guestLoadBase.value_or(module.imageBase);
+            if (module.relocationsStripped && guestBase != module.imageBase) {
+                throw atRva(FailureCode::ImageMemory, rva,
+                            "base relocations are stripped: selected guest base " + hex(guestBase) +
+                                " differs from preferred image base " + hex(module.imageBase));
+            }
+
+            for (const auto &section : module.sections) {
+                const uint64_t endRva = uint64_t(section.rva) + section.virtualSize;
+                if (section.virtualSize && endRva - 1 > UINT64_MAX - guestBase) {
+                    throw atRva(FailureCode::ImageMemory, rva,
+                                "selected guest load base overflows section " + section.name);
+                }
+            }
+
+            return {request, guestBase, *code};
         }
 
         std::unique_ptr<llvm::Module> generateAmd64IR(const ValidatedEntry &entry,
@@ -1218,7 +1306,8 @@ namespace forge {
             const Triple outputTriple("arm64-apple-macosx11.0.0");
             module->setTargetTriple(outputTriple);
             module->setDataLayout(outputTriple.computeDataLayout());
-            Translator(*module, rva, entry.request.mode, *regs, image).translate(graph);
+            x86::ImageMemory imageMemory(image, entry.guestBase);
+            Translator(*module, rva, entry.request.mode, *regs, imageMemory).translate(graph);
             return module;
         }
     } // namespace

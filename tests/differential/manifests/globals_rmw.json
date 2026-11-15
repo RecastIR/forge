@@ -1,0 +1,28 @@
+{
+  "schema_version": 1,
+  "id": "globals/rmw",
+  "description": "Exercise overlapping ADD, INC, DEC and SUB writes and report the wide value, overflow and carry flags.",
+  "source": "fixtures/arithmetic/integer_driver.c",
+  "binary": "global_rmw.exe",
+  "args": [
+    "0",
+    "0",
+    "2",
+    "1",
+    "127",
+    "1",
+    "1",
+    "-2",
+    "128",
+    "0",
+    "1",
+    "3",
+    "254",
+    "0"
+  ],
+  "expected": {
+    "exit_code": 0,
+    "stdout": "254\n432345564227502336\n72057594021020287\n144115188092437376\n216172782130299904\n360287970155758849\n72057594003982079\n",
+    "stderr": ""
+  }
+}

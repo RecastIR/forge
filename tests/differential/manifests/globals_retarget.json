@@ -1,0 +1,20 @@
+{
+  "schema_version": 1,
+  "id": "globals/retarget",
+  "description": "Switch a relocated writable pointer between two sections, write through an interior alias, and read overlapping persistent bytes on subsequent calls.",
+  "source": "fixtures/arithmetic/integer_driver.c",
+  "binary": "global_retarget.exe",
+  "args": [
+    "0", "1",
+    "1", "2",
+    "0", "3",
+    "2", "-1",
+    "0", "-1",
+    "1", "0"
+  ],
+  "expected": {
+    "exit_code": 0,
+    "stdout": "131074\n262147\n458755\n65538\n2\n458755\n",
+    "stderr": ""
+  }
+}

@@ -52,7 +52,10 @@ class GuestExecution(unittest.TestCase):
             # A test-local forwarding entry can call the retained internal LLVM symbol.
             with ir.open("a") as out:
                 out.write(f"\ndefine void @probe(ptr %p) {{\n  call void @forge_lifted_{rva:x}(ptr %p)\n  ret void\n}}\n")
-        optimized = self.work / f"{name}.o2.ll"
+        return self.compile_variants(ir, state)
+
+    def compile_variants(self, ir, state=False):
+        optimized = ir.with_suffix(".o2.ll")
         run(OPT, "-passes=verify", "-disable-output", ir)
         run(OPT, "-S", "-passes=default<O2>", ir, "-o", optimized)
         run(OPT, "-passes=verify", "-disable-output", optimized)

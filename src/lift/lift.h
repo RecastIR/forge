@@ -3,6 +3,7 @@
 #include <cstdint>
 #include <filesystem>
 #include <memory>
+#include <optional>
 
 namespace llvm {
     class LLVMContext;
@@ -17,6 +18,8 @@ namespace forge {
     struct LiftRequest {
         uint32_t startRva;
         EntryMode mode;
+        // Guest VAs default to the PE's preferred base. Native storage has its own address.
+        std::optional<uint64_t> guestLoadBase = std::nullopt;
     };
 
     // The module is independent of the image after generation. The caller's context

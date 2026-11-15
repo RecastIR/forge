@@ -1,0 +1,32 @@
+{
+  "schema_version": 1,
+  "id": "globals/array",
+  "description": "Replace one byte of an indexed writable array and read the entire little-endian word.",
+  "source": "fixtures/globals/array.c",
+  "binary": "global_array.exe",
+  "args": [
+    "0",
+    "103",
+    "1",
+    "255",
+    "8",
+    "170",
+    "4",
+    "136",
+    "13",
+    "82",
+    "2",
+    "128",
+    "8",
+    "19",
+    "3",
+    "0",
+    "1",
+    "34"
+  ],
+  "expected": {
+    "exit_code": 0,
+    "stdout": "19088743\n2309737983\n27936103\n27953255\n1386991103\n270545024\n18057319\n2695938048\n1386990882\n",
+    "stderr": ""
+  }
+}

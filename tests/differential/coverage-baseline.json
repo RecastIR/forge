@@ -430,6 +430,76 @@
       "id": "image/widths",
       "config": "release",
       "target": "macos-arm64"
+    },
+    {
+      "id": "globals/counters",
+      "config": "debug",
+      "target": "macos-arm64"
+    },
+    {
+      "id": "globals/counters",
+      "config": "release",
+      "target": "macos-arm64"
+    },
+    {
+      "id": "globals/static_lookup",
+      "config": "debug",
+      "target": "macos-arm64"
+    },
+    {
+      "id": "globals/static_lookup",
+      "config": "release",
+      "target": "macos-arm64"
+    },
+    {
+      "id": "globals/array",
+      "config": "debug",
+      "target": "macos-arm64"
+    },
+    {
+      "id": "globals/array",
+      "config": "release",
+      "target": "macos-arm64"
+    },
+    {
+      "id": "globals/pointer",
+      "config": "debug",
+      "target": "macos-arm64"
+    },
+    {
+      "id": "globals/pointer",
+      "config": "release",
+      "target": "macos-arm64"
+    },
+    {
+      "id": "globals/rmw",
+      "config": "debug",
+      "target": "macos-arm64"
+    },
+    {
+      "id": "globals/rmw",
+      "config": "release",
+      "target": "macos-arm64"
+    },
+    {
+      "id": "image/target_join",
+      "config": "debug",
+      "target": "macos-arm64"
+    },
+    {
+      "id": "image/target_join",
+      "config": "release",
+      "target": "macos-arm64"
+    },
+    {
+      "id": "globals/retarget",
+      "config": "debug",
+      "target": "macos-arm64"
+    },
+    {
+      "id": "globals/retarget",
+      "config": "release",
+      "target": "macos-arm64"
     }
   ]
 }

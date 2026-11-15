@@ -48,6 +48,7 @@ def inspect_pe(path, fixture_id):
             if not re.search(rf"^\s*[0-9a-f]+\s+\d+\s+{name}$",
                              imports.get("kernel32.dll", ""), re.MULTILINE):
                 raise ValueError(f"{path}: missing KERNEL32.dll import {name}")
+    return report
 
 
 # Instruction-specific contracts are checked on the linked, callable leaf in
@@ -81,6 +82,8 @@ INTEGER_WITNESSES = {
     "stack_branch": ("jg ", "mov QWORD PTR [rsp+0x8],rdx", "jmp ", "mov QWORD PTR [rsp+0x8],rcx", "adc rax,r10"),
     "stack_loop": ("mov rax,QWORD PTR [rsp+0x10]", "mov QWORD PTR [rsp+0x10],rax", "jne ", "mov rax,QWORD PTR [rsp+0x10]"),
     "integer_mix": ("shl ", "xor ", "imul "),
+    "global_rmw": ("add BYTE PTR [rip", "seto ", "inc WORD PTR [rip", "dec BYTE PTR [rip", "setb ",
+                   "sub DWORD PTR [rip", "setb ", "mov r8,QWORD PTR [rip"),
 }
 
 
@@ -108,7 +111,7 @@ def reachable_leaf(instructions):
                   "jp", "jnp", "jl", "jge", "jle", "jg"}
     ordinary = {"mov", "movabs", "movzx", "movsx", "movsxd", "lea", "add", "sub", "xor",
                 "and", "or", "test", "cmp", "shl", "shr", "sar", "inc", "dec", "not", "neg", "imul",
-                "push", "pop", "cwde", "cdqe", "nop"}
+                "push", "pop", "cwde", "cdqe", "nop", "seto", "setb"}
     addresses = list(instructions)
     following = dict(zip(addresses, addresses[1:]))
     graph = {}
@@ -270,7 +273,11 @@ def check_frame(name, instructions, config):
             raise ValueError("missing three return paths into the shared epilogue")
 
 
-IMAGE_LEAVES = {"lookup", "image_direct", "image_spill", "image_loop", "image_widths"}
+IMAGE_LEAVES = {"lookup", "image_direct", "image_spill", "image_loop", "image_widths", "image_target_join"}
+GLOBAL_SYMBOLS = {"global_array": ("words",), "global_counters": ("warm", "cold"),
+                  "global_static": ("_ZZ13global_staticE5total", "_ZL7weights"),
+                  "global_pointer": ("_ZL7current", "_ZL7counter"), "global_rmw": (".cells",),
+                  "global_retarget": (".initial", ".other", ".ptrslot")}
 
 
 def indexed_lookup(instructions, graph, loads):
@@ -306,21 +313,65 @@ def indexed_lookup(instructions, graph, loads):
     return False
 
 
+def section_rows(sections):
+    return [(int(start, 16), int(size, 16), int(offset or "0", 16), flags)
+            for size, start, offset, flags in re.findall(
+                r"^\s*\d+\s+\S+\s+([0-9a-f]+)\s+([0-9a-f]+)\s+[0-9a-f]+(?:\s+([0-9a-f]+))?[^\n]*\n\s+([^\n]+)",
+                sections, re.MULTILINE)]
+
+
+def follow_assembly_path(instructions, graph, start, *expected):
+    # Walk consecutive CFG edges in the hand-assembled leaf. Resolve RIP operands
+    # by their linked VA; branch destinations come from the disassembly graph.
+    edges = [start]
+    for wanted in expected:
+        if len(edges) != 1:
+            raise ValueError(f"expected a single path to {wanted!r}")
+        addr = edges[0]
+        code, _, target = instructions[addr].partition(" # ")
+        if target:
+            va = int(target.split()[0], 16)
+            code = re.sub(r"\[rip[^]]*\]", f"[{va:x}]", code)
+        if code.startswith(("je ", "jmp ")):
+            code = code.split()[0]
+        if code != wanted:
+            raise ValueError(f"expected {wanted!r} at {addr:x}, found {instructions[addr]!r}")
+        edges = graph[addr]
+    return edges
+
+
+def check_target_join(instructions, graph, sections):
+    narrow, wide = follow_assembly_path(instructions, graph, min(graph), "test rcx,rcx", "je")
+    first, second = (sections.get(instructions[addr]) for addr in (narrow, wide))
+    if first is None or second is None or first[0] == second[0]:
+        raise ValueError("expected a branch selecting two distinct immutable sections")
+    join = follow_assembly_path(instructions, graph, narrow, f"lea r8,[{first[1]:x}]", "xor r10d,r10d", "sub r11d,r11d")
+    other = follow_assembly_path(instructions, graph, wide, f"lea r8,[{second[1]:x}]", "xor r10,r10", "sub r11,r11", "jmp")
+    if other != join:
+        raise ValueError("offset arithmetic must begin at the shared join")
+    follow_assembly_path(instructions, graph, join[0], "sub r10d,0x1", "mov eax,0xffffffff", "sub r10,rax",
+                         "add eax,0x4", "mov r9,r8", "add r9,r10", "add r9,r11", "add r9,rax",
+                         "mov QWORD PTR [rsp+0x8],r9", "mov r10,QWORD PTR [rsp+0x8]", "movzx eax,WORD PTR [r10+0x1]",
+                         "add rax,rdx", "ret")
+
+
 def check_image_leaf(name, instructions, sections, config):
     graph = reachable_leaf(instructions)
     body = [instructions[address] for address in sorted(graph)]
     # Verify resolved VAs against the linked PE's section table, independently of Forge.
-    sections = [(int(start, 16), int(size, 16), flags) for size, start, flags in re.findall(
-        r"^\s*\d+\s+\S+\s+([0-9a-f]+)\s+([0-9a-f]+).*\n\s+([^\n]+)", sections, re.MULTILINE)]
+    sections = section_rows(sections)
     references = [line for line in body if "[rip" in line]
     if not references:
         raise ValueError("missing reachable RIP-relative data reference")
+    target_sections = {}
     for line in references:
         target = re.search(r"#\s*(?:0x)?([0-9a-f]+)", line)
-        if not target or not any(start <= int(target[1], 16) < start + size and "READONLY" in flags
-                                 and ("CODE" in flags) == (name == "image_widths")
-                                 for start, size, flags in sections):
+        section = next((start for start, size, _, flags in sections if target
+                        and start <= int(target[1], 16) < start + size and "READONLY" in flags
+                        and ("CODE" in flags) == (name == "image_widths")), None)
+        if section is None:
             raise ValueError(f"missing immutable section target for {line}")
+        target_sections[line] = (section, int(target[1], 16))
     loads = [line for line in body if re.match(r"mov(?:sx|sxd|zx)? \w+,(?:BYTE|WORD|DWORD|QWORD) PTR \[", line)
              and not re.search(r"\[(rsp|rbp)", line)]
     if not loads:
@@ -331,6 +382,8 @@ def check_image_leaf(name, instructions, sections, config):
         raise ValueError("missing direct RIP-relative load")
     if name == "image_loop" and not any(instructions[a] in loads for loop in natural_loops(graph)[0].values() for a in loop):
         raise ValueError("missing image load inside loop")
+    if name == "image_target_join":
+        check_target_join(instructions, graph, target_sections)
     if name == "image_spill":
         if len(references) < 2 or not any(len(edges) == 2 for edges in graph.values()):
             raise ValueError("missing branch-selected data addresses")
@@ -347,7 +400,134 @@ def check_image_leaf(name, instructions, sections, config):
             raise ValueError("missing stack spill and reload of the table base")
 
 
-def check_frame_padding(path):
+def written_operand(line):
+    # reachable_leaf checks the opcode set. These instructions only read their explicit operands.
+    opcode, _, operands = line.partition(" #")[0].partition(" ")
+    if (opcode.startswith("j") or opcode in {"cmp", "test", "nop", "push", "ret", "cwde", "cdqe"} or
+            (opcode == "imul" and "," not in operands)):
+        return ""
+    return operands.partition(",")[0]
+
+
+def check_static_lookup(instructions, graph, config):
+    loops, predecessors = natural_loops(graph)
+    entry = next(iter(graph))
+    for loop in loops.values():
+        if not any(instructions[a].startswith("mov DWORD PTR [rip") and
+                   instructions[a].endswith("<_ZZ13global_staticE5total>") for a in loop):
+            continue
+        if config == "debug":
+            # The unoptimized loop reloads the weights base immediately before using it.
+            for address in loop:
+                if instructions[address] == "mov edx,DWORD PTR [rdx+rax*1]" and len(predecessors[address]) == 1:
+                    source, = predecessors[address]
+                    if (source in loop and instructions[source].startswith("lea rax,[rip") and
+                            instructions[source].endswith("<_ZL7weights>")):
+                        return
+        else:
+            # Release hoists the LEA to the entry and keeps R8 live across every iteration.
+            if (instructions[entry].startswith("lea r8,[rip") and instructions[entry].endswith("<_ZL7weights>") and
+                    not any(written_operand(instructions[a]) in {"r8", "r8d", "r8w", "r8b"} for a in graph if a != entry) and
+                    any(instructions[a] == "add eax,DWORD PTR [r8+rdx*4]" for a in loop)):
+                return
+    raise ValueError("missing loop lookup through the weights base and static local update")
+
+
+def check_pointer_spill(body):
+    # The pinned leaves are straight-line. Between the spill and the final read the
+    # only stores are through the reloaded pointer and directly to the same counter.
+    if any(line.startswith("j") for line in body):
+        raise ValueError("expected a straight-line pointer spill and reload")
+    load = next((i for i, line in enumerate(body)
+                 if line.startswith("mov rax,QWORD PTR [rip") and line.endswith("<_ZL7current>")), None)
+    spill = (re.fullmatch(r"mov QWORD PTR (\[(r[bs]p)[+-]0x[0-9a-f]+\]),rax", body[load+1])
+             if load is not None and load+1 < len(body) else None)
+    if not spill:
+        raise ValueError("missing spill of the relocated pointer")
+    reload = "mov rax,QWORD PTR " + spill[1]
+    uses = [i+1 for i in range(load+2, len(body)-1) if body[i] == reload]
+    if (len(uses) != 3 or not re.fullmatch(r"mov \w+,QWORD PTR \[rax\]", body[uses[0]]) or
+            not re.fullmatch(r"mov QWORD PTR \[rax\],\w+", body[uses[1]]) or
+            body[uses[2]] != "mov rax,QWORD PTR [rax]"):
+        raise ValueError("missing ordered stack-reloaded pointer read or write")
+
+    counter_writes = [i for i in range(uses[1]+1, uses[2])
+                      if body[i].startswith("mov QWORD PTR [rip") and body[i].endswith("<_ZL7counter>")]
+    if len(counter_writes) != 1:
+        raise ValueError("missing direct counter update before the final pointer read")
+    frame = {"rsp", "esp", "sp", "spl"} if spill[2] == "rsp" else {"rbp", "ebp", "bp", "bpl"}
+    for i in range(load+2, uses[2]):
+        if i in (uses[1], counter_writes[0]):
+            continue
+        dest = written_operand(body[i])
+        if ("[" in dest or dest in frame or body[i].startswith("push ") or
+                (spill[2] == "rsp" and body[i].startswith("pop "))):
+            raise ValueError("pointer spill or its frame may be overwritten before reload")
+
+
+def check_global_leaf(path, instructions, sections, pe_report, config):
+    name = path.stem
+    graph = reachable_leaf(instructions)
+    body = [instructions[a] for a in sorted(graph)]
+    references = {}
+    for line in body:
+        if "[rip" not in line:
+            continue
+        match = re.search(r"#\s*([0-9a-f]+)\s+<([^>]+)>", line)
+        if not match:
+            raise ValueError(f"missing linked target for {line}")
+        address = int(match[1], 16)
+        row = next((r for r in sections if r[0] <= address < r[0] + r[1]), None)
+        if row is None or "ALLOC" not in row[3] or "CODE" in row[3]:
+            raise ValueError(f"missing mapped data section for {line}")
+        references[match[2]] = (address, row)
+
+    for symbol in GLOBAL_SYMBOLS[name]:
+        if symbol not in references:
+            raise ValueError(f"missing reachable reference to {symbol}")
+        flags = references[symbol][1][3]
+        if ("READONLY" in flags) != (symbol == "_ZL7weights") or ("CONTENTS" in flags) == (symbol == "cold"):
+            raise ValueError(f"unexpected section permissions or initialization for {symbol}")
+
+    memory_write = r"mov DWORD PTR \[rip[^]]*\],\w+"
+    if name == "global_counters":
+        if not any(len(edges) == 2 for edges in graph.values()) or any(
+                not any(re.match(memory_write, line) and line.endswith(f"<{symbol}>") for line in body)
+                for symbol in ("warm", "cold")):
+            raise ValueError("missing branch or counter writes")
+    elif name == "global_static":
+        check_static_lookup(instructions, graph, config)
+    elif name == "global_array":
+        if (not any(re.fullmatch(r"mov BYTE PTR \[r\w+\],\w+", line) for line in body)
+                or not any(re.fullmatch(r"mov \w+,DWORD PTR \[r\w+\+r\w+\*[14]\]", line) for line in body)):
+            raise ValueError("missing narrow array store or indexed wide read")
+    elif name in ("global_pointer", "global_retarget"):
+        pointer, initial = (("_ZL7current", "_ZL7counter") if name == "global_pointer" else (".ptrslot", ".initial"))
+        slot, (start, size, offset, _) = references[pointer]
+        base = re.search(r"^ImageBase\s+([0-9a-f]+)$", pe_report, re.MULTILINE)
+        dir64 = [int(rva, 16) for rva in re.findall(r"\[([0-9a-f]+)\] DIR64\b", pe_report)]
+        if not base or dir64.count(slot - int(base[1], 16)) != 1:
+            raise ValueError("expected one DIR64 on the loaded pointer field")
+        if (slot + 8 > start + size or struct.unpack_from("<Q", path.read_bytes(), offset + slot - start)[0]
+                != references[initial][0]):
+            raise ValueError("pointer initializer must point to the initial counter")
+        if name == "global_pointer":
+            check_pointer_spill(body)
+        else:
+            if references[".other"][1][0] == references[initial][1][0]:
+                raise ValueError("retargeting must cross writable sections")
+            reload, switch = follow_assembly_path(instructions, graph, min(graph), "test rcx,rcx", "je")
+            store, reset = follow_assembly_path(instructions, graph, switch, f"lea r9,[{references['.other'][0]:x}]",
+                                                "cmp rcx,0x1", "je")
+            if follow_assembly_path(instructions, graph, reset, f"lea r9,[{references[initial][0]:x}]") != [store]:
+                raise ValueError("both retargeting paths must reach the same pointer store")
+            if follow_assembly_path(instructions, graph, store, f"mov QWORD PTR [{slot:x}],r9") != [reload]:
+                raise ValueError("retained and updated pointers must reach the same slot reload")
+            follow_assembly_path(instructions, graph, reload, f"mov r8,QWORD PTR [{slot:x}]", "lea r9,[r8+0x2]",
+                                 "add WORD PTR [r9],dx", "mov rax,QWORD PTR [r8]", "ret")
+
+
+def check_padding(path):
     # BFD's -h shows virtual size even for an invalid nonzero SizeOfRawData
     # with a null file offset. Check the linked section header itself.
     data = path.read_bytes()
@@ -355,30 +535,37 @@ def check_frame_padding(path):
     count, = struct.unpack_from("<H", data, pe + 6)
     optional_size, = struct.unpack_from("<H", data, pe + 20)
     table = pe + 24 + optional_size
+    expected = {b".frpad": (33 * 1024 * 1024, 0, 0, 0x40000080)}
+    if path.stem == "image_target_join":
+        expected[b".wrpad"] = (257 * 1024 * 1024, 0, 0, 0xc0000080)
     for pos in range(table, table + 40 * count, 40):
-        if data[pos:pos+8].rstrip(b"\0") == b".frpad":
+        name = data[pos:pos+8].rstrip(b"\0")
+        if name in expected:
             extent, _, raw, offset = struct.unpack_from("<4I", data, pos + 8)
             flags, = struct.unpack_from("<I", data, pos + 36)
-            # IMAGE_SCN_MEM_READ | IMAGE_SCN_CNT_UNINITIALIZED_DATA
-            if (extent, raw, offset, flags) == (33 * 1024 * 1024, 0, 0, 0x40000080):
-                return
-    raise ValueError("missing 33 MiB read-only zero-fill section")
+            if (extent, raw, offset, flags) == expected[name]:
+                del expected[name]
+    if expected:
+        raise ValueError(f"missing required virtual-only section layout for {list(expected)}")
 
 
-def check_leaf(path, config="debug"):
+def check_leaf(path, config="debug", pe_report=""):
     witnesses = INTEGER_WITNESSES.get(path.stem)
     if (witnesses is None and path.stem != "cfg_nested_exits"
-            and path.stem not in FRAME_LOCALS and path.stem not in IMAGE_LEAVES):
+            and path.stem not in FRAME_LOCALS and path.stem not in IMAGE_LEAVES and path.stem not in GLOBAL_SYMBOLS):
         return
     output = subprocess.check_output(["x86_64-w64-mingw32-objdump", "-d", "--no-show-raw-insn",
                                       "-Mintel", "--disassemble=" + path.stem, path], text=True)
     try:
         instructions = leaf_instructions(output, path.stem)
-        if path.stem in IMAGE_LEAVES:
+        if path.stem in IMAGE_LEAVES or path.stem in GLOBAL_SYMBOLS:
             sections = subprocess.check_output(["x86_64-w64-mingw32-objdump", "-h", path], text=True)
-            check_image_leaf(path.stem, instructions, sections, config)
-        if path.stem in ("branch_locals", "count_locals"):
-            check_frame_padding(path)
+            if path.stem in IMAGE_LEAVES:
+                check_image_leaf(path.stem, instructions, sections, config)
+            else:
+                check_global_leaf(path, instructions, section_rows(sections), pe_report, config)
+        if path.stem in ("branch_locals", "count_locals", "image_target_join"):
+            check_padding(path)
         if path.stem in FRAME_LOCALS:
             check_frame(path.stem, instructions, config)
         if path.stem == "cfg_nested_exits":
@@ -439,8 +626,8 @@ def build(config, cases, output):
             if data != (second / binary).read_bytes():
                 other = hashlib.sha256((second / binary).read_bytes()).hexdigest()
                 raise ValueError(f"{config}/{binary}: clean builds differ: {hashlib.sha256(data).hexdigest()} vs {other}")
-            inspect_pe(path, fixture_id)
-            check_leaf(path, config)
+            pe_report = inspect_pe(path, fixture_id)
+            check_leaf(path, config, pe_report)
             checksums.append(f"{hashlib.sha256(data).hexdigest()}  {binary}\n")
             shutil.copy2(path, staged / binary)
         (staged / "SHA256SUMS").write_text("".join(checksums), encoding="ascii")

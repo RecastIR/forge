@@ -4,6 +4,7 @@
 
 #include "llvm/ADT/ArrayRef.h"
 #include "llvm/Object/COFF.h"
+#include "llvm/Support/Endian.h"
 #include "llvm/Support/JSON.h"
 #include "llvm/Support/Win64EH.h"
 
@@ -500,12 +501,16 @@ namespace forge {
             if (!dir) {
                 return;
             }
+
+            const uint64_t directoryRva =
+                object->getDataDirectory(COFF::BASE_RELOCATION_TABLE)->RelativeVirtualAddress;
+
             for (size_t pos = 0; pos < dir->bytes.size();) {
                 auto h = dir->read<coff_base_reloc_block_header>(pos);
                 if (h.BlockSize < sizeof(h) || h.BlockSize % 2) {
                     invalid(dir->label, dir->offset + pos, "invalid relocation block size");
                 }
-                if (h.PageRVA % 4096 || pos % 4) {
+                if (h.PageRVA % 4096 || (directoryRva + pos) % 4) {
                     invalid(dir->label, dir->offset + pos, "misaligned relocation page or block");
                 }
                 auto block = dir->slice(pos, h.BlockSize);
@@ -604,6 +609,8 @@ namespace forge {
             Module module{};
             module.machine = static_cast<COFF::MachineTypes>(object->getMachine());
             module.dll = object->getCharacteristics() & COFF::IMAGE_FILE_DLL;
+            module.relocationsStripped =
+                object->getCharacteristics() & COFF::IMAGE_FILE_RELOCS_STRIPPED;
             module.imageBase = object->getImageBase();
             module.entryPoint = header.AddressOfEntryPoint;
             size_t index = 0;
@@ -707,7 +714,8 @@ namespace forge {
     }
 
     namespace {
-        void appendGuardSlot(const ParsedImage &image, uint64_t va, std::vector<RvaRange> &ranges) {
+        void appendLoadConfigSlot(const ParsedImage &image, uint64_t va, StringRef name,
+                                  std::vector<RvaRange> &ranges) {
             if (!va) {
                 return;
             }
@@ -716,8 +724,7 @@ namespace forge {
             const auto *section = image.sectionAtRva(rva);
             if (!section ||
                 rva + sizeof(uint64_t) > uint64_t(section->rva) + section->virtualSize) {
-                throw InspectionError("control flow guard slot outside mapped section at VA " +
-                                      hex(va));
+                throw InspectionError(name.str() + " outside mapped section at VA " + hex(va));
             }
 
             ranges.push_back({rva, rva + sizeof(uint64_t)});
@@ -734,8 +741,7 @@ namespace forge {
 
             auto mapped = mapFileRange(sections, file, dir->RelativeVirtualAddress, dir->Size);
             if (!mapped || !dir->Size) {
-                throw InspectionError(
-                    "invalid import directory while mapping immutable image data");
+                throw InspectionError("invalid import directory while mapping image data");
             }
 
             View view{mapped->bytes, mapped->fileOffset, "image import descriptor"};
@@ -772,17 +778,79 @@ namespace forge {
                 }
             }
         }
-    } // namespace
 
-    std::vector<RvaRange> ParsedImage::imageReadExclusions() const {
-        std::vector<RvaRange> ranges;
-        for (const auto &block : metadata.relocations) {
-            for (const auto &rel : block.entries) {
-                if (const unsigned width = relocationWidth(rel.type)) {
-                    ranges.push_back({rel.rva, uint64_t(rel.rva) + width});
+        std::vector<RvaRange> mergeRanges(std::vector<RvaRange> ranges) {
+            llvm::sort(ranges, [](auto a, auto b) { return a.begin < b.begin; });
+            std::vector<RvaRange> merged;
+
+            for (auto range : ranges) {
+                if (!merged.empty() && range.begin <= merged.back().end) {
+                    merged.back().end = std::max(merged.back().end, range.end);
+                } else {
+                    merged.push_back(range);
                 }
             }
+
+            return merged;
         }
+
+        std::vector<RvaRange> directoryRanges(const llvm::object::COFFObjectFile &coff) {
+            std::vector<RvaRange> ranges;
+
+            for (unsigned index = 0; index < COFF::NUM_DATA_DIRECTORIES; ++index) {
+                // The certificate table's "RVA" is a file offset outside the loaded image.
+                if (index == COFF::CERTIFICATE_TABLE) {
+                    continue;
+                }
+
+                const auto *dir = coff.getDataDirectory(index);
+
+                if (dir && dir->RelativeVirtualAddress && dir->Size) {
+                    ranges.push_back({dir->RelativeVirtualAddress,
+                                      uint64_t(dir->RelativeVirtualAddress) + dir->Size});
+                }
+            }
+
+            return ranges;
+        }
+
+        llvm::ArrayRef<RvaRange> rangesIn(llvm::ArrayRef<RvaRange> view, RvaRange range) {
+            auto begin = llvm::lower_bound(
+                view, range.begin, [](RvaRange field, uint64_t rva) { return field.end <= rva; });
+            auto end =
+                std::lower_bound(begin, view.end(), range.end,
+                                 [](RvaRange field, uint64_t rva) { return field.begin < rva; });
+            return {begin, end};
+        }
+    } // namespace
+
+    void ImageInitialization::validateRelocations(RvaRange range) const {
+        auto malformed = rangesIn(conflicts, range);
+
+        if (!malformed.empty()) {
+            throw InspectionError("overlapping base relocations at RVA " +
+                                  hex(malformed.front().begin));
+        }
+    }
+
+    llvm::ArrayRef<RvaRange> ImageInitialization::exclusionsIn(RvaRange range) const {
+        return rangesIn(excluded, range);
+    }
+
+    llvm::ArrayRef<const Relocation *> ImageInitialization::relocationsIn(RvaRange range) const {
+        llvm::ArrayRef<const Relocation *> view(fields);
+        auto begin =
+            llvm::lower_bound(view, range.begin, [](const Relocation *field, uint64_t rva) {
+                return uint64_t(field->rva) + relocationWidth(field->type) <= rva;
+            });
+        auto end = std::lower_bound(
+            begin, view.end(), range.end,
+            [](const Relocation *field, uint64_t rva) { return field->rva < rva; });
+        return {begin, end};
+    }
+
+    std::vector<RvaRange> ParsedImage::loaderWrittenRanges() const {
+        std::vector<RvaRange> ranges;
 
         if (metadata.tls && metadata.tls->index >= metadata.imageBase && metadata.tls->index) {
             const auto rva = metadata.tls->index - metadata.imageBase;
@@ -792,17 +860,24 @@ namespace forge {
         }
 
         // Windows writes the target slots, including slots in read-only sections.
-        // Earlier load-config versions end before one or both field offsets.
+        // Older load-config versions may end before a field.
         if (const auto *config = coff->getLoadConfig64()) {
             using Config = llvm::object::coff_load_configuration64;
+
+            if (config->Size >= offsetof(Config, SecurityCookie) + sizeof(config->SecurityCookie)) {
+                appendLoadConfigSlot(*this, config->SecurityCookie, "security cookie", ranges);
+            }
+
             if (config->Size >=
                 offsetof(Config, GuardCFCheckFunction) + sizeof(config->GuardCFCheckFunction)) {
-                appendGuardSlot(*this, config->GuardCFCheckFunction, ranges);
+                appendLoadConfigSlot(*this, config->GuardCFCheckFunction, "control flow guard slot",
+                                     ranges);
             }
 
             if (config->Size >=
                 offsetof(Config, GuardCFCheckDispatch) + sizeof(config->GuardCFCheckDispatch)) {
-                appendGuardSlot(*this, config->GuardCFCheckDispatch, ranges);
+                appendLoadConfigSlot(*this, config->GuardCFCheckDispatch, "control flow guard slot",
+                                     ranges);
             }
         }
 
@@ -824,17 +899,121 @@ namespace forge {
                                ranges);
         }
 
-        llvm::sort(ranges, [](auto a, auto b) { return a.begin < b.begin; });
-        std::vector<RvaRange> merged;
-        for (auto range : ranges) {
-            if (!merged.empty() && range.begin <= merged.back().end) {
-                merged.back().end = std::max(merged.back().end, range.end);
-            } else {
-                merged.push_back(range);
+        return mergeRanges(std::move(ranges));
+    }
+
+    ImageInitialization ParsedImage::imageInitialization() const {
+        ImageInitialization result;
+        result.excluded = loaderWrittenRanges();
+        std::vector<const Relocation *> ordered;
+
+        for (const auto &block : metadata.relocations) {
+            for (const auto &rel : block.entries) {
+                if (rel.type != COFF::IMAGE_REL_BASED_ABSOLUTE) {
+                    ordered.push_back(&rel);
+                }
             }
         }
 
-        return merged;
+        llvm::stable_sort(ordered, [](const auto *a, const auto *b) { return a->rva < b->rva; });
+        std::vector<RvaRange> unavailable;
+        const auto directories = directoryRanges(*coff);
+        for (const auto *rel : ordered) {
+            const auto *section = sectionAtRva(rel->rva);
+            RvaRange field{rel->rva, uint64_t(rel->rva) + relocationWidth(rel->type)};
+
+            if (!section || field.end > uint64_t(section->rva) + section->virtualSize) {
+                throw InspectionError("relocation target outside a single mapped section at RVA " +
+                                      hex(rel->rva));
+            }
+
+            // Only a mapping that selects conflicting fixups depends on how their bytes
+            // would have been patched. Keep the entire cluster out of the regular field index.
+            if (!result.conflicts.empty() && field.begin < result.conflicts.back().end) {
+                result.conflicts.back().end = std::max(field.end, result.conflicts.back().end);
+                continue;
+            }
+
+            if (!result.fields.empty()) {
+                const auto *previous = result.fields.back();
+                const uint64_t end = uint64_t(previous->rva) + relocationWidth(previous->type);
+
+                if (field.begin < end) {
+                    result.conflicts.push_back({previous->rva, std::max(end, field.end)});
+                    result.fields.pop_back();
+                    continue;
+                }
+            }
+
+            result.fields.push_back(rel);
+
+            // Directory metadata remains in its original PE representation. Exclude only the
+            // fixup, so neighboring ordinary bytes stay available through the same resolver.
+            const bool isMetadata = llvm::any_of(directories, [field](RvaRange dir) {
+                return dir.begin < field.end && field.begin < dir.end;
+            });
+
+            if (rel->type != COFF::IMAGE_REL_BASED_DIR64 || section->permissions[2] == 'x' ||
+                isMetadata || !result.exclusionsIn(field).empty()) {
+                unavailable.push_back(field);
+            }
+        }
+
+        unavailable.insert(unavailable.end(), result.excluded.begin(), result.excluded.end());
+        unavailable.insert(unavailable.end(), result.conflicts.begin(), result.conflicts.end());
+        result.excluded = mergeRanges(std::move(unavailable));
+        return result;
+    }
+
+    ImageBytes ParsedImage::imageBytes(RvaRange range, const ImageInitialization &init,
+                                       uint64_t guestLoadBase) const {
+        // The backing can extend beyond the access that selected it. Conflicting fields
+        // have no fixup in the index and their bytes are excluded from the resolver.
+        ImageBytes result{initializedBytes(range).str(), {}};
+        const uint64_t delta = guestLoadBase - metadata.imageBase;
+
+        if (delta == 0) {
+            return result;
+        }
+
+        const uint64_t rawEnd = range.begin + result.prefix.size();
+
+        for (const auto *rel : init.relocationsIn(range)) {
+            RvaRange field{rel->rva, uint64_t(rel->rva) + relocationWidth(rel->type)};
+
+            if (!init.exclusionsIn(field).empty()) {
+                continue;
+            }
+
+            // Decode the complete field even when a fixed image read selects only part of it.
+            // Its last bytes may be loader-provided zeros beyond the PE raw extent.
+            char bytes[sizeof(uint64_t)]{};
+            const auto raw = initializedBytes(field);
+            std::copy(raw.begin(), raw.end(), bytes);
+            const uint64_t relocated = llvm::support::endian::read64le(bytes) + delta;
+            llvm::support::endian::write64le(bytes, relocated);
+
+            const auto begin = std::max(field.begin, range.begin);
+            const auto end = std::min(field.end, range.end);
+            const auto prefixEnd = std::min(end, rawEnd);
+
+            if (begin < prefixEnd) {
+                std::copy_n(bytes + (begin - field.begin), prefixEnd - begin,
+                            result.prefix.data() + (begin - range.begin));
+            }
+
+            const auto tailBegin = std::max(begin, rawEnd);
+
+            if (tailBegin < end) {
+                llvm::StringRef tail(bytes + (tailBegin - field.begin), end - tailBegin);
+
+                if (llvm::any_of(tail, [](char byte) { return byte != 0; })) {
+                    result.tail.push_back({tailBegin - range.begin, tail.str()});
+                }
+            }
+        }
+
+        return result;
     }
 
     const llvm::object::ObjectFile &ParsedImage::object() const { return *coff; }

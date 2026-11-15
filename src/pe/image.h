@@ -2,6 +2,7 @@
 
 #include "input.h"
 
+#include "llvm/ADT/ArrayRef.h"
 #include "llvm/ADT/StringExtras.h"
 #include "llvm/BinaryFormat/COFF.h"
 
@@ -29,6 +30,8 @@ namespace forge {
         bool immutable() const {
             return permissions[0] == 'r' && permissions[1] != 'w' && !discardable;
         }
+
+        bool writableData() const { return permissions == "rw-" && !discardable; }
     };
 
     struct RvaRange {
@@ -66,6 +69,27 @@ namespace forge {
 
     unsigned relocationWidth(unsigned type);
 
+    struct ImageInitialization {
+        // Sorted indices borrow the parsed relocation records for the duration of translation.
+        std::vector<const Relocation *> fields;
+        std::vector<RvaRange> excluded;
+        std::vector<RvaRange> conflicts;
+        void validateRelocations(RvaRange range) const;
+        llvm::ArrayRef<const Relocation *> relocationsIn(RvaRange range) const;
+        llvm::ArrayRef<RvaRange> exclusionsIn(RvaRange range) const;
+    };
+
+    struct ImageBytes {
+        struct Fragment {
+            uint64_t offset;
+            std::string bytes;
+        };
+
+        std::string prefix;
+        // Only relocated bytes that differ from the implicit zero tail need storage.
+        std::vector<Fragment> tail;
+    };
+
     struct RelocationBlock {
         uint32_t pageRva, size;
         std::vector<Relocation> entries;
@@ -91,6 +115,7 @@ namespace forge {
         fs::path path;
         llvm::COFF::MachineTypes machine;
         bool dll;
+        bool relocationsStripped;
         uint64_t imageBase;
         uint32_t entryPoint;
         std::vector<Section> sections;
@@ -124,14 +149,16 @@ namespace forge {
         // Borrow the initialized prefix of a virtual interval inside a single section.
         // The remaining bytes in the interval are zero-filled by the PE loader.
         llvm::StringRef initializedBytes(RvaRange range) const;
-        // Ranges whose loader-visible contents cannot be obtained from the preferred-base snapshot.
-        std::vector<RvaRange> imageReadExclusions() const;
+        ImageInitialization imageInitialization() const;
+        ImageBytes imageBytes(RvaRange range, const ImageInitialization &init,
+                              uint64_t guestLoadBase) const;
         // DWARF enrichment borrows this object for the duration of its lookup.
         const llvm::object::ObjectFile &object() const;
 
       private:
         friend Module inspectPE(const InputFile &input);
 
+        std::vector<RvaRange> loaderWrittenRanges() const;
         llvm::sys::fs::UniqueID identity;
         fs::path openedPath;
         // COFF borrows the snapshot and must be destroyed before it.

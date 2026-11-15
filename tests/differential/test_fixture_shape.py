@@ -1,9 +1,10 @@
 """Instruction and control-flow witnesses for the linked MinGW fixtures."""
 from pathlib import Path
+import tempfile
 import unittest
 from unittest.mock import patch
 
-from build import check_frame, check_image_leaf, check_leaf, check_nested_exits, leaf_instructions
+from build import check_frame, check_global_leaf, check_image_leaf, check_leaf, check_nested_exits, leaf_instructions
 
 
 # Both loops are laid out after a shared return. Absolute addresses are immaterial.
@@ -47,6 +48,109 @@ class FixtureShapeTests(unittest.TestCase):
             check_image_leaf("lookup", bypass, sections, "debug")
         with self.assertRaisesRegex(ValueError, "immutable section"):
             check_image_leaf("lookup", leaf, sections.replace("READONLY", "DATA"), "debug")
+
+    def test_global_pointer_requires_the_used_relocation_and_alias(self):
+        code = ["mov rax,QWORD PTR [rip+0x10] # 401010 <_ZL7current>", "mov QWORD PTR [rsp+0x8],rax",
+                "mov rax,QWORD PTR [rsp+0x8]", "mov rdx,QWORD PTR [rax]", "mov rax,QWORD PTR [rsp+0x8]",
+                "mov QWORD PTR [rax],rdx", "mov QWORD PTR [rip+0x8],rdx # 401008 <_ZL7counter>",
+                "mov rax,QWORD PTR [rsp+0x8]", "mov rax,QWORD PTR [rax]", "ret"]
+        sections = [(0x401000, 32, 0, "CONTENTS, ALLOC, LOAD, DATA")]
+        report = "ImageBase 400000\nreloc 0 offset 10 [1010] DIR64"
+        with tempfile.TemporaryDirectory() as tmp:
+            image = Path(tmp) / "global_pointer.exe"
+            image.write_bytes(bytes(16) + (0x401008).to_bytes(8, "little"))
+            def check(body, pe_report=report):
+                check_global_leaf(image, dict(enumerate(body)), sections, pe_report, "release")
+
+            check(code)
+            check([*code[:2], "nop", "sub r9,rcx", "cmp QWORD PTR [rsp+0x8],rdx", *code[2:]])
+            for broken in (report.replace("1010", "1018"), report.replace("DIR64", "ABSOLUTE")):
+                with self.assertRaisesRegex(ValueError, "DIR64"):
+                    check(code, broken)
+            with self.assertRaisesRegex(ValueError, "pointer read or write"):
+                check([line.replace("[rax],rdx", "[rcx],rdx") for line in code])
+            for overwrite in ("mov QWORD PTR [rsp+0x8],rdx", "mov BYTE PTR [rsp+0xc],al",
+                              "add rsp,0x8", "seto spl", "push rdx", "pop r9"):
+                with self.subTest(overwrite=overwrite), self.assertRaisesRegex(ValueError, "overwritten"):
+                    check([*code[:2], overwrite, *code[2:]])
+            with self.assertRaisesRegex(ValueError, "straight-line"):
+                check(["je 3", *code])  # Reach the first reload without executing the spill.
+            with self.assertRaisesRegex(ValueError, "direct counter update"):
+                check([*code[:6], *code[7:9], code[6], code[9]])
+            image.write_bytes(bytes(32))
+            with self.assertRaisesRegex(ValueError, "pointer initializer"):
+                check(code)
+
+    def test_image_target_join_requires_distinct_sections_on_branch_arms(self):
+        sections = ("  0 .choicea 00000008 00002000 00002000\n  CONTENTS, ALLOC, LOAD, READONLY, DATA\n"
+                    "  1 .choiceb 00000008 00003000 00003000\n  CONTENTS, ALLOC, LOAD, READONLY, DATA")
+        body = ["test rcx,rcx", "je 6", "lea r8,[rip+0x20] # 3000", "xor r10,r10", "sub r11,r11", "jmp 9",
+                "lea r8,[rip+0x10] # 2000", "xor r10d,r10d", "sub r11d,r11d", "sub r10d,0x1", "mov eax,0xffffffff",
+                "sub r10,rax", "add eax,0x4", "mov r9,r8", "add r9,r10", "add r9,r11", "add r9,rax",
+                "mov QWORD PTR [rsp+0x8],r9", "mov r10,QWORD PTR [rsp+0x8]", "movzx eax,WORD PTR [r10+0x1]",
+                "add rax,rdx", "ret"]
+        check_image_leaf("image_target_join", dict(enumerate(body)), sections, "debug")
+        interior = dict(enumerate(body))
+        interior[2] = body[2].replace("3000", "3001")
+        interior[6] = body[6].replace("2000", "2001")
+        check_image_leaf("image_target_join", interior, sections, "release")
+        for index, change, reason in ((1, "jmp 6", "expected 'je'"), (2, "lea r8,[rip+0x20] # 2004", "distinct"),
+                                      (3, "xor r10d,r10d", "xor r10,r10"), (5, "jmp a", "shared join"),
+                                      (8, "sub r11d,r10d", "sub r11d,r11d"), (9, "sub r10,0x1", "sub r10d,0x1"),
+                                      (12, "jmp d", "add eax,0x4"), (13, "mov r9,r11", "mov r9,r8"),
+                                      (18, "mov r10,QWORD PTR [rsp+0x10]", r"rsp\+0x8")):
+            modified = dict(enumerate(body))
+            modified[index] = change
+            with self.subTest(change=change), self.assertRaisesRegex(ValueError, reason):
+                check_image_leaf("image_target_join", modified, sections, "release")
+
+    def test_retarget_requires_a_writable_relocated_slot_and_distinct_targets(self):
+        body = ["test rcx,rcx", "je 7", "lea r9,[rip+0x8] # 402000 <.other>", "cmp rcx,0x1", "je 6",
+                "lea r9,[rip+0x8] # 401000 <.initial>",
+                "mov QWORD PTR [rip+0x8],r9 # 403000 <.ptrslot>", "mov r8,QWORD PTR [rip+0x8] # 403000 <.ptrslot>",
+                "lea r9,[r8+0x2]", "add WORD PTR [r9],dx", "mov rax,QWORD PTR [r8]", "ret"]
+        sections = [(0x401000 + n * 4096, 8, n * 8, "CONTENTS, ALLOC, LOAD, DATA") for n in range(3)]
+        report = "ImageBase 400000\nreloc 0 offset 0 [3000] DIR64"
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "global_retarget.exe"
+            path.write_bytes(bytes(16) + (0x401000).to_bytes(8, "little"))
+            def check(code):
+                check_global_leaf(path, dict(enumerate(code)), sections, report, "debug")
+
+            check(body)
+            # Both addresses and the relocated slot are present, but every call replaces it.
+            always_retarget = [body[5], body[2], *body[6:]]
+            with self.assertRaisesRegex(ValueError, "test rcx,rcx"):
+                check(always_retarget)
+            for index, change, reason in ((2, body[2].replace("402000", "401000"), "cross writable sections"),
+                                          (1, "je 8", "same slot reload"), (4, "je 7", "same pointer store"),
+                                          (6, body[6].replace(",r9", ",rdx"), "expected 'mov QWORD PTR"),
+                                          (8, "lea r9,[r8+0x4]", "expected 'lea r9"),
+                                          (9, "jmp a", "expected 'add WORD PTR")):
+                with self.subTest(change=change), self.assertRaisesRegex(ValueError, reason):
+                    check([*body[:index], change, *body[index + 1:]])
+
+    def test_global_static_uses_the_live_weights_base_in_the_loop(self):
+        sections = [(0x401000, 32, 0, "CONTENTS, ALLOC, READONLY, DATA"),
+                    (0x402000, 32, 32, "CONTENTS, ALLOC, DATA")]
+        store = "mov DWORD PTR [rip+0x8],eax # 402000 <_ZZ13global_staticE5total>"
+        weights = "[rip+0x10] # 401000 <_ZL7weights>"
+        debug = ["nop", "lea rax," + weights, "mov edx,DWORD PTR [rdx+rax*1]", store, "jne 1", "ret"]
+        release = ["lea r8," + weights, "je 6", "mov eax,ecx", "add eax,DWORD PTR [r8+rdx*4]", store,
+                   "jne 2", "ret"]
+
+        def check(code, config):
+            check_global_leaf(Path("global_static.exe"), dict(enumerate(code)), sections, "", config)
+
+        check(debug, "debug")
+        check(release, "release")
+        check([*release[:2], "cmp r8,rdx", *release[3:]], "release")
+        for config, broken in (("debug", ["je 2", *debug[1:]]),
+                               ("debug", [*debug[:2], "mov edx,DWORD PTR [rdx+rcx*1]", *debug[3:]]),
+                               ("release", [*release[:3], "add eax,DWORD PTR [rax+rdx*4]", *release[4:]]),
+                               ("release", [*release[:2], "mov r8d,ecx", *release[3:]])):
+            with self.subTest(config=config, body=broken), self.assertRaisesRegex(ValueError, "weights base"):
+                check(broken, config)
 
     def test_frame_loop_must_store_inside_a_reachable_loop(self):
         instructions = dict(enumerate([

@@ -35,7 +35,7 @@ def generate(output, mc, link, dlltool, clang):
             definition.write_text("LIBRARY " + dll + "\nEXPORTS\n" + "\n".join(public) + "\n")
             run(dlltool, "-m", "i386:x86-64", "-d", definition, "-l", dll + ".lib")
 
-        def image(filename, assembly=stub, imports=(), delays=(), exports=()):
+        def image(filename, assembly=stub, imports=(), delays=(), exports=(), link_flags=()):
             assembly += helper if delays else ""
             for _, symbol in imports:
                 assembly += "\n.section .rdata,\"dr\"\n.quad __imp_" + symbol + "\n"
@@ -47,7 +47,7 @@ def generate(output, mc, link, dlltool, clang):
                 definition = work / "exports.def"
                 definition.write_text("EXPORTS\n" + "\n".join(definitions[filename]) + "\n")
                 flags = ["/dll", "/noentry", "/def:exports.def", "/implib:unused.lib"]
-            run(link, "/nodefaultlib", "/timestamp:0", *flags, *("/export:" + name for name in exports), "/out:" + filename, "image.obj",
+            run(link, "/nodefaultlib", "/timestamp:0", *flags, *link_flags, *("/export:" + name for name in exports), "/out:" + filename, "image.obj",
                 *dict.fromkeys(dll + ".lib" for dll, _ in imports),
                 *("/delayload:" + dll for dll in delays))
             (output / filename).write_bytes((work / filename).read_bytes())
@@ -66,7 +66,13 @@ def generate(output, mc, link, dlltool, clang):
             (output / f"{name}.exe").write_bytes((work / f"{name}.exe").read_bytes())
         cfg_leaves = sources.parent / "differential/fixtures/control_flow/cfg_cases.S"
         image("cfg.exe", (sources / "cfg.s").read_text() + cfg_leaves.read_text())
-        image("image.exe", (sources / "image.s").read_text())
+        image_assembly = (sources / "image.s").read_text()
+        image("image.exe", image_assembly)
+        image("image-fixed.exe", image_assembly, link_flags=["/fixed"])
+        ranges = (sources / "image-ranges.s").read_text()
+        for fields in (8, 64, 512):
+            image(f"image-ranges-{fields}.exe", f".set fields, {fields}\n" + ranges,
+                  exports=["entry"], link_flags=["/base:0x10000000"])
         image("stack.exe", (sources / "stack.s").read_text())
         image("chained.exe", (sources / "chained.s").read_text())
         image("unicode.exe", stub + '.section ".donnée","dr"\n.byte 1\n.section ".界区","dr"\n.byte 1\n')

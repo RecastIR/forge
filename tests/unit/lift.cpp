@@ -1,22 +1,32 @@
 #include "lift/lift.h"
 #include "analysis/analysis.h"
 #include "diagnostic.h"
+#include "lift/address_fact.h"
 #include "output/publication.h"
 
 #include "llvm/ADT/ScopeExit.h"
 #include "llvm/ADT/SmallString.h"
+#include "llvm/Analysis/MemoryLocation.h"
+#include "llvm/AsmParser/Parser.h"
 #include "llvm/IR/BasicBlock.h"
 #include "llvm/IR/CFG.h"
 #include "llvm/IR/Constants.h"
 #include "llvm/IR/Function.h"
+#include "llvm/IR/IRBuilder.h"
+#include "llvm/IR/InstIterator.h"
 #include "llvm/IR/Instructions.h"
+#include "llvm/IR/IntrinsicInst.h"
 #include "llvm/IR/Module.h"
 #include "llvm/IR/Verifier.h"
+#include "llvm/Support/JSON.h"
+#include "llvm/Support/SourceMgr.h"
 
 #include <fstream>
 #include <map>
+#include <set>
 #include <string_view>
 #include <type_traits>
+#include <vector>
 
 namespace {
     using namespace forge;
@@ -28,6 +38,75 @@ namespace {
         if (!condition) {
             throw std::runtime_error(message);
         }
+    }
+
+    void checkAddressAlternatives() {
+        using x86::AddressFact;
+        constexpr uint64_t high = uint64_t{1} << 63;
+        const uint64_t expected[] = {0, 1, 4, 5, high, high + 1, high + 4, high + 5};
+        const auto bounded = AddressFact{}.masked(high | 5);
+        check(bounded.values() == llvm::ArrayRef(expected), "lost a sparse masked index");
+        check(bounded.join(AddressFact(5)) == bounded, "duplicate widened an exact address set");
+        check(!bounded.join(AddressFact(6)).known() && !AddressFact{}.masked(high | 7).known(),
+              "truncated an over-cap address set");
+        check(!bounded.join(AddressFact{}).known(), "discarded an unknown predecessor");
+        check(AddressFact(UINT64_MAX).plus(AddressFact(1)) == AddressFact(0),
+              "guest address arithmetic did not wrap");
+
+        const AddressFact stack(x86::GuestMemory::entryRsp, AddressFact::Stack);
+        const auto immediate = AddressFact(UINT32_MAX).plus(AddressFact(2)).masked(UINT32_MAX);
+        check(immediate == AddressFact(1).computed() && !stack.plus(immediate).stackDerived(),
+              "32-bit arithmetic lost zero extension or acquired a stack-only origin");
+        check(stack.plus(AddressFact(17).times(0)).stackDerived() &&
+                  !stack.plus(stack.times(0)).stackDerived(),
+              "self-subtraction changed its legacy stack proof");
+    }
+
+    void checkSpillSnapshots() {
+        using x86::AddressFact;
+        using x86::StackSpills;
+        const AddressFact first(x86::GuestMemory::base);
+        const auto second = first.plus(AddressFact(8));
+        StackSpills entry;
+        for (unsigned slot = 0; slot < 500; ++slot) {
+            entry.write(first.plus(AddressFact(8 * slot)), 64, AddressFact(slot));
+        }
+
+        const auto *original = entry.find(x86::GuestMemory::base);
+        check(original && *original == AddressFact(0).computed(), "missing initial spill");
+        std::vector<StackSpills> successors;
+        successors.reserve(4800);
+        for (unsigned block = 0; block < 4800; ++block) {
+            auto &snapshot = successors.emplace_back(entry);
+            snapshot.write(first, 64, AddressFact(0));
+            snapshot.write(first.plus(AddressFact(4000)), 8, AddressFact{});
+            check(!snapshot.merge(entry) && snapshot.find(x86::GuestMemory::base) == original,
+                  "an unchanged spill snapshot copied its entries");
+        }
+
+        auto &branch = successors.front();
+        branch.write(first, 64, AddressFact(17));
+        check(branch.read(first) == AddressFact(17).computed() &&
+                  entry.read(first) == AddressFact(0).computed(),
+              "spill overwrite changed an earlier snapshot");
+
+        auto &join = successors.back();
+        const auto choices = AddressFact(0).join(AddressFact(17));
+        check(join.merge(branch) && join.read(first) == choices &&
+                  entry.read(first) == AddressFact(0).computed(),
+              "changed join lost a target or modified a sibling");
+
+        branch.write(first, 64, AddressFact(0));
+        check(!entry.merge(branch) && entry.find(x86::GuestMemory::base) == original,
+              "equal independent spill snapshots caused a detach");
+        branch.write(first.plus(AddressFact(7)), 16, AddressFact{});
+        check(!branch.read(first).known() && !branch.read(second).known() &&
+                  entry.read(second) == AddressFact(1).computed(),
+              "partial overlapping write damaged a shared predecessor");
+        auto &cleared = successors[1];
+        cleared.write(AddressFact{}, 64, AddressFact{});
+        check(!cleared.read(first).known() && entry.read(second) == AddressFact(1).computed(),
+              "unknown write cleared another branch");
     }
 
     void checkAlias(const llvm::Module &module, const ParsedImage &image, const fs::path &path) {
@@ -306,10 +385,214 @@ namespace {
                   "verifier failure lost its stage, category or provenance");
         }
     }
+
+    // The native image suite compiles this output with both LLVM pipelines. Printing
+    // after analysis destruction also exercises the returned module's ownership.
+    void emitRebased(const fs::path &path, llvm::StringRef entry, llvm::StringRef base) {
+        uint32_t rva;
+        uint64_t guestBase;
+        check(!entry.getAsInteger(0, rva) && !base.getAsInteger(0, guestBase),
+              "invalid rebase test arguments");
+        llvm::LLVMContext context;
+        std::unique_ptr<llvm::Module> module;
+        {
+            AnalyzedImage analysis(
+                std::make_unique<ParsedImage>(InputFile(path), ParsePolicy::FunctionAnalysis),
+                DebugInfo::Omit);
+            module = generateIR(analysis, {rva, EntryMode::WindowsX64I64Pair, guestBase}, context);
+        }
+
+        check(!llvm::verifyModule(*module), "rebased module lost its backing storage");
+        module->print(llvm::outs(), nullptr);
+    }
+
+    std::unique_ptr<llvm::Module> readMeasurementIR(const fs::path &path,
+                                                    llvm::LLVMContext &context) {
+        llvm::SMDiagnostic diagnostic;
+        auto module = llvm::parseAssemblyFile(path.string(), diagnostic, context);
+        if (!module) {
+            diagnostic.print("image measurement", llvm::errs());
+            throw std::runtime_error("invalid measurement IR");
+        }
+
+        return module;
+    }
+
+    void countResolverBlocks(const fs::path &path) {
+        llvm::LLVMContext context;
+        const auto module = readMeasurementIR(path, context);
+        auto *resolver = module->getFunction("forge_image_address");
+        auto *entry = module->getFunction("forge_lifted");
+        check(resolver && !resolver->empty() && entry && !entry->empty() &&
+                  entry->getReturnType()->isIntegerTy(64),
+              "missing resolver or callable entry for measurement");
+
+        // The counter covers only the resolver body. A helper could hide an entire scan.
+        for (const auto &inst : llvm::instructions(resolver)) {
+            if (const auto *call = llvm::dyn_cast<llvm::CallBase>(&inst)) {
+                check(call->getIntrinsicID() == llvm::Intrinsic::trap,
+                      "unmeasured call in image resolver");
+            }
+        }
+
+        llvm::IRBuilder<> ir(context);
+        auto *counter = new llvm::GlobalVariable(*module, ir.getInt64Ty(), false,
+                                                 llvm::GlobalValue::InternalLinkage, ir.getInt64(0),
+                                                 "resolver.block.visits");
+        for (auto &block : *resolver) {
+            ir.SetInsertPoint(&block, block.getFirstInsertionPt());
+            auto *visits = ir.CreateLoad(ir.getInt64Ty(), counter);
+            visits->setVolatile(true);
+            ir.CreateStore(ir.CreateAdd(visits, ir.getInt64(1)), counter, true);
+        }
+
+        // Reset on every invocation and return the measured visits after the real lookup.
+        auto &first = entry->getEntryBlock();
+        ir.SetInsertPoint(&first, first.getFirstInsertionPt());
+        ir.CreateStore(ir.getInt64(0), counter);
+        for (auto &block : *entry) {
+            if (auto *ret = llvm::dyn_cast<llvm::ReturnInst>(block.getTerminator())) {
+                ir.SetInsertPoint(ret);
+                ret->setOperand(0, ir.CreateLoad(ir.getInt64Ty(), counter));
+            }
+        }
+
+        check(!llvm::verifyModule(*module), "invalid instrumented resolver IR");
+        module->print(llvm::outs(), nullptr);
+    }
+
+    // Count stored byte-array payloads, including embedded zero bytes. Aggregate
+    // zero fill represents a virtual extent without an explicit byte payload.
+    uint64_t initializerBytes(const llvm::Constant &value) {
+        if (value.isNullValue()) {
+            return 0;
+        }
+
+        if (const auto *bytes = llvm::dyn_cast<llvm::ConstantDataArray>(&value)) {
+            check(bytes->getElementType()->isIntegerTy(8), "unexpected image initializer type");
+            return bytes->getRawDataValues().size();
+        }
+
+        const auto *parts = llvm::dyn_cast<llvm::ConstantStruct>(&value);
+        check(parts && parts->getType()->isPacked(), "unexpected image initializer form");
+        uint64_t total = 0;
+        for (const auto &fragment : parts->operands()) {
+            total += initializerBytes(*llvm::cast<llvm::Constant>(fragment.get()));
+        }
+
+        return total;
+    }
+
+    uint64_t constructorBytes(const llvm::Module &module,
+                              const std::set<const llvm::Value *> &backings) {
+        const auto *ctor = module.getFunction("forge_image_initialize");
+        if (!ctor) {
+            return 0;
+        }
+
+        const auto *guard = module.getNamedGlobal("image.initialized.once");
+        check(!guard || (guard->hasPrivateLinkage() && guard->getValueType()->isIntegerTy(1)),
+              "unexpected image initialization guard");
+        uint64_t total = 0;
+        for (const auto &inst : llvm::instructions(ctor)) {
+            llvm::MemoryLocation write;
+            if (const auto *store = llvm::dyn_cast<llvm::StoreInst>(&inst)) {
+                write = llvm::MemoryLocation::get(store);
+            } else if (const auto *copy = llvm::dyn_cast<llvm::MemCpyInst>(&inst)) {
+                write = llvm::MemoryLocation::getForDest(copy);
+            } else {
+                check(!inst.mayWriteToMemory(), "unknown image constructor write");
+                continue;
+            }
+
+            if (write.Ptr == guard && llvm::isa<llvm::StoreInst>(inst)) {
+                continue;
+            }
+
+            check(backings.contains(write.Ptr->stripInBoundsConstantOffsets()),
+                  "unexpected image constructor destination");
+            check(write.Size.hasValue() && write.Size.isPrecise() &&
+                      !write.Size.getValue().isScalable(),
+                  "unknown image constructor write length");
+            total += write.Size.getValue().getFixedValue();
+        }
+
+        return total;
+    }
+
+    // Measure the raw module. The PE determines the budget charge and the module's
+    // initializers determine the payload. Backing sizes include holes and virtual tails.
+    void imageStats(const fs::path &path, llvm::StringRef base, const fs::path &irPath) {
+        uint64_t guestBase;
+        check(!base.getAsInteger(0, guestBase), "invalid measurement load base");
+        ParsedImage image(InputFile(path), ParsePolicy::FunctionAnalysis);
+        const auto initialization = image.imageInitialization();
+        llvm::LLVMContext context;
+        const auto module = readMeasurementIR(irPath, context);
+        std::set<uint32_t> sections;
+        std::set<const llvm::Value *> backings;
+        uint64_t budgeted = 0;
+        uint64_t emitted = 0;
+        uint64_t extent = 0;
+        for (const auto &global : module->globals()) {
+            auto name = global.getName();
+            if (!name.consume_front("image_")) {
+                continue;
+            }
+
+            uint32_t rva;
+            check(!name.getAsInteger(16, rva), "invalid backing RVA");
+            const auto *section = image.sectionAtRva(rva);
+            check(section != nullptr, "missing PE section for image backing");
+            check(global.hasInitializer(), "missing image backing initializer");
+            sections.insert(section->rva);
+            backings.insert(&global);
+            const auto size = module->getDataLayout().getTypeAllocSize(global.getValueType());
+            const auto bytes =
+                image.imageBytes({rva, rva + size.getFixedValue()}, initialization, guestBase);
+            extent += size.getFixedValue();
+            budgeted += bytes.prefix.size();
+            emitted += initializerBytes(*global.getInitializer());
+
+            for (const auto &fragment : bytes.tail) {
+                budgeted += fragment.bytes.size();
+            }
+        }
+
+        const auto *ranges = module->getNamedGlobal("image.ranges");
+        const auto *resolver = module->getFunction("forge_image_address");
+        llvm::json::Object stats{
+            {"selected_sections", sections.size()},
+            {"budgeted_initialized_bytes", budgeted},
+            {"emitted_initializer_bytes", emitted + constructorBytes(*module, backings)},
+            {"virtual_bytes", extent},
+            {"intervals", ranges ? ranges->getValueType()->getArrayNumElements() : 0},
+            {"resolver_blocks", resolver ? resolver->size() : 0},
+            {"resolver_instructions", resolver ? resolver->getInstructionCount() : 0},
+            {"ir_bytes", fs::file_size(irPath)}};
+        llvm::outs() << llvm::json::Value(std::move(stats)) << '\n';
+    }
 } // namespace
 
 int main(int argc, char **argv) try {
+    if (argc == 5 && std::string_view(argv[1]) == "--emit-rebased") {
+        emitRebased(argv[2], argv[3], argv[4]);
+        return 0;
+    }
+
+    if (argc == 5 && std::string_view(argv[1]) == "--image-stats") {
+        imageStats(argv[2], argv[3], argv[4]);
+        return 0;
+    }
+
+    if (argc == 3 && std::string_view(argv[1]) == "--count-resolver-blocks") {
+        countResolverBlocks(argv[2]);
+        return 0;
+    }
+
     check(argc == 4, "expected add.exe, cfg.exe and image.exe fixtures");
+    checkAddressAlternatives();
+    checkSpillSnapshots();
     checkControlFlow(argv[2]);
     checkControlFlowLeaves(argv[2]);
     llvm::SmallString<128> temporary;
@@ -326,6 +609,9 @@ int main(int argc, char **argv) try {
     check(!llvm::verifyModule(*artifact), "IR did not survive image destruction");
     checkRelativePublication(argv[1], directory, *artifact);
     checkVerifierFailure(context, directory / "input.exe");
+} catch (const forge::InspectionError &error) {
+    llvm::errs() << forge::failureKind(error.kind).code << ": " << error.what() << '\n';
+    return 1;
 } catch (const std::exception &error) {
     llvm::errs() << "lift contract: " << error.what() << '\n';
     return 1;
