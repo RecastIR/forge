@@ -1,15 +1,19 @@
 #pragma once
 
-#include "lift/cfg.h"
 #include "lift/integer.h"
 
-#include <set>
+#include <map>
+#include <vector>
 
 namespace forge::x86 {
+    struct DirectCall;
+    class RecoveredFunctionGroup;
+
     inline constexpr unsigned registerCount = 16;
     inline constexpr unsigned callerSlots = 7;
     inline constexpr unsigned rspIndex = callerSlots;
     using Defined = std::array<uint64_t, registerCount>;
+    using RegisterSet = std::bitset<registerCount>;
 
     struct Definitions {
         Defined registers{};
@@ -30,7 +34,8 @@ namespace forge::x86 {
     };
 
     struct CallSiteEffect {
-        uint32_t target, continuation;
+        // The recovered group owns the validated site for the lifetime of the proof.
+        const DirectCall *site;
         DefinitionEffect prefix;
     };
 
@@ -45,13 +50,10 @@ namespace forge::x86 {
         std::map<uint32_t, BlockEffects> blocks;
         DefinitionEffect returns;
         Definitions entry;
-        std::set<uint32_t> callers;
-        std::vector<uint32_t> continuations;
     };
 
-    using FunctionGraphs = std::map<uint32_t, ControlFlowGraph>;
     using FunctionFlows = std::map<uint32_t, FunctionFlow>;
 
-    void proveCallFlow(const FunctionGraphs &graphs, FunctionFlows &flows, uint32_t root,
+    void proveCallFlow(const RecoveredFunctionGroup &group, FunctionFlows &flows,
                        const Definitions &initial);
 } // namespace forge::x86

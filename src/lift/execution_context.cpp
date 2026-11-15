@@ -120,7 +120,7 @@ namespace forge::x86 {
     }
 
     Function *emitEntryAdapter(Function &body, uint32_t rva, EntryMode mode,
-                               const ContextLayout &layout, ImageMemory &image,
+                               const ContextLayout &layout, const ImagePlan &image,
                                RegisterSet modified) {
         auto &module = *body.getParent();
         IRBuilder<> ir(module.getContext());

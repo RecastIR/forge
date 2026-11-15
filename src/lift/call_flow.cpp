@@ -1,4 +1,7 @@
 #include "lift/call_flow.h"
+#include "lift/recovery.h"
+
+#include <set>
 
 namespace forge::x86 {
     bool Definitions::intersect(const Definitions &other) {
@@ -63,8 +66,8 @@ namespace forge::x86 {
 
             for (const auto &call : block.calls) {
                 result.append(call.prefix);
-                visit(call.target, result);
-                result.append(flows.at(call.target).returns);
+                visit(call.site->callee, result);
+                result.append(flows.at(call.site->callee).returns);
             }
 
             result.append(block.tail);
@@ -109,32 +112,27 @@ namespace forge::x86 {
         }
     } // namespace
 
-    void proveCallFlow(const FunctionGraphs &graphs, FunctionFlows &flows, uint32_t root,
+    void proveCallFlow(const RecoveredFunctionGroup &group, FunctionFlows &flows,
                        const Definitions &initial) {
         std::set<uint32_t> pending;
 
         for (auto &[address, function] : flows) {
             function.returns = top();
             pending.insert(address);
-
-            for (const auto &[leader, block] : function.blocks) {
-                for (const auto &call : block.calls) {
-                    auto &callee = flows.at(call.target);
-                    callee.callers.insert(address);
-                    callee.continuations.push_back(call.continuation);
-                }
-            }
         }
 
         while (!pending.empty()) {
             const auto address = pending.extract(pending.begin()).value();
             auto &function = flows.at(address);
-            const auto returns = returnEffect(graphs.at(address), function, flows);
+            const auto &recovered = group.function(address);
+            const auto returns = returnEffect(recovered.graph, function, flows);
 
             if (function.returns != returns) {
                 function.returns = returns;
-                const auto &parents = function.callers;
-                pending.insert(parents.begin(), parents.end());
+
+                for (const auto *site : recovered.incoming) {
+                    pending.insert(site->caller);
+                }
             }
         }
 
@@ -146,7 +144,7 @@ namespace forge::x86 {
             pending.insert(address);
         }
 
-        flows.at(root).entry = initial;
+        flows.at(group.root()).entry = initial;
 
         while (!pending.empty()) {
             const auto address = pending.extract(pending.begin()).value();

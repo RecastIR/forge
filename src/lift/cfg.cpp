@@ -8,14 +8,6 @@
 namespace forge::x86 {
     using namespace llvm;
 
-    std::optional<int64_t> Step::callTarget() const {
-        if (opcode == "CALL64pcrel32") {
-            return int64_t(next) + inst.getOperand(0).getImm();
-        }
-
-        return std::nullopt;
-    }
-
     void Step::reject(FailureCode kind, const Twine &reason, std::optional<int64_t> target) const {
         auto encoded = toHex(bytes, true);
         InspectionError failure(hex(rva) + ": " + (opcode + " [" + encoded + "]: " + reason).str(),
@@ -105,7 +97,7 @@ namespace forge::x86 {
             }
 
             const auto &desc = info.get(s.inst.getOpcode());
-            if (desc.isCall() && !s.callTarget()) {
+            if (desc.isCall() && !s.isDirectCall()) {
                 s.reject(FailureCode::UnsupportedControlFlow, "unsupported indirect or far call");
             }
 

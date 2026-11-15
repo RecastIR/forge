@@ -5,9 +5,7 @@
 #include "lift/memory.h"
 
 namespace forge::x86 {
-    class ImageMemory;
-
-    using RegisterSet = std::bitset<registerCount>;
+    class ImagePlan;
 
     // LLVM owns the layout and all emitted storage. An external activation owns
     // one instance, and every guest body borrows it through its sole argument.
@@ -32,6 +30,6 @@ namespace forge::x86 {
 
     // Emits both selected-entry interfaces and the invocation-scoped initialization.
     llvm::Function *emitEntryAdapter(llvm::Function &body, uint32_t rva, EntryMode mode,
-                                     const ContextLayout &layout, ImageMemory &image,
+                                     const ContextLayout &layout, const ImagePlan &image,
                                      RegisterSet modified);
 } // namespace forge::x86

@@ -2,6 +2,8 @@
 #include "analysis/analysis.h"
 #include "diagnostic.h"
 #include "lift/address_fact.h"
+#include "lift/group_analysis.h"
+#include "lift/recovery.h"
 #include "output/publication.h"
 
 #include "llvm/ADT/ScopeExit.h"
@@ -261,32 +263,10 @@ namespace {
         return module;
     }
 
-    void checkImageConstants(const fs::path &fixture, const fs::path &directory,
-                             llvm::LLVMContext &context) {
-        const auto path = directory / "image.exe";
-        fs::copy_file(fixture, path);
-        std::unique_ptr<llvm::Module> module;
-        {
-            AnalyzedImage analysis(
-                std::make_unique<ParsedImage>(InputFile(path), ParsePolicy::Inspection),
-                DebugInfo::Omit);
-            fs::remove(path);
-            auto symbol = llvm::find_if(analysis.module().exports, [](const Export &item) {
-                return llvm::is_contained(item.names, "direct32");
-            });
-            check(symbol != analysis.module().exports.end(), "missing image-data export");
-            LiftRequest request{symbol->rva, EntryMode::WindowsX64I64Pair};
-            module = generateIR(analysis, request, context);
-            auto second = generateIR(analysis, request, context);
-            std::string firstIR, secondIR;
-            llvm::raw_string_ostream(firstIR) << *module;
-            llvm::raw_string_ostream(secondIR) << *second;
-            check(firstIR == secondIR, "image globals changed between lifts");
-        }
-
-        check(!llvm::verifyModule(*module), "image module lost its backing storage");
+    void checkDirectImageBytes(const llvm::Module &module) {
+        check(!llvm::verifyModule(module), "image module lost its backing storage");
         unsigned globals = 0;
-        for (const auto &global : module->globals()) {
+        for (const auto &global : module.globals()) {
             if (global.getName().starts_with("image_")) {
                 const auto *bytes =
                     llvm::dyn_cast<llvm::ConstantDataSequential>(global.getInitializer());
@@ -298,6 +278,49 @@ namespace {
         }
 
         check(globals == 1, "direct read embedded unrelated PE contents");
+    }
+
+    void checkImageConstants(const fs::path &fixture, const fs::path &directory,
+                             llvm::LLVMContext &context) {
+        const auto path = directory / "image.exe";
+        fs::copy_file(fixture, path);
+        std::unique_ptr<llvm::Module> module;
+        x86::ImagePlan imagePlan;
+        {
+            AnalyzedImage analysis(
+                std::make_unique<ParsedImage>(InputFile(path), ParsePolicy::Inspection),
+                DebugInfo::Omit);
+            fs::remove(path);
+            auto symbol = llvm::find_if(analysis.module().exports, [](const Export &item) {
+                return llvm::is_contained(item.names, "direct32");
+            });
+            check(symbol != analysis.module().exports.end(), "missing image-data export");
+            LiftRequest request{symbol->rva, EntryMode::WindowsX64I64Pair};
+            const auto entry = x86::validateEntry(analysis, request.startRva);
+            const x86::RecoveredFunctionGroup group(entry);
+            imagePlan =
+                x86::analyzeGroup(group, x86::validateGuestBase(entry, {}), request.mode).image;
+
+            module = generateIR(analysis, request, context);
+            auto second = generateIR(analysis, request, context);
+            std::string firstIR, secondIR;
+            llvm::raw_string_ostream(firstIR) << *module;
+            llvm::raw_string_ostream(secondIR) << *second;
+            check(firstIR == secondIR, "image globals changed between lifts");
+        }
+
+        checkDirectImageBytes(*module);
+
+        // A finished plan can materialize its backing after both the group and PE are gone.
+        llvm::Module detached("detached_image", context);
+        llvm::IRBuilder<> ir(context);
+        auto *type = llvm::FunctionType::get(ir.getVoidTy(), false);
+        auto *entry =
+            llvm::Function::Create(type, llvm::Function::InternalLinkage, "entry", detached);
+        ir.SetInsertPoint(llvm::BasicBlock::Create(context, "entry", entry));
+        check(imagePlan.emitResolver(detached, ir) != nullptr, "detached image lost its resolver");
+        ir.CreateRetVoid();
+        checkDirectImageBytes(detached);
     }
 
     void checkRelativePublication(const fs::path &fixture, const fs::path &directory,

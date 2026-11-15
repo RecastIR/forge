@@ -649,6 +649,20 @@ probe call_redirect
     ret
     .seh_endproc
 
+# These entries exercise recovery without executing the recursive or invalid calls.
+direct_caller recovery_mutual_a, recovery_mutual_b
+probe recovery_mutual_b
+    subq $40, %rsp
+    callq recovery_mutual_a
+    callq recovery_mutual_b
+    addq $40, %rsp
+    ret
+    .seh_endproc
+
+direct_caller recovery_invalid_entry, recovery_invalid_callee
+direct_caller recovery_invalid_callee, recovery_invalid_callee+1
+direct_caller recovery_unrecorded, entry
+
 .section .rdata,"dr"
 call_constant:
     .quad 0x12345678
