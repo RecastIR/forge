@@ -171,6 +171,9 @@ class BuildConfig(BuildCase):
             ([f"-DCMAKE_RUNTIME_OUTPUT_DIRECTORY_{config}=$<LOWER_CASE:$<CONFIG>>",
               f"-DCMAKE_ARCHIVE_OUTPUT_DIRECTORY_{config}=libraries/$<CONFIG>"],
              build / "cli" / CONFIG.lower(), build / "libraries" / CONFIG),
+            (["-UCMAKE_RUNTIME_OUTPUT_DIRECTORY*", "-UCMAKE_ARCHIVE_OUTPUT_DIRECTORY*",
+              "-DEXECUTABLE_OUTPUT_PATH=legacy/bin/$<CONFIG>", "-DLIBRARY_OUTPUT_PATH=legacy/lib/$<CONFIG>"],
+             build / "legacy/bin/$<CONFIG>" / suffix, build / "legacy/lib/$<CONFIG>" / suffix),
         ]
         for options, bin_dir, lib_dir in cases:
             with self.subTest(output_options=options):
