@@ -6,7 +6,7 @@ add_library(forge_core STATIC
   src/lift/operands.cpp src/lift/group_analysis.cpp src/lift/execution_context.cpp
   src/lift/integer.cpp src/lift/memory.cpp src/lift/image_memory.cpp src/lift/lift.cpp
   src/output/publication.cpp)
-set_target_properties(forge_core PROPERTIES ARCHIVE_OUTPUT_DIRECTORY "${PROJECT_BINARY_DIR}")
+configure_forge_output(forge_core ARCHIVE_OUTPUT_DIRECTORY "${LIBRARY_OUTPUT_PATH}")
 target_include_directories(forge_core PUBLIC src)
 target_include_directories(forge_core SYSTEM PUBLIC ${LLVM_INCLUDE_DIRS})
 target_link_libraries(forge_core PUBLIC LLVMDebugInfoDWARF LLVMObject LLVMTransformUtils LLVMCore

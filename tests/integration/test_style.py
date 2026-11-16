@@ -246,15 +246,17 @@ namespace forge {
         renamed = self.root / 'compiler/src/renamed file.cpp'
         self.run_command('git', 'mv', self.file, renamed)
         self.header.unlink()
-        for directory in ('build', 'compiler/src/generated', 'compiler/src/third_party', 'tests/support/vendor'):
+        for directory in ('build', 'cli/src/generated', 'compiler/src/generated', 'compiler/src/third_party',
+                          'tests/support/vendor'):
             folder = self.root / directory
             folder.mkdir(parents=True)
             (folder / 'ignored.cpp').write_text('int  x;\n')
         self.run_command('make', 'format-check')
         renamed.write_text(FORMATTED.replace('Value = 4', 'Value=5'))
         new = self.root / 'cli/src/new.cpp'
-        new.parent.mkdir(parents=True)
         new.write_text('int  Other;\n')
+        native = self.run_command(sys.executable, '-B', 'cmake/style.py', 'native-sources').splitlines()
+        self.assertCountEqual(native, [str(renamed), str(self.caller), str(new)])
         output = self.run_command('make', 'format-check', success=False)
         self.assertIn('cli/src/new.cpp:1:', output)
         self.assertIn('compiler/src/renamed file.cpp:3:', output)

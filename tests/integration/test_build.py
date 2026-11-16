@@ -158,6 +158,27 @@ class BuildConfig(BuildCase):
         self.assertNotEqual(failed.returncode, 0)
         self.assertIn("Missing required LLVM tool 'opt'", " ".join(failed.stderr.split()))
 
+    def check_custom_output_locations(self, build):
+        suffix = CONFIG if GENERATOR == "Xcode" else ""
+        config = CONFIG.upper()
+        archives = self.tmp / "custom archives"
+        cases = [
+            (["-DCMAKE_RUNTIME_OUTPUT_DIRECTORY=bin", f"-DCMAKE_ARCHIVE_OUTPUT_DIRECTORY={archives}"],
+             build / "bin" / suffix, archives / suffix),
+            ([f"-DCMAKE_RUNTIME_OUTPUT_DIRECTORY_{config}=config-bin",
+              f"-DCMAKE_ARCHIVE_OUTPUT_DIRECTORY_{config}=config-lib"],
+             build / "config-bin", build / "config-lib"),
+            ([f"-DCMAKE_RUNTIME_OUTPUT_DIRECTORY_{config}=$<LOWER_CASE:$<CONFIG>>",
+              f"-DCMAKE_ARCHIVE_OUTPUT_DIRECTORY_{config}=libraries/$<CONFIG>"],
+             build / "cli" / CONFIG.lower(), build / "libraries" / CONFIG),
+        ]
+        for options, bin_dir, lib_dir in cases:
+            with self.subTest(output_options=options):
+                self.invoke(CMAKE, "-S", SOURCE, "-B", build, *options)
+                self.invoke(CMAKE, "--build", build, "--config", CONFIG, "--target", "forge", "--parallel", "4")
+                for product in (bin_dir / "forge", lib_dir / "libforge_core.a"):
+                    self.assertTrue(product.is_file(), product)
+
     @unittest.skipUnless(WITH_CLI == "1", "requires a provisioned CLI")
     def test_fresh_cli_and_external_database(self):
         # Model an LLVM installation that exports a shared include root containing another CLI11.
@@ -174,6 +195,8 @@ class BuildConfig(BuildCase):
             self.invoke(CMAKE, "-G", GENERATOR, "-S", SOURCE, "-B", build, *options)
             self.invoke(CMAKE, "--build", build, "--config", CONFIG, "--target", "forge", "--parallel", "4")
             self.assertTrue((build / CONFIG / "forge").is_file())
+            self.assertTrue((build / CONFIG / "libforge_core.a").is_file())
+            self.check_custom_output_locations(build)
             return
         build = self.tmp / "analysis build"
         self.invoke(CMAKE, "-S", SOURCE, "-B", build, *options, f"-DCMAKE_BUILD_TYPE={CONFIG}",
@@ -187,6 +210,7 @@ class BuildConfig(BuildCase):
         self.assertIn(str(SOURCE / "tests/unit/integer.cpp"), [e["file"] for e in entries])
         self.invoke(CMAKE, "--build", build, "--parallel", "4")
         self.assertTrue((build / "forge").is_file())
+        self.assertTrue((build / "libforge_core.a").is_file())
         self.assertFalse((build / "tests/integer_semantics").exists())
         self.assertFalse(list(build.rglob("register_state.cpp.o")))
         if read_cache(build)["FORGE_CONAN_PRESET"] == "sanitize":
@@ -214,8 +238,7 @@ class BuildConfig(BuildCase):
         subprocess.run(command, cwd=SOURCE, env=env, check=True)
         args = (self.tmp / "clang-tidy.args").read_text().splitlines()
         self.assertEqual(args[:2], ["-p", str(build)])
-        expected = [str(p) for folder in ("cli/src", "compiler/src", "tests/support", "tests/unit")
-                    for p in (SOURCE / folder).rglob("*.cpp")]
+        expected = self.invoke(sys.executable, "-B", "cmake/style.py", "native-sources").splitlines()
         self.assertTrue(any(arg.startswith("--vfsoverlay=") for arg in args))
         self.assertCountEqual([arg for arg in args if arg.endswith(".cpp")], expected)
         self.assertEqual(database.read_bytes(), contents)
@@ -228,6 +251,8 @@ class BuildConfig(BuildCase):
                 self.assertNotEqual(failed.returncode, 0)
                 self.assertIn("Missing first-party compile commands", failed.stderr)
                 self.assertIn(str(missing), failed.stderr)
+
+        self.check_custom_output_locations(build)
 
 
 class Provisioning(BuildCase):

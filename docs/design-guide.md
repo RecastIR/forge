@@ -8,7 +8,9 @@ The CLI owns command registration, argument parsing, reports, diagnostic formatt
 
 ### Compiler and runtime
 
-The compiler owns PE input and metadata, function and program recovery, and analysis of registers, flags, and guest addresses. Its `forge_core` library owns the diagnostic model, generates and verifies LLVM IR, and provides compiler transformations and output publication to callers. It builds independently of CLI11 and the runtime. The stack checks and image-memory operations that Forge emits into a module are part of code generation.
+The compiler owns PE input and metadata, function and program recovery, and analysis of registers, flags, and guest addresses. Its `forge_core` library owns the diagnostic model and provides APIs to generate, verify, and publish LLVM IR. The stack checks and image-memory operations that Forge emits into a module are part of code generation. The library builds independently of CLI11 and the runtime.
+
+The differential harness runs LLVM’s `opt` on the generated module to test the O2 variant. Future production transformations belong in the compiler. [Differential build rules](../tests/CMakeLists.txt)
 
 The future macOS ARM64 runtime will own guest process and thread state, memory management, external-call ABI bridging, import binding and dispatch, and Windows-compatible services and native adapters. Runtime initialization, termination, callbacks, and integration with selected Wine-derived implementations belong there.
 
