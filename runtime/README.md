@@ -32,4 +32,27 @@ add_executable(native_host main.c)
 target_link_libraries(native_host PRIVATE forge_runtime)
 ```
 
-The [runtime architecture](../docs/runtime-architecture.md) covers lifetimes, status codes, guest calling and memory contracts, Wine reuse, and the proposed first imported service. The runtime's Forge-authored source uses [Apache-2.0](../LICENSE).
+The [runtime architecture](../docs/runtime-architecture.md) covers lifetimes, status codes, guest calling and memory contracts, Wine reuse, and lifted last-error services. The runtime's Forge-authored source uses [Apache-2.0](../LICENSE).
+
+## Link a lifted Windows function
+
+Build the runtime-only archive above, build the Windows fixtures, and select the exported `last_error` RVA from `forge inspect`. With LLVM 23 selected, run these commands from the repository root.
+
+```sh
+pe=build/fixtures/windows-x64/release/last_error.exe
+rva=$(build/dev/forge inspect "$pe" --format json | python3 -c 'import json,sys; print(next(e["rva"] for e in json.load(sys.stdin)["modules"][0]["exports"] if "last_error" in e["names"]))')
+build/dev/forge lift "$pe" --rva "$rva" --signature 'i64(i64,i64)' --runtime --output build/tmp/last_error.ll
+llvm_bin=$("$LLVM_CONFIG" --bindir)
+"$llvm_bin/opt" -passes=verify -disable-output build/tmp/last_error.ll
+"$llvm_bin/llc" -filetype=obj build/tmp/last_error.ll -o build/tmp/last_error.o
+xcrun clang++ -std=c++20 -arch arm64 -Iruntime/include tests/support/runtime_pairs.cpp \
+    build/tmp/last_error.o build/tmp/runtime-only/libforge_runtime.a -o build/tmp/last_error
+build/tmp/last_error 4275878552 0 0 1
+```
+
+Both invocations print `4275878552`. The driver creates an ABI v1 instance and guest thread before the first invocation. It retains both through the second invocation and then releases them. Its linked entry has this C ABI.
+
+```cpp
+extern "C" int64_t forge_lifted_with_runtime(forge_rt_instance *, forge_rt_thread_token,
+                                              int64_t arg1, int64_t arg2);
+```

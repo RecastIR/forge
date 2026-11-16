@@ -1,6 +1,6 @@
 # Forge Runtime on macOS ARM64
 
-A native host can link `libforge_runtime.a`, create a runtime instance and keep a 32-bit last-error value for each of its guest threads. A C translation unit and hand-authored LLVM IR compiled to ARM64 Mach-O exercise the public ABI for future generated calls. Selecting a function with `forge lift` still produces a function-level LLVM module. [Public C header](../runtime/include/forge/runtime.h) · [Build and linkage](../runtime/README.md)
+A native host can link `libforge_runtime.a`, create a runtime instance and keep a 32-bit last-error value for each of its guest threads. A C translation unit and hand-authored LLVM IR compiled to ARM64 Mach-O exercise the public ABI alongside real lifted calls. Selecting a function with `forge lift` still produces a function-level LLVM module. [Public C header](../runtime/include/forge/runtime.h) · [Build and linkage](../runtime/README.md)
 
 ## Ownership today
 
@@ -38,16 +38,18 @@ For an integer Windows x64 call, the compiler interprets guest RCX, RDX, R8 and 
 
 Each future nested or callback invocation must carry its originating instance and guest thread and preserve its caller's frame. Calling through a guest callback address requires a proved guest entry, signature and controlled re-entry into lifted code. A callback VA cannot serve as a native function pointer. Floating-point/vector parameters and returns, aggregates, varargs and alternate conventions require separate signature and register rules. PE32 x86 needs a separate guest model, including pointer width. Managed execution and Windows exception dispatch also fall outside v1.
 
-### Imported services and the next compiler change
+### Lifted last-error services
 
-The inspector already reports DLL spelling and normalized names, symbol name or ordinal, delay status and export forwarder strings. Function analysis skips these import symbol tables. The lifter separately excludes loader-written ranges, including IAT slots, when it plans ordinary image access. The current `Import`/`Symbol` records do not bind each identity to its executable slot. The recovered-guest-call model describes calls to guest bodies. An inspection classification such as `external_api` grants no authority to call a host function. [PE model](../compiler/src/pe/image.h) · [Parsing and loader writes](../compiler/src/pe/pe.cpp) · [Call lowering](../compiler/src/lift/lift.cpp)
+The host selects the runtime-enabled two-integer entry explicitly. It creates an instance with the ABI version expected by the generated object (1), checks the status, and supplies a live instance and thread token to `forge_lifted_with_runtime`. A version mismatch fails instance creation. Arbitrary or expired non-null instance addresses violate the host lifetime contract. Zero, foreign or retired tokens and a null instance fail at the service boundary. The generated module checks every returned status and takes its normal native trap path before reading an output or executing the continuation.
 
-**Proposed Task 12B.**
+| Ordinary named import from KERNEL32.dll | Guest behavior | Native ABI call |
+| --- | --- | --- |
+| `SetLastError` | Read the low 32 defined RCX bits. The void return leaves RAX undefined. | `forge_rt_set_last_error(instance, thread, value)` |
+| `GetLastError` | Read the selected thread’s DWORD. Write EAX, defining all of RAX by zero extension. | `forge_rt_get_last_error(instance, thread, &host_dword)` |
 
-1. Start with an AMD64 PE importing the named `KERNEL32.dll!SetLastError` and `GetLastError` through ordinary non-delay IAT entries. Retain descriptor/lookup evidence, owning image, slot RVA/width and name-or-ordinal identity together. Check ranges, matching indices and overlaps against the original snapshot. Reuse the parser's descriptor and thunk reading. Diagnose malformed metadata separately from a valid unsupported import.
-2. Recognize a statically proved RIP-relative memory CALL through one of those slots. Record the instruction RVA, exact slot, identity and continuation. Select a typed binding for those two names only. Keep ordinary image accesses to loader-written bytes guarded. A delay import, ordinal, unresolved forwarder/API set, ambiguous slot, unsupported signature or unproved indirect target needs a diagnostic with source evidence. Following forwarders later needs cycle detection and a selected API-set mapping. Normalizing a DLL name alone does not resolve either.
-3. Give the host a context-bearing entry for the linked module so nested generated code can use a live instance and token. Preserve the existing entry interfaces for earlier callers. Lower the setter's DWORD argument and the getter's DWORD return using the guest convention. `SetLastError` has a void guest return. Check native ABI status on both calls. A runtime-contract failure is a host execution failure, not a fabricated Windows result. Other services will have their own success/failure sentinels and API-specific rules about changing last error. Guest handles will need typed ownership, rights and stale-handle checks before any host resource is accessed.
-4. Add a native execution fixture that sets and reads distinct values, Windows reference observations for defined behavior, and negative cases for unsupported import shapes. Compare with the existing reference workflow and retain the independent ABI tests. Windows executable startup, DLL loading, process TLS callbacks, SEH, heap, callbacks and general dispatch remain separate milestones.
+Recovery selects the binding by normalized DLL and exact symbol spelling. A static reference to that binding supplies its signature and native symbol to analysis and emission. Each call checks the Windows shadow area and alignment, installs its guest continuation, invokes the service with the Darwin ARM64 C ABI, then validates and pops the guest return slot. The runtime receives only its instance, token and scalar or host output slot. The invocation owns the stack, register state, and native binding arguments. Nested guest bodies share this context. Runtime calls preserve nonvolatile GPRs and RSP and invalidate modeled volatile registers and flags except for the getter’s defined result.
+
+The import contract assumes the loader-selected binding remains fixed. Named imports from other modules, delay loads, ordinals, forwarding, runtime hooks, and arbitrary pointer dispatch require additional evidence. A future pointer-taking API needs checked guest range access with direction, size and lifetime, as described above. [PE recovery](program-architecture.md#imported-call-recovery) · [Native linkage](../runtime/README.md#link-a-lifted-windows-function)
 
 ## Wine source investigation
 
@@ -181,3 +183,15 @@ Lifecycle measurements warm up once, then separately time creation and destructi
 [w-musl]: https://github.com/wine-mirror/wine/blob/b073859675060c9211fcbccfd90e4e87520dc2c2/libs/musl/COPYRIGHT
 [w-ntstatus]: https://github.com/wine-mirror/wine/blob/b073859675060c9211fcbccfd90e4e87520dc2c2/include/ntstatus.h
 [w-winerror]: https://github.com/wine-mirror/wine/blob/b073859675060c9211fcbccfd90e4e87520dc2c2/include/winerror.h
+
+### Lifted entry measurement
+
+Run the following after a Release differential comparison for `imports/last_error`. Each binary uses the same Release C++ host and runtime. The measured guest path enters the typed wrapper, calls a nested helper to set the value and calls the getter twice, including guest stack, continuation and status checks. The loop includes checksum accumulation and excludes instance creation, CLI lifting, compilation and output formatting.
+
+```sh
+for variant in baseline o2; do
+    build/differential/windows-x64/release/imports/last_error/"$variant"/native/bin/differential_runtime_pairs --benchmark
+done
+```
+
+The driver warms up for 100,000 entries, then reports the median and range of nine 100,000-entry batches with verified checksums. On an Apple M2 Max, one local run measured **76.04 ns/entry** for baseline (75.00–79.72) and **23.54 ns/entry** for O2 (22.81–24.48). These observations include the complete guest operation. The direct ABI benchmark above measures a different sequence and remains independently reproducible. CI imposes no timing threshold.

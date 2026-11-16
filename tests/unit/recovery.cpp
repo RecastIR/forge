@@ -93,7 +93,7 @@ namespace {
             const auto *site = caller.callAt(step.rva);
             check(site && site == callee.incoming[i] && site->caller == root &&
                       site->instruction == step.rva && site->block == root &&
-                      site->continuation == steps[2 * i + 2].rva && site->callee == target &&
+                      site->continuation == steps[2 * i + 2].rva && site->guest().rva == target &&
                       step.opcode == "CALL64pcrel32",
                   "wrong ordered site, decoded opcode or same-block continuation");
         }
@@ -163,31 +163,32 @@ namespace {
             const auto &calls = flow.flows.at(root).blocks.at(site->block).calls;
             check(
                 step && step->rva == site->instruction && site == caller.callAt(step->rva) &&
-                    site->callee == shared && site->caller == root &&
+                    site->guest().rva == shared && site->caller == root &&
                     site->continuation == step->next && site->continuation > previous &&
                     llvm::any_of(calls, [site](const auto &effect) { return effect.site == site; }),
                 "mixed call proof or continuation does not refer to the recovered site");
             previous = site->continuation;
 
             if (site == incoming.back()) {
-                check(site->kind == x86::CallKind::Direct && step->isDirectCall() &&
-                          site->evidenceRva == step->rva,
+                check(site->guest().kind == x86::CallKind::Direct && step->isDirectCall() &&
+                          site->guest().evidenceRva == step->rva,
                       "direct call lost its encoded target evidence");
                 continue;
             }
 
-            const auto *lea = caller.instructionContaining(site->evidenceRva);
-            check(site->kind == x86::CallKind::RipRelativeRegister && step->isRegisterCall() &&
-                      lea && lea->opcode == "LEA64r" && operands.ripRva(*lea, 1) == shared &&
+            const auto *lea = caller.instructionContaining(site->guest().evidenceRva);
+            check(site->guest().kind == x86::CallKind::RipRelativeRegister &&
+                      step->isRegisterCall() && lea && lea->opcode == "LEA64r" &&
+                      operands.ripRva(*lea, 1) == shared &&
                       lea->inst.getOperand(0).getReg() == step->inst.getOperand(0).getReg(),
                   "register call lost its source LEA or operand");
         }
 
-        checkRipOffsets(*caller.instructionContaining(incoming.front()->evidenceRva),
+        checkRipOffsets(*caller.instructionContaining(incoming.front()->guest().evidenceRva),
                         group.registers());
         const auto &self = group.function(recursive);
         check(self.calls.size() == 1 && self.incoming.size() == 2 &&
-                  self.calls.begin()->second.callee == recursive &&
+                  self.calls.begin()->second.guest().rva == recursive &&
                   self.incoming.back() == &self.calls.begin()->second,
               "recursive register call did not reuse its own function");
     }
@@ -198,7 +199,7 @@ namespace {
         const auto &function = recursive.function(root);
         const auto *self = function.callAt(root + 12);
         check(recursive.functions().size() == 1 && function.incoming.size() == 1 && self &&
-                  self == function.incoming.front() && self->caller == self->callee &&
+                  self == function.incoming.front() && self->caller == self->guest().rva &&
                   self->caller == root && self->continuation == root + 17,
               "self-recursion did not return to the selected function");
         const auto &branch = function.graph.at(root);
@@ -219,9 +220,9 @@ namespace {
         check(mutual.root() == b && mutual.functions().size() == 2 && first.incoming.size() == 1 &&
                   second.incoming.size() == 2 && toSecond && toFirst && self &&
                   first.incoming.front() == toFirst && second.incoming[0] == toSecond &&
-                  second.incoming[1] == self && self->caller == b && self->callee == b &&
-                  toSecond->caller == a && toSecond->callee == b && toFirst->caller == b &&
-                  toFirst->callee == a,
+                  second.incoming[1] == self && self->caller == b && self->guest().rva == b &&
+                  toSecond->caller == a && toSecond->guest().rva == b && toFirst->caller == b &&
+                  toFirst->guest().rva == a,
               "mutual recursion lost a function or a cycle edge");
     }
 
@@ -284,8 +285,8 @@ namespace {
               "incorrect leaf group");
         const auto &first = caller.calls.begin()->second;
         const auto &second = std::next(caller.calls.begin())->second;
-        const auto &shared = group.function(first.callee);
-        check(first.callee == second.callee && shared.incoming.size() == 2 &&
+        const auto &shared = group.function(first.guest().rva);
+        check(first.guest().rva == second.guest().rva && shared.incoming.size() == 2 &&
                   shared.incoming.front() == &first && shared.incoming.back() == &second &&
                   first.continuation == first.instruction + 5 &&
                   second.continuation == second.instruction + 5,
@@ -323,7 +324,7 @@ namespace {
 
         const auto root = exportedRva(analysis, "recovery_saved_input");
         const RecoveredFunctionGroup group(analysis, root);
-        const auto target = group.function(root).calls.begin()->second.callee;
+        const auto target = group.function(root).calls.begin()->second.guest().rva;
         check(group.function(target).origin == x86::RecoveryOrigin::InferredLeaf,
               "reading a supported nonvolatile source disqualified a leaf");
     }

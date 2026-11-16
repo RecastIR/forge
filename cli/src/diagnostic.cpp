@@ -52,6 +52,18 @@ namespace forge {
             fields["branch_target"] = *context.branchTarget;
         }
 
+        if (context.importSlot) {
+            fields["iat_slot_rva"] = hex(*context.importSlot);
+        }
+
+        if (!context.importDll.empty()) {
+            fields["import_dll"] = context.importDll;
+        }
+
+        if (!context.importSymbol.empty()) {
+            fields["import_symbol"] = context.importSymbol;
+        }
+
         if (!context.output.empty()) {
             fields["output"] = llvm::json::fixUTF8(context.output.native());
         }

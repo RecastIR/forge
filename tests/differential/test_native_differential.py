@@ -39,6 +39,76 @@ class NativeDifferentialTests(unittest.TestCase):
                             result = subprocess.run([exe, *args], capture_output=True, timeout=10)
                             self.assertEqual((result.returncode, result.stdout, result.stderr), (status, stdout, b""))
 
+    def test_runtime_entry(self):
+        fixture = "imports/last_error"
+        with tempfile.TemporaryDirectory(dir=self.tmp) as tmp:
+            output = Path(tmp)
+            for config in diff.CONFIGS:
+                self.assertEqual(diff.run(config, fixture, output=output, forge=self.forge), 0)
+                for variant in diff.VARIANTS:
+                    exe = output / config / fixture / variant / "native/bin/differential_runtime_pairs"
+                    for mode in ("isolation", "zero", "foreign", "retired", "null"):
+                        for operation in ("set", "get"):
+                            with self.subTest(config=config, variant=variant, mode=mode, operation=operation):
+                                result = subprocess.run([exe, "--probe", mode, operation], capture_output=True, timeout=10)
+                                self.assertEqual(result.returncode, 0 if mode == "isolation" else -signal.SIGTRAP)
+                                self.assertEqual(result.stdout, b"")
+
+    def test_bound_iat_and_external_call_frames(self):
+        # The same original getter slot is used in the bound and frame-fault probes.
+        sys.path.insert(0, str(diff.SUITE.parent / "integration"))
+        from pe_layout import Layout
+        sys.path.pop(0)
+        source = diff.BINARIES / "release/last_error.exe"
+        for fault in (False, True):
+            with self.subTest(fault=fault), tempfile.TemporaryDirectory(dir=self.tmp) as tmp:
+                work = Path(tmp).resolve()
+                data = bytearray(source.read_bytes())
+                layout = Layout(data)
+                desc = layout.file_offset(layout.directory(1)[0])
+                found = False
+                while layout.u32(desc + 12):
+                    name = layout.file_offset(layout.u32(desc + 12))
+                    if data[name:name+13].lower() == b"kernel32.dll\0":
+                        lookup, slots = layout.u32(desc), layout.u32(desc + 16)
+                        struct.pack_into("<I", data, desc + 4, 0xffffffff)
+                        i = 0
+                        while (hint := layout.u32(layout.file_offset(lookup) + 8*i)):
+                            start = layout.file_offset(hint) + 2
+                            if data[start:start+13] == b"GetLastError\0":
+                                getter = slots + 8*i
+                                found = True
+                            struct.pack_into("<Q", data, layout.file_offset(slots) + 8*i,
+                                             0x7ffa00001000 + 32*i)
+                            i += 1
+                        break
+                    desc += 20
+                self.assertTrue(found)
+                image = work / source.name
+                image.write_bytes(data)
+                entry = diff.analyze(self.forge, image, "last_error", work)
+                if fault:
+                    # Select insufficient shadow (8) or a misaligned stack (32) at the same IAT call.
+                    prefix = bytes.fromhex("85d2 7506 4883ec08 eb04 4883ec20 ff15")
+                    code = prefix + struct.pack("<i", getter - (entry.start + len(prefix) + 4)) + b"\xc3"
+                    self.assertLessEqual(len(code), entry.end - entry.start)
+                    data[entry.file_offset:entry.file_offset+len(code)] = code
+                    image.write_bytes(data)
+                ir = work / diff.CANONICAL_IR
+                ir.parent.mkdir()
+                diff.lift(self.forge, image, {"signature": "i64(i64,i64)", "harness": "runtime_pairs"}, entry, ir)
+                for variant in diff.VARIANTS:
+                    directory = work / variant
+                    directory.mkdir()
+                    exe, _ = diff.native.build(ir, "runtime_pairs", directory, "release", variant)
+                    if fault:
+                        for mode in ("0", "1"):
+                            result = subprocess.run([exe, "5", mode], capture_output=True, timeout=10)
+                            self.assertEqual(result.returncode, -signal.SIGTRAP)
+                    else:
+                        result = subprocess.run([exe, "4294967295", "0", "0", "1"], capture_output=True, timeout=10)
+                        self.assertEqual((result.returncode, result.stdout), (0, b"4294967295\n4294967295\n"))
+
     def test_continuation_faults(self):
         fixture = "functions/continuations"
         with tempfile.TemporaryDirectory(dir=self.tmp) as tmp:

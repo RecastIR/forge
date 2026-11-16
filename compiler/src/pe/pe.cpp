@@ -113,17 +113,17 @@ namespace forge {
             }
         };
 
-        ImportThunks importThunks(ArrayRef<Section> sections, StringRef file, uint32_t rva) {
+        ImportThunks importThunks(ArrayRef<Section> sections, StringRef file, uint32_t rva,
+                                  StringRef label) {
             const auto *section = virtualSection(sections, rva);
             if (!section) {
-                throw InspectionError("import lookup table RVA " + hex(rva) + " outside sections");
+                throw InspectionError(label.str() + " RVA " + hex(rva) + " outside sections");
             }
 
             const auto delta = rva - section->rva;
             const auto rawStart = std::min(delta, section->initializedSize());
             const uint64_t offset = uint64_t(section->fileOffset) + rawStart;
-            return {{file.substr(offset, section->initializedSize() - rawStart), offset,
-                     "import lookup table"},
+            return {{file.substr(offset, section->initializedSize() - rawStart), offset, label},
                     section->virtualSize - delta,
                     rva};
         }
@@ -163,20 +163,22 @@ namespace forge {
             std::optional<View> directory(unsigned index, StringRef label) const;
             void count(size_t records, const View &where);
             std::string name(View data);
-            std::vector<Symbol> symbols(uint32_t rva);
-            void imports(Module &module, bool delayed);
             void exports(Module &module);
             void relocations(Module &module);
             void tls(Module &module);
             void exceptions(Module &module, ParsePolicy policy);
         };
 
-        View ImageParser::tail(uint64_t rva, StringRef label) const {
-            if (auto mapped = mapFileRange(sections, file.bytes, rva)) {
+        View mappedTail(ArrayRef<Section> sections, StringRef file, uint64_t rva, StringRef label) {
+            if (auto mapped = mapFileRange(sections, file, rva)) {
                 return {mapped->bytes, mapped->fileOffset, label};
             }
             throw InspectionError(label.str() + " RVA " + hex(rva) +
                                   " is outside file-backed sections");
+        }
+
+        View ImageParser::tail(uint64_t rva, StringRef label) const {
+            return mappedTail(sections, file.bytes, rva, label);
         }
 
         ImageParser::ImageParser(MemoryBufferRef buffer)
@@ -340,7 +342,7 @@ namespace forge {
             remainingRecords -= records;
         }
 
-        std::string ImageParser::name(View data) {
+        std::string readName(View data, size_t &remainingNameBytes) {
             size_t length = data.bytes.take_front(remainingNameBytes + 1).find('\0');
             if (length == StringRef::npos) {
                 invalid(data.label, data.offset, "unterminated name or name budget exceeded");
@@ -353,37 +355,9 @@ namespace forge {
             return str.str();
         }
 
-        std::vector<Symbol> ImageParser::symbols(uint32_t rva) {
-            auto table = importThunks(sections, file.bytes, rva);
-            std::vector<Symbol> result;
-            for (size_t pos = 0;; pos += 8) {
-                auto entry = table.read(pos);
-                uint64_t value = static_cast<uint64_t>(entry.Data);
-                if (!value) {
-                    return result;
-                }
-                count(1, table.raw);
-                if (entry.isOrdinal()) {
-                    if (value & UINT64_C(0x7fffffffffff0000)) {
-                        invalid(table.raw.label, table.raw.offset + pos,
-                                "reserved ordinal bits are set");
-                    }
-                    result.push_back({{}, entry.getOrdinal()});
-                } else {
-                    if (value > UINT32_MAX) {
-                        invalid(table.raw.label, table.raw.offset + pos,
-                                "expected a hint/name RVA");
-                    }
-                    View hintName = tail(value, "import hint/name");
-                    hintName.read<ulittle16_t>();
-                    result.push_back(
-                        {name(hintName.slice(2, hintName.bytes.size() - 2)), std::nullopt});
-                }
-            }
-        }
-
         struct ImportDescriptor {
             uint32_t name, lookup, addressTable, handle;
+            bool bound;
         };
 
         std::optional<ImportDescriptor> readImportDescriptor(const View &dir, size_t &pos,
@@ -401,7 +375,7 @@ namespace forge {
 
                 pos += sizeof(d);
                 return ImportDescriptor{d.Name, d.DelayImportNameTable, d.DelayImportAddressTable,
-                                        d.ModuleHandle};
+                                        d.ModuleHandle, false};
             }
 
             const auto d = dir.read<coff_import_directory_table_entry>(pos);
@@ -410,29 +384,170 @@ namespace forge {
             }
 
             pos += sizeof(d);
-            return ImportDescriptor{d.NameRVA,
-                                    d.ImportLookupTableRVA ? d.ImportLookupTableRVA
-                                                           : d.ImportAddressTableRVA,
-                                    d.ImportAddressTableRVA, 0};
+            return ImportDescriptor{d.NameRVA, d.ImportLookupTableRVA, d.ImportAddressTableRVA, 0,
+                                    d.TimeDateStamp != 0};
         }
 
-        void ImageParser::imports(Module &module, bool delayed) {
-            auto dir = delayed ? directory(COFF::DELAY_IMPORT_DESCRIPTOR, "delay imports")
-                               : directory(COFF::IMPORT_TABLE, "imports");
-            if (!dir) {
+        std::string ImageParser::name(View data) { return readName(data, remainingNameBytes); }
+
+        struct ImportReader {
+            ArrayRef<Section> sections;
+            StringRef file;
+            size_t &recordBudget, &nameBudget;
+            std::vector<Import> *imports;
+            std::vector<RvaRange> *writes;
+
+            void consume(const View &source, size_t pos) {
+                if (!recordBudget) {
+                    invalid(source.label, source.offset + pos, "import record limit exceeded");
+                }
+
+                --recordBudget;
+            }
+
+            Symbol symbol(const ImportThunks &table, size_t pos,
+                          import_lookup_table_entry64 entry) {
+                const auto value = static_cast<uint64_t>(entry.Data);
+                if (entry.isOrdinal()) {
+                    if (value & UINT64_C(0x7fffffffffff0000)) {
+                        invalid(table.raw.label, table.raw.offset + pos,
+                                "reserved ordinal bits are set");
+                    }
+                    return {{}, entry.getOrdinal()};
+                }
+
+                if (value > INT32_MAX) {
+                    invalid(table.raw.label, table.raw.offset + pos, "expected a hint/name RVA");
+                }
+
+                View hintName = mappedTail(sections, file, value, "import hint/name");
+                hintName.read<ulittle16_t>();
+                return {readName(hintName.slice(2, hintName.bytes.size() - 2), nameBudget),
+                        std::nullopt, static_cast<uint32_t>(value)};
+            }
+
+            void read(const COFFObjectFile &coff, bool delayed);
+            void readTable(const ImportDescriptor &d, Import *record, bool delayed);
+        };
+
+        void ImportReader::readTable(const ImportDescriptor &d, Import *record, bool delayed) {
+            const auto lookup = d.lookup ? d.lookup : d.addressTable;
+            auto table = importThunks(sections, file, lookup, "import lookup table");
+            auto slots = importThunks(sections, file, d.addressTable, "import address table");
+            size_t pos = 0;
+            for (;; pos += importSlotWidth) {
+                const auto entry = table.read(pos);
+                const auto slot = static_cast<uint64_t>(slots.read(pos).Data);
+                const auto value = static_cast<uint64_t>(entry.Data);
+                if (record &&
+                    (((value == 0) != (slot == 0)) || (!delayed && !d.bound && value != slot))) {
+                    invalid(slots.raw.label, slots.raw.offset + pos,
+                            "lookup and address table disagree at corresponding index");
+                }
+
+                if (!entry.Data) {
+                    break;
+                }
+
+                consume(table.raw, pos);
+                if (record) {
+                    // A bound address has no name or ordinal when OriginalFirstThunk is absent.
+                    record->symbols.push_back(d.bound && !d.lookup ? Symbol{}
+                                                                   : symbol(table, pos, entry));
+                }
+            }
+
+            if (writes && pos) {
+                writes->push_back({d.addressTable, uint64_t(d.addressTable) + pos});
+            }
+
+            if (writes && d.handle) {
+                writes->push_back({d.handle, uint64_t(d.handle) + importSlotWidth});
+            }
+        }
+
+        void ImportReader::read(const COFFObjectFile &coff, bool delayed) {
+            const auto *dir =
+                coff.getDataDirectory(delayed ? COFF::DELAY_IMPORT_DESCRIPTOR : COFF::IMPORT_TABLE);
+            if (!dir || (!dir->Size && !dir->RelativeVirtualAddress)) {
                 return;
             }
+
+            const StringRef label = delayed ? "delay imports" : "imports";
+            if (!dir->Size || !dir->RelativeVirtualAddress) {
+                throw InspectionError(label.str() + " has an incomplete directory entry");
+            }
+
+            auto view =
+                mappedTail(sections, file, dir->RelativeVirtualAddress, label).slice(0, dir->Size);
             size_t pos = 0;
             for (;;) {
-                const auto descriptor = readImportDescriptor(*dir, pos, delayed);
+                const auto start = pos;
+                const auto descriptor = readImportDescriptor(view, pos, delayed);
                 if (!descriptor) {
                     return;
                 }
 
-                count(1, *dir);
-                auto spelling = name(tail(descriptor->name, "import DLL name"));
-                module.imports.push_back(
-                    {spelling, StringRef(spelling).lower(), delayed, symbols(descriptor->lookup)});
+                consume(view, start);
+                const auto &d = *descriptor;
+                if (!d.addressTable || (delayed && !d.lookup)) {
+                    invalid(label, view.offset + start, "invalid import thunk mapping");
+                }
+
+                Import *record = nullptr;
+                if (imports) {
+                    auto spelling =
+                        readName(mappedTail(sections, file, d.name, "import DLL name"), nameBudget);
+                    record = &imports->emplace_back(
+                        Import{spelling,
+                               StringRef(spelling).lower(),
+                               delayed,
+                               d.bound,
+                               static_cast<uint32_t>(dir->RelativeVirtualAddress + start),
+                               d.name,
+                               d.lookup,
+                               d.addressTable,
+                               d.handle,
+                               view.offset + start,
+                               {}});
+                }
+
+                readTable(d, record, delayed);
+            }
+        }
+
+        void validateImportOwnership(ArrayRef<Import> descriptors) {
+            std::map<uint32_t, uint64_t> spans;
+            for (const auto &descriptor : descriptors) {
+                const uint64_t end = descriptor.addressTableRva +
+                                     (descriptor.symbols.size() + uint64_t{1}) * importSlotWidth;
+                auto next = spans.lower_bound(descriptor.addressTableRva);
+                if ((next != spans.end() && next->first < end) ||
+                    (next != spans.begin() &&
+                     std::prev(next)->second > descriptor.addressTableRva)) {
+                    invalid("import descriptor", descriptor.descriptorOffset,
+                            "overlapping IAT slot ownership");
+                }
+
+                spans.emplace_hint(next, descriptor.addressTableRva, end);
+            }
+
+            for (const auto &descriptor : descriptors) {
+                if (!descriptor.lookupRva ||
+                    (!descriptor.bound && descriptor.lookupRva == descriptor.addressTableRva)) {
+                    continue;
+                }
+
+                // Binding may overwrite every IAT in the image. Independent lookup evidence
+                // must survive those writes, even when another descriptor owns the address table.
+                const uint64_t end = descriptor.lookupRva +
+                                     (descriptor.symbols.size() + uint64_t{1}) * importSlotWidth;
+                const auto start = spans.lower_bound(descriptor.lookupRva);
+                if ((start != spans.end() && start->first < end) ||
+                    (start != spans.begin() && std::prev(start)->second > descriptor.lookupRva)) {
+                    invalid("import descriptor", descriptor.descriptorOffset,
+                            "lookup table overlaps an IAT");
+                }
             }
         }
 
@@ -638,8 +753,11 @@ namespace forge {
             }
 
             if (policy == ParsePolicy::Inspection) {
-                imports(module, false);
-                imports(module, true);
+                ImportReader reader{sections,           file.bytes,      remainingRecords,
+                                    remainingNameBytes, &module.imports, nullptr};
+                reader.read(*object, false);
+                reader.read(*object, true);
+                validateImportOwnership(module.imports);
                 exports(module);
             }
 
@@ -734,55 +852,6 @@ namespace forge {
             }
 
             ranges.push_back({rva, rva + sizeof(uint64_t)});
-        }
-
-        // Some images omit the aggregate IAT directory. The descriptors identify the
-        // loader-written slots even when they lie in an otherwise immutable section.
-        void appendImportWrites(ArrayRef<Section> sections, StringRef file,
-                                const llvm::object::data_directory *dir, bool delayed,
-                                size_t &remaining, std::vector<RvaRange> &ranges) {
-            if (!dir || (!dir->Size && !dir->RelativeVirtualAddress)) {
-                return;
-            }
-
-            auto mapped = mapFileRange(sections, file, dir->RelativeVirtualAddress, dir->Size);
-            if (!mapped || !dir->Size) {
-                throw InspectionError("invalid import directory while mapping image data");
-            }
-
-            View view{mapped->bytes, mapped->fileOffset, "image import descriptor"};
-            size_t pos = 0;
-            while (auto descriptor = readImportDescriptor(view, pos, delayed)) {
-                if (!remaining) {
-                    invalid(view.label, view.offset + pos, "import descriptor limit exceeded");
-                }
-
-                --remaining;
-                if (!descriptor->addressTable) {
-                    invalid(view.label, view.offset + pos, "invalid import thunk mapping");
-                }
-
-                auto thunks = importThunks(sections, file, descriptor->lookup);
-                uint64_t size = 0;
-                while (thunks.read(size).Data) {
-                    if (!remaining) {
-                        invalid(thunks.raw.label, thunks.raw.offset + size,
-                                "import slot limit exceeded");
-                    }
-
-                    --remaining;
-                    size += 8;
-                }
-
-                if (size) {
-                    ranges.push_back(
-                        {descriptor->addressTable, uint64_t(descriptor->addressTable) + size});
-                }
-
-                if (descriptor->handle) {
-                    ranges.push_back({descriptor->handle, uint64_t(descriptor->handle) + 8});
-                }
-            }
         }
 
         std::vector<RvaRange> mergeRanges(std::vector<RvaRange> ranges) {
@@ -912,7 +981,7 @@ namespace forge {
                 config->DynamicValueRelocTableSection);
     }
 
-    std::vector<RvaRange> ParsedImage::loaderWrittenRanges() const {
+    std::vector<RvaRange> ParsedImage::tlsAndConfigWrites() const {
         std::vector<RvaRange> ranges;
 
         if (metadata.tls && metadata.tls->index >= metadata.imageBase && metadata.tls->index) {
@@ -944,6 +1013,11 @@ namespace forge {
             }
         }
 
+        return ranges;
+    }
+
+    std::vector<RvaRange> ParsedImage::loaderWrittenRanges() const {
+        auto ranges = tlsAndConfigWrites();
         const auto *iat = coff->getDataDirectory(llvm::COFF::IAT);
         if (iat && bool(iat->Size) != bool(iat->RelativeVirtualAddress)) {
             throw InspectionError("incomplete import address table directory");
@@ -954,15 +1028,94 @@ namespace forge {
                 {iat->RelativeVirtualAddress, uint64_t(iat->RelativeVirtualAddress) + iat->Size});
         }
 
-        size_t remaining = 1'000'000;
-        for (bool delayed : {false, true}) {
-            const auto *dir = coff->getDataDirectory(delayed ? llvm::COFF::DELAY_IMPORT_DESCRIPTOR
-                                                             : llvm::COFF::IMPORT_TABLE);
-            appendImportWrites(metadata.sections, buffer->getBuffer(), dir, delayed, remaining,
-                               ranges);
-        }
+        size_t records = 1'000'000, names = 0;
+        ImportReader reader{
+            metadata.sections, buffer->getBuffer(), records, names, nullptr, &ranges};
+        reader.read(*coff, false);
+        reader.read(*coff, true);
 
         return mergeRanges(std::move(ranges));
+    }
+
+    ImportBindings ParsedImage::importBindings() const {
+        size_t records = 1'000'000, names = size_t{64} * 1024 * 1024;
+        ImportBindings result;
+        auto &descriptors = result.descriptors;
+        ImportReader reader{
+            metadata.sections, buffer->getBuffer(), records, names, &descriptors, nullptr};
+        reader.read(*coff, false);
+        reader.read(*coff, true);
+        validateImportOwnership(descriptors);
+        auto otherWrites = tlsAndConfigWrites();
+        for (const auto &descriptor : descriptors) {
+            if (descriptor.delayHandleRva) {
+                otherWrites.push_back({descriptor.delayHandleRva,
+                                       uint64_t(descriptor.delayHandleRva) + importSlotWidth});
+            }
+        }
+
+        otherWrites = mergeRanges(std::move(otherWrites));
+        for (const auto &descriptor : descriptors) {
+            const RvaRange iat{descriptor.addressTableRva,
+                               descriptor.addressTableRva +
+                                   (descriptor.symbols.size() + uint64_t{1}) * importSlotWidth};
+            if (!rangesIn(otherWrites, iat).empty()) {
+                invalid("import descriptor", descriptor.descriptorOffset,
+                        "IAT overlaps another loader-written field");
+            }
+        }
+
+        llvm::sort(descriptors, [](const auto &a, const auto &b) {
+            return a.addressTableRva < b.addressTableRva;
+        });
+        return result;
+    }
+
+    std::optional<ImportSlot> ImportBindings::at(uint32_t slotRva) const & {
+        const auto after =
+            llvm::upper_bound(descriptors, slotRva, [](uint32_t address, const Import &descriptor) {
+                return address < descriptor.addressTableRva;
+            });
+        if (after == descriptors.begin()) {
+            return {};
+        }
+
+        const auto &descriptor = *std::prev(after);
+        const auto offset = slotRva - descriptor.addressTableRva;
+        if (offset % importSlotWidth || offset / importSlotWidth >= descriptor.symbols.size()) {
+            return {};
+        }
+
+        const auto lookup =
+            descriptor.lookupRva ? descriptor.lookupRva : descriptor.addressTableRva;
+        return ImportSlot{descriptor, descriptor.symbols[offset / importSlotWidth],
+                          lookup + offset};
+    }
+
+    std::optional<uint32_t> ImportSlot::unstableIdentityRva(const RelocationIndex &relocations,
+                                                            ArrayRef<RvaRange> loaderWrites) const {
+        const RvaRange metadata[] = {
+            {descriptor.descriptorRva,
+             uint64_t(descriptor.descriptorRva) + sizeof(coff_import_directory_table_entry)},
+            {descriptor.nameRva, uint64_t(descriptor.nameRva) + descriptor.name.size() + 1},
+            {symbol.hintNameRva,
+             uint64_t(symbol.hintNameRva) + sizeof(ulittle16_t) + symbol.name.size() + 1}};
+        for (const auto range : metadata) {
+            if (relocations.firstOverlap(range) || !rangesIn(loaderWrites, range).empty()) {
+                return static_cast<uint32_t>(range.begin);
+            }
+        }
+
+        // With an unbound shared table, the loader consumes the lookup value before replacing it.
+        const RvaRange lookup{lookupEntryRva, uint64_t(lookupEntryRva) + importSlotWidth};
+        const bool separate =
+            descriptor.lookupRva && descriptor.lookupRva != descriptor.addressTableRva;
+        if (relocations.firstOverlap(lookup) ||
+            (separate && !rangesIn(loaderWrites, lookup).empty())) {
+            return lookupEntryRva;
+        }
+
+        return {};
     }
 
     ImageInitialization ParsedImage::imageInitialization() const {

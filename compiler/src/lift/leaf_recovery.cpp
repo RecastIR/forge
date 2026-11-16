@@ -226,7 +226,7 @@ namespace forge::x86 {
         }
 
         void LeafRecovery::recover(const ResolvedCallSite &call) try {
-            const auto target = call.callee;
+            const auto target = call.guest().rva;
 
             if (const auto *span = occupied.overlap(target, uint64_t(target) + 1)) {
                 const auto *step = functions.at(span->owner).instructionContaining(target);
@@ -256,7 +256,7 @@ namespace forge::x86 {
             if (error.context.functionRva || localEdge ||
                 (error.kind != FailureCode::InvalidCallTarget &&
                  error.kind != FailureCode::UnsupportedControlFlow)) {
-                error.context.functionRva = call.callee;
+                error.context.functionRva = call.guest().rva;
                 error.context.sourceCall = CallLocation{call.caller, call.instruction};
                 throw;
             }
@@ -265,8 +265,9 @@ namespace forge::x86 {
             const auto *site = functions.at(call.caller).instructionContaining(call.instruction);
             try {
                 site->reject(error.kind,
-                             "cannot recover leaf at " + hex(call.callee) + ": " + error.what(),
-                             call.callee);
+                             "cannot recover leaf at " + hex(call.guest().rva) + ": " +
+                                 error.what(),
+                             call.guest().rva);
             } catch (InspectionError &failure) {
                 failure.context.blockRva = call.block;
 

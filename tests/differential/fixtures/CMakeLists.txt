@@ -46,6 +46,12 @@ foreach(i RANGE 0 ${last})
       COMMAND "${CMAKE_OBJCOPY}" --set-section-flags ".frpad=alloc,readonly" "$<TARGET_FILE:fixture_${name}>"
       VERBATIM)
   endif()
+  if(name STREQUAL "last_error")
+    target_sources("fixture_${name}" PRIVATE imports/last_error.S)
+    add_custom_command(TARGET "fixture_${name}" POST_BUILD
+      COMMAND "${Python3_EXECUTABLE}" -B "${suite}/last_error_shape.py" "${CMAKE_OBJDUMP}" "$<TARGET_FILE:fixture_${name}>"
+      VERBATIM)
+  endif()
   if(name STREQUAL "call_recursive")
     target_compile_definitions("fixture_${name}" PRIVATE CALL_PAIR_DRIVER=1)
   endif()

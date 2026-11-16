@@ -380,7 +380,7 @@ class CLI(Case):
         commands = {"": ["inspect", "analyze", "lift"],
                     "inspect": ["--help", "--format", "--strict", "--verbose", "--dll-path"],
                     "analyze": ["--help", "--format", "--strict", "--functions"],
-                    "lift": ["--help", "--rva", "--output", "--signature", "--diagnostics-format"]}
+                    "lift": ["--help", "--rva", "--output", "--signature", "--runtime", "--diagnostics-format"]}
         for name, expected in commands.items():
             with self.subTest(command=name):
                 args = [name] if name else []

@@ -7,17 +7,22 @@
 namespace forge::x86 {
     using namespace llvm;
 
-    ContextLayout::ContextLayout(LLVMContext &context, bool origins, bool stack)
-        : origins(origins), stack(stack) {
+    ContextLayout::ContextLayout(LLVMContext &context, bool origins, bool stack, bool runtime)
+        : origins(origins), stack(stack), runtime(runtime) {
         const auto registers = [&](unsigned count) {
             return ArrayType::get(Type::getInt64Ty(context), count);
         };
         auto *stackType =
             ArrayType::get(Type::getInt8Ty(context), stack ? GuestMemory::capacity : 0);
         auto *flagType = ArrayType::get(Type::getInt1Ty(context), FlagCount);
-        type = StructType::get(context,
-                               {registers(registerCount), registers(origins ? registerCount : 0),
-                                flagType, stackType, stackType});
+        SmallVector<Type *> fields{registers(registerCount), registers(origins ? registerCount : 0),
+                                   flagType, stackType, stackType};
+        if (runtime) {
+            fields.push_back(PointerType::getUnqual(context));
+            fields.push_back(Type::getInt64Ty(context));
+        }
+
+        type = StructType::get(context, fields);
     }
 
     ContextView::ContextView(IRBuilder<> &ir, const ContextLayout &layout, Value *context)
@@ -25,6 +30,10 @@ namespace forge::x86 {
           marks(layout.origins ? ir.CreateStructGEP(layout.type, context, 1, "register.marks")
                                : nullptr),
           flags(ir.CreateStructGEP(layout.type, context, 2, "flags")),
+          instance(layout.runtime ? ir.CreateStructGEP(layout.type, context, 5, "runtime.instance")
+                                  : nullptr),
+          thread(layout.runtime ? ir.CreateStructGEP(layout.type, context, 6, "runtime.thread")
+                                : nullptr),
           bytes(layout.stack ? ir.CreateStructGEP(layout.type, context, 3, "stack.bytes")
                              : nullptr),
           validity(layout.stack ? ir.CreateStructGEP(layout.type, context, 4, "stack.valid")
@@ -50,15 +59,18 @@ namespace forge::x86 {
             return marks;
         }
 
-        void initializeRegisters(IRBuilder<> &ir, const ContextView &context, Value *state) {
+        void initializeRegisters(IRBuilder<> &ir, const ContextView &context, Value *state,
+                                 Function &adapter) {
             for (unsigned i = 0; i < registerCount; ++i) {
                 Value *value = ir.getInt64(0);
 
-                if (i < callerSlots) {
+                if (state && i < callerSlots) {
                     value = ir.CreateAlignedLoad(ir.getInt64Ty(), slot(ir, state, i), Align(4));
+                } else if (!state && (i == 1 || i == 2)) {
+                    value = adapter.getArg(i + 1);
                 } else if (i == rspIndex) {
                     value = ir.getInt64(GuestMemory::entryRsp);
-                } else if (context.marks) {
+                } else if (context.marks && i > rspIndex) {
                     value = ir.CreateFreeze(PoisonValue::get(ir.getInt64Ty()), "incoming");
                 }
 
@@ -124,15 +136,30 @@ namespace forge::x86 {
                                RegisterSet modified) {
         auto &module = *body.getParent();
         IRBuilder<> ir(module.getContext());
-        auto *adapter = Function::Create(body.getFunctionType(), Function::InternalLinkage,
-                                         "forge_lifted_" + utohexstr(rva, true), module);
-        appendToUsed(module, {adapter});
-        auto *state = adapter->getArg(0);
-        state->setName("state");
+        Function *adapter;
+        Value *state = nullptr;
+        if (layout.runtime) {
+            auto *word = ir.getInt64Ty();
+            auto *type = FunctionType::get(word, {ir.getPtrTy(), word, word, word}, false);
+            adapter = Function::Create(type, Function::ExternalLinkage, "forge_lifted_with_runtime",
+                                       module);
+        } else {
+            adapter = Function::Create(body.getFunctionType(), Function::InternalLinkage,
+                                       "forge_lifted_" + utohexstr(rva, true), module);
+            appendToUsed(module, {adapter});
+            state = adapter->getArg(0);
+            state->setName("state");
+        }
+
         ir.SetInsertPoint(BasicBlock::Create(ir.getContext(), "entry", adapter));
         auto *invocation = ir.CreateAlloca(layout.type, nullptr, "invocation");
         const ContextView context(ir, layout, invocation);
-        initializeRegisters(ir, context, state);
+        if (layout.runtime) {
+            ir.CreateStore(adapter->getArg(0), context.instance);
+            ir.CreateStore(adapter->getArg(1), context.thread);
+        }
+
+        initializeRegisters(ir, context, state, *adapter);
         GuestMemory memory(ir);
         auto *resolver = image.emitResolver(module, ir);
 
@@ -155,6 +182,16 @@ namespace forge::x86 {
         }
 
         checkNonvolatiles(ir, memory, context, saved);
+
+        if (layout.runtime) {
+            if (context.marks) {
+                auto *marks = ir.CreateLoad(ir.getInt64Ty(), context.marks);
+                memory.guard(ir.CreateICmpEQ(marks, ir.getInt64(UINT64_MAX)));
+            }
+
+            ir.CreateRet(ir.CreateLoad(ir.getInt64Ty(), context.registers));
+            return resolver;
+        }
 
         for (unsigned i = 0; i < callerSlots; ++i) {
             if (context.marks && (!typed || i == 0)) {

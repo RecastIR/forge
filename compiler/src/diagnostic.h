@@ -32,6 +32,8 @@ namespace forge {
         // Source call evidence when the primary instruction belongs to an inferred callee.
         std::optional<CallLocation> sourceCall;
         std::optional<int64_t> branchTarget;
+        std::optional<uint32_t> importSlot;
+        std::string importDll, importSymbol;
         std::optional<uint64_t> fileOffset;
         std::string opcode, bytes, architecture;
     };

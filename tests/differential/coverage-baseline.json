@@ -590,6 +590,16 @@
       "id": "functions/indirect_calls",
       "config": "release",
       "target": "macos-arm64"
+    },
+    {
+      "id": "imports/last_error",
+      "config": "debug",
+      "target": "macos-arm64"
+    },
+    {
+      "id": "imports/last_error",
+      "config": "release",
+      "target": "macos-arm64"
     }
   ]
 }

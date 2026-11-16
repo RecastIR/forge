@@ -10,6 +10,7 @@ class Layout:
         self.directories = self.opt + 112
         table = self.opt + struct.unpack_from("<H", data, self.pe + 20)[0]
         count = struct.unpack_from("<H", data, self.pe + 6)[0]
+        self.section_table = table
         self.sections = [struct.unpack_from("<IIII", data, table + 40 * i + 8) for i in range(count)]
 
     def u32(self, offset):
@@ -17,6 +18,12 @@ class Layout:
 
     def directory(self, index):
         return struct.unpack_from("<II", self.data, self.directories + 8 * index)
+
+    def section_header(self, rva):
+        for index, (size, start, _, _) in enumerate(self.sections):
+            if start <= rva < start + size:
+                return self.section_table + 40 * index
+        raise ValueError(f"unmapped fixture RVA {rva:x}")
 
     def file_offset(self, rva):
         for size, start, raw_size, offset in self.sections:

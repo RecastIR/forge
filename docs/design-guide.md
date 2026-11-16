@@ -12,9 +12,9 @@ The compiler owns PE input and metadata, function and program recovery, and anal
 
 The differential harness runs LLVM’s `opt` on the generated module to test the O2 variant. Future production transformations belong in the compiler. [Differential build rules](../tests/CMakeLists.txt)
 
-The independent `forge_runtime` static library owns an instance and its guest thread last-error state. Native code calls its versioned C ABI. A C executable and a hand-authored LLVM fixture exercise it. The compiler still emits its own invocation context and module-backed memory. The host owns execution of the selected function.
+The independent `forge_runtime` static library owns an instance and its guest thread last-error state. Native code calls its versioned C ABI. A C executable, hand-authored LLVM fixture, and lifted Windows IAT calls exercise it. The compiler still emits its own invocation context and module-backed memory. The host owns execution of the selected function.
 
-For future imports the compiler must prove the call target, interpret Windows x64 arguments and preserve guest frame semantics. The runtime supplies the requested service over explicit instance and thread state. Extend the ABI when a supported caller needs a capability. The [runtime architecture](runtime-architecture.md) records ownership rules, the proposed first binding, Wine reuse evidence and the source-integration policy.
+For an imported service the PE reader owns slot identity, recovery selects a typed external target, and the compiler interprets Windows x64 arguments and preserves guest frame semantics. The runtime supplies the requested service over explicit instance and thread state. Extend the ABI when a supported caller needs a capability. The [runtime architecture](runtime-architecture.md) records ownership rules, the two last-error bindings, Wine reuse evidence and the source-integration policy.
 
 ## Where does the change belong?
 

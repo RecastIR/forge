@@ -37,6 +37,12 @@ These C11 and C++20 console programs provide Windows x64 inputs for whole-execut
 | `runner/exit_nonzero` | Exits 7 with both streams empty. |
 | `runner/exit_and_stderr` | Writes the same 13 stderr bytes and calls `ExitProcess(0x1234)`. |
 
+### Last-error imports
+
+`imports/last_error` builds an assembly export and nested helper. The fixture build checks the two linked functions’ reachable CALL encodings and resolves their displacements against the ordinary KERNEL32 import table. The Windows driver parses all inputs, invokes the export repeatedly, then prints the decimal results. A set/read operation and a subsequent read-only operation exercise state persistence across entries without intervening CRT calls.
+
+The `runtime_pairs` harness selects `--runtime` and links the generated ARM64 object with `forge_runtime`. The native regression suite separately interleaves two tokens in one runtime and a token in a second runtime and checks isolated failure signals for both services. Wine supplies the Windows observations. Native execution uses only the linked host, generated code and native runtime. [Link and run locally](../../runtime/README.md#link-a-lifted-windows-function)
+
 ## Build and inspect
 
 From the repository root, use Docker with Linux amd64 container support. Apple Silicon uses Docker Desktop's amd64 emulation. Explicit image preparation needs access to the Debian image registry and package snapshot. Fixture compilation and inspection run with networking disabled. Rerun image preparation when a pinned image input changes. The native Forge dependency setup is independent.

@@ -240,6 +240,8 @@ def lift(forge, image, case, selected, ir):
     log, stdout = work / "lifting.log", work / "lifting.stdout"
     args = [forge, "lift", image, "--rva", hex(selected.start), "--signature", case["signature"],
             "--output", ir, "--diagnostics-format", "json"]
+    if case.get("harness") == "runtime_pairs":
+        args.append("--runtime")
     with stdout.open("wb") as output, log.open("wb") as errors:
         status = native.command_status(args, output, errors)
 
@@ -277,7 +279,7 @@ def lift(forge, image, case, selected, ir):
 def native_differences(wanted, actual, harness, args):
     mismatches = differences(wanted, actual)
     for mismatch in mismatches:
-        if harness in ("decimal_pairs", "calculate_pairs") and mismatch["field"] == "stdout":
+        if harness in ("decimal_pairs", "calculate_pairs", "runtime_pairs") and mismatch["field"] == "stdout":
             offset = mismatch["offset"]
             first = 2 * wanted.stdout.count(b"\n", 0, offset)
             if offset < len(wanted.stdout) and first + 1 < len(args):

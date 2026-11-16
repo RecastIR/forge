@@ -168,6 +168,7 @@ namespace forge::x86 {
             std::map<uint32_t, MappedRange> pending;
             std::map<uint32_t, const ResolvedCallSite *> deferred;
 
+            std::optional<ImportBindings> &imports;
             const InstructionOperands operands;
             std::optional<std::vector<RvaRange>> loaderWrites;
 
@@ -176,6 +177,7 @@ namespace forge::x86 {
             void checkCalledExtent(uint32_t target, const MappedRange &code, const Step &step);
             void validateCallEvidence(const RecoveredFunction &caller, const Step &call,
                                       int64_t target);
+            ExternalCallTarget bindImport(const RecoveredFunction &caller, const Step &step);
             bool schedule(uint32_t target, const Step &step);
             void scanCalls(RecoveredFunction &caller, const GuestBlock &block);
             void run(const MCDisassembler &dis, const MCInstrInfo &instructions,
@@ -245,7 +247,7 @@ namespace forge::x86 {
             if (image.advertisesDynamicRelocations() || !caller.code.section.immutable()) {
                 call.reject(
                     FailureCode::UnsupportedControlFlow,
-                    "cannot prove a stable register call in mutable or dynamically relocated code",
+                    "cannot prove a stable indirect call in mutable or dynamically relocated code",
                     target);
             }
 
@@ -263,8 +265,83 @@ namespace forge::x86 {
 
             if (write) {
                 call.reject(FailureCode::UnsupportedControlFlow,
-                            "register call proof depends on loader-written code at " + hex(*write),
+                            "indirect call proof depends on loader-written code at " + hex(*write),
                             target);
+            }
+        }
+
+        ExternalCallTarget GroupDiscovery::bindImport(const RecoveredFunction &caller,
+                                                      const Step &step) {
+            const auto target = operands.ripRva(step, 0);
+            if (!target || *target < 0 || *target > UINT32_MAX) {
+                step.reject(FailureCode::UnsupportedControlFlow,
+                            "expected RIP-relative call through a mapped IAT slot");
+            }
+
+            operands.decodeAddress(step, 0, true);
+            const auto slot = static_cast<uint32_t>(*target);
+            std::string identity;
+
+            try {
+                if (!imports) {
+                    imports = entry.analysis.image().importBindings();
+                }
+            } catch (const InspectionError &error) {
+                step.reject(error.kind, error.what(), {}, slot);
+            }
+
+            const auto imported = imports->at(slot);
+            try {
+                if (!imported) {
+                    step.reject(FailureCode::UnsupportedControlFlow,
+                                "no complete validated IAT slot at " + hex(slot));
+                }
+
+                const auto &descriptor = imported->descriptor;
+                const auto &symbol = imported->symbol;
+                identity = symbol.ordinal ? "#" + std::to_string(*symbol.ordinal) : symbol.name;
+                if (descriptor.bound && !descriptor.lookupRva) {
+                    step.reject(FailureCode::UnsupportedControlFlow,
+                                "bound IAT has no independent import lookup table");
+                }
+
+                static constexpr ServiceBinding services[] = {
+                    {"SetLastError", "forge_rt_set_last_error", ServiceSignature::DwordToVoid},
+                    {"GetLastError", "forge_rt_get_last_error", ServiceSignature::VoidToDword}};
+                const auto *binding = llvm::find_if(
+                    services, [&](const auto &service) { return service.name == symbol.name; });
+                if (descriptor.delayed || descriptor.normalizedName != "kernel32.dll" ||
+                    binding == std::end(services)) {
+                    step.reject(FailureCode::UnsupportedControlFlow,
+                                Twine(descriptor.delayed ? "unsupported delay import "
+                                                         : "unsupported import ") +
+                                    descriptor.name + "!" + identity + " at IAT slot " + hex(slot));
+                }
+
+                validateCallEvidence(caller, step, slot);
+                if (const auto changed =
+                        imported->unstableIdentityRva(entry.relocations, loaderWrittenRanges())) {
+                    step.reject(
+                        FailureCode::UnsupportedControlFlow,
+                        "import identity overlaps loader-written or relocated bytes at RVA " +
+                            hex(*changed));
+                }
+
+                if (step.next >= uint64_t(caller.entry) + caller.code.bytes.size()) {
+                    step.reject(FailureCode::UnsupportedControlFlow,
+                                "external call has no in-function continuation");
+                }
+
+                return {slot, descriptor, *binding};
+            } catch (InspectionError &error) {
+                error.context.branchTarget.reset();
+                error.context.importSlot = slot;
+                if (imported) {
+                    error.context.importDll = imported->descriptor.name;
+                    error.context.importSymbol = identity;
+                }
+
+                throw;
             }
         }
 
@@ -278,6 +355,13 @@ namespace forge::x86 {
                 }
 
                 const auto *producer = std::exchange(previous, &step);
+                if (step.isMemoryCall()) {
+                    caller.calls.emplace(step.rva,
+                                         ResolvedCallSite{caller.entry, leader, step.rva, step.next,
+                                                          bindImport(caller, step)});
+                    continue;
+                }
+
                 CallKind kind;
                 int64_t target;
                 uint32_t evidence;
@@ -302,8 +386,9 @@ namespace forge::x86 {
                 const auto address = static_cast<uint32_t>(target);
                 const auto &site =
                     caller.calls
-                        .emplace(step.rva, ResolvedCallSite{caller.entry, leader, step.rva, address,
-                                                            step.next, kind, evidence})
+                        .emplace(step.rva,
+                                 ResolvedCallSite{caller.entry, leader, step.rva, step.next,
+                                                  GuestCallTarget{address, kind, evidence}})
                         .first->second;
 
                 if (!deferred.contains(address) && !schedule(address, step)) {
@@ -361,7 +446,9 @@ namespace forge::x86 {
             // Incoming indices follow source order even when discovery began at a higher RVA.
             for (const auto &[caller, function] : functions) {
                 for (const auto &[instruction, call] : function.calls) {
-                    functions.at(call.callee).incoming.push_back(&call);
+                    if (!call.external()) {
+                        functions.at(call.guest().rva).incoming.push_back(&call);
+                    }
                 }
             }
         }
@@ -491,7 +578,7 @@ namespace forge::x86 {
         withLocation(source, location, FailureCode::LiftingInternal, [&] {
             decoder = std::make_unique<Decoder>(entryRva);
             GroupDiscovery discovery{
-                entry, recovered, {}, {}, InstructionOperands(*decoder->regs, 0), {}};
+                entry, recovered, {}, {}, imports, InstructionOperands(*decoder->regs, 0), {}};
             discovery.run(*decoder->dis, *decoder->instructions, *decoder->regs);
         });
     }
@@ -509,6 +596,14 @@ namespace forge::x86 {
         }
 
         for (const auto &[rva, owner] : recovered) {
+            if (const auto *site = owner.callAt(*instruction); site && site->external()) {
+                const auto &target = *site->external();
+                failure.context.blockRva = site->block;
+                failure.context.importSlot = target.slot;
+                failure.context.importDll = target.descriptor.name;
+                failure.context.importSymbol = target.binding.name.str();
+            }
+
             if (rva == entryRva || !owner.instructionContaining(*instruction)) {
                 continue;
             }

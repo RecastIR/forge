@@ -348,6 +348,13 @@ namespace forge::x86 {
 
         bool FunctionAnalyzer::traceCall(const ResolvedCallSite &site, AddressFacts &facts,
                                          CallAddresses &calls, bool collect) const {
+            if (site.external()) {
+                std::fill_n(facts.registers.begin(), callerSlots, AddressFact{});
+                // CALL overwrites the return slot below RSP, including any earlier spill there.
+                facts.spills = {};
+                return true;
+            }
+
             if (!collect) {
                 CallInputs inputs;
                 inputs.rsp = facts.registers[rspIndex]
@@ -358,10 +365,10 @@ namespace forge::x86 {
                     inputs.arguments[i] = facts.registers[i + 1].project(entryAddresses);
                 }
 
-                calls.enter(site.callee, inputs);
+                calls.enter(site.guest().rva, inputs);
             }
 
-            auto &callee = calls.functions.at(site.callee);
+            auto &callee = calls.functions.at(site.guest().rva);
 
             if (!callee.returned) {
                 if (!collect) {

@@ -19,7 +19,7 @@ namespace forge::x86 {
         incoming.flags = flags.apply(incoming.flags);
 
         for (size_t i = 0; i < writes.size(); ++i) {
-            incoming.registers[i] |= writes[i];
+            incoming.registers[i] = writes[i] | (carried[i] & incoming.registers[i]);
         }
 
         return incoming;
@@ -30,7 +30,8 @@ namespace forge::x86 {
         flags.carried = next.flags.apply(flags.carried);
 
         for (size_t i = 0; i < writes.size(); ++i) {
-            writes[i] |= next.writes[i];
+            writes[i] = next.writes[i] | (writes[i] & next.carried[i]);
+            carried[i] = next.writes[i] | (carried[i] & next.carried[i]);
         }
     }
 
@@ -41,14 +42,32 @@ namespace forge::x86 {
 
         for (size_t i = 0; i < writes.size(); ++i) {
             writes[i] &= other.writes[i];
+            carried[i] &= other.carried[i];
         }
 
         return *this != before;
     }
 
     bool DefinitionEffect::operator==(const DefinitionEffect &other) const {
-        return writes == other.writes && flags.generated == other.flags.generated &&
-               flags.carried == other.flags.carried;
+        return writes == other.writes && carried == other.carried &&
+               flags.generated == other.flags.generated && flags.carried == other.flags.carried;
+    }
+
+    DefinitionEffect callEffect(const ResolvedCallSite &site, const FunctionFlows &flows) {
+        const auto *external = site.external();
+        if (!external) {
+            return flows.at(site.guest().rva).returns;
+        }
+
+        DefinitionEffect result;
+        std::fill_n(result.carried.begin(), callerSlots, 0);
+        result.flags = {};
+        if (external->binding.signature == ServiceSignature::VoidToDword) {
+            // The EAX write defines all 64 bits, including the zero-extended high half.
+            result.writes[0] = result.carried[0] = UINT64_MAX;
+        }
+
+        return result;
     }
 
     namespace {
@@ -66,8 +85,11 @@ namespace forge::x86 {
 
             for (const auto &call : block.calls) {
                 result.append(call.prefix);
-                visit(call.site->callee, result);
-                result.append(flows.at(call.site->callee).returns);
+                if (!call.site->external()) {
+                    visit(call.site->guest().rva, result);
+                }
+
+                result.append(callEffect(*call.site, flows));
             }
 
             result.append(block.tail);

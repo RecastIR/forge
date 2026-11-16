@@ -119,6 +119,13 @@ def validate_context(context, stage, category, code, image, selected, ir, resolv
         allowed.update(("instruction_rva", "bytes", "opcode"))
     elif code == "LIFT_INVALID_ENCODING":
         allowed.update(("instruction_rva", "bytes"))
+    if context.get("opcode") == "CALL64m" and "iat_slot_rva" in context:
+        allowed.update(("iat_slot_rva", "import_dll", "import_symbol"))
+        for key in ("import_dll", "import_symbol"):
+            if key in context and not field(context, key, str):
+                raise ValueError("empty import identity")
+        if "import_symbol" in context and "import_dll" not in context:
+            raise ValueError("import symbol requires its module")
     if context.keys() - allowed:
         raise ValueError("unexpected context fields for this diagnostic")
     entry = context_rva(context, "entry_rva")
@@ -154,6 +161,12 @@ def validate_context(context, stage, category, code, image, selected, ir, resolv
             body = encoded[1:] if 0x40 <= encoded[0] <= 0x4f else encoded
             if len(body) != 2 or body[0] != 0xff or body[1] & 0xf8 != 0xe0:
                 raise ValueError("invalid register jump encoding")
+        if "iat_slot_rva" in context:
+            body = encoded[1:] if 0x40 <= encoded[0] <= 0x4f else encoded
+            if (len(body) != 6 or body[:2] != b"\xff\x15"
+                    or context_rva(context, "iat_slot_rva") != instruction + len(encoded)
+                    + int.from_bytes(body[2:], "little", signed=True)):
+                raise ValueError("IAT slot disagrees with RIP-relative CALL")
         if context.get("opcode") == "CALL64r":
             if not register_call_encoding(encoded, rejected_prefix=code == "LIFT_UNSUPPORTED_PREFIX"):
                 raise ValueError("invalid register call encoding")

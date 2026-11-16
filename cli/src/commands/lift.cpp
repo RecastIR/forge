@@ -47,15 +47,20 @@ namespace forge::cli {
             ->type_name("FILE")
             ->required()
             ->trigger_on_parse();
+        auto *signature =
+            command
+                ->add_option_function<std::string>(
+                    "--signature",
+                    [&options](const std::string &) {
+                        options.request.mode = EntryMode::WindowsX64I64Pair;
+                    },
+                    "Wrap the function with this signature (default: register state).")
+                ->check(CLI::IsMember({"i64(i64,i64)"}))
+                ->trigger_on_parse();
         command
-            ->add_option_function<std::string>(
-                "--signature",
-                [&options](const std::string &) {
-                    options.request.mode = EntryMode::WindowsX64I64Pair;
-                },
-                "Wrap the function with this signature (default: register state).")
-            ->check(CLI::IsMember({"i64(i64,i64)"}))
-            ->trigger_on_parse();
+            ->add_flag("--runtime", options.request.runtime,
+                       "Emit a typed entry accepting a runtime instance and guest thread.")
+            ->needs(signature);
         addFormat(*command, "--diagnostics-format", options.jsonDiagnostics,
                   "Execution diagnostic format (default: text).");
         command->final_callback(
