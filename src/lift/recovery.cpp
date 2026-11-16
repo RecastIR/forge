@@ -2,6 +2,7 @@
 
 #include "analysis/analysis.h"
 #include "lift/asm_info.h"
+#include "lift/leaf_recovery.h"
 
 #include "llvm/MC/MCContext.h"
 #include "llvm/MC/MCDisassembler/MCDisassembler.h"
@@ -138,22 +139,6 @@ namespace forge::x86 {
             return code;
         }
 
-        const Step *instructionInterior(const std::map<uint32_t, RecoveredFunction> &functions,
-                                        uint32_t target) {
-            const auto nextFunction = functions.upper_bound(target);
-
-            if (nextFunction == functions.begin()) {
-                return nullptr;
-            }
-
-            // Each completed CFG starts at the function's RVA and its blocks are disjoint.
-            const auto &graph = std::prev(nextFunction)->second.graph;
-            const auto &steps = std::prev(graph.upper_bound(target))->second.steps;
-            const auto found = std::partition_point(
-                steps.begin(), steps.end(), [target](const Step &s) { return s.next <= target; });
-            return found != steps.end() && found->rva < target ? &*found : nullptr;
-        }
-
         std::optional<MappedRange> validateCallee(const AnalyzedImage &analysis,
                                                   const RelocationIndex &relocations,
                                                   const Step &step, uint32_t target) {
@@ -175,42 +160,16 @@ namespace forge::x86 {
             }
         }
 
-        struct UnresolvedCall {
-            // The discovered CFG owns this step through final target classification.
-            const Step &step;
-            uint32_t target, function, block;
-
-            [[noreturn]] void reject(const std::map<uint32_t, RecoveredFunction> &functions,
-                                     uint32_t root) const try {
-                if (const auto *containing = instructionInterior(functions, target)) {
-                    step.reject(FailureCode::InvalidCallTarget,
-                                "direct call enters decoded instruction at " + hex(containing->rva),
-                                target);
-                }
-
-                step.reject(FailureCode::UnsupportedControlFlow,
-                            hex(target) + ": unsupported direct call target without an exact "
-                                          "discovered function start",
-                            target);
-            } catch (InspectionError &error) {
-                error.context.blockRva = block;
-                if (function != root) {
-                    error.context.functionRva = function;
-                }
-
-                throw;
-            }
-        };
-
         struct GroupDiscovery {
             const ValidatedEntry &entry;
             std::map<uint32_t, RecoveredFunction> &functions;
             std::map<uint32_t, MappedRange> pending;
-            std::optional<UnresolvedCall> unresolved;
+            std::map<uint32_t, const DirectCall *> deferred;
 
             bool schedule(uint32_t target, const Step &step);
             void scanCalls(uint32_t rva, RecoveredFunction &caller, const GuestBlock &block);
-            void run(const MCDisassembler &dis, const MCInstrInfo &instructions);
+            void run(const MCDisassembler &dis, const MCInstrInfo &instructions,
+                     const MCRegisterInfo &regs);
         };
 
         bool GroupDiscovery::schedule(uint32_t target, const Step &step) {
@@ -220,6 +179,14 @@ namespace forge::x86 {
 
             const auto code = validateCallee(entry.analysis, entry.relocations, step, target);
             if (!code) {
+                const auto &table = entry.analysis.module().exceptions;
+                if (table && table->trailingBytes()) {
+                    step.reject(
+                        FailureCode::UnsupportedControlFlow,
+                        "insufficient evidence for leaf recovery: partial runtime function record",
+                        target);
+                }
+
                 return false;
             }
 
@@ -242,11 +209,13 @@ namespace forge::x86 {
                 }
 
                 const auto address = static_cast<uint32_t>(target);
-                if (schedule(address, step)) {
-                    caller.calls.emplace(step.rva,
-                                         DirectCall{rva, leader, step.rva, address, step.next});
-                } else if (!unresolved) {
-                    unresolved.emplace(step, address, rva, leader);
+                const auto &site =
+                    caller.calls
+                        .emplace(step.rva, DirectCall{rva, leader, step.rva, address, step.next})
+                        .first->second;
+
+                if (!deferred.contains(address) && !schedule(address, step)) {
+                    deferred.emplace(address, &site);
                 }
             }
         } catch (InspectionError &error) {
@@ -254,12 +223,16 @@ namespace forge::x86 {
             throw;
         }
 
-        void GroupDiscovery::run(const MCDisassembler &dis, const MCInstrInfo &instructions) {
+        void GroupDiscovery::run(const MCDisassembler &dis, const MCInstrInfo &instructions,
+                                 const MCRegisterInfo &regs) {
             pending.emplace(entry.rva, entry.code);
             while (!pending.empty()) {
                 auto scheduled = pending.extract(pending.begin());
                 const auto rva = scheduled.key();
-                auto &function = functions.try_emplace(rva, scheduled.mapped()).first->second;
+                auto &function =
+                    functions
+                        .try_emplace(rva, rva, RecoveryOrigin::UnwindBacked, scheduled.mapped())
+                        .first->second;
 
                 try {
                     function.graph = discoverCFG(function.code.bytes, rva, dis, instructions);
@@ -275,8 +248,8 @@ namespace forge::x86 {
                 }
             }
 
-            if (unresolved) {
-                unresolved->reject(functions, entry.rva);
+            if (!deferred.empty()) {
+                recoverLeaves(entry, functions, deferred, dis, instructions, regs);
             }
 
             // Incoming indices follow source order even when discovery began at a higher RVA.
@@ -332,6 +305,18 @@ namespace forge::x86 {
 
             return guestBase;
         });
+    }
+
+    const Step *RecoveredFunction::instructionContaining(uint32_t rva) const {
+        const auto after = graph.upper_bound(rva);
+        if (after == graph.begin()) {
+            return nullptr;
+        }
+
+        const auto &steps = std::prev(after)->second.steps;
+        const auto it = std::partition_point(steps.begin(), steps.end(),
+                                             [rva](const Step &s) { return s.next <= rva; });
+        return it == steps.end() ? nullptr : &*it;
     }
 
     const DirectCall *RecoveredFunction::callAt(uint32_t instructionRva) const {
@@ -400,7 +385,7 @@ namespace forge::x86 {
         withLocation(source, location, FailureCode::LiftingInternal, [&] {
             decoder = std::make_unique<Decoder>(entryRva);
             GroupDiscovery discovery{entry, recovered, {}, {}};
-            discovery.run(*decoder->dis, *decoder->instructions);
+            discovery.run(*decoder->dis, *decoder->instructions, *decoder->regs);
         });
     }
 
@@ -409,13 +394,26 @@ namespace forge::x86 {
     const MCRegisterInfo &RecoveredFunctionGroup::registers() const & { return *decoder->regs; }
 
     void RecoveredFunctionGroup::annotateFailure(InspectionError &failure) const {
-        if (failure.context.instructionRva) {
-            const auto next = recovered.upper_bound(*failure.context.instructionRva);
-            if (next != recovered.begin() && std::prev(next)->first != entryRva) {
-                failure.context.functionRva = std::prev(next)->first;
-            }
+        addLocation(failure, source, entryLocation(source, entryRva, function(entryRva).code));
+        const auto instruction = failure.context.instructionRva;
+
+        if (!instruction) {
+            return;
         }
 
-        addLocation(failure, source, entryLocation(source, entryRva, function(entryRva).code));
+        for (const auto &[rva, owner] : recovered) {
+            if (rva == entryRva || !owner.instructionContaining(*instruction)) {
+                continue;
+            }
+
+            failure.context.functionRva = rva;
+
+            if (owner.origin == RecoveryOrigin::InferredLeaf) {
+                const auto &site = *owner.incoming.front();
+                failure.context.sourceCall = CallLocation{site.caller, site.instruction};
+            }
+
+            return;
+        }
     }
 } // namespace forge::x86

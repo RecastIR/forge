@@ -38,6 +38,9 @@ namespace forge {
         uint64_t begin, end;
     };
 
+    // Return whole ranges intersecting a nonempty interval in a sorted, disjoint index.
+    llvm::ArrayRef<RvaRange> rangesIn(llvm::ArrayRef<RvaRange> view, RvaRange range);
+
     struct MappedRange {
         const Section &section;
         llvm::StringRef bytes;
@@ -121,6 +124,8 @@ namespace forge {
     struct Exceptions {
         uint32_t rva, size;
         std::vector<RuntimeFunction> functions;
+
+        unsigned trailingBytes() const;
     };
 
     struct Module {
@@ -161,6 +166,7 @@ namespace forge {
         // Borrow the initialized prefix of a virtual interval inside a single section.
         // The remaining bytes in the interval are zero-filled by the PE loader.
         llvm::StringRef initializedBytes(RvaRange range) const;
+        std::vector<RvaRange> loaderWrittenRanges() const;
         ImageInitialization imageInitialization() const;
         ImageBytes imageBytes(RvaRange range, const ImageInitialization &init,
                               uint64_t guestLoadBase) const;
@@ -170,7 +176,6 @@ namespace forge {
       private:
         friend Module inspectPE(const InputFile &input);
 
-        std::vector<RvaRange> loaderWrittenRanges() const;
         llvm::sys::fs::UniqueID identity;
         fs::path openedPath;
         // COFF borrows the snapshot and must be destroyed before it.

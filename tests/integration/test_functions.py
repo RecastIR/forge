@@ -636,6 +636,156 @@ class Lift(Case):
         self.assertEqual((context["block_rva"], context["instruction_rva"], context["file_offset"],
                           context["bytes"]), (hex(helper), hex(helper), layout.file_offset(helper), "f7f1"))
 
+    def test_inferred_leaf_boundaries_and_effects(self):
+        original = (FIXTURES / "leaves.exe").read_bytes()
+        module = self.report(FIXTURES / "leaves.exe")["modules"][0]
+        caller, = [int(e["rva"], 16) for e in module["exports"] if "call_leaves" in e["names"]]
+        section, = [s for s in module["sections"] if s["name"] == ".probe"]
+        start = int(section["rva"], 16)
+        end = start + section["virtual_size"]
+        layout = Layout(original)
+        image, ir = self.dir / "candidate.exe", self.dir / "candidate.ll"
+        before = self.invoke("analyze", FIXTURES / "leaves.exe", "--functions", "--format", "json").stdout
+
+        def lift(targets, fragments, reason="", code="LIFT_UNSUPPORTED_CONTROL_FLOW", fence=None,
+                 bad_unwind=False, edit=None):
+            data = bytearray(original)
+            # Establish a concrete incoming RAX for leaves that preserve it.
+            body = bytearray.fromhex("48 83 ec 28 89 c8")
+            for target in targets:
+                body.extend(b"\xe8" + struct.pack("<i", target - (caller + len(body) + 5)))
+            body.extend(bytes.fromhex("48 83 c4 28 c3"))
+            for rva, payload in [(caller, body), *fragments]:
+                off = layout.file_offset(rva)
+                data[off:off + len(payload)] = payload
+            if fence is not None:
+                table = layout.file_offset(layout.directory(3)[0])
+                struct.pack_into("<I", data, table + 12, fence)
+                if bad_unwind:
+                    struct.pack_into("<I", data, table + 20, 0)
+            if edit:
+                edit(data)
+            image.write_bytes(data)
+            ir.write_text("previous IR")
+            result = self.invoke("lift", image, "--rva", hex(caller), "--signature", "i64(i64,i64)",
+                                 "--output", ir, "--diagnostics-format", "json", code=int(bool(reason)))
+            if reason:
+                error = json.loads(result.stderr)
+                self.assertEqual(error["code"], code, error)
+                self.assertIn(reason, error["message"])
+                self.assertEqual(ir.read_text(), "previous IR")
+                return error["context"]
+            return ir.read_text()
+
+        for encoding, reason in (("50 58 c3", "modifies RSP"), ("58 c3", "modifies RSP"),
+                ("48 29 cc c3", "modifies RSP"), ("40 b4 00 c3", "modifies RSP"),
+                ("b7 00 c3", "modifies RBX"), ("44 0f 44 e0 c3", "modifies R12"),
+                ("e8 00 00 00 00 c3", "nested call"), ("ff d0", "indirect or far call"),
+                ("ff e0", "unsupported control transfer"), ("eb fe", "no reachable normal return"),
+                ("eb fd", hex(start - 1))):
+            with self.subTest(encoding=encoding):
+                context = lift([start], [(start, bytes.fromhex(encoding))], reason)
+                if encoding == "eb fd":
+                    self.assertEqual((context["instruction_rva"], context["branch_target"], context["call_site_rva"]),
+                                     (hex(start), start - 1, hex(caller + 6)))
+                else:
+                    self.assertEqual((context["instruction_rva"], context["branch_target"]),
+                                     (hex(caller + 6), start))
+
+        for encoding in ("0f 57 f6 c3", "0f ae 11 c3", "f7 f1 c3"):
+            with self.subTest(encoding=encoding):
+                context = lift([start], [(start, bytes.fromhex(encoding))], "unsupported",
+                               "LIFT_UNSUPPORTED_INSTRUCTION")
+                self.assertEqual((context["function_rva"], context["instruction_rva"], context["caller_rva"],
+                                  context["call_site_rva"]), (hex(start), hex(start), hex(caller), hex(caller+6)))
+
+        lift([end - 1], [], "truncated", "LIFT_INVALID_ENCODING")
+        lift([end], [], "outside", "LIFT_INVALID_CALL_TARGET")
+        lift([layout.directory(3)[0]], [], "outside", "LIFT_INVALID_CALL_TARGET")
+        lift([start], [(start, bytes.fromhex("eb 3e"))], hex(start + 64), fence=start + 64)
+        lift([start + 65], [(start + 65, b"\xc3")], "conflicts with a recorded", fence=start + 64,
+             bad_unwind=True)
+        lift([start + 62], [(start + 62, bytes.fromhex("89 c8"))], "fallthrough", fence=start + 64)
+        fixup, = [int(r["rva"], 16) for block in module["relocations"] for r in block["entries"]
+                  if r["type"] == 10 and start <= int(r["rva"], 16) < end]
+        lift([fixup], [(fixup, b"\xc3")], "relocation")
+        lift([fixup - 2], [(fixup - 2, bytes.fromhex("eb 08")), (fixup + 8, b"\xc3")])
+        def tls_index(data):
+            tls = start + 256
+            struct.pack_into("<II", data, layout.directories + 8 * 9, tls, 40)
+            struct.pack_into("<QQQQII", data, layout.file_offset(tls),
+                             0, 0, int(module["image_base_va"], 16) + start + 4, 0, 0, 0)
+
+        literal = (start + 3, bytes.fromhex("b8 78 56 34 12 c3"))
+        lift([start + 3], [literal], "loader-written", edit=tls_index)
+        lift([start], [(start, b"\xeb\x06"), literal], edit=tls_index)
+
+        def partial_record(data):
+            table = layout.directory(3)[0]
+            struct.pack_into("<II", data, layout.directories + 3 * 8, table, 20)
+            struct.pack_into("<II", data, layout.file_offset(table) + 12, start, start + 3)
+
+        ctx = lift([start], [(start, b"\x89\xc8\xc3")], "partial runtime function", edit=partial_record)
+        self.assertEqual((ctx["instruction_rva"], ctx["branch_target"]), (hex(caller + 6), start))
+        analysis = self.invoke("analyze", image, "--functions", "--format", "json")
+        self.assertIn("PARTIAL_RUNTIME_FUNCTION", [d["code"] for d in json.loads(analysis.stdout)["diagnostics"]])
+        table, table_size = layout.directory(3)
+        table_offset = layout.file_offset(table)
+        recorded_callee = layout.u32(table_offset + 12)
+
+        def partial_after_complete_records(data):
+            relocated_table = start + 256
+            offset = layout.file_offset(relocated_table)
+            data[offset:offset + table_size] = original[table_offset:table_offset + table_size]
+            struct.pack_into("<II", data, offset + table_size, start, start + 3)
+            struct.pack_into("<II", data, layout.directories + 3 * 8, relocated_table, table_size + 8)
+
+        lift([recorded_callee], [], edit=partial_after_complete_records)
+
+        for offset, payload, reason, code, claimed in (
+                (62, "06 cc", "invalid", "LIFT_INVALID_ENCODING", "06cc"),
+                (62, "b8 01 02 03 04", "decode boundary", "LIFT_UNSUPPORTED_CONTROL_FLOW", "b801"),
+                (63, "48 89 c8", "decode boundary", "LIFT_UNSUPPORTED_CONTROL_FLOW", "48")):
+            address = start + offset
+            ctx = lift([address], [(address, bytes.fromhex(payload))], reason, code, fence=start + 64)
+            self.assertEqual((ctx["function_rva"], ctx["instruction_rva"], ctx["bytes"], ctx["file_offset"],
+                              ctx["caller_rva"], ctx["call_site_rva"]),
+                             (hex(address), hex(address), claimed, layout.file_offset(address),
+                              hex(caller), hex(caller + 6)))
+        # An independently called leaf in the skipped bytes owns its own instructions.
+        sparse = [(start, bytes.fromhex("eb 06 cc cc 89 c8 c3 cc c3"))]
+        ir_text = lift([start, start+4, start], sparse)
+        self.assertEqual(ir_text.count(f"define internal void @forge_guest_{start:x}("), 1)
+        self.assertEqual(ir_text, lift([start, start+4, start], sparse))
+        self.assertEqual(self.invoke("analyze", image, "--functions", "--format", "json").stdout, before)
+        self.assertIn("ENTRY_INVALID_START", self.invoke("lift", image, "--rva", hex(start), "--output", ir,
+                      "--diagnostics-format", "json", code=1).stderr.decode())
+
+        context = lift([start, start+4], [(start, bytes.fromhex("eb 06 cc cc 89 c8 c3 cc 44 89 d0 c3"))],
+                       "R10", "LIFT_UNDEFINED_REGISTER")
+        self.assertEqual((context["function_rva"], context["instruction_rva"], context["call_site_rva"]),
+                         (hex(start), hex(start + 8), hex(caller + 6)))
+
+        lift([start], [(start, bytes.fromhex("85 c9 74 01 48 89 c8 c3"))], "branch enters an instruction",
+             "LIFT_INVALID_CALL_TARGET")
+        for order in ((start, start+1), (start+1, start)):
+            context = lift(order, [(start, bytes.fromhex("48 89 c8 c3"))], "enters decoded instruction",
+                           "LIFT_INVALID_CALL_TARGET")
+            self.assertEqual(context["branch_target"], start+1)
+        for order in ((start, start+4), (start+4, start)):
+            lift(order, [(start, bytes.fromhex("eb 06 cc cc eb 02 cc cc c3"))], "overlaps decoded function")
+
+        # A closed cycle may coexist with a returning path, including a backedge to entry.
+        lift([start], [(start, bytes.fromhex("85 c9 74 02 eb fa c3"))])
+        lift([start], [(start, bytes.fromhex("48 8b 44 24 08 c3"))])
+        nop = bytes.fromhex("0f 1f 00")
+        lift([start], [(start, nop*4095 + b"\xc3")])
+        lift([start], [(start, nop*4096 + b"\xc3")], "instruction budget")
+        for distance in (65535, 65536):
+            jump = b"\xe9" + struct.pack("<i", distance - 5)
+            lift([start], [(start, jump), (start + distance, b"\xc3")],
+                 "" if distance == 65535 else hex(start + distance))
+
     def test_imported_call(self):
         data = bytearray((FIXTURES / "metadata.exe").read_bytes())
         layout = Layout(data)

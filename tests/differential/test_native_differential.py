@@ -56,6 +56,43 @@ class NativeDifferentialTests(unittest.TestCase):
                             self.assertEqual((raised.exception.outcome, raised.exception.status),
                                              ("signaled", -signal.SIGTRAP))
 
+    def test_inferred_diagnostic_call_sites(self):
+        with tempfile.TemporaryDirectory(dir=self.tmp) as tmp:
+            work = Path(tmp)
+            image = work / "source.exe"
+            original = (diff.BINARIES / "debug/call_leaves.exe").read_bytes()
+            image.write_bytes(original)
+            caller = diff.analyze(self.forge, image, "call_leaves", work)
+            module = diff.read_json(work / "inspect.json")["modules"][0]
+            analysis = diff.read_json(work / "analysis.json")
+            first = caller.file_offset + 4
+            self.assertEqual(original[first], 0xe8)
+            leaf = caller.start + 9 + struct.unpack_from("<i", original, first + 1)[0]
+            leaf_code = diff.resolve_leaf_window(module, analysis, image, leaf, caller.start, caller.start + 4)
+            ir = work / diff.CANONICAL_IR
+            ir.parent.mkdir()
+
+            for prefix, site, suffix, reachable in (
+                    (b"", 0, b"\xc3", True), (b"\xd5\x00", 0, b"\xc3", True),
+                    (b"\x48\xb8", 2, b"\x00\x00\x00\xc3", False),
+                    (b"\xeb\x05", 2, b"\xc3", False),
+                    (b"\xeb\x01\xb8", 3, b"\xc3", True)):
+                with self.subTest(prefix=prefix.hex()):
+                    displacement = leaf - (caller.start + len(prefix) + 5)
+                    body = prefix + b"\xe8" + struct.pack("<i", displacement) + suffix
+                    data = bytearray(original)
+                    data[caller.file_offset:caller.file_offset + len(body)] = body
+                    data[leaf_code.file_offset:leaf_code.file_offset + 2] = b"\x0f\x0b"
+                    image.write_bytes(data)
+                    if reachable:
+                        with self.assertRaisesRegex(diff.Unsupported, "LIFT_UNSUPPORTED_INSTRUCTION"):
+                            diff.lift(self.forge, image, {"signature": "i64(i64,i64)"}, caller, ir)
+                        with self.assertRaisesRegex(ValueError, "reachable direct CALL"):
+                            diff.resolve_leaf_window(module, analysis, image, leaf + 1, caller.start, caller.start + site)
+                    else:
+                        with self.assertRaisesRegex(ValueError, "reachable direct CALL"):
+                            diff.resolve_leaf_window(module, analysis, image, leaf, caller.start, caller.start + site)
+
     def test_mutable_state_in_a_fresh_process(self):
         fixture = "globals/counters"
         manifest = next(m for m in diff.load_catalog() if m.case["id"] == fixture)

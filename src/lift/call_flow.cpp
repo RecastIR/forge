@@ -76,7 +76,7 @@ namespace forge::x86 {
 
         // Meet over finite paths to RET. Starting at the greatest effect makes a
         // recursive cycle wait for its base cases instead of inventing an exit.
-        DefinitionEffect returnEffect(const ControlFlowGraph &graph, FunctionFlow &function,
+        DefinitionEffect returnEffect(const RecoveredFunction &recovered, FunctionFlow &function,
                                       const FunctionFlows &flows) {
             std::set<uint32_t> pending;
 
@@ -85,14 +85,14 @@ namespace forge::x86 {
                 pending.insert(address);
             }
 
-            function.blocks.at(graph.begin()->first).incoming = {};
+            function.blocks.at(recovered.entry).incoming = {};
             auto returns = top();
 
             while (!pending.empty()) {
                 const auto address = pending.extract(pending.begin()).value();
                 const auto out = transfer(function.blocks.at(address), flows,
                                           [](uint32_t, const DefinitionEffect &) {});
-                const auto &block = graph.at(address);
+                const auto &block = recovered.graph.at(address);
 
                 if (block.exit == Flow::Return) {
                     returns.intersect(out);
@@ -125,7 +125,7 @@ namespace forge::x86 {
             const auto address = pending.extract(pending.begin()).value();
             auto &function = flows.at(address);
             const auto &recovered = group.function(address);
-            const auto returns = returnEffect(recovered.graph, function, flows);
+            const auto returns = returnEffect(recovered, function, flows);
 
             if (function.returns != returns) {
                 function.returns = returns;

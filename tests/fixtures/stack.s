@@ -663,6 +663,32 @@ direct_caller recovery_invalid_entry, recovery_invalid_callee
 direct_caller recovery_invalid_callee, recovery_invalid_callee+1
 direct_caller recovery_unrecorded, entry
 
+direct_caller recovery_mov_source, mov_source
+direct_caller recovery_cmp_input, cmp_input
+direct_caller recovery_store_source, store_source
+direct_caller recovery_extend_source, extend_source
+direct_caller recovery_cmov_source, cmov_source
+direct_caller recovery_saved_input, saved_input
+
+mov_source:
+    movq %r16, %rax
+    ret
+cmp_input:
+    cmpq %rax, %r16
+    ret
+store_source:
+    movq %r16, (%rcx)
+    ret
+extend_source:
+    movzbl %r16b, %eax
+    ret
+cmov_source:
+    cmoveq %r16, %rax
+    ret
+saved_input:
+    movzbl %bl, %eax
+    ret
+
 .section .rdata,"dr"
 call_constant:
     .quad 0x12345678

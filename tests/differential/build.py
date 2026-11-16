@@ -105,45 +105,59 @@ def leaf_instructions(output, symbol):
     return instructions
 
 
-def reachable_leaf(instructions, *, call_entries=()):
-    # This is a fixture-shape oracle over objdump output, independent of Forge's decoder.
-    conditions = {"jo", "jno", "jb", "jae", "je", "jne", "jbe", "ja", "js", "jns",
-                  "jp", "jnp", "jl", "jge", "jle", "jg"}
-    ordinary = {"mov", "movabs", "movzx", "movsx", "movsxd", "lea", "add", "sub", "xor",
-                "and", "or", "test", "cmp", "shl", "shr", "sar", "inc", "dec", "not", "neg", "imul",
-                "push", "pop", "cwde", "cdqe", "nop", "seto", "setb"}
-    addresses = list(instructions)
-    following = dict(zip(addresses, addresses[1:]))
+CONDITIONS = {"jo", "jno", "jb", "jae", "je", "jne", "jbe", "ja", "js", "jns",
+              "jp", "jnp", "jl", "jge", "jle", "jg"}
+FALLTHROUGH = {"mov", "movabs", "movzx", "movsx", "movsxd", "lea", "add", "sub", "xor",
+               "and", "or", "test", "cmp", "shl", "shr", "sar", "inc", "dec", "not", "neg", "imul",
+               "push", "pop", "cwde", "cdqe", "nop", "seto", "setb"}
+
+
+def direct_target(operands):
+    target = re.fullmatch(r"(?:0x)?([0-9a-f]+)(?: <[^>]+>)?", operands)
+    return int(target[1], 16) if target else None
+
+
+def reachable_instructions(entry, decode, in_body, allow_call, ordinary, *, end=None):
+    # Follow numeric disassembly addresses from the entry, including both conditional edges.
     graph = {}
-    pending = [addresses[0]]
+    pending = [entry]
     while pending:
         address = pending.pop()
         if address in graph:
             continue
-        text = instructions[address]
+        text, following = decode(address)
         opcode, _, operands = text.partition(" ")
         successors = []
         if opcode == "ret" and not operands:
             graph[address] = successors
             continue
-        if opcode == "jmp" or opcode in conditions:
-            target = re.fullmatch(r"([0-9a-f]+)(?: <[^>]+>)?", operands)
-            if target is None or int(target[1], 16) not in instructions:
+        if opcode == "jmp" or opcode in CONDITIONS:
+            target = direct_target(operands)
+            if target is None or not in_body(target):
                 raise ValueError(f"invalid direct target at {address:x}: {text}")
-            successors.append(int(target[1], 16))
-        elif opcode == "call" and call_entries:
-            match = re.fullmatch(r"([0-9a-f]+)(?: <[^>]+>)?", operands)
-            if not match or int(match[1], 16) not in call_entries:
+            successors.append(target)
+        elif opcode == "call":
+            target = direct_target(operands)
+            if target is None or not allow_call(target):
                 raise ValueError(f"unexpected direct call target at {address:x}: {text}")
-        elif opcode not in ordinary and not (call_entries and opcode == "adc"):
+        elif opcode not in ordinary:
             raise ValueError(f"unsupported instruction or transfer at {address:x}: {text}")
         if opcode != "jmp":
-            if address not in following:
+            if following is None or (following == end and opcode in CONDITIONS):
                 raise ValueError(f"fallthrough outside leaf at {address:x}")
-            successors.append(following[address])
+            if following != end:
+                successors.append(following)
         graph[address] = successors
         pending.extend(successors)
     return graph
+
+
+def reachable_leaf(instructions, *, call_entries=()):
+    addresses = list(instructions)
+    following = dict(zip(addresses, addresses[1:]))
+    return reachable_instructions(addresses[0], lambda a: (instructions[a], following.get(a)),
+                                  instructions.__contains__, call_entries.__contains__,
+                                  FALLTHROUGH | ({"adc"} if call_entries else set()))
 
 
 def natural_loops(graph):
@@ -562,6 +576,8 @@ CALL_GRAPHS = {
     "call_mutual": {"call_mutual": ["even_step"], "even_step": ["odd_step"], "odd_step": ["even_step"]},
     "call_sequence": {"call_sequence": ["pair", "increment", "pair"], "pair": ["increment", "increment"],
                       "increment": []},
+    "call_leaves": {"call_leaves": ["leaf_add", "leaf_add", "leaf_abs", "leaf_count", "leaf_store"],
+                    "leaf_add": [], "leaf_abs": [], "leaf_count": [], "leaf_store": []},
     "call_flags": {"call_flags": ["add_carry", "inspect_return"], "add_carry": [], "inspect_return": []},
 }
 
@@ -574,12 +590,26 @@ def check_call_group(name, listing, pe_report, config):
         r"^ [0-9a-f]+:[ \t]+([0-9a-f]+) ([0-9a-f]+) [0-9a-f]+$", pe_report, re.MULTILINE)]
     for symbol, body in bodies.items():
         start = next(iter(body))
-        containing = [(a, b) for a, b in ranges if a <= start < b]
-        if len(containing) != 1 or containing[0][0] != start:
-            raise ValueError(f"{symbol} needs a unique linked unwind entry")
         graph = reachable_leaf(body, call_entries=entries)
-        if max(graph) >= containing[0][1]:
-            raise ValueError(f"{symbol} has reachable code outside its unwind range")
+        containing = [(a, b) for a, b in ranges if a <= start < b]
+        if name == "call_leaves" and symbol != name:
+            # Objdump addresses include each linked instruction's exact start. RET is one byte.
+            after = dict(zip(body, list(body)[1:]))
+            for address in graph:
+                end = address + 1 if body[address] == "ret" else after[address]
+                if any(a < end and address < b for a, b in ranges):
+                    raise ValueError(f"{symbol} overlaps a linked unwind range")
+            if symbol == "leaf_abs" and sum(body[a] == "ret" for a in graph) != 2:
+                raise ValueError("leaf_abs needs two reachable returns")
+            if symbol == "leaf_count" and not natural_loops(graph)[0]:
+                raise ValueError("leaf_count needs a reachable loop")
+            if symbol == "leaf_store" and "add QWORD PTR [rcx],0x7" not in (body[a] for a in graph):
+                raise ValueError("leaf_store must update the caller's memory")
+        else:
+            if len(containing) != 1 or containing[0][0] != start:
+                raise ValueError(f"{symbol} needs a unique linked unwind entry")
+            if max(graph) >= containing[0][1]:
+                raise ValueError(f"{symbol} has reachable code outside its unwind range")
         calls = {a: entries[int(body[a].split()[1], 16)] for a in graph if body[a].startswith("call ")}
         if sorted(calls.values()) != sorted(expected[symbol]):
             raise ValueError(f"{symbol} expected calls to {expected[symbol]}, found {list(calls.values())}")

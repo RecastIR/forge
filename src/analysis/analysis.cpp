@@ -138,7 +138,7 @@ namespace forge {
                 ranges.back().indices.push_back(i);
             }
 
-            if (unsigned tail = table.size % 12) {
+            if (unsigned tail = table.trailingBytes()) {
                 diagnostics.push_back({"PARTIAL_RUNTIME_FUNCTION",
                                        std::to_string(tail) +
                                            " trailing exception directory bytes at RVA " +

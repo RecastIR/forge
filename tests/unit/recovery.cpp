@@ -188,6 +188,76 @@ namespace {
         }
     }
 
+    void checkLeafInstructions(const AnalyzedImage &analysis,
+                               const x86::RecoveredFunction &function) {
+        for (const auto &[leader, block] : function.graph) {
+            for (const auto &step : block.steps) {
+                const auto mapped = analysis.image().mapRva(step.rva, step.next - step.rva);
+                check(mapped && step.bytes.data() == mapped->bytes.data() && !step.opcode.empty() &&
+                          function.instructionContaining(step.rva) == &step,
+                      "lost inferred instruction or borrow");
+
+                const bool overlaps =
+                    llvm::any_of(analysis.functions(), [&](const FunctionRange &record) {
+                        return step.rva < record.record.end && record.record.begin < step.next;
+                    });
+                check(!overlaps, "leaf overlaps an observed PE range");
+            }
+        }
+    }
+
+    void checkLeaves(const AnalyzedImage &analysis, const RecoveredFunctionGroup &group) {
+        const auto root = group.root();
+        const auto &caller = group.function(root);
+        check(group.functions().size() == 5 && caller.calls.size() == 5 &&
+                  caller.origin == x86::RecoveryOrigin::UnwindBacked,
+              "incorrect leaf group");
+        const auto &first = caller.calls.begin()->second;
+        const auto &second = std::next(caller.calls.begin())->second;
+        const auto &shared = group.function(first.callee);
+        check(first.callee == second.callee && shared.incoming.size() == 2 &&
+                  shared.incoming.front() == &first && shared.incoming.back() == &second &&
+                  first.continuation == first.instruction + 5 &&
+                  second.continuation == second.instruction + 5,
+              "shared leaf lost call identity or continuation");
+
+        for (const auto &[rva, f] : group.functions()) {
+            if (rva == root) {
+                continue;
+            }
+
+            check(f.entry == rva && f.origin == x86::RecoveryOrigin::InferredLeaf &&
+                      f.calls.empty() && f.code.section.permissions[2] == 'x',
+                  "wrong inferred evidence");
+
+            checkLeafInstructions(analysis, f);
+        }
+    }
+
+    void checkLeafRegisters(const AnalyzedImage &analysis) {
+        for (auto caller : {"recovery_mov_source", "recovery_cmp_input", "recovery_store_source",
+                            "recovery_extend_source", "recovery_cmov_source"}) {
+            const auto root = exportedRva(analysis, caller);
+            try {
+                const RecoveredFunctionGroup group(analysis, root);
+                throw std::runtime_error("recovery admitted an unmodeled source register");
+            } catch (const InspectionError &error) {
+                const auto &where = error.context;
+                check(error.kind == FailureCode::UnsupportedRegister && where.functionRva &&
+                          where.instructionRva == where.functionRva && where.sourceCall &&
+                          where.sourceCall->caller == root &&
+                          where.sourceCall->instruction == root + 4,
+                      "unmodeled leaf operand lost its classification or source call");
+            }
+        }
+
+        const auto root = exportedRva(analysis, "recovery_saved_input");
+        const RecoveredFunctionGroup group(analysis, root);
+        const auto target = group.function(root).calls.begin()->second.callee;
+        check(group.function(target).origin == x86::RecoveryOrigin::InferredLeaf,
+              "reading a supported nonvolatile source disqualified a leaf");
+    }
+
     void checkAnalysisFailure(const AnalyzedImage &analysis) {
         const auto root = exportedRva(analysis, "call_bad_teardown");
         const auto callee = exportedRva(analysis, "bad_teardown");
@@ -220,7 +290,7 @@ namespace {
 } // namespace
 
 int main(int argc, char **argv) try {
-    check(argc == 2, "expected stack.exe");
+    check(argc == 3, "expected stack.exe and leaves.exe");
     const AnalyzedImage analysis(
         std::make_unique<ParsedImage>(InputFile(argv[1]), ParsePolicy::Inspection),
         DebugInfo::Omit);
@@ -238,13 +308,28 @@ int main(int argc, char **argv) try {
     checkSelfRecursion(analysis);
     checkMutualRecursion(analysis);
     checkParallelEdges(analysis);
+    checkLeafRegisters(analysis);
     checkAnalysisFailure(analysis);
     const auto nested = exportedRva(analysis, "recovery_invalid_callee");
     checkFailure(analysis, exportedRva(analysis, "recovery_invalid_entry"), nested, nested + 1,
                  FailureCode::InvalidCallTarget);
-    const auto unresolved = exportedRva(analysis, "recovery_unrecorded");
-    checkFailure(analysis, unresolved, unresolved, analysis.module().entryPoint,
-                 FailureCode::UnsupportedControlFlow);
+    const auto unrecorded = exportedRva(analysis, "recovery_unrecorded");
+    const RecoveredFunctionGroup retOnly(analysis, unrecorded);
+    check(retOnly.function(analysis.module().entryPoint).origin ==
+              x86::RecoveryOrigin::InferredLeaf,
+          "a direct call to the unrecorded RET should recover one leaf");
+
+    const AnalyzedImage leaves(
+        std::make_unique<ParsedImage>(InputFile(argv[2]), ParsePolicy::Inspection),
+        DebugInfo::Omit);
+    const auto caller = exportedRva(leaves, "call_leaves");
+    const RecoveredFunctionGroup leafGroup(leaves, caller);
+    {
+        const RecoveredFunctionGroup other(leaves, caller);
+        checkLeaves(leaves, other);
+    }
+
+    checkLeaves(leaves, leafGroup);
     return 0;
 } catch (const std::exception &error) {
     llvm::errs() << error.what() << "\n";

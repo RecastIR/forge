@@ -29,6 +29,9 @@ namespace forge::x86 {
     enum class StackOp : uint8_t { PushRegister, PushImmediate, Pop, Leave };
     std::optional<StackOp> stackInstruction(llvm::StringRef opcode);
     std::optional<uint8_t> shiftCount(const Step &s, Form form);
+
+    inline bool isNoop(llvm::StringRef opcode) { return opcode == "NOOPW" || opcode == "NOOPL"; }
+
     bool memoryDestination(Form form);
     unsigned memoryOperand(const Step &s, const IntegerInstruction &instruction);
     bool hasMemoryOperand(Form form);
@@ -44,6 +47,7 @@ namespace forge::x86 {
         RegisterView reg(const Step &s, const llvm::MCOperand &op, unsigned width) const;
         std::optional<uint64_t> ripAddress(const Step &s, unsigned first) const;
         AddressOperand decodeAddress(const Step &s, unsigned first, bool access) const;
+        void validateIntegerOperands(const Step &s, const IntegerInstruction &instruction) const;
         RegisterView destination(const Step &s, const IntegerInstruction &instruction) const;
         std::optional<RegisterView> resultRegister(const Step &s) const;
 

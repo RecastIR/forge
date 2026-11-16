@@ -332,7 +332,7 @@ namespace forge {
                 return;
             }
 
-            if (s.opcode == "NOOPW" || s.opcode == "NOOPL") {
+            if (x86::isNoop(s.opcode)) {
                 return;
             }
 
@@ -510,7 +510,7 @@ namespace forge {
                     BasicBlock::Create(ir.getContext(), "rva_" + utohexstr(address, true), impl);
             }
 
-            ir.CreateBr(states.begin()->second.irBlock);
+            ir.CreateBr(states.at(function.entry).irBlock);
 
             for (const auto &[address, block] : graph) {
                 auto &state = states.at(address);
@@ -528,7 +528,7 @@ namespace forge {
                         state.phis[f] = phi;
                         semantics.flags[f] = phi;
 
-                        if (address == graph.begin()->first) {
+                        if (address == function.entry) {
                             phi->addIncoming(incomingFlags[f], entry);
                         }
                     }

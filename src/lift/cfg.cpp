@@ -20,6 +20,8 @@ namespace forge::x86 {
     }
 
     namespace {
+        constexpr unsigned maxLeafInstructions = 4096;
+
         bool legacyPrefix(uint8_t b) {
             switch (b) {
             case 0xf0:
@@ -111,9 +113,9 @@ namespace forge::x86 {
         class Discovery {
           public:
             Discovery(StringRef bytes, uint32_t begin, const MCDisassembler &dis,
-                      const MCInstrInfo &info)
+                      const MCInstrInfo &info, LeafStepCheck validateLeaf)
                 : bytes(bytes), begin(begin), end(begin + static_cast<uint32_t>(bytes.size())),
-                  dis(dis), info(info) {}
+                  dis(dis), info(info), validateLeaf(validateLeaf) {}
 
             ControlFlowGraph run();
 
@@ -122,6 +124,7 @@ namespace forge::x86 {
             uint32_t begin, end;
             const MCDisassembler &dis;
             const MCInstrInfo &info;
+            LeafStepCheck validateLeaf;
             std::map<uint32_t, Step> decoded;
             // Keep the edge that introduced each leader for overlap diagnostics.
             std::map<uint32_t, uint32_t> leaders;
@@ -136,8 +139,13 @@ namespace forge::x86 {
             if (address < begin || address >= end) {
                 auto dest = address < 0 ? "-" + hex(static_cast<uint64_t>(-address))
                                         : hex(static_cast<uint64_t>(address));
-                s.reject(FailureCode::UnsupportedControlFlow,
-                         "control flow outside function to " + dest, address);
+                s.reject(
+                    FailureCode::UnsupportedControlFlow,
+                    (validateLeaf
+                         ? "insufficient evidence: control flow outside inferred leaf bounds to "
+                         : "control flow outside function to ") +
+                        dest,
+                    address);
             }
 
             auto target = static_cast<uint32_t>(address);
@@ -148,7 +156,8 @@ namespace forge::x86 {
 
         void Discovery::overlap(uint32_t target) const {
             decoded.at(leaders.at(target))
-                .reject(FailureCode::UnsupportedControlFlow,
+                .reject(validateLeaf ? FailureCode::InvalidCallTarget
+                                     : FailureCode::UnsupportedControlFlow,
                         "branch enters an instruction at " + hex(target), target);
         }
 
@@ -163,6 +172,13 @@ namespace forge::x86 {
                     overlap(rva);
                 }
 
+                if (validateLeaf && decoded.size() >= maxLeafInstructions) {
+                    throw InspectionError(
+                        hex(rva) +
+                            ": insufficient evidence within the inferred leaf instruction budget",
+                        FailureCode::UnsupportedControlFlow);
+                }
+
                 auto s = decodeStep(bytes.drop_front(rva - begin), rva, dis, info);
                 // A forward target may already be scheduled, even before its decode.
                 auto leader = leaders.upper_bound(rva);
@@ -172,6 +188,10 @@ namespace forge::x86 {
 
                 checkPrefix(s);
                 auto flow = control(s, info);
+                if (validateLeaf) {
+                    validateLeaf(s, flow);
+                }
+
                 auto &step = decoded.emplace_hint(after, rva, std::move(s))->second;
                 if (flow == Flow::Conditional || flow == Flow::Jump) {
                     schedule(step, int64_t(step.next) + step.inst.getOperand(0).getImm());
@@ -250,12 +270,12 @@ namespace forge::x86 {
     } // namespace
 
     ControlFlowGraph discoverCFG(StringRef bytes, uint32_t begin, const MCDisassembler &dis,
-                                 const MCInstrInfo &info) {
-        if (bytes.size() > size_t{64} * 1024) {
+                                 const MCInstrInfo &info, LeafStepCheck validateLeaf) {
+        if (bytes.size() > maxFunctionBytes) {
             throw InspectionError(hex(begin) + ": experimental lift limit is 64 KiB per function",
                                   FailureCode::FunctionSize);
         }
 
-        return Discovery(bytes, begin, dis, info).run();
+        return Discovery(bytes, begin, dis, info, validateLeaf).run();
     }
 } // namespace forge::x86

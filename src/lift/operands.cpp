@@ -130,6 +130,21 @@ namespace forge::x86 {
         return operand;
     }
 
+    void InstructionOperands::validateIntegerOperands(const Step &s,
+                                                      const IntegerInstruction &op) const {
+        const unsigned count = s.inst.getNumOperands();
+        const unsigned address = hasMemoryOperand(op.form) ? memoryOperand(s, op) : count;
+
+        for (unsigned i = 0; i < count; ++i) {
+            if (i == address) {
+                decodeAddress(s, i, true);
+                i += 4; // The address tuple occupies five MC operands.
+            } else if (s.inst.getOperand(i).isReg()) {
+                reg(s, s.inst.getOperand(i), i == 0 ? op.width : op.sourceWidth);
+            }
+        }
+    }
+
     RegisterView InstructionOperands::destination(const Step &s,
                                                   const IntegerInstruction &instruction) const {
         if (instruction.form == Form::Accumulator) {

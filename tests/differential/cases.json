@@ -386,6 +386,13 @@
     "harness": "decimal_pairs"
   },
   {
+    "fixture_id": "functions/leaves",
+    "scope": "function",
+    "export": "call_leaves",
+    "signature": "i64(i64,i64)",
+    "harness": "decimal_pairs"
+  },
+  {
     "fixture_id": "functions/continuations",
     "scope": "function",
     "export": "call_continuations",

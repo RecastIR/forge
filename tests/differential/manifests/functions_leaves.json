@@ -1,0 +1,24 @@
+{
+  "schema_version": 1,
+  "id": "functions/leaves",
+  "description": "Call four unrecorded assembly leaves, reusing the arithmetic helper and observing a store into the caller frame.",
+  "source": "fixtures/arithmetic/integer_driver.c",
+  "binary": "call_leaves.exe",
+  "args": [
+    "0",
+    "0",
+    "-12",
+    "2",
+    "8",
+    "-3",
+    "-1",
+    "-1",
+    "3",
+    "3"
+  ],
+  "expected": {
+    "exit_code": 0,
+    "stdout": "7\n17\n10\n13\n19\n",
+    "stderr": ""
+  }
+}

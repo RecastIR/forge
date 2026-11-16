@@ -580,14 +580,15 @@ namespace forge {
 
             using Entry = Win64EH::RuntimeFunction;
 
-            if (policy == ParsePolicy::Inspection && dir->bytes.size() % sizeof(Entry)) {
-                invalid(dir->label, dir->offset, "partial AMD64 runtime function");
-            }
-
             Exceptions result{
                 object->getDataDirectory(COFF::EXCEPTION_TABLE)->RelativeVirtualAddress,
                 uint32_t(dir->bytes.size()),
                 {}};
+
+            if (policy == ParsePolicy::Inspection && result.trailingBytes()) {
+                invalid(dir->label, dir->offset, "partial AMD64 runtime function");
+            }
+
             count(dir->bytes.size() / sizeof(Entry), *dir);
 
             for (size_t i = 0; i + sizeof(Entry) <= dir->bytes.size(); i += sizeof(Entry)) {
@@ -649,6 +650,10 @@ namespace forge {
             return module;
         }
     } // namespace
+
+    unsigned Exceptions::trailingBytes() const {
+        return size % sizeof(llvm::Win64EH::RuntimeFunction);
+    }
 
     ParsedImage::ParsedImage(const InputFile &input, ParsePolicy policy)
         : identity(input.id()), openedPath(input.absolutePath()), buffer(input.read()) {
@@ -815,15 +820,15 @@ namespace forge {
             return ranges;
         }
 
-        llvm::ArrayRef<RvaRange> rangesIn(llvm::ArrayRef<RvaRange> view, RvaRange range) {
-            auto begin = llvm::lower_bound(
-                view, range.begin, [](RvaRange field, uint64_t rva) { return field.end <= rva; });
-            auto end =
-                std::lower_bound(begin, view.end(), range.end,
-                                 [](RvaRange field, uint64_t rva) { return field.begin < rva; });
-            return {begin, end};
-        }
     } // namespace
+
+    llvm::ArrayRef<RvaRange> rangesIn(llvm::ArrayRef<RvaRange> view, RvaRange range) {
+        auto begin = llvm::lower_bound(
+            view, range.begin, [](RvaRange field, uint64_t rva) { return field.end <= rva; });
+        auto end = std::lower_bound(begin, view.end(), range.end,
+                                    [](RvaRange field, uint64_t rva) { return field.begin < rva; });
+        return {begin, end};
+    }
 
     RelocationIndex::RelocationIndex(llvm::ArrayRef<RelocationBlock> blocks) : blocks(blocks) {
         std::vector<RvaRange> fields;
