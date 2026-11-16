@@ -5,6 +5,7 @@
 
 #include "llvm/ADT/STLExtras.h"
 #include "llvm/ADT/StringExtras.h"
+#include "llvm/Support/Endian.h"
 #include "llvm/Support/raw_ostream.h"
 
 #include <array>
@@ -258,6 +259,47 @@ namespace {
               "reading a supported nonvolatile source disqualified a leaf");
     }
 
+    void checkJumpTable(const AnalyzedImage &analysis) {
+        const auto entry = exportedRva(analysis, "cfg_jump_table");
+        const RecoveredFunctionGroup first(analysis, entry);
+        const RecoveredFunctionGroup repeated(analysis, entry);
+        const auto &function = first.function(entry);
+        checkRange(analysis, first, entry);
+        check(first.functions().size() == 1 && function.calls.empty() && function.incoming.empty(),
+              "table entries became call edges");
+
+        const auto dispatch = llvm::find_if(function.graph, [](const auto &item) {
+            return item.second.exit == x86::Flow::Indirect;
+        });
+        check(dispatch != function.graph.end(), "missing indirect terminator");
+        const auto &block = dispatch->second;
+        const auto &jump = block.steps.back();
+        const auto &again = repeated.function(entry).graph.at(dispatch->first);
+        const auto mapped = analysis.image().mapRva(jump.rva, jump.next - jump.rva);
+        const auto &table = block.table.value();
+        check(mapped && table.count == 5 && block.successors.size() == 5 &&
+                  block.successors == again.successors && again.steps.back().rva == jump.rva &&
+                  jump.opcode == "JMP64r" && function.instructionContaining(jump.rva) == &jump &&
+                  jump.bytes.data() == mapped->bytes.data(),
+              "dispatch identity, source bytes or repeated recovery differ");
+
+        const auto &guard = function.graph.at(table.compareRva);
+        check(guard.exit == x86::Flow::Conditional && guard.steps.back().rva == table.guardRva &&
+                  guard.successors[1] == dispatch->first &&
+                  block.successors[0] == block.successors[1],
+              "range guard or duplicate table edge lost");
+
+        for (unsigned i = 0; i < table.count; ++i) {
+            const auto word = analysis.image().mapRva(table.tableRva + 4 * i, 4).value();
+            const auto offset =
+                llvm::SignExtend64<32>(llvm::support::endian::read32le(word.bytes.data()));
+            const auto target = block.successors[i];
+            check(int64_t(table.tableRva) + offset == target && function.graph.contains(target) &&
+                      function.graph.at(target).steps.front().rva == target,
+                  "table successor is not the linked entry's instruction boundary");
+        }
+    }
+
     void checkAnalysisFailure(const AnalyzedImage &analysis) {
         const auto root = exportedRva(analysis, "call_bad_teardown");
         const auto callee = exportedRva(analysis, "bad_teardown");
@@ -287,10 +329,38 @@ namespace {
                   "standalone analysis lost the failing nested instruction");
         }
     }
+
+    // Check PE stability for the differential runner's independently disassembled caller.
+    // The first interval is code. Each following interval is a relative table.
+    void checkDispatchSpans(const fs::path &path, llvm::ArrayRef<char *> bounds) {
+        check(bounds.size() >= 4 && bounds.size() % 2 == 0, "expected code and table RVA spans");
+        ParsedImage image(InputFile(path), ParsePolicy::FunctionAnalysis);
+        check(!image.advertisesDynamicRelocations(), "unknown dynamic relocation writes");
+        const auto init = image.imageInitialization();
+
+        for (size_t i = 0; i < bounds.size(); i += 2) {
+            uint32_t begin = 0, end = 0;
+            check(!llvm::StringRef(bounds[i]).getAsInteger(0, begin) &&
+                      !llvm::StringRef(bounds[i + 1]).getAsInteger(0, end) && begin < end,
+                  "invalid dispatch span");
+            const auto mapped = image.mapRva(begin, end - begin);
+            check(mapped && mapped->section.immutable() &&
+                      (mapped->section.permissions[2] == 'x') == (i == 0),
+                  "dispatch requires stable file-backed bytes");
+            check(init.exclusionsIn({begin, end}).empty() &&
+                      init.relocationsIn({begin, end}).empty(),
+                  "dispatch overlaps loader-written bytes or relocations");
+        }
+    }
 } // namespace
 
 int main(int argc, char **argv) try {
-    check(argc == 3, "expected stack.exe and leaves.exe");
+    if (argc >= 3 && llvm::StringRef(argv[1]) == "--check-dispatch-spans") {
+        checkDispatchSpans(argv[2], llvm::ArrayRef(argv + 3, static_cast<size_t>(argc - 3)));
+        return 0;
+    }
+
+    check(argc == 4, "expected stack.exe, leaves.exe and jump.exe");
     const AnalyzedImage analysis(
         std::make_unique<ParsedImage>(InputFile(argv[1]), ParsePolicy::Inspection),
         DebugInfo::Omit);
@@ -330,6 +400,10 @@ int main(int argc, char **argv) try {
     }
 
     checkLeaves(leaves, leafGroup);
+    const AnalyzedImage jumps(
+        std::make_unique<ParsedImage>(InputFile(argv[3]), ParsePolicy::Inspection),
+        DebugInfo::Omit);
+    checkJumpTable(jumps);
     return 0;
 } catch (const std::exception &error) {
     llvm::errs() << error.what() << "\n";

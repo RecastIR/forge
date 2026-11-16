@@ -12,6 +12,7 @@ FORGE_FAILURE(UnmappedCode, "ENTRY_UNMAPPED_CODE", "entry", "invalid_input", "LI
 FORGE_FAILURE(RelocationOverlap, "ENTRY_RELOCATION_OVERLAP", "entry", "unsupported", "LIFT_ERROR")
 FORGE_FAILURE(FunctionSize, "LIFT_FUNCTION_SIZE", "lifting", "unsupported", "LIFT_ERROR")
 FORGE_FAILURE(InvalidInstruction, "LIFT_INVALID_ENCODING", "lifting", "invalid_input", "LIFT_ERROR")
+FORGE_FAILURE(InvalidBranchTarget, "LIFT_INVALID_BRANCH_TARGET", "lifting", "invalid_input", "LIFT_ERROR")
 FORGE_FAILURE(InvalidCallTarget, "LIFT_INVALID_CALL_TARGET", "lifting", "invalid_input", "LIFT_ERROR")
 FORGE_FAILURE(UnsupportedInstruction, "LIFT_UNSUPPORTED_INSTRUCTION", "lifting", "unsupported", "LIFT_ERROR")
 FORGE_FAILURE(ImageMemory, "LIFT_IMAGE_MEMORY", "lifting", "unsupported", "LIFT_ERROR")

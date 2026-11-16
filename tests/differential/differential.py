@@ -17,6 +17,7 @@ import tempfile
 import time
 
 from build import CONDITIONS, FALLTHROUGH, direct_target, reachable_instructions
+from caller_tables import CallerTables
 from comparison import describe, differences
 from lift_diagnostics import SelectedFunction, parse_diagnostic
 from manifests import FIXTURE_ID, SUITE, field, load_catalog, unique_keys
@@ -165,14 +166,17 @@ def caller_decoder(image, begin, end):
     return decode
 
 
-def verify_leaf_call(image, base, caller, site, target):
+def verify_leaf_call(image, module, caller, site, target, forge):
+    base = int(field(module, "image_base_va", str), 16)
     begin, end = base + caller.start, base + caller.end
     try:
         decode = caller_decoder(image, begin, end)
+        tables = CallerTables(image, module, caller, decode)
         ordinary = FALLTHROUGH | {"adc", "sbb", "leave", "lahf", "sal"} | {
             prefix + jump[1:] for prefix in ("cmov", "set") for jump in CONDITIONS}
         graph = reachable_instructions(begin, decode, lambda a: begin <= a < end,
-                                       lambda _: True, ordinary, end=end)
+                                       lambda _: True, ordinary, end=end, indirect=tables.targets)
+        tables.validate(graph, forge)
     except (OSError, subprocess.SubprocessError) as error:
         raise ValueError(f"cannot disassemble the leaf caller: {error}") from error
 
@@ -188,11 +192,11 @@ def verify_leaf_call(image, base, caller, site, target):
     raise ValueError("callee disagrees with reachable direct CALL evidence")
 
 
-def resolve_leaf_window(module, analysis, image, rva, caller_rva, site):
+def resolve_leaf_window(module, analysis, image, rva, caller_rva, site, forge=DEFAULT_FORGE):
     caller = resolve_function(module, analysis, caller_rva, "leaf caller")
     if caller.entry_restriction() or not caller.start <= site < caller.end:
         raise ValueError("leaf call site outside eligible caller")
-    verify_leaf_call(image, int(field(module, "image_base_va", str), 16), caller, site, rva)
+    verify_leaf_call(image, module, caller, site, rva, forge)
 
     # Bound a reported location independently. No gap becomes an analysis function.
     limit = min(0xffffffff, rva + 65536)
@@ -243,7 +247,7 @@ def lift(forge, image, case, selected, ir):
         module = read_json(work / "inspect.json")["modules"][0]
         analysis = read_json(work / "analysis.json")
         if caller is not None:
-            return resolve_leaf_window(module, analysis, image, rva, caller, site)
+            return resolve_leaf_window(module, analysis, image, rva, caller, site, forge)
         return resolve_function(module, analysis, rva, "callee")
 
     try:

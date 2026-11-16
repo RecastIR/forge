@@ -2,6 +2,7 @@
 
 #include "analysis/analysis.h"
 #include "lift/asm_info.h"
+#include "lift/jump_table.h"
 #include "lift/leaf_recovery.h"
 
 #include "llvm/MC/MCContext.h"
@@ -41,7 +42,7 @@ namespace forge::x86 {
             failure.context.input = location.input;
             failure.context.entryRva = location.entryRva;
 
-            if (failureKind(failure.kind).stage == "pe") {
+            if (failureKind(failure.kind).stage == "pe" && !failure.context.instructionRva) {
                 return;
             }
 
@@ -225,6 +226,7 @@ namespace forge::x86 {
 
         void GroupDiscovery::run(const MCDisassembler &dis, const MCInstrInfo &instructions,
                                  const MCRegisterInfo &regs) {
+            JumpTableReader tables(entry.analysis.image(), regs);
             pending.emplace(entry.rva, entry.code);
             while (!pending.empty()) {
                 auto scheduled = pending.extract(pending.begin());
@@ -235,7 +237,8 @@ namespace forge::x86 {
                         .first->second;
 
                 try {
-                    function.graph = discoverCFG(function.code.bytes, rva, dis, instructions);
+                    function.graph =
+                        discoverCFG(function.code.bytes, rva, dis, instructions, tables);
                     for (const auto &[leader, block] : function.graph) {
                         scanCalls(rva, function, block);
                     }

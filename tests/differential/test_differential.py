@@ -523,6 +523,35 @@ class LiftDiagnosticTests(unittest.TestCase):
             with self.subTest(code=code, context=context), self.assertRaises(ValueError):
                 parse(stage, category, code, context)
 
+    def test_invalid_table_target_requires_register_jump_bytes(self):
+        for encoded, valid in [(b"\xff\xe0", True), (b"\x41\xff\xe1", True),
+                               (b"\xff\x20", False), (b"\xe8\x00", False)]:
+            with self.subTest(encoded=encoded.hex()):
+                self.image.write_bytes(b"MZ" + encoded)
+                context = dict(self.diagnostic["context"], instruction_rva=self.rva, opcode="JMP64r",
+                               bytes=encoded.hex(), branch_target=-10)
+                record = dict(self.diagnostic, category="invalid_input", code="LIFT_INVALID_BRANCH_TARGET",
+                              context=context)
+                if valid:
+                    self.assertEqual(lift_diagnostics.parse_diagnostic(self.encode(record), self.image,
+                                     self.selected, self.ir), record)
+                else:
+                    with self.assertRaisesRegex(ValueError, "register jump encoding"):
+                        lift_diagnostics.parse_diagnostic(self.encode(record), self.image, self.selected, self.ir)
+
+    def test_pe_failure_at_dispatch_verifies_source_location(self):
+        self.image.write_bytes(b"MZ\xff\xe0")
+        context = dict(self.diagnostic["context"], instruction_rva=self.rva, file_offset=2,
+                       opcode="JMP64r", bytes="ffe0")
+        record = dict(self.diagnostic, stage="pe", category="invalid_input", code="INVALID_PE",
+                      context=context)
+        self.assertEqual(lift_diagnostics.parse_diagnostic(self.encode(record), self.image,
+                         self.selected, self.ir), record)
+        for changed in (dict(file_offset=3), dict(bytes="ffe1"), dict(opcode="JMP64m")):
+            with self.subTest(changed=changed), self.assertRaises(ValueError):
+                lift_diagnostics.parse_diagnostic(self.encode(dict(record, context=dict(context, **changed))),
+                                                  self.image, self.selected, self.ir)
+
     def test_invalid_call_target_verifies_displacement(self):
         self.image.write_bytes(b"MZ\xe8\x00\x00\x00\x80")
         context = dict(self.diagnostic["context"], instruction_rva="0x10", opcode="CALL64pcrel32",

@@ -47,6 +47,29 @@ Every branch and fallthrough must stay within the window and land on an instruct
 
 The supported instruction and operand model must establish that every reachable instruction preserves RSP and all nonvolatile GPRs until RET. Every explicit integer source, destination and effective address must use modeled operands. Reads of nonvolatile registers are allowed. Partial and conditional writes, pushes, pops, and save/restore pairs disqualify the candidate. Stack arguments, caller-provided pointers and PE data use ordinary checked memory semantics. Nested calls, unresolved transfers, and unmodeled instructions, including SIMD and floating-point control operations, prevent inference. A validated leaf joins the ordinary group with its recovery origin, bounded section view, CFG and incoming call sites. Multiple calls share one guest body. [Operand model](../src/lift/operands.cpp) · [Recovery contract](../src/lift/recovery.h)
 
+### Bounded indirect branches
+
+An unwind-backed function can dispatch through a table of signed 32-bit offsets. The pinned MinGW GCC emits this contiguous sequence for the seven-case C switch in both fixture configurations.
+
+```asm
+cmp     rcx, 6
+ja      default_case
+lea     r8, [rip + table]
+movsxd  rax, dword ptr [r8 + rcx * 4]
+add     rax, r8
+jmp     rax
+```
+
+Recovery matches decoded operands. The base must survive the load and the ADD must form the value consumed by JMP. Unsigned JA leaves indices 0 through the immediate bound on its fallthrough. A 32-bit CMP requires a 32-bit register copy immediately after JA that zero-extends the compared value into the actual address index on every incoming path. For example, two paths can both prove `ECX <= 1` while one still reaches the load with `RCX = 0x100000001`. Signed guards, additional index arithmetic, absolute VA tables and indirect calls are unsupported. [Recognition and entry validation](../src/lift/jump_table.cpp)
+
+The current recovery policy requires an unwind-backed function extent for table targets. An inferred leaf's decode window can contain unclaimed bytes belonging to another function. At an indirect jump in such a leaf, the diagnostic identifies the source CALL and reports the leaf's jump RVA, bytes, and missing extent. [Leaf recovery](../src/lift/leaf_recovery.cpp)
+
+The table must fit in file-backed, immutable, non-executable data in one section. Each complete four-byte entry must be free of loader writes and base fixups. Conflicting fixups at an entry produce `INVALID_PE` with the dispatch instruction, table RVA and first affected index. The recorded code range must also be stable. A PE advertising a Dynamic Value Relocation Table has an unknown loader write footprint. Forge rejects table recovery in that image, including when the table is identified by section index at offset zero. A PE initialization failure at a recognized dispatch retains the JMP location and the table range. Recovery adds each sign-extended little-endian entry to the table RVA and schedules the destination in the same validated function. Existing instruction extents and pending leaders detect overlapping decodes. The limit is 1,024 entries per site and 4,096 entries per function, counting duplicates.
+
+CFG discovery drains direct paths, resolves pending register jumps in RVA order and follows their targets. Each scheduled leader records explicit incoming edges separately from ordinary fallthrough. Before partitioning, recovery checks every proof against those leaders. If a table edge and an instruction extent overlap, the diagnostic identifies the dispatch, its entry index and both conflicting RVAs. An edge to the CMP rechecks the bound. Any edge entering the sequence after the CMP can bypass part of the proof and rejects the lift, including edges found through a later table. An unresolved site fails the request before LLVM emission. The recovered block owns the comparison, guard, load and table RVAs and an ordered successor for each index. Repeated targets retain their indices. The original JA owns the out-of-range edge. [CFG discovery](../src/lift/cfg.cpp) · [Recovered-group tests](../tests/unit/recovery.cpp)
+
+Group analysis selects the proven table byte span for its indexed load. The generated code still performs the checked four-byte read, signed extension and 64-bit ADD, including its flags. An LLVM switch compares the computed guest VA with the selected load base plus each distinct destination RVA. A mismatched address traps. Flag PHIs take their inputs from the actual emitted predecessor edges after any memory or register checks. [LLVM emission](../src/lift/lift.cpp) · [Execution and failure tests](../tests/integration/test_jump.py)
+
 ### One call group in practice
 
 In `functions/sequence`, `call_sequence` passes the address of a live stack local to `pair`. The helper dereferences it and calls `increment` twice. The entry and its helper reach the same `increment` body and its writable PE counter. The internal `forge_lifted_<rva>(ptr)` adapter takes seven register slots and allocates a fresh invocation context. The optional external `forge_lifted(i64, i64)` wrapper supplies RCX/RDX and returns RAX. Nested bodies share the invocation's registers, flags and checked stack. Each calling activation retains its expected return slot and the nonvolatile values it must check. At a nested call Forge checks RSP alignment and shadow space, pushes the guest VA of the next instruction, and validates the frame on return. Each emitted `forge_guest_<rva>` body receives the same guest-state pointer. [Fixture source](../tests/differential/fixtures/functions/sequence.cpp) · [Call lowering](../src/lift/lift.cpp) · [Stack checks](../src/lift/memory.cpp)
@@ -133,5 +156,5 @@ The recovery contract test exercises call-site order, fallthrough continuations,
 ## Deferred Work
 
 - **Additional platforms.** Evaluate PE32 x86 to a 64-bit target, other executable formats, and other native targets against representative binaries when independent reference execution is available.
-- **Full executable and OS compatibility.** Multiple external entries, cross-module calls, indirect dispatch, loader startup, TLS execution, unwinding, Windows API implementations and application packaging each need a concrete consumer and end-to-end observations. The current DLL inspection report remains useful input to that work.
+- **Full executable and OS compatibility.** Multiple external entries, cross-module calls, broader indirect dispatch, loader startup, TLS execution, unwinding, Windows API implementations and application packaging each need a concrete consumer and end-to-end observations. The current DLL inspection report remains useful input to that work.
 - **Broad transformations.** A custom semantic IR, pass registry, plugin framework, ML/LLM integration and automated modernization remain future decisions. Revisit them when a specific transformation, its required facts, and its success and failure criteria can be named.

@@ -166,6 +166,7 @@ namespace forge {
         // Borrow the initialized prefix of a virtual interval inside a single section.
         // The remaining bytes in the interval are zero-filled by the PE loader.
         llvm::StringRef initializedBytes(RvaRange range) const;
+        bool advertisesDynamicRelocations() const;
         std::vector<RvaRange> loaderWrittenRanges() const;
         ImageInitialization imageInitialization() const;
         ImageBytes imageBytes(RvaRange range, const ImageInitialization &init,

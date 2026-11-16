@@ -6,8 +6,11 @@
 #include "lift/operands.h"
 #include "lift/recovery.h"
 
+#include "llvm/IR/CFG.h"
 #include "llvm/IR/Module.h"
 #include "llvm/IR/Verifier.h"
+
+#include <set>
 
 namespace forge {
     namespace {
@@ -74,6 +77,7 @@ namespace forge {
             void storeFlags();
             void lowerCall(const Step &s, const x86::DirectCall &call);
             void emitReturn(const Step &s);
+            void emitDispatch(const x86::GuestBlock &block, const BlockStates &states);
             void lowerStack(const Step &s, StackOp op);
             Value *markSlot(unsigned index);
             Value *loadView(Value *ptr, RegisterView view);
@@ -425,6 +429,29 @@ namespace forge {
             ir.CreateRetVoid();
         }
 
+        void Translator::emitDispatch(const x86::GuestBlock &block, const BlockStates &states) {
+            const auto &jump = block.steps.back();
+            auto *target = value(jump, jump.inst.getOperand(0), 64);
+            auto *fault = BasicBlock::Create(ir.getContext(), "dispatch.fault", impl);
+
+            {
+                IRBuilderBase::InsertPointGuard restore(ir);
+                ir.SetInsertPoint(fault);
+                ir.CreateIntrinsic(Intrinsic::trap, {});
+                ir.CreateUnreachable();
+            }
+
+            auto *dispatch = ir.CreateSwitch(target, fault);
+            std::set<uint32_t> seen;
+
+            for (auto dest : block.successors) {
+                if (seen.insert(dest).second) {
+                    dispatch->addCase(ir.getInt64(analysis.image.guestBase() + dest),
+                                      states.at(dest).irBlock);
+                }
+            }
+        }
+
         void Translator::emitBlock(const x86::GuestBlock &block, const BlockStates &states) {
             const auto &last = block.steps.back();
             auto instructions = ArrayRef(block.steps);
@@ -453,6 +480,9 @@ namespace forge {
                 ir.CreateCondBr(condition(last), states.at(block.successors[0]).irBlock,
                                 states.at(block.successors[1]).irBlock);
                 break;
+            case x86::Flow::Indirect:
+                emitDispatch(block, states);
+                break;
             case x86::Flow::Fallthrough:
             case x86::Flow::Jump:
                 ir.CreateBr(states.at(block.successors.front()).irBlock);
@@ -463,18 +493,33 @@ namespace forge {
             }
         }
 
-        void connectFlags(const x86::ControlFlowGraph &graph, const BlockStates &states) {
-            for (const auto &[addr, block] : graph) {
-                const auto &source = states.at(addr);
-                for (auto dest : block.successors) {
-                    const auto &phis = states.at(dest).phis;
-                    for (unsigned f = 0; f < x86::FlagCount; ++f) {
-                        if (phis[f]) {
-                            assert(source.outgoing[f] &&
-                                   "availability disagrees with flag lowering");
-                            phis[f]->addIncoming(source.outgoing[f], source.exitBlock);
-                        }
+        void connectEdgeFlags(const BlockState &source, const BlockState &dest) {
+            for (unsigned f = 0; f < x86::FlagCount; ++f) {
+                if (auto *phi = dest.phis[f]) {
+                    assert(source.outgoing[f] && "availability disagrees with flag lowering");
+                    phi->addIncoming(source.outgoing[f], source.exitBlock);
+                }
+            }
+        }
+
+        void connectFlags(const BlockStates &states) {
+            std::map<const BasicBlock *, const BlockState *> headers;
+
+            for (const auto &[addr, state] : states) {
+                headers.emplace(state.irBlock, &state);
+            }
+
+            // Conditional branches may have parallel edges. A switch on the computed VA
+            // has one edge per distinct VA, plus a trap block with no guest state.
+            for (const auto &[addr, source] : states) {
+                for (const auto *dest : llvm::successors(source.exitBlock)) {
+                    const auto header = headers.find(dest);
+
+                    if (header == headers.end()) {
+                        continue;
                     }
+
+                    connectEdgeFlags(source, *header->second);
                 }
             }
         }
@@ -545,7 +590,7 @@ namespace forge {
                 state.outgoing = semantics.flags;
             }
 
-            connectFlags(graph, states);
+            connectFlags(states);
         }
 
         std::unique_ptr<llvm::Module> emitGroup(const x86::RecoveredFunctionGroup &group,

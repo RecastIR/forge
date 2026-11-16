@@ -156,7 +156,7 @@ add_test(NAME fixtures COMMAND "${Python3_EXECUTABLE}" -B
   --mc "${llvm-mc}" --link "${lld-link}" --dlltool "${llvm-dlltool}" --clang "${clang}")
 set_tests_properties(fixtures PROPERTIES FIXTURES_SETUP pe_images)
 add_test(NAME input_lifetime COMMAND input_lifetime "${fixtures}/minimal.exe")
-add_test(NAME recovery_contract COMMAND recovery_contract "${fixtures}/stack.exe" "${fixtures}/leaves.exe")
+add_test(NAME recovery_contract COMMAND recovery_contract "${fixtures}/stack.exe" "${fixtures}/leaves.exe" "${fixtures}/jump.exe")
 add_test(NAME lift_contract COMMAND lift_contract "${fixtures}/add.exe" "${fixtures}/cfg.exe"
   "${fixtures}/image.exe" "${fixtures}/stack.exe")
 add_test(NAME lift_command COMMAND lift_command "${fixtures}/add.exe")
@@ -198,11 +198,12 @@ foreach(mode codegen native differential)
 endforeach()
 
 if(APPLE)
-  foreach(memory_suite stack image)
+  foreach(memory_suite stack image jump)
     add_test(NAME guest_${memory_suite} COMMAND "${Python3_EXECUTABLE}" -B
       "${CMAKE_CURRENT_SOURCE_DIR}/integration/test_${memory_suite}.py" "$<TARGET_FILE:forge>" "${fixtures}/${memory_suite}.exe"
       "${opt}" "${llc}" "$<TARGET_OBJECTS:forge_native_harness>" "$<TARGET_OBJECTS:register_state_harness>" ${harness_linker})
     set_tests_properties(guest_${memory_suite} PROPERTIES FIXTURES_REQUIRED pe_images SKIP_RETURN_CODE 77 TIMEOUT 180)
   endforeach()
-  set_tests_properties(guest_stack guest_image PROPERTIES ENVIRONMENT "FORGE_TEST_LIFT_CONTRACT=$<TARGET_FILE:lift_contract>")
+  set_tests_properties(guest_stack guest_image guest_jump PROPERTIES ENVIRONMENT "FORGE_TEST_LIFT_CONTRACT=$<TARGET_FILE:lift_contract>")
+  set_property(TEST guest_jump APPEND PROPERTY ENVIRONMENT "LLVM_DIR=${LLVM_DIR}")
 endif()

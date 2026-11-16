@@ -50,6 +50,7 @@ namespace forge::x86 {
         void checkStackMapping(const Step &step) const;
         void addressTaken(const Step &step, uint64_t va);
         void fixedAccess(const Step &step, uint64_t va, unsigned width, bool write);
+        void tableRead(const Step &step, const RelativeTable &table);
         void computedAccess(const Step &step, std::optional<uint64_t> va, unsigned width,
                             bool write);
         void continuationAccess(const Step &step, const Continuation &origin,
@@ -77,6 +78,7 @@ namespace forge::x86 {
         enum class ExecutableSelection : uint8_t { AddressTakenSection, ContinuationBytes };
 
         const ImageInitialization &contents();
+        void fixedImageAccess(const Step &step, RvaRange access, bool write);
         void selectComputed(const Step &step, uint64_t va, unsigned width, bool write,
                             ExecutableSelection executableSelection);
         void select(const Step &step, const Section &section, RvaRange access);

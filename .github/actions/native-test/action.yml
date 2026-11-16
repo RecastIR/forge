@@ -33,7 +33,7 @@ runs:
       shell: bash
       run: |
         binary="build/$PRESET/forge"
-        tar -czf "$RUNNER_TEMP/tested-$PRESET.tgz" "$binary"
+        tar -czf "$RUNNER_TEMP/tested-$PRESET.tgz" "$binary" "build/$PRESET/tests/recovery_contract"
         echo "sha256=$(shasum -a 256 "$binary" | cut -d' ' -f1)" >> "$GITHUB_OUTPUT"
     - uses: actions/upload-artifact@v4
       with:
