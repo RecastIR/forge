@@ -57,8 +57,16 @@ function(configure_forge_cxx target)
   target_compile_options(${target} PRIVATE ${sanitizer_compile_flags})
 endfunction()
 
-function(configure_forge_output target property legacy_directory)
+function(configure_forge_output target property legacy_variable)
   set(properties "${property}")
+  if(NOT DEFINED CMAKE_${property} AND NOT "${${legacy_variable}}" STREQUAL "")
+    # Keep the legacy setting in the component's directory scope. CMake treats
+    # its path literally even when it contains "$<".
+    cmake_path(ABSOLUTE_PATH ${legacy_variable} BASE_DIRECTORY "${PROJECT_BINARY_DIR}"
+      OUTPUT_VARIABLE directory)
+    set(${legacy_variable} "${directory}" PARENT_SCOPE)
+    set(properties "")
+  endif()
   foreach(config IN LISTS CMAKE_CONFIGURATION_TYPES CMAKE_BUILD_TYPE)
     string(TOUPPER "${config}" config)
     if(DEFINED CMAKE_${property}_${config})
@@ -67,17 +75,12 @@ function(configure_forge_output target property legacy_directory)
   endforeach()
 
   foreach(name IN LISTS properties)
-    if(DEFINED CMAKE_${name})
-      set(directory "${CMAKE_${name}}")
-    else()
-      set(directory "${legacy_directory}")
-    endif()
+    set(directory "${CMAKE_${name}}")
     # These targets used to live at the project root. Leave a leading generator
     # expression to CMake because its result may be an absolute path.
     if(NOT IS_ABSOLUTE "${directory}" AND NOT directory MATCHES "^\\$<")
-      set(directory "${PROJECT_BINARY_DIR}/${directory}")
+      set_property(TARGET ${target} PROPERTY ${name} "${PROJECT_BINARY_DIR}/${directory}")
     endif()
-    set_property(TARGET ${target} PROPERTY ${name} "${directory}")
   endforeach()
 endfunction()
 

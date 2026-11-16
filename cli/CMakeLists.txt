@@ -4,7 +4,7 @@ add_executable(forge
   src/commands/lift.cpp src/commands/lift_execution.cpp
   src/report.cpp src/analysis_report.cpp src/diagnostic.cpp)
 target_include_directories(forge PRIVATE src)
-configure_forge_output(forge RUNTIME_OUTPUT_DIRECTORY "${EXECUTABLE_OUTPUT_PATH}")
+configure_forge_output(forge RUNTIME_OUTPUT_DIRECTORY EXECUTABLE_OUTPUT_PATH)
 set_target_properties(forge PROPERTIES LINK_LIBRARIES_STRATEGY REORDER_FREELY)
 # LLVM can expose a global include directory containing a different CLI11.
 target_link_libraries(forge PRIVATE CLI11::CLI11 forge_core)
