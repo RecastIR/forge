@@ -4,16 +4,17 @@ Forge inspects Windows PE32+ AMD64 executables and DLLs on macOS. It reports the
 
 ## Repository layout
 
-The root CMake project builds the `forge` CLI on a private `forge_core` library. Core contract tests link the same production code. All headers are internal to the repository.
+The root CMake project registers the compiler and the test suites. The compiler builds the `forge` CLI and its private `forge_core` library. Core contract tests link the same production code. All headers are internal to the repository.
 
 | Location | Responsibility |
 | --- | --- |
-| `src/cli/` | Application entry point, argument compatibility, shared analysis input, and report and diagnostic rendering |
-| `src/cli/commands/` | Typed options, CLI11 registration, and execution for inspect, analyze, and lift |
-| `src/pe/` | File input, PE parsing, image metadata, and DLL dependency resolution |
-| `src/analysis/` | Function discovery, range validation, findings, and optional debug enrichment |
-| `src/lift/` | Translation of supported function instructions to LLVM IR |
-| `src/output/` | Publication of completed LLVM modules |
+| `compiler/src/cli/` | Application entry point, argument compatibility, shared analysis input, and report and diagnostic rendering |
+| `compiler/src/cli/commands/` | Typed options, CLI11 registration, and execution for inspect, analyze, and lift |
+| `compiler/src/pe/` | File input, PE parsing, image metadata, and DLL dependency resolution |
+| `compiler/src/analysis/` | Function discovery, range validation, findings, and optional debug enrichment |
+| `compiler/src/lift/` | Translation of supported function instructions to LLVM IR |
+| `compiler/src/output/` | Publication of completed LLVM modules |
+| `runtime/` | Reserved for the future native macOS ARM64 runtime and Windows compatibility services |
 | `cmake/` | Formatting and static-analysis commands |
 | `tests/integration/` | Build, CLI, code generation, and native execution suites and their Python helpers |
 | `tests/fixtures/` | SDK-free PE fixture sources and their generator |
@@ -21,7 +22,7 @@ The root CMake project builds the `forge` CLI on a private `forge_core` library.
 | `tests/support/` | C++ harness for calling a lifted function from a test |
 | `tests/differential/` | Windows x64 fixtures, manifests, cross-build tooling, and Wine reference capture |
 
-Add new production code to the component that owns it. Create `runtime/` when generated code first needs a shared native implementation. Register tests in `tests/CMakeLists.txt`. Build the whole-executable fixtures with `make provision-fixtures` and `./tools/build-windows-fixtures.sh --all`, then capture their Wine references with `./tools/run-windows-references.sh --all`. On Apple Silicon, compare enabled lifted functions with `./tools/run-differential.sh --all --config debug` or `--config release`. See the [fixture guide](tests/differential/README.md).
+Add new production code to the component that owns it. See the [compiler and runtime responsibilities](docs/design-guide.md#compiler-and-runtime) when adding a component. Register tests in `tests/CMakeLists.txt`. Build the whole-executable fixtures with `make provision-fixtures` and `./tools/build-windows-fixtures.sh --all`, then capture their Wine references with `./tools/run-windows-references.sh --all`. On Apple Silicon, compare enabled lifted functions with `./tools/run-differential.sh --all --config debug` or `--config release`. See the [fixture guide](tests/differential/README.md).
 
 ### Image ownership and stage contracts
 

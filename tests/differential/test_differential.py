@@ -656,7 +656,7 @@ class LiftDiagnosticTests(unittest.TestCase):
             self.lift(0, b"")
 
     def test_recognized_execution_codes_match_forge(self):
-        catalog = (diff.SUITE.parents[1] / "src/diagnostics.def").read_text()
+        catalog = (diff.SUITE.parents[1] / "compiler/src/diagnostics.def").read_text()
         expected = set()
         row = r'FORGE_FAILURE\(\w+,\s*"(\w+)",\s*"(\w+)",\s*"(\w+)",\s*"\w+"\)'
         for line in catalog.splitlines():

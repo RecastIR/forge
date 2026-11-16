@@ -190,9 +190,9 @@ class BuildConfig(BuildCase):
         self.assertFalse((build / "tests/integer_semantics").exists())
         self.assertFalse(list(build.rglob("register_state.cpp.o")))
         if read_cache(build)["FORGE_CONAN_PRESET"] == "sanitize":
-            parsing = next(e for e in entries if e["file"] == str(SOURCE / "src/cli/parsing.cpp"))
+            parsing = next(e for e in entries if e["file"] == str(SOURCE / "compiler/src/cli/parsing.cpp"))
             self.assertIn("-fsanitize=address,undefined", parsing["command"])
-            self.assertIn("-fsanitize=address,undefined", (build / "CMakeFiles/forge.dir/link.txt").read_text())
+            self.assertIn("-fsanitize=address,undefined", (build / "compiler/CMakeFiles/forge.dir/link.txt").read_text())
             failed = self.invoke(CMAKE, "-S", SOURCE, "-B", self.tmp / "unsanitized", *options,
                                  f"-DCMAKE_BUILD_TYPE={CONFIG}", "-DFORGE_ENABLE_SANITIZERS=OFF", success=False)
             self.assertIn("FORGE_ENABLE_SANITIZERS conflicts", failed)
@@ -214,13 +214,13 @@ class BuildConfig(BuildCase):
         subprocess.run(command, cwd=SOURCE, env=env, check=True)
         args = (self.tmp / "clang-tidy.args").read_text().splitlines()
         self.assertEqual(args[:2], ["-p", str(build)])
-        expected = [str(p) for folder in ("src", "tests/support", "tests/unit")
+        expected = [str(p) for folder in ("compiler/src", "tests/support", "tests/unit")
                     for p in (SOURCE / folder).rglob("*.cpp")]
         self.assertTrue(any(arg.startswith("--vfsoverlay=") for arg in args))
         self.assertCountEqual([arg for arg in args if arg.endswith(".cpp")], expected)
         self.assertEqual(database.read_bytes(), contents)
 
-        for missing in (harness, SOURCE / "src/pe/pe.cpp", SOURCE / "tests/unit/integer.cpp"):
+        for missing in (harness, SOURCE / "compiler/src/pe/pe.cpp", SOURCE / "tests/unit/integer.cpp"):
             with self.subTest(missing=missing):
                 database.write_text(json.dumps([e for e in entries if e["file"] != str(missing)]))
                 failed = subprocess.run(command, cwd=SOURCE, env=self.env, capture_output=True, text=True)
@@ -346,7 +346,7 @@ class Provisioning(BuildCase):
     def test_named_configurations_in_clean_checkout(self):
         src = self.tmp / "clean checkout"
         self.copy_build_files(src)
-        for name in ("src", "tests", "conan"):
+        for name in ("compiler", "tests", "conan"):
             shutil.copytree(SOURCE / name, src / name)
         for name in ("conanfile.py", "conan.lock", "requirements-build.txt", ".gitignore"):
             shutil.copyfile(SOURCE / name, src / name)

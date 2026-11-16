@@ -28,12 +28,12 @@ class StyleChecks(unittest.TestCase):
         for file in ('CMakeLists.txt', 'CMakePresets.json', 'Makefile', '.clang-format', '.clang-tidy', '.gitignore'):
             shutil.copyfile(SOURCE / file, self.root / file)
         shutil.copytree(SOURCE / 'cmake', self.root / 'cmake')
-        (self.root / 'src').mkdir()
-        self.file = self.root / 'src/legacy.cpp'
+        (self.root / 'compiler/src').mkdir(parents=True)
+        self.file = self.root / 'compiler/src/legacy.cpp'
         self.file.write_text(FORMATTED)
-        self.header = self.root / 'src/model.h'
+        self.header = self.root / 'compiler/src/model.h'
         self.header.write_text('#pragma once\n\ninline int value() { return 3; }\n')
-        self.caller = self.root / 'src/sample.cpp'
+        self.caller = self.root / 'compiler/src/sample.cpp'
         self.caller.write_text('#include "model.h"\n\nint readValue() { return value(); }\n')
         self.run_command('git', 'init', '-q')
         self.run_command('git', 'add', '.')
@@ -62,7 +62,7 @@ class StyleChecks(unittest.TestCase):
     def test_whole_function_and_lifetime_advisories(self):
         command = self.fixture_lint_command()
         self.header.write_text('inline int score(int Value) {\n    return Value;\n}\n')
-        included = ('src/generated', 'src/third_party', 'tests/support/vendor',
+        included = ('compiler/src/generated', 'compiler/src/third_party', 'tests/support/vendor',
                     'tests/differential/fixtures', 'tests/support', 'tests/unit')
         paths = []
         for index, directory in enumerate(included):
@@ -71,7 +71,7 @@ class StyleChecks(unittest.TestCase):
             path.write_text(f'inline void helper{index}() {{ return; }}\n')
             paths.append(path)
         self.caller.write_text(
-            '#include "../src/model.h"\n' +
+            '#include "../../compiler/src/model.h"\n' +
             ''.join(f'#include "{path.relative_to(self.root)}"\n' for path in paths) +
             '#include <llvm/ADT/Twine.h>\n'
             'std::string label(int Value) {\n'
@@ -79,7 +79,7 @@ class StyleChecks(unittest.TestCase):
             '    return Label.str();\n}\n'
             'int choose(int Value) {\n'
             '    if (Value > 0) { return score(Value); } else { return 0; }\n}\n')
-        self.run_command('git', 'add', 'src', 'tests')
+        self.run_command('git', 'add', 'compiler/src', 'tests')
         self.run_command('git', '-c', 'user.name=Test', '-c', 'user.email=test@localhost',
                          'commit', '-qm', 'baseline advisory fixtures')
         # Seven nested conditions score 28. Only the function body changes.
@@ -151,8 +151,18 @@ int measure(const int start, const int End) {
                 self.assertIn(diagnostic, output)
                 self.assertIn(invalid.split(':')[0], output)
 
+    def test_lint_across_compiler_move(self):
+        self.run_command('git', 'mv', 'compiler/src', 'src')
+        self.run_command('git', '-c', 'user.name=Test', '-c', 'user.email=test@localhost',
+                         'commit', '-qm', 'former compiler layout')
+        self.run_command('git', 'mv', 'src', 'compiler/src')
+        self.file.write_text(FORMATTED + 'int next(int NewValue) { return NewValue; }\n')
+        output = self.run_command(*self.fixture_lint_command(), env=dict(self.env, FORGE_STYLE_BASE='HEAD'))
+        self.assertIn("'NewValue' [readability-identifier-naming]", output)
+        self.assertNotIn("'Old' [readability-identifier-naming]", output)
+
     def test_whole_tree_formatting_and_entry_points(self):
-        shutil.copytree(SOURCE / 'src', self.root / 'src', dirs_exist_ok=True)
+        shutil.copytree(SOURCE / 'compiler', self.root / 'compiler', dirs_exist_ok=True)
         self.run_command('cmake', '-S', '.', '-B', 'build/dev', '-DFORGE_BUILD_CLI=OFF', '-DBUILD_TESTING=OFF')
         target = ('cmake', '--build', 'build/dev', '--target')
         bad = FORMATTED.replace('    int Value', '  int Value')
@@ -165,7 +175,7 @@ int measure(const int start, const int End) {
                 self.file.write_text(bad)
                 for check in ('format-check', 'format-audit'):
                     output = self.run_command(*command, check, success=False, env=env)
-                    self.assertIn('src/legacy.cpp:', output)
+                    self.assertIn('compiler/src/legacy.cpp:', output)
                     self.assertEqual(self.file.read_text(), bad)
                 self.run_command(*command, 'format', env=env)
                 self.assertEqual(self.file.read_text(), FORMATTED)
@@ -220,24 +230,24 @@ namespace forge {
         self.assertEqual(self.file.read_bytes(), expected)
 
     def test_file_selection(self):
-        renamed = self.root / 'src/renamed file.cpp'
+        renamed = self.root / 'compiler/src/renamed file.cpp'
         self.run_command('git', 'mv', self.file, renamed)
         self.header.unlink()
-        for directory in ('build', 'src/generated', 'src/third_party', 'tests/support/vendor'):
+        for directory in ('build', 'compiler/src/generated', 'compiler/src/third_party', 'tests/support/vendor'):
             folder = self.root / directory
             folder.mkdir(parents=True)
             (folder / 'ignored.cpp').write_text('int  x;\n')
         self.run_command('make', 'format-check')
         renamed.write_text(FORMATTED.replace('Value = 4', 'Value=5'))
-        new = self.root / 'src/new.cpp'
+        new = self.root / 'compiler/src/new.cpp'
         new.write_text('int  Other;\n')
         output = self.run_command('make', 'format-check', success=False)
-        self.assertIn('src/new.cpp:1:', output)
-        self.assertIn('src/renamed file.cpp:3:', output)
+        self.assertIn('compiler/src/new.cpp:1:', output)
+        self.assertIn('compiler/src/renamed file.cpp:3:', output)
         self.run_command('make', 'format')
         self.assertEqual(new.read_text(), 'int Other;\n')
         self.assertEqual(renamed.read_text(), FORMATTED.replace('Value = 4', 'Value = 5'))
-        self.assertEqual((self.root / 'src/third_party/ignored.cpp').read_text(), 'int  x;\n')
+        self.assertEqual((self.root / 'compiler/src/third_party/ignored.cpp').read_text(), 'int  x;\n')
 
     def test_quality_commands_reject_wrong_tool_version(self):
         tools = self.root / 'decoy'
