@@ -58,6 +58,9 @@ function(configure_forge_cxx target)
 endfunction()
 
 add_subdirectory(compiler)
+if(FORGE_BUILD_CLI)
+  add_subdirectory(cli)
+endif()
 
 include(CTest)
 if(BUILD_TESTING OR CMAKE_EXPORT_COMPILE_COMMANDS OR DEFINED FORGE_DIFFERENTIAL_IR OR DEFINED FORGE_DIFFERENTIAL_CASES)

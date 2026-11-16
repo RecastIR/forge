@@ -1,4 +1,4 @@
-#include "cli/report.h"
+#include "report.h"
 #include "pe/dependencies.h"
 
 #include "llvm/Support/FormatVariadic.h"

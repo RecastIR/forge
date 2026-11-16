@@ -161,6 +161,19 @@ int measure(const int start, const int End) {
         self.assertIn("'NewValue' [readability-identifier-naming]", output)
         self.assertNotIn("'Old' [readability-identifier-naming]", output)
 
+    def test_lint_across_cli_move(self):
+        (self.root / 'compiler/src/cli').mkdir()
+        self.run_command('git', 'mv', self.file, 'compiler/src/cli/legacy.cpp')
+        self.run_command('git', '-c', 'user.name=Test', '-c', 'user.email=test@localhost',
+                         'commit', '-qm', 'CLI inside compiler')
+        (self.root / 'cli').mkdir()
+        self.run_command('git', 'mv', 'compiler/src/cli', 'cli/src')
+        self.file = self.root / 'cli/src/legacy.cpp'
+        self.file.write_text(FORMATTED + 'int next(int NewValue) { return NewValue; }\n')
+        output = self.run_command(*self.fixture_lint_command(), env=dict(self.env, FORGE_STYLE_BASE='HEAD'))
+        self.assertIn("'NewValue' [readability-identifier-naming]", output)
+        self.assertNotIn("'Old' [readability-identifier-naming]", output)
+
     def test_whole_tree_formatting_and_entry_points(self):
         shutil.copytree(SOURCE / 'compiler', self.root / 'compiler', dirs_exist_ok=True)
         self.run_command('cmake', '-S', '.', '-B', 'build/dev', '-DFORGE_BUILD_CLI=OFF', '-DBUILD_TESTING=OFF')
@@ -239,10 +252,11 @@ namespace forge {
             (folder / 'ignored.cpp').write_text('int  x;\n')
         self.run_command('make', 'format-check')
         renamed.write_text(FORMATTED.replace('Value = 4', 'Value=5'))
-        new = self.root / 'compiler/src/new.cpp'
+        new = self.root / 'cli/src/new.cpp'
+        new.parent.mkdir(parents=True)
         new.write_text('int  Other;\n')
         output = self.run_command('make', 'format-check', success=False)
-        self.assertIn('compiler/src/new.cpp:1:', output)
+        self.assertIn('cli/src/new.cpp:1:', output)
         self.assertIn('compiler/src/renamed file.cpp:3:', output)
         self.run_command('make', 'format')
         self.assertEqual(new.read_text(), 'int Other;\n')

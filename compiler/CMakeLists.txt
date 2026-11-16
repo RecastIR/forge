@@ -17,16 +17,3 @@ if(APPLE AND TARGET LTO)
   target_link_options(forge_core INTERFACE "LINKER:-lto_library,$<TARGET_FILE:LTO>")
 endif()
 configure_forge_cxx(forge_core)
-
-if(FORGE_BUILD_CLI)
-  add_executable(forge
-    src/cli/main.cpp src/cli/parsing.cpp src/cli/analysis_input.cpp
-    src/cli/commands/inspect.cpp src/cli/commands/analyze.cpp
-    src/cli/commands/lift.cpp src/cli/commands/lift_execution.cpp
-    src/cli/report.cpp src/cli/analysis_report.cpp src/cli/diagnostic.cpp)
-  set_target_properties(forge PROPERTIES RUNTIME_OUTPUT_DIRECTORY "${PROJECT_BINARY_DIR}"
-    LINK_LIBRARIES_STRATEGY REORDER_FREELY)
-  # LLVM can expose a global include directory containing a different CLI11.
-  target_link_libraries(forge PRIVATE CLI11::CLI11 forge_core)
-  configure_forge_cxx(forge)
-endif()

@@ -24,7 +24,7 @@ WarningsAsErrors: >
   bugprone-use-after-move,
   readability-braces-around-statements
 # make lint narrows this to the owned native headers in the current checkout.
-HeaderFilterRegex: '(^|/)(compiler/src|tests/(support|unit))/.+\.h$'
+HeaderFilterRegex: '(^|/)((cli|compiler)/src|tests/(support|unit))/.+\.h$'
 CheckOptions:
   readability-function-cognitive-complexity.Threshold: '25'
   readability-function-cognitive-complexity.DescribeBasicIncrements: 'true'

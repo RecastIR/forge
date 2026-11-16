@@ -2,17 +2,21 @@
 
 For changes that span guest functions, transformations, or output targets, see the [program architecture review](program-architecture.md). It traces a direct-call lift and documents the lifetimes of source facts, proofs and executable state.
 
-## Compiler and runtime
+## Component responsibilities
 
-The compiler owns PE input and metadata, function and program recovery, and analysis of registers, flags, and guest addresses. It generates and verifies LLVM IR, owns compiler transformations, and publishes results through the Forge CLI. The stack checks and image-memory operations that Forge emits into a module are part of code generation.
+The CLI owns command registration, argument parsing, reports, diagnostic formatting and exit codes. Its executors call the compiler library. Future commands for native compilation, packaging, Blueprints and runtime configuration belong here. The CLI may coordinate runtime packaging or execution without linking a runtime implementation.
+
+### Compiler and runtime
+
+The compiler owns PE input and metadata, function and program recovery, and analysis of registers, flags, and guest addresses. Its `forge_core` library owns the diagnostic model, generates and verifies LLVM IR, and provides compiler transformations and output publication to callers. It builds independently of CLI11 and the runtime. The stack checks and image-memory operations that Forge emits into a module are part of code generation.
 
 The future macOS ARM64 runtime will own guest process and thread state, memory management, external-call ABI bridging, import binding and dispatch, and Windows-compatible services and native adapters. Runtime initialization, termination, callbacks, and integration with selected Wine-derived implementations belong there.
 
-A narrow, explicit ABI will let the compiler generate calls independently of the concrete Windows API provider. The runtime will consume that contract without depending on LLVM internals, recovered CFGs, or compiler-private classes. Task 12A will define the public interface and dependency strategy.
+A narrow, explicit ABI will let the compiler generate calls independently of the concrete Windows API provider. The runtime will execute the generated code through that ABI, independently of LLVM and compiler internals. Task 12A will define the public interface and dependency strategy.
 
 ## Where does the change belong?
 
-The CLI calls the private `forge_core` library. Inspection follows imports across files and returns a report. Analysis and lifting share one parsed image. The CLI can render the analysis or request a verified LLVM module and pass it to publication. Keep dependencies pointing toward the data each stage consumes. Core contract tests call these same interfaces directly.
+The CLI calls `forge_core`. Inspection follows imports across files and returns a report. Analysis and lifting share one parsed image. The CLI can render the analysis or request a verified LLVM module and pass it to publication. Keep dependencies pointing toward the data each stage consumes. Core contract tests call these same interfaces directly.
 
 | Component | Responsibility and contract |
 | --- | --- |
@@ -22,13 +26,13 @@ The CLI calls the private `forge_core` library. Inspection follows imports acros
 | [Function analysis](../compiler/src/analysis/analysis.h) | `AnalyzedImage` owns its `ParsedImage`. It derives function ranges, overlaps, findings, and eligibility from the parsed records. Optional debug enrichment uses the same image. |
 | [Lifting](../compiler/src/lift/lift.h) | `generateIR` validates the request against the borrowed analysis. The [recovered group](../compiler/src/lift/recovery.h) owns the reachable CFGs and validated calls. [Group analysis](../compiler/src/lift/group_analysis.h) prepares the proofs and memory plan for the selected entry contract and guest base. LLVM emission uses these inputs to build and verify the caller-owned module. |
 | [Publication](../compiler/src/output/publication.h) | `publishIR` borrows the completed module and parsed image. It checks the requested destination and owns the file operations that replace it. |
-| [CLI](../compiler/src/cli/main.cpp) | The entry point registers commands and handles help and usage errors. Each command selects policies, sequences core calls, and returns an exit status. Renderers consume reports, findings, and classified errors. |
+| [CLI](../cli/src/main.cpp) | The entry point registers commands and handles help and usage errors. Each command selects policies, sequences core calls, and returns an exit status. Renderers consume reports, findings, and classified errors. |
 
 ## Adding a CLI command
 
-1. Follow the [inspect implementation](../compiler/src/cli/commands/inspect.cpp). Put the option struct and registration declaration in a header under `compiler/src/cli/commands/`. Store paths, flags, and existing core request types by value. Keep command-specific options, validation, and help text in the matching implementation.
+1. Follow the [inspect implementation](../cli/src/commands/inspect.cpp). Put the option struct and registration declaration in a header under `cli/src/commands/`. Store paths, flags, and existing core request types by value. Keep command-specific options, validation, and help text in the matching implementation.
 2. In `main.cpp`, declare the options before the `CLI::App`, then call the registration function with the app, options, and exit status. CLI11 retains references to option storage. Bind a `final_callback` that calls the typed executor and records its return value. It runs after help and argument checks. Use `trigger_on_parse()` for options whose every occurrence needs validation.
-3. Keep the executor independent of CLI11. Call the owning core interfaces, render reports to stdout and diagnostics to stderr, and return the command's status. Use `cli/parsing.h` for shared input and report options and `cli/report.h` for existing renderers. Add the command's sources to the `forge` target in [the compiler build](../compiler/CMakeLists.txt).
+3. Keep the executor independent of CLI11. Call the owning core interfaces, render reports to stdout and diagnostics to stderr, and return the command's status. Use `parsing.h` for shared input and report options and `report.h` for existing renderers. Add the command's sources to the `forge` target in [the CLI build](../cli/CMakeLists.txt).
 4. Exercise the public syntax, both streams, and exit status in the [CLI suite](../tests/integration/test_inspect.py). For a separately testable executor, see the [typed lift test](../tests/unit/lift_command.cpp), which calls the production executor with a generated PE fixture and a diagnostic stream. Register tests in `tests/CMakeLists.txt`.
 
 From the repository root, run the focused tests with fixture setup, including when the build was previously configured with tests disabled.

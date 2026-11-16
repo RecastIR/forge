@@ -168,6 +168,6 @@ Forge defers `cppcoreguidelines-pro-type-member-init`. A trial flagged five init
 
 ## Comparing advisory lint findings
 
-Review findings relevant to your changes and leave unrelated complexity for separate work. Inspect each suggested control-flow simplification in context. Whole-function advisories include declarations outside the diff. Native lint covers `compiler/src`, `tests/support`, and `tests/unit`, excluding generated and third-party headers. Windows fixture sources use their own toolchain.
+Review findings relevant to your changes and leave unrelated complexity for separate work. Inspect each suggested control-flow simplification in context. Whole-function advisories include declarations outside the diff. Native lint covers `cli/src`, `compiler/src`, `tests/support`, and `tests/unit`, excluding generated and third-party headers. Windows fixture sources use their own toolchain.
 
 Naming and nested-ternary diagnostics use the working-tree diff against the merge base of `HEAD` and `origin/main`, including branch commits, staged and unstaged edits, and untracked sources. Set `FORGE_STYLE_BASE` to an available commit to reproduce a specific comparison. CI uses the PR base SHA or the previous SHA of a push. Whole-tree formatting requires no comparison commit.

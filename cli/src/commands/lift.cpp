@@ -1,5 +1,5 @@
-#include "cli/commands/lift.h"
-#include "cli/parsing.h"
+#include "commands/lift.h"
+#include "parsing.h"
 
 #include "llvm/Support/raw_ostream.h"
 

@@ -1,6 +1,6 @@
 #pragma once
 
-#include "cli/report.h"
+#include "report.h"
 
 #include <CLI/CLI.hpp>
 

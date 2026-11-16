@@ -1,7 +1,7 @@
-#include "cli/commands/analyze.h"
-#include "cli/commands/inspect.h"
-#include "cli/commands/lift.h"
-#include "cli/parsing.h"
+#include "commands/analyze.h"
+#include "commands/inspect.h"
+#include "commands/lift.h"
+#include "parsing.h"
 
 #include "llvm/Support/raw_ostream.h"
 

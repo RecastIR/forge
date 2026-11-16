@@ -1,4 +1,4 @@
-#include "cli/commands/lift.h"
+#include "commands/lift.h"
 
 #include "llvm/ADT/ScopeExit.h"
 #include "llvm/ADT/SmallString.h"

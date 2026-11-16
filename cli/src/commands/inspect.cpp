@@ -1,8 +1,8 @@
-#include "cli/commands/inspect.h"
-#include "cli/parsing.h"
-#include "cli/report.h"
+#include "commands/inspect.h"
 #include "diagnostic.h"
+#include "parsing.h"
 #include "pe/dependencies.h"
+#include "report.h"
 
 namespace forge::cli {
     namespace {

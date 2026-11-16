@@ -4,12 +4,13 @@ Forge inspects Windows PE32+ AMD64 executables and DLLs on macOS. It reports the
 
 ## Repository layout
 
-The root CMake project registers the compiler and the test suites. The compiler builds the `forge` CLI and its private `forge_core` library. Core contract tests link the same production code. All headers are internal to the repository.
+The root CMake project builds the `forge_core` compiler library and registers the `forge` executable when `FORGE_BUILD_CLI` is enabled. The CLI and core contract tests both call the compiler library. All headers are internal to the repository.
 
 | Location | Responsibility |
 | --- | --- |
-| `compiler/src/cli/` | Application entry point, argument compatibility, shared analysis input, and report and diagnostic rendering |
-| `compiler/src/cli/commands/` | Typed options, CLI11 registration, and execution for inspect, analyze, and lift |
+| `cli/src/` | Application entry point, argument compatibility, shared analysis input, and report and diagnostic rendering |
+| `cli/src/commands/` | Typed options, CLI11 registration, and execution for inspect, analyze, and lift |
+| `compiler/src/diagnostic.*`, `compiler/src/diagnostics.def` | Diagnostic model and failure codes shared by compiler stages and CLI renderers |
 | `compiler/src/pe/` | File input, PE parsing, image metadata, and DLL dependency resolution |
 | `compiler/src/analysis/` | Function discovery, range validation, findings, and optional debug enrichment |
 | `compiler/src/lift/` | Translation of supported function instructions to LLVM IR |
@@ -22,7 +23,7 @@ The root CMake project registers the compiler and the test suites. The compiler 
 | `tests/support/` | C++ harness for calling a lifted function from a test |
 | `tests/differential/` | Windows x64 fixtures, manifests, cross-build tooling, and Wine reference capture |
 
-Add new production code to the component that owns it. See the [compiler and runtime responsibilities](docs/design-guide.md#compiler-and-runtime) when adding a component. Register tests in `tests/CMakeLists.txt`. Build the whole-executable fixtures with `make provision-fixtures` and `./tools/build-windows-fixtures.sh --all`, then capture their Wine references with `./tools/run-windows-references.sh --all`. On Apple Silicon, compare enabled lifted functions with `./tools/run-differential.sh --all --config debug` or `--config release`. See the [fixture guide](tests/differential/README.md).
+Add new production code to the component that owns it. See the [component responsibilities](docs/design-guide.md#component-responsibilities) when adding a component. Register tests in `tests/CMakeLists.txt`. Build the whole-executable fixtures with `make provision-fixtures` and `./tools/build-windows-fixtures.sh --all`, then capture their Wine references with `./tools/run-windows-references.sh --all`. On Apple Silicon, compare enabled lifted functions with `./tools/run-differential.sh --all --config debug` or `--config release`. See the [fixture guide](tests/differential/README.md).
 
 ### Image ownership and stage contracts
 

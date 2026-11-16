@@ -7,7 +7,7 @@ import sys
 from xml.etree import ElementTree
 
 
-NATIVE_ROOTS = ('compiler/src', 'tests/support', 'tests/unit')
+NATIVE_ROOTS = ('cli/src', 'compiler/src', 'tests/support', 'tests/unit')
 ROOTS = (*NATIVE_ROOTS, 'tests/fixtures', 'tests/differential/fixtures', 'tests/differential/reference')
 # Git needs both sides of a rename when comparing with a pre-monorepo revision.
 DIFF_ROOTS = (*ROOTS, 'src')
