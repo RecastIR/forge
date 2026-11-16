@@ -16,7 +16,7 @@ import sys
 import tempfile
 import time
 
-from build import CONDITIONS, FALLTHROUGH, direct_target, reachable_instructions
+from build import CONDITIONS, FALLTHROUGH, direct_target, reachable_instructions, register_call_targets
 from caller_tables import CallerTables
 from comparison import describe, differences
 from lift_diagnostics import SelectedFunction, parse_diagnostic
@@ -166,7 +166,7 @@ def caller_decoder(image, begin, end):
     return decode
 
 
-def verify_leaf_call(image, module, caller, site, target, forge):
+def verified_call_target(image, module, caller, site, forge, *, require_continuation):
     base = int(field(module, "image_base_va", str), 16)
     begin, end = base + caller.start, base + caller.end
     try:
@@ -175,8 +175,13 @@ def verify_leaf_call(image, module, caller, site, target, forge):
         ordinary = FALLTHROUGH | {"adc", "sbb", "leave", "lahf", "sal"} | {
             prefix + jump[1:] for prefix in ("cmov", "set") for jump in CONDITIONS}
         graph = reachable_instructions(begin, decode, lambda a: begin <= a < end,
-                                       lambda _: True, ordinary, end=end, indirect=tables.targets)
-        tables.validate(graph, forge)
+                                       lambda _: True, ordinary, end=end, indirect=tables.targets, register_calls=True)
+        with image.open("rb") as source:
+            def encoding(first, last):
+                source.seek(caller.file_offset + first - begin)
+                return source.read(last - first)
+            registers = register_call_targets(graph, decode, encoding=encoding)
+        tables.validate(graph, forge, register_calls=bool(registers))
     except (OSError, subprocess.SubprocessError) as error:
         raise ValueError(f"cannot disassemble the leaf caller: {error}") from error
 
@@ -187,16 +192,20 @@ def verify_leaf_call(image, module, caller, site, target, forge):
     if address in graph:
         text, continuation = decode(address)
         opcode, _, operands = text.partition(" ")
-        if opcode == "call" and continuation < end and direct_target(operands) == base + target:
-            return
-    raise ValueError("callee disagrees with reachable direct CALL evidence")
+        if opcode == "call" and (not require_continuation or continuation < end):
+            dest = registers.get(address, direct_target(operands))
+            if dest is not None:
+                return dest - base
+    raise ValueError("callee disagrees with reachable direct CALL or register call evidence")
 
 
 def resolve_leaf_window(module, analysis, image, rva, caller_rva, site, forge=DEFAULT_FORGE):
     caller = resolve_function(module, analysis, caller_rva, "leaf caller")
     if caller.entry_restriction() or not caller.start <= site < caller.end:
         raise ValueError("leaf call site outside eligible caller")
-    verify_leaf_call(image, module, caller, site, rva, forge)
+    target = verified_call_target(image, module, caller, site, forge, require_continuation=True)
+    if rva != target:
+        raise ValueError("callee disagrees with reachable direct CALL or register call evidence")
 
     # Bound a reported location independently. No gap becomes an analysis function.
     limit = min(0xffffffff, rva + 65536)
@@ -250,8 +259,12 @@ def lift(forge, image, case, selected, ir):
             return resolve_leaf_window(module, analysis, image, rva, caller, site, forge)
         return resolve_function(module, analysis, rva, "callee")
 
+    def register_target(owner, site):
+        module = read_json(work / "inspect.json")["modules"][0]
+        return verified_call_target(image, module, owner, site, forge, require_continuation=False)
+
     try:
-        diagnostic = parse_diagnostic(log.read_bytes(), image, selected, ir, resolve_callee)
+        diagnostic = parse_diagnostic(log.read_bytes(), image, selected, ir, resolve_callee, register_target)
     except ValueError as error:
         raise ValueError(f"invalid forge lift diagnostic ({log.name}): {error}") from error
     detail = f"{diagnostic['stage']}/{diagnostic['code']}: {diagnostic['message']} ({log.name})"

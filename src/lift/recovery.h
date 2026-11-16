@@ -32,9 +32,14 @@ namespace forge::x86 {
     ValidatedEntry validateEntry(const AnalyzedImage &&analysis, uint32_t rva) = delete;
     uint64_t validateGuestBase(const ValidatedEntry &entry, std::optional<uint64_t> requested);
 
+    enum class CallKind : uint8_t { Direct, RipRelativeRegister };
+
     // All RVAs in a recovered group belong to its one immutable source snapshot.
-    struct DirectCall {
+    struct ResolvedCallSite {
         uint32_t caller, block, instruction, callee, continuation;
+        CallKind kind;
+        // Direct calls carry their own displacement. Register calls cite the producing LEA.
+        uint32_t evidenceRva;
     };
 
     enum class RecoveryOrigin { UnwindBacked, InferredLeaf };
@@ -51,11 +56,11 @@ namespace forge::x86 {
         // For an inferred leaf this is the bounded decode window. Only graph steps claim bytes.
         MappedRange code;
         ControlFlowGraph graph;
-        std::map<uint32_t, DirectCall> calls;
+        std::map<uint32_t, ResolvedCallSite> calls;
         // References the callers' records in caller, block and instruction order.
-        std::vector<const DirectCall *> incoming;
+        std::vector<const ResolvedCallSite *> incoming;
         const Step *instructionContaining(uint32_t rva) const;
-        const DirectCall *callAt(uint32_t instructionRva) const;
+        const ResolvedCallSite *callAt(uint32_t instructionRva) const;
     };
 
     // The caller keeps the analyzed image alive for all byte and section views.

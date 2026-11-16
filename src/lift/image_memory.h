@@ -17,7 +17,7 @@ namespace llvm {
 
 namespace forge::x86 {
     struct Continuation;
-    struct DirectCall;
+    struct ResolvedCallSite;
 
     // Each selected backing owns its relocated initialized bytes and accessible intervals.
     // A plan can emit into independent modules after releasing the recovered steps and image.
@@ -54,7 +54,7 @@ namespace forge::x86 {
         void computedAccess(const Step &step, std::optional<uint64_t> va, unsigned width,
                             bool write);
         void continuationAccess(const Step &step, const Continuation &origin,
-                                llvm::ArrayRef<const DirectCall *> sites, unsigned width,
+                                llvm::ArrayRef<const ResolvedCallSite *> sites, unsigned width,
                                 bool write);
         ImagePlan finish() &&;
 

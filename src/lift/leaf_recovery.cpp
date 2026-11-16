@@ -53,7 +53,7 @@ namespace forge::x86 {
         };
 
         void checkLeafEffects(const Step &step, Flow flow, const InstructionOperands &operands) {
-            if (flow != Flow::Fallthrough || isNoop(step.opcode)) {
+            if (flow != Flow::Fallthrough || isNoop(step)) {
                 return;
             }
 
@@ -98,7 +98,7 @@ namespace forge::x86 {
         struct LeafRecovery {
             const ValidatedEntry &entry;
             std::map<uint32_t, RecoveredFunction> &functions;
-            const std::map<uint32_t, const DirectCall *> &deferred;
+            const std::map<uint32_t, const ResolvedCallSite *> &deferred;
             ArrayRef<RvaRange> recorded;
             std::vector<RvaRange> loaderWrites;
             const MCDisassembler &dis;
@@ -109,7 +109,7 @@ namespace forge::x86 {
             std::string ownerEvidence(uint32_t rva) const;
             MappedRange window(uint32_t rva) const;
             ControlFlowGraph decode(uint32_t target, const MappedRange &code) const;
-            void recover(const DirectCall &call);
+            void recover(const ResolvedCallSite &call);
         };
 
         std::string LeafRecovery::ownerEvidence(uint32_t rva) const {
@@ -225,21 +225,20 @@ namespace forge::x86 {
             throw failure;
         }
 
-        void LeafRecovery::recover(const DirectCall &call) try {
+        void LeafRecovery::recover(const ResolvedCallSite &call) try {
             const auto target = call.callee;
 
             if (const auto *span = occupied.overlap(target, uint64_t(target) + 1)) {
                 const auto *step = functions.at(span->owner).instructionContaining(target);
 
                 if (step->rva != target) {
-                    throw InspectionError("direct call enters decoded instruction at " +
-                                              hex(step->rva) + " in function " +
-                                              ownerEvidence(span->owner),
+                    throw InspectionError("call enters decoded instruction at " + hex(step->rva) +
+                                              " in function " + ownerEvidence(span->owner),
                                           FailureCode::InvalidCallTarget);
                 }
 
                 throw InspectionError(
-                    "unsupported direct call target belongs to a decoded block of function " +
+                    "unsupported call target belongs to a decoded block of function " +
                         ownerEvidence(span->owner),
                     FailureCode::UnsupportedControlFlow);
             }
@@ -282,7 +281,7 @@ namespace forge::x86 {
 
     void recoverLeaves(const ValidatedEntry &entry,
                        std::map<uint32_t, RecoveredFunction> &functions,
-                       const std::map<uint32_t, const DirectCall *> &deferred,
+                       const std::map<uint32_t, const ResolvedCallSite *> &deferred,
                        const MCDisassembler &dis, const MCInstrInfo &instructions,
                        const MCRegisterInfo &regs) {
         const auto ranges = recordedRanges(entry.analysis);

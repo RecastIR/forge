@@ -391,7 +391,7 @@ class Lift(Case):
                 ("66 66 89 c8 c3", "prefix"), ("14 00 c3", "undefined incoming RAX"),
                 ("39 d1 0f 94 c0 c3", "undefined RAX"), ("c0 e9 08 0f 92 c0", "CF"),
                 ("83 d1 00 c3", "CF"), ("d2 e1 0f 90 c0 c3", "OF"), ("48 89 c8 48 89 c8 40", "invalid or truncated"),
-                ("31 c0 31 c0 31 c0 90", "unsupported")]:
+                ("31 c0 31 c0 31 c0 90", "fallthrough outside function")]:
             with self.subTest(code=code):
                 body = bytes.fromhex(code)
                 self.assertLessEqual(len(body), 7)

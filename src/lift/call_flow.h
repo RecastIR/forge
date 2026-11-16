@@ -6,7 +6,7 @@
 #include <vector>
 
 namespace forge::x86 {
-    struct DirectCall;
+    struct ResolvedCallSite;
     class RecoveredFunctionGroup;
 
     inline constexpr unsigned registerCount = 16;
@@ -35,7 +35,7 @@ namespace forge::x86 {
 
     struct CallSiteEffect {
         // The recovered group owns the validated site for the lifetime of the proof.
-        const DirectCall *site;
+        const ResolvedCallSite *site;
         DefinitionEffect prefix;
     };
 

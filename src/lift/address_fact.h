@@ -10,7 +10,7 @@
 #include <optional>
 
 namespace forge::x86 {
-    // A group represents all direct call sites entering one callee. Keep their
+    // A group represents all resolved call sites entering one callee. Keep their
     // shared displacement symbolic until a guest access actually needs PE bytes.
     struct Continuation {
         uint32_t callee;

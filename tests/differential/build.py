@@ -117,7 +117,72 @@ def direct_target(operands):
     return int(target[1], 16) if target else None
 
 
-def reachable_instructions(entry, decode, in_body, allow_call, ordinary, *, end=None, indirect=None):
+GPRS = set("rax rbx rcx rdx rsi rdi rsp rbp".split()) | {f"r{i}" for i in range(8, 16)}
+
+
+def call_padding(asm, raw):
+    if asm == "nop":
+        return raw is None or raw == b"\x90"
+    if not re.fullmatch(r"nop[wl]? (?:word|dword) ptr \[.+\]", asm.lower()):
+        return False
+    if raw is None:
+        return True
+    body = raw.removeprefix(b"\x66")
+    if body and 0x40 <= body[0] <= 0x47:
+        body = body[1:]
+    return len(body) >= 3 and body.startswith(b"\x0f\x1f") and body[2] < 0xc0
+
+
+def register_call_targets(graph, decode, *, encoding=None):
+    """Independently recover RIP-relative targets from reachable linked disassembly."""
+    preds = {}
+    for address, edges in graph.items():
+        for successor in edges:
+            preds.setdefault(successor, []).append(address)
+    targets = {}
+    for address in graph:
+        text, continuation = decode(address)
+        op, _, reg = text.partition(" ")
+        if op != "call" or reg not in GPRS:
+            continue
+        if encoding:
+            raw = encoding(address, continuation)
+            body = raw[1:] if raw and 0x40 <= raw[0] <= 0x4f else raw
+            if len(body) != 2 or body[0] != 0xff or body[1] & 0xf8 != 0xd0:
+                raise ValueError(f"unsupported register call encoding at {address:x}")
+        cursor = address
+        while cursor != next(iter(graph)):
+            incoming = preds.get(cursor, [])
+            if len(incoming) != 1:
+                break
+            parent = incoming[0]
+            instr, end = decode(parent)
+            if end != cursor:
+                break
+            # A branch or previous call is never a producer or a transparent instruction.
+            asm = instr.partition("#")[0].strip()
+            raw = encoding(parent, end) if encoding else None
+            if call_padding(asm, raw):
+                cursor = parent
+                continue
+            lea = re.fullmatch(r"lea " + reg + r",\s*\[rip(?:\s*([+-])\s*(0x[0-9a-f]+|\d+))?\]", asm)
+            if lea:
+                disp = int(lea[2] or "0", 0) * (-1 if lea[1] == "-" else 1)
+                # GNU objdump sometimes prints a negative disp32 as an unsigned hex word.
+                disp = ((disp + (1 << 31)) % (1 << 32)) - (1 << 31)
+                if raw is not None:
+                    if (len(raw) != 7 or raw[0] & 0xf8 != 0x48 or raw[1] != 0x8d
+                            or raw[2] & 0xc7 != 5 or int.from_bytes(raw[3:], "little", signed=True) != disp):
+                        break
+                targets[address] = end + disp
+            break
+        if address not in targets:
+            raise ValueError(f"unproven register call at {address:x}")
+    return targets
+
+
+def reachable_instructions(entry, decode, in_body, allow_call, ordinary, *, end=None, indirect=None,
+                           register_calls=False):
     # Follow numeric disassembly addresses from the entry, including both conditional edges.
     graph = {}
     pending = [entry]
@@ -141,7 +206,7 @@ def reachable_instructions(entry, decode, in_body, allow_call, ordinary, *, end=
                 successors.append(target)
         elif opcode == "call":
             target = direct_target(operands)
-            if target is None or not allow_call(target):
+            if not (register_calls and operands in GPRS) and (target is None or not allow_call(target)):
                 raise ValueError(f"unexpected direct call target at {address:x}: {text}")
         elif opcode not in ordinary:
             raise ValueError(f"unsupported instruction or transfer at {address:x}: {text}")
@@ -155,12 +220,12 @@ def reachable_instructions(entry, decode, in_body, allow_call, ordinary, *, end=
     return graph
 
 
-def reachable_leaf(instructions, *, call_entries=()):
+def reachable_leaf(instructions, *, call_entries=(), register_calls=False):
     addresses = list(instructions)
     following = dict(zip(addresses, addresses[1:]))
     return reachable_instructions(addresses[0], lambda a: (instructions[a], following.get(a)),
                                   instructions.__contains__, call_entries.__contains__,
-                                  FALLTHROUGH | ({"adc"} if call_entries else set()))
+                                  FALLTHROUGH | ({"adc"} if call_entries else set()), register_calls=register_calls)
 
 
 def natural_loops(graph):
@@ -581,6 +646,8 @@ CALL_GRAPHS = {
                       "increment": []},
     "call_leaves": {"call_leaves": ["leaf_add", "leaf_add", "leaf_abs", "leaf_count", "leaf_store"],
                     "leaf_add": [], "leaf_abs": [], "leaf_count": [], "leaf_store": []},
+    "call_indirect": {"call_indirect": ["indirect_preserve"] * 3 + ["indirect_leaf", "indirect_recurse"],
+                      "indirect_preserve": [], "indirect_leaf": [], "indirect_recurse": ["indirect_recurse"]},
     "call_flags": {"call_flags": ["add_carry", "inspect_return"], "add_carry": [], "inspect_return": []},
 }
 
@@ -593,9 +660,9 @@ def check_call_group(name, listing, pe_report, config):
         r"^ [0-9a-f]+:[ \t]+([0-9a-f]+) ([0-9a-f]+) [0-9a-f]+$", pe_report, re.MULTILINE)]
     for symbol, body in bodies.items():
         start = next(iter(body))
-        graph = reachable_leaf(body, call_entries=entries)
+        graph = reachable_leaf(body, call_entries=entries, register_calls=name == "call_indirect")
         containing = [(a, b) for a, b in ranges if a <= start < b]
-        if name == "call_leaves" and symbol != name:
+        if (name == "call_leaves" and symbol != name) or symbol == "indirect_leaf":
             # Objdump addresses include each linked instruction's exact start. RET is one byte.
             after = dict(zip(body, list(body)[1:]))
             for address in graph:
@@ -613,7 +680,18 @@ def check_call_group(name, listing, pe_report, config):
                 raise ValueError(f"{symbol} needs a unique linked unwind entry")
             if max(graph) >= containing[0][1]:
                 raise ValueError(f"{symbol} has reachable code outside its unwind range")
-        calls = {a: entries[int(body[a].split()[1], 16)] for a in graph if body[a].startswith("call ")}
+        following = dict(zip(body, list(body)[1:]))
+        registers = register_call_targets(graph, lambda a: (body[a], following.get(a)))
+        if any(addr not in entries for addr in registers.values()):
+            raise ValueError("register call misses the linked function entry")
+        calls = {a: entries[registers[a] if a in registers else direct_target(body[a][5:])]
+                 for a in graph if body[a].startswith("call ")}
+        if name == "call_indirect":
+            indirect = [calls[a] for a in sorted(registers)]
+            required = {"call_indirect": ["indirect_preserve"] * 2 + ["indirect_leaf", "indirect_recurse"],
+                        "indirect_recurse": ["indirect_recurse"]}
+            if indirect != required.get(symbol, []):
+                raise ValueError(f"{symbol} lost a required register call")
         if sorted(calls.values()) != sorted(expected[symbol]):
             raise ValueError(f"{symbol} expected calls to {expected[symbol]}, found {list(calls.values())}")
         live = [body[a] for a in sorted(graph)]

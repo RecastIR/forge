@@ -78,6 +78,9 @@ def generate(output, mc, link, dlltool, clang):
             image(f"image-ranges-{fields}.exe", f".set fields, {fields}\n" + ranges,
                   exports=["entry"], link_flags=["/base:0x10000000"])
         leaf_calls = sources.parent / "differential/fixtures/functions/call_leaves.S"
+        indirect = leaf_calls.with_name("call_indirect.S")
+        image("indirect.exe", stub + indirect.read_text() + '\n.section .rdata,"dr"\n.quad entry\n',
+              exports=["indirect_preserve", "indirect_leaf", "indirect_recurse"])
         image("stack.exe", (sources / "stack.s").read_text())
         # A separate file-backed section lets CLI tests exercise both limits and boundary types.
         probe = ('.section .probe,"xr"\n.space 65568, 0xcc\n.quad entry\n.space 12, 0xcc\n'

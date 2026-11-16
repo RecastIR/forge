@@ -580,6 +580,16 @@
       "id": "control_flow/jump_table",
       "config": "release",
       "target": "macos-arm64"
+    },
+    {
+      "id": "functions/indirect_calls",
+      "config": "debug",
+      "target": "macos-arm64"
+    },
+    {
+      "id": "functions/indirect_calls",
+      "config": "release",
+      "target": "macos-arm64"
     }
   ]
 }

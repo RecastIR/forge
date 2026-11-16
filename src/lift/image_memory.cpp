@@ -315,8 +315,8 @@ namespace forge::x86 {
     }
 
     void ImageMemory::continuationAccess(const Step &step, const Continuation &origin,
-                                         llvm::ArrayRef<const DirectCall *> sites, unsigned width,
-                                         bool write) {
+                                         llvm::ArrayRef<const ResolvedCallSite *> sites,
+                                         unsigned width, bool write) {
         // Repeated reads in a high-fan-in helper need only one expansion of its
         // call sites. The first selecting step owns the budget diagnostic.
         if (!continuationAccesses.emplace(origin.callee, origin.offset, width, write).second) {

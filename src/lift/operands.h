@@ -30,7 +30,10 @@ namespace forge::x86 {
     std::optional<StackOp> stackInstruction(llvm::StringRef opcode);
     std::optional<uint8_t> shiftCount(const Step &s, Form form);
 
-    inline bool isNoop(llvm::StringRef opcode) { return opcode == "NOOPW" || opcode == "NOOPL"; }
+    inline bool isNoop(const Step &step) {
+        return step.opcode == "NOOPW" || step.opcode == "NOOPL" ||
+               (step.opcode == "NOOP" && step.bytes == "\x90");
+    }
 
     bool memoryDestination(Form form);
     unsigned memoryOperand(const Step &s, const IntegerInstruction &instruction);
@@ -45,6 +48,8 @@ namespace forge::x86 {
             : regs(regs), guestBase(guestBase) {}
 
         RegisterView reg(const Step &s, const llvm::MCOperand &op, unsigned width) const;
+        int64_t registerCallRva(const Step &call, const Step *producer) const;
+        std::optional<int64_t> ripRva(const Step &s, unsigned first) const;
         std::optional<uint64_t> ripAddress(const Step &s, unsigned first) const;
         AddressOperand decodeAddress(const Step &s, unsigned first, bool access) const;
         void validateIntegerOperands(const Step &s, const IntegerInstruction &instruction) const;

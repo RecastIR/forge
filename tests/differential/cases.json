@@ -412,5 +412,12 @@
     "export": "cfg_jump_table",
     "signature": "i64(i64,i64)",
     "harness": "decimal_pairs"
+  },
+  {
+    "fixture_id": "functions/indirect_calls",
+    "scope": "function",
+    "export": "call_indirect",
+    "signature": "i64(i64,i64)",
+    "harness": "decimal_pairs"
   }
 ]

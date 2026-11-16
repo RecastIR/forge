@@ -77,7 +77,7 @@ namespace forge::x86 {
         s.reject(FailureCode::UnsupportedRegister, "unsupported register " + name);
     }
 
-    std::optional<uint64_t> InstructionOperands::ripAddress(const Step &s, unsigned first) const {
+    std::optional<int64_t> InstructionOperands::ripRva(const Step &s, unsigned first) const {
         const auto base = s.inst.getOperand(first).getReg();
 
         if (!base || StringRef(regs.getName(base)) != "RIP") {
@@ -86,7 +86,15 @@ namespace forge::x86 {
 
         const auto displacement = s.inst.getOperand(first + 3).getImm();
         const auto signedOffset = llvm::SignExtend64<32>(static_cast<uint64_t>(displacement));
-        return guestBase + s.next + static_cast<uint64_t>(signedOffset);
+        return int64_t(s.next) + signedOffset;
+    }
+
+    std::optional<uint64_t> InstructionOperands::ripAddress(const Step &s, unsigned first) const {
+        if (const auto rva = ripRva(s, first)) {
+            return guestBase + static_cast<uint64_t>(*rva);
+        }
+
+        return {};
     }
 
     AddressOperand InstructionOperands::decodeAddress(const Step &s, unsigned first,
@@ -178,6 +186,25 @@ namespace forge::x86 {
         }
 
         return reg(s, s.inst.getOperand(0), width);
+    }
+
+    int64_t InstructionOperands::registerCallRva(const Step &call, const Step *previous) const {
+        if (!previous || previous->opcode != "LEA64r" ||
+            previous->inst.getOperand(0).getReg() != call.inst.getOperand(0).getReg()) {
+            call.reject(FailureCode::UnsupportedControlFlow,
+                        "unsupported register call: expected a same-block RIP-relative LEA to the "
+                        "target register");
+        }
+
+        const auto target = ripRva(*previous, 1);
+        if (!target) {
+            call.reject(FailureCode::UnsupportedControlFlow,
+                        "unsupported register call: target LEA is not RIP-relative");
+        }
+
+        reg(call, call.inst.getOperand(0), 64);
+        decodeAddress(*previous, 1, false);
+        return *target;
     }
 
     bool memoryDestination(Form form) {

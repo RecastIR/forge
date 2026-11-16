@@ -147,7 +147,7 @@ namespace forge::x86 {
 
             if (!section || section->permissions[2] != 'x') {
                 step.reject(FailureCode::InvalidCallTarget,
-                            "direct call target outside executable image sections", target);
+                            "call target outside executable image sections", target);
             }
 
             FailureContext location;
@@ -165,10 +165,15 @@ namespace forge::x86 {
             const ValidatedEntry &entry;
             std::map<uint32_t, RecoveredFunction> &functions;
             std::map<uint32_t, MappedRange> pending;
-            std::map<uint32_t, const DirectCall *> deferred;
+            std::map<uint32_t, const ResolvedCallSite *> deferred;
 
+            const InstructionOperands operands;
+            std::optional<std::vector<RvaRange>> loaderWrites;
+
+            void validateCallEvidence(const RecoveredFunction &caller, const Step &call,
+                                      int64_t target);
             bool schedule(uint32_t target, const Step &step);
-            void scanCalls(uint32_t rva, RecoveredFunction &caller, const GuestBlock &block);
+            void scanCalls(RecoveredFunction &caller, const GuestBlock &block);
             void run(const MCDisassembler &dis, const MCInstrInfo &instructions,
                      const MCRegisterInfo &regs);
         };
@@ -195,24 +200,67 @@ namespace forge::x86 {
             return true;
         }
 
-        void GroupDiscovery::scanCalls(uint32_t rva, RecoveredFunction &caller,
-                                       const GuestBlock &block) try {
+        void GroupDiscovery::validateCallEvidence(const RecoveredFunction &caller, const Step &call,
+                                                  int64_t target) {
+            const auto &image = entry.analysis.image();
+            if (image.advertisesDynamicRelocations() || !caller.code.section.immutable()) {
+                call.reject(
+                    FailureCode::UnsupportedControlFlow,
+                    "cannot prove a stable register call in mutable or dynamically relocated code",
+                    target);
+            }
+
+            if (!loaderWrites) {
+                try {
+                    loaderWrites = image.loaderWrittenRanges();
+                } catch (const InspectionError &error) {
+                    call.reject(error.kind, error.what(), target);
+                }
+            }
+
+            const RvaRange extent{caller.entry, uint64_t(caller.entry) + caller.code.bytes.size()};
+            if (!rangesIn(*loaderWrites, extent).empty()) {
+                call.reject(FailureCode::UnsupportedControlFlow,
+                            "register call proof depends on loader-written code", target);
+            }
+        }
+
+        void GroupDiscovery::scanCalls(RecoveredFunction &caller, const GuestBlock &block) try {
             const auto leader = block.steps.front().rva;
+            // Partitioning has already placed every possible entry to the sequence at a leader.
+            const Step *previous = nullptr;
             for (const auto &step : block.steps) {
-                if (!step.isDirectCall()) {
+                if (isNoop(step)) {
                     continue;
                 }
 
-                const int64_t target = int64_t(step.next) + step.inst.getOperand(0).getImm();
+                const auto *producer = std::exchange(previous, &step);
+                CallKind kind;
+                int64_t target;
+                uint32_t evidence;
+                if (step.isDirectCall()) {
+                    kind = CallKind::Direct;
+                    target = int64_t(step.next) + step.inst.getOperand(0).getImm();
+                    evidence = step.rva;
+                } else if (step.isRegisterCall()) {
+                    target = operands.registerCallRva(step, producer);
+                    validateCallEvidence(caller, step, target);
+                    kind = CallKind::RipRelativeRegister;
+                    evidence = producer->rva;
+                } else {
+                    continue;
+                }
+
                 if (target < 0 || target > UINT32_MAX) {
                     step.reject(FailureCode::InvalidCallTarget,
-                                "direct call target outside the guest RVA space", target);
+                                "call target outside the guest RVA space", target);
                 }
 
                 const auto address = static_cast<uint32_t>(target);
                 const auto &site =
                     caller.calls
-                        .emplace(step.rva, DirectCall{rva, leader, step.rva, address, step.next})
+                        .emplace(step.rva, ResolvedCallSite{caller.entry, leader, step.rva, address,
+                                                            step.next, kind, evidence})
                         .first->second;
 
                 if (!deferred.contains(address) && !schedule(address, step)) {
@@ -240,7 +288,7 @@ namespace forge::x86 {
                     function.graph =
                         discoverCFG(function.code.bytes, rva, dis, instructions, tables);
                     for (const auto &[leader, block] : function.graph) {
-                        scanCalls(rva, function, block);
+                        scanCalls(function, block);
                     }
                 } catch (InspectionError &error) {
                     if (rva != entry.rva) {
@@ -322,7 +370,7 @@ namespace forge::x86 {
         return it == steps.end() ? nullptr : &*it;
     }
 
-    const DirectCall *RecoveredFunction::callAt(uint32_t instructionRva) const {
+    const ResolvedCallSite *RecoveredFunction::callAt(uint32_t instructionRva) const {
         const auto found = calls.find(instructionRva);
         return found == calls.end() ? nullptr : &found->second;
     }
@@ -387,7 +435,8 @@ namespace forge::x86 {
         const auto location = entryLocation(source, entryRva, entry.code);
         withLocation(source, location, FailureCode::LiftingInternal, [&] {
             decoder = std::make_unique<Decoder>(entryRva);
-            GroupDiscovery discovery{entry, recovered, {}, {}};
+            GroupDiscovery discovery{
+                entry, recovered, {}, {}, InstructionOperands(*decoder->regs, 0), {}};
             discovery.run(*decoder->dis, *decoder->instructions, *decoder->regs);
         });
     }

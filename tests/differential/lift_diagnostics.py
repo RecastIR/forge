@@ -57,7 +57,7 @@ def context_rva(context, name):
     return int(text, 16)
 
 
-def validate_context(context, stage, category, code, image, selected, ir, resolve_callee):
+def validate_context(context, stage, category, code, image, selected, ir, resolve_callee, register_target):
     allowed = {"input", "entry_rva", "signature"}
     owner = selected
     # A malformed fixup selected by a jump table has both PE and dispatch provenance.
@@ -86,19 +86,19 @@ def validate_context(context, stage, category, code, image, selected, ir, resolv
             start = context_rva(context, "block_rva")
             if not owner.start <= start <= context_rva(context, "instruction_rva"):
                 raise ValueError("basic block disagrees with the instruction location")
-    if code == "LIFT_UNSUPPORTED_CONTROL_FLOW" or code in INVALID_TARGETS:
+    if code == "LIFT_UNSUPPORTED_CONTROL_FLOW" or code in INVALID_TARGETS or (dispatch_pe and context.get("opcode") == "CALL64r"):
         allowed.add("branch_target")
         if "branch_target" in context:
             target = field(context, "branch_target", int)
             if not -(1 << 31) <= target < (1 << 32) + (1 << 31):
                 raise ValueError("invalid branch destination")
-    if code == "LIFT_INVALID_CALL_TARGET" and (context.get("opcode") != "CALL64pcrel32"
+    if code == "LIFT_INVALID_CALL_TARGET" and (context.get("opcode") not in {"CALL64pcrel32", "CALL64r"}
             or not {"instruction_rva", "branch_target", "bytes"} <= context.keys()):
-        raise ValueError("invalid call target diagnostic lacks a direct call site")
+        raise ValueError("invalid call target diagnostic lacks a resolved call site")
     if code == "LIFT_INVALID_BRANCH_TARGET" and (context.get("opcode") != "JMP64r"
             or not {"instruction_rva", "branch_target", "bytes"} <= context.keys()):
         raise ValueError("invalid branch target diagnostic lacks a dispatch site")
-    if dispatch_pe and (context.get("opcode") != "JMP64r" or "bytes" not in context):
+    if dispatch_pe and (context.get("opcode") not in {"JMP64r", "CALL64r"} or "bytes" not in context):
         raise ValueError("PE diagnostic at a dispatch lacks register jump evidence")
     if stage in ("pe", "entry", "lifting", "verification"):
         allowed.add("file_offset")
@@ -146,12 +146,19 @@ def validate_context(context, stage, category, code, image, selected, ir, resolv
         encoded = bytes.fromhex(text)
         if instruction + len(encoded) > owner.end:
             raise ValueError("instruction bytes extend beyond the diagnostic function range")
-        if code == "LIFT_INVALID_BRANCH_TARGET" or dispatch_pe:
+        if code == "LIFT_INVALID_BRANCH_TARGET" or (dispatch_pe and context.get("opcode") == "JMP64r"):
             # JMP r64 is FF /4 with register addressing and one optional REX.
             body = encoded[1:] if 0x40 <= encoded[0] <= 0x4f else encoded
             if len(body) != 2 or body[0] != 0xff or body[1] & 0xf8 != 0xe0:
                 raise ValueError("invalid register jump encoding")
-        if code == "LIFT_INVALID_CALL_TARGET":
+        if context.get("opcode") == "CALL64r":
+            body = encoded[1:] if 0x40 <= encoded[0] <= 0x4f else encoded
+            if len(body) != 2 or body[0] != 0xff or body[1] & 0xf8 != 0xd0:
+                raise ValueError("invalid register call encoding")
+            if code == "LIFT_INVALID_CALL_TARGET" and (register_target is None
+                    or register_target(owner, instruction) != context["branch_target"]):
+                raise ValueError("call target disagrees with the reachable RIP-relative LEA")
+        elif code == "LIFT_INVALID_CALL_TARGET":
             if len(encoded) < 5 or encoded[-5] != 0xe8:
                 raise ValueError("invalid direct call encoding")
             target = instruction + len(encoded) + int.from_bytes(encoded[-4:], "little", signed=True)
@@ -163,7 +170,7 @@ def validate_context(context, stage, category, code, image, selected, ir, resolv
                 raise ValueError("instruction bytes disagree with the PE snapshot")
 
 
-def parse_diagnostic(raw, image, selected, ir, resolve_callee=None):
+def parse_diagnostic(raw, image, selected, ir, resolve_callee=None, register_target=None):
     if not raw.endswith(b"\n") or raw.count(b"\n") != 1:
         raise ValueError("expected one newline-terminated JSON record")
     try:
@@ -183,5 +190,5 @@ def parse_diagnostic(raw, image, selected, ir, resolve_callee=None):
     # Escaped unpaired surrogates can survive JSON parsing but cannot be reported as UTF-8.
     message.encode("utf-8")
     validate_context(field(diagnostic, "context", dict), *kind, diagnostic["code"], image,
-                     selected, ir, resolve_callee)
+                     selected, ir, resolve_callee, register_target)
     return diagnostic
