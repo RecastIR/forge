@@ -301,6 +301,16 @@ namespace forge {
                                       f'LINT_DATABASE={self.root / "compile_commands.json"}', success=False)
             self.assertIn('23.1.5', output)
             self.assertIn('23.1.50', output)
+            self.assertIn('LLVM_CONFIG', output)
+
+        (tools / 'clang-format-23').symlink_to('clang-format')
+        env = dict(self.env, PATH=str(tools) + os.pathsep + self.env['PATH'])
+        output = self.run_command('cmake', '-DFORGE_RUNTIME_ONLY=ON', '-DACTION=format-check',
+                                  '-P', 'cmake/quality.cmake', env=env, success=False)
+        self.assertIn('23.1.50', output)
+        self.assertIn('PATH', output)
+        self.assertNotIn('LLVM_CONFIG', output)
+        self.assertNotIn('LLVM_DIR', output)
 
     def test_fixture_brace_probe(self):
         fixture = self.root / 'tests/differential/fixtures/example.c'

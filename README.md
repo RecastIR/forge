@@ -133,7 +133,7 @@ make test CONFIG=Debug
 make sanitize       # Run CTest in a separate Debug build with ASan and UBSan
 ```
 
-`make lint` configures the lint preset in `build/lint/` with Unix Makefiles and refreshes its `compile_commands.json` on each invocation. On macOS it pairs the selected LLVM compiler and clang-tidy with the macOS SDK. This also works alongside an Xcode build. All quality targets use the same LLVM selection as the build. The native build uses Apple’s compiler, SDK and linker. When linking LLVM libraries, the Apple linker loads the selected package’s libLTO to read its ThinLTO bitcode.
+`make lint` configures the lint preset in `build/lint/` with Unix Makefiles and refreshes its `compile_commands.json` on each invocation. On macOS it pairs the selected LLVM compiler and clang-tidy with the macOS SDK. This also works alongside an Xcode build. In the full build the quality targets use the selected LLVM package. A runtime-only build finds its formatter on `PATH`, checking for `clang-format-23` first, then `clang-format`, and requires version 23.1.5. The native build uses Apple’s compiler, SDK and linker. When linking LLVM libraries, the Apple linker loads the selected package’s libLTO to read its ThinLTO bitcode.
 
 ```sh
 make lint LLVM_CONFIG=/path/to/bin/llvm-config

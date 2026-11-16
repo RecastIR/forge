@@ -11,7 +11,7 @@ import unittest
 
 MODE = sys.argv[1]
 SOURCE, CMAKE, LLVM_DIR, LLVM_BIN, TMP_ROOT = map(Path, sys.argv[2:7])
-WITH_CLI, TOOLCHAIN, CONFIG, GENERATOR = sys.argv[7:]
+WITH_CLI, TOOLCHAIN, CONFIG, GENERATOR, WITH_RUNTIME_IR = sys.argv[7:]
 
 
 def read_cache(build):
@@ -52,6 +52,20 @@ class BuildCase(unittest.TestCase):
 
 
 class BuildConfig(BuildCase):
+    @unittest.skipUnless(sys.platform == "darwin" and platform.machine() == "arm64", "requires native Apple Silicon")
+    def test_runtime_benchmark_preserves_external_calls(self):
+        build = self.tmp / "benchmark"
+        self.invoke(CMAKE, "-S", SOURCE, "-B", build, "-DFORGE_RUNTIME_ONLY=ON",
+                    "-DCMAKE_BUILD_TYPE=Release", "-DCMAKE_OSX_ARCHITECTURES=arm64",
+                    "-DCMAKE_UNITY_BUILD=ON", "-DCMAKE_INTERPROCEDURAL_OPTIMIZATION_RELEASE=ON")
+        self.invoke(CMAKE, "--build", build, "--target", "runtime_benchmark")
+        benchmark = build / "tests/runtime_benchmark"
+        self.invoke(benchmark)
+        disassembly = self.invoke("xcrun", "otool", "-tvV", benchmark)
+        for symbol in (r"__Z\d+directSet\w*", r"__Z\d+directGet\w*",
+                       "_forge_rt_set_last_error", "_forge_rt_get_last_error"):
+            self.assertRegex(disassembly, rf"\bbl[ \t]+{symbol}\b")
+
     def test_runtime_only_without_compiler_packages(self):
         build = self.tmp / "standalone runtime"
         env = dict(self.env, LLVM_CONFIG=str(self.tmp / "missing llvm-config"))
@@ -83,10 +97,13 @@ class BuildConfig(BuildCase):
             self.assertIn("Omitting runtime_ir_smoke", partial)
             self.assertEqual(self.configured_tests(build, env), native_tests)
 
-            (bin_dir / "llc").symlink_to(LLVM_BIN / "llc")
+            expected = native_tests
+            if WITH_RUNTIME_IR == "1":
+                (bin_dir / "llc").symlink_to(LLVM_BIN / "llc")
+                expected = native_tests | {"runtime_ir_smoke"}
             self.invoke(CMAKE, "-S", SOURCE, "-B", build, "-DFORGE_ENABLE_SANITIZERS=ON", env=env)
             self.invoke(CMAKE, "--build", build, "--parallel", "4", env=env)
-            self.assertEqual(self.configured_tests(build, env), native_tests | {"runtime_ir_smoke"})
+            self.assertEqual(self.configured_tests(build, env), expected)
             self.invoke(ctest, "--test-dir", build, "--output-on-failure", "--no-tests=error", env=env)
             entries = json.loads((build / "compile_commands.json").read_text())
             for entry in entries:
@@ -148,10 +165,20 @@ class BuildConfig(BuildCase):
 
     @unittest.skipUnless(WITH_CLI == "1", "requires a CLI-enabled parent toolchain")
     def test_cli_selection_follows_the_toolchain(self):
-        output = self.invoke(CMAKE, "-S", SOURCE, "-B", self.tmp / "conflicting", "-G", GENERATOR,
-                             f"-DCMAKE_TOOLCHAIN_FILE={TOOLCHAIN}", f"-DCMAKE_BUILD_TYPE={CONFIG}",
-                             f"-DLLVM_DIR={LLVM_DIR}", "-DFORGE_BUILD_CLI=OFF", success=False)
-        self.assertIn("with_cli", output)
+        conflicts = (("-DFORGE_BUILD_CLI=OFF", "with_cli"),
+                     ("-DFORGE_RUNTIME_ONLY=ON", "FORGE_RUNTIME_ONLY requires a separate build directory"))
+        for index, (option, reason) in enumerate(conflicts):
+            with self.subTest(option=option):
+                output = self.invoke(CMAKE, "-S", SOURCE, "-B", self.tmp / f"conflict {index}", "-G", GENERATOR,
+                                     f"-DCMAKE_TOOLCHAIN_FILE={TOOLCHAIN}", f"-DCMAKE_BUILD_TYPE={CONFIG}",
+                                     f"-DLLVM_DIR={LLVM_DIR}", option, success=False)
+                self.assertIn(reason, " ".join(output.split()))
+
+    def test_runtime_only_rejects_named_preset_before_provisioning(self):
+        build = self.tmp / "not provisioned"
+        output = self.invoke(CMAKE, "--preset", "dev", "-B", build, "-DFORGE_RUNTIME_ONLY=ON", success=False)
+        self.assertIn("FORGE_RUNTIME_ONLY", output)
+        self.assertEqual(read_cache(build)["FORGE_RUNTIME_ONLY"], "OFF")
 
     def test_rejects_unsupported_package(self):
         package = self.tmp / "old"
@@ -182,11 +209,8 @@ class BuildConfig(BuildCase):
         self.assertNotEqual(failed.returncode, 0)
         self.assertIn("Conflicting llvm-mc", " ".join(failed.stderr.split()))
 
-    def test_missing_differential_tool_ignores_path(self):
-        if sys.platform != "darwin":
-            self.skipTest("the differential harness configures on macOS")
-        # Wrap the real package. Advertise a tool directory containing only
-        # llvm-config, with the genuine opt available as a tempting PATH fallback.
+    def llvm_package_with_tools(self, *names):
+        # Wrap the real package so it advertises only the selected tools.
         package = self.tmp / "package"
         package.mkdir()
         tools = self.tmp / "bin"
@@ -197,11 +221,39 @@ class BuildConfig(BuildCase):
         config.write_text(f'#!/bin/sh\nif [ "$1" = --bindir ]; then dirname "$0"; '
                           f'else exec "{LLVM_BIN / "llvm-config"}" "$@"; fi\n')
         config.chmod(0o755)
+        for name in names:
+            (tools / name).symlink_to(LLVM_BIN / name)
+        return package, tools
+
+    def test_missing_differential_tool_ignores_path(self):
+        if sys.platform != "darwin":
+            self.skipTest("the differential harness configures on macOS")
+        package, _ = self.llvm_package_with_tools()
         env = dict(self.env, PATH=str(LLVM_BIN) + os.pathsep + self.env["PATH"])
         failed = self.run_configure(f"-DLLVM_DIR={package}", "-DBUILD_TESTING=OFF",
                                     f"-DFORGE_DIFFERENTIAL_IR={self.tmp / 'lift.ll'}", env=env)
         self.assertNotEqual(failed.returncode, 0)
         self.assertIn("Missing required LLVM tool 'opt'", " ".join(failed.stderr.split()))
+
+    def test_core_runtime_ir_uses_optional_tools_from_selected_package(self):
+        package, tools = self.llvm_package_with_tools("llvm-mc", "lld-link", "llvm-dlltool", "clang")
+        build = self.tmp / "core"
+        env = dict(self.env, PATH=str(LLVM_BIN) + os.pathsep + self.env["PATH"])
+        configure = (CMAKE, "-S", SOURCE, "-B", build, f"-DLLVM_DIR={package}",
+                     "-DFORGE_BUILD_CLI=OFF", "-DBUILD_TESTING=ON")
+        self.invoke(*configure, env=env)
+        partial = self.configured_tests(build, env)
+        self.assertTrue({"lift_contract", "runtime_contract", "runtime_c_smoke"} <= partial)
+        self.assertNotIn("runtime_ir_smoke", partial)
+
+        if WITH_RUNTIME_IR == "1":
+            for name in ("opt", "llc"):
+                (tools / name).symlink_to(LLVM_BIN / name)
+            self.invoke(*configure, env=env)
+            self.assertEqual(self.configured_tests(build, env), partial | {"runtime_ir_smoke"})
+            self.invoke(CMAKE, "--build", build, "--target", "runtime_ir_smoke", env=env)
+            self.invoke(CMAKE.parent / "ctest", "--test-dir", build, "-R", "^runtime_ir_smoke$",
+                        "--output-on-failure", "--no-tests=error", env=env)
 
     def check_custom_output_locations(self, build):
         suffix = CONFIG if GENERATOR == "Xcode" else ""
@@ -356,11 +408,19 @@ class Provisioning(BuildCase):
         other = self.tmp / "another directory"
         for option in ("CONFIG=Debug", "PRESET=dev", f'CMAKE_ARGS=-B "{other}"',
                        "CMAKE_ARGS=-DFORGE_BUILD_CLI=OFF", "CMAKE_ARGS=-D FORGE_BUILD_CLI:BOOL=OFF",
-                       "CMAKE_ARGS=-DFORGE_ENABLE_SANITIZERS:BOOL=OFF", "CMAKE_ARGS=-D FORGE_ENABLE_SANITIZERS=OFF"):
+                       "CMAKE_ARGS=-DFORGE_ENABLE_SANITIZERS:BOOL=OFF", "CMAKE_ARGS=-D FORGE_ENABLE_SANITIZERS=OFF",
+                       "CMAKE_ARGS=-DFORGE_RUNTIME_ONLY=ON", "CMAKE_ARGS=-D FORGE_RUNTIME_ONLY:BOOL=ON"):
             with self.subTest(option=option):
                 self.invoke("make", "configure", exact, option, success=False)
                 self.assertEqual(original, (tree / "CMakeCache.txt").read_bytes())
         self.assertFalse(other.exists())
+        expected_tests = self.configured_tests(tree)
+        self.assertIn("cli", expected_tests)
+        failure = self.invoke(CMAKE, "-S", SOURCE, "-B", tree, "-DFORGE_RUNTIME_ONLY=ON", success=False)
+        self.assertIn("FORGE_RUNTIME_ONLY", failure)
+        self.assertEqual(read_cache(tree)["FORGE_RUNTIME_ONLY"], "OFF")
+        self.invoke(CMAKE, "-S", SOURCE, "-B", tree)
+        self.assertEqual(self.configured_tests(tree), expected_tests)
         self.invoke("make", "configure", exact)
 
         note = tree / "conan" / "local-note.txt"
