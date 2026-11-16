@@ -233,7 +233,7 @@ PRs into `main` and pushes to `main` start three Apple Silicon jobs and one Linu
 
 | Job | Produces or verifies |
 | --- | --- |
-| `macos-dev` and `macos-sanitize` | Each runs its full CTest suite with outbound networking disabled, checks JUnit for execution of the native, Unicorn, guest stack and provisioning tests, and publishes its tested Forge executable and SHA-256. |
+| `macos-dev` and `macos-sanitize` | Each runs its full CTest suite with outbound networking disabled, checks JUnit for execution of the native, Unicorn, guest memory/control-flow, runtime contract, C and LLVM IR runtime linkage, and provisioning tests, and publishes its tested Forge executable and SHA-256. |
 | `macos-presets` | Runs formatting and clang-tidy, builds Release and both Xcode configurations, runs their CLI smoke tests with fixture setup, and checks the build layout. |
 | `windows-fixtures` | On Linux amd64, builds each Windows configuration twice, checks PE reproducibility, captures Wine behavior and tests the capture boundaries. Publishes the exports and references together. |
 | `differential` | Downloads the tested Forge executables, their matching recovery contract helpers and the Windows inputs after those producers succeed. Uses sanitized Forge with Xcode for Debug and ordinary dev Forge with Unix Makefiles for Release. Runs the negative integrations. |

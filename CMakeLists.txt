@@ -11,18 +11,27 @@ if(binary_dir STREQUAL default_build_root OR binary_dir STREQUAL build_root)
   message(FATAL_ERROR "The build root is a container. Configure a child with cmake --preset dev. "
     "Save any existing artifacts and retire the old root CMake cache separately.")
 endif()
-include(cmake/dependencies.cmake)
+option(FORGE_RUNTIME_ONLY "Build only the independently linkable Forge Runtime and its tests" OFF)
+if(NOT FORGE_RUNTIME_ONLY)
+  include(cmake/dependencies.cmake)
+endif()
 project(Forge LANGUAGES C CXX)
 
-include(cmake/llvm.cmake)
-forge_check_dependencies()
+if(FORGE_RUNTIME_ONLY)
+  option(FORGE_ENABLE_SANITIZERS "Build Forge with AddressSanitizer and UndefinedBehaviorSanitizer" OFF)
+  set(FORGE_RUNTIME_IR_TOOLS_DIR "" CACHE PATH "Directory containing opt and llc for the optional ARM64 runtime IR test")
+else()
+  include(cmake/llvm.cmake)
+  forge_check_dependencies()
+endif()
 foreach(action format format-check format-audit)
   add_custom_target(${action}
     COMMAND "${CMAKE_COMMAND}" "-DACTION=${action}" "-DLLVM_DIR=${LLVM_DIR}"
+            "-DFORGE_RUNTIME_ONLY=${FORGE_RUNTIME_ONLY}"
             -P "${CMAKE_CURRENT_SOURCE_DIR}/cmake/quality.cmake"
     WORKING_DIRECTORY "${CMAKE_CURRENT_SOURCE_DIR}" VERBATIM)
 endforeach()
-if(FORGE_PRESET STREQUAL "lint")
+if(NOT FORGE_RUNTIME_ONLY AND FORGE_PRESET STREQUAL "lint")
   add_custom_target(lint
     COMMAND "${CMAKE_COMMAND}" -DACTION=lint "-DLLVM_DIR=${LLVM_DIR}"
             "-DLINT_DATABASE=${CMAKE_BINARY_DIR}/compile_commands.json"
@@ -48,13 +57,17 @@ if(FORGE_ENABLE_SANITIZERS)
   check_sanitizers()
 endif()
 
-function(configure_forge_cxx target)
-  target_compile_features(${target} PRIVATE cxx_std_20)
-  set_target_properties(${target} PROPERTIES CXX_EXTENSIONS OFF)
-  if(CMAKE_CXX_COMPILER_ID MATCHES "^(AppleClang|Clang|GNU)$" AND NOT MSVC)
+function(configure_forge_native target language standard)
+  target_compile_features(${target} PRIVATE ${standard})
+  set_target_properties(${target} PROPERTIES ${language}_EXTENSIONS OFF)
+  if(CMAKE_${language}_COMPILER_ID MATCHES "^(AppleClang|Clang|GNU)$" AND NOT MSVC)
     target_compile_options(${target} PRIVATE -Wall -Wextra -Wpedantic -Wconversion -Wshadow)
   endif()
   target_compile_options(${target} PRIVATE ${sanitizer_compile_flags})
+endfunction()
+
+function(configure_forge_cxx target)
+  configure_forge_native(${target} CXX cxx_std_20)
 endfunction()
 
 function(configure_forge_output target property legacy_variable)
@@ -84,9 +97,12 @@ function(configure_forge_output target property legacy_variable)
   endforeach()
 endfunction()
 
-add_subdirectory(compiler)
-if(FORGE_BUILD_CLI)
-  add_subdirectory(cli)
+add_subdirectory(runtime)
+if(NOT FORGE_RUNTIME_ONLY)
+  add_subdirectory(compiler)
+  if(FORGE_BUILD_CLI)
+    add_subdirectory(cli)
+  endif()
 endif()
 
 include(CTest)

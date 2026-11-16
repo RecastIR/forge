@@ -7,7 +7,8 @@ import sys
 from xml.etree import ElementTree
 
 
-NATIVE_ROOTS = ('cli/src', 'compiler/src', 'tests/support', 'tests/unit')
+NATIVE_ROOTS = ('cli/src', 'compiler/src', 'runtime/src', 'runtime/include',
+                'tests/benchmarks', 'tests/integration', 'tests/support', 'tests/unit')
 ROOTS = (*NATIVE_ROOTS, 'tests/fixtures', 'tests/differential/fixtures', 'tests/differential/reference')
 # Git needs both sides of a rename when comparing with a pre-monorepo revision.
 DIFF_ROOTS = (*ROOTS, 'src')
@@ -80,7 +81,7 @@ def changed_sources():
 
 
 def native(path):
-    return any(Path(root) in path.parents for root in NATIVE_ROOTS) and path.suffix in {'.cpp', '.h'}
+    return any(Path(root) in path.parents for root in NATIVE_ROOTS) and path.suffix in {'.cpp', '.h', '.c'}
 
 
 def fixture_brace_lines(tool, path):
@@ -118,7 +119,7 @@ def format_sources(action, tool):
 if __name__ == '__main__':
     if sys.argv[1] == 'native-sources':
         for path in sources():
-            if native(path) and path.suffix == '.cpp':
+            if native(path) and path.suffix in {'.cpp', '.c'}:
                 print(path.absolute())
     else:
         sys.exit(format_sources(*sys.argv[1:]))

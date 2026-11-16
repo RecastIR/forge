@@ -12,9 +12,9 @@ The compiler owns PE input and metadata, function and program recovery, and anal
 
 The differential harness runs LLVM’s `opt` on the generated module to test the O2 variant. Future production transformations belong in the compiler. [Differential build rules](../tests/CMakeLists.txt)
 
-The future macOS ARM64 runtime will own guest process and thread state, memory management, external-call ABI bridging, import binding and dispatch, and Windows-compatible services and native adapters. Runtime initialization, termination, callbacks, and integration with selected Wine-derived implementations belong there.
+The independent `forge_runtime` static library owns an instance and its guest thread last-error state. Native code calls its versioned C ABI. A C executable and a hand-authored LLVM fixture exercise it. The compiler still emits its own invocation context and module-backed memory. The host owns execution of the selected function.
 
-A narrow, explicit ABI will let the compiler generate calls independently of the concrete Windows API provider. The runtime will execute the generated code through that ABI, independently of LLVM and compiler internals. Task 12A will define the public interface and dependency strategy.
+For future imports the compiler must prove the call target, interpret Windows x64 arguments and preserve guest frame semantics. The runtime supplies the requested service over explicit instance and thread state. Extend the ABI when a supported caller needs a capability. The [runtime architecture](runtime-architecture.md) records ownership rules, the proposed first binding, Wine reuse evidence and the source-integration policy.
 
 ## Where does the change belong?
 

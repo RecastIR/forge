@@ -2,6 +2,7 @@
 import json
 import os
 from pathlib import Path
+import platform
 import shutil
 import subprocess
 import sys
@@ -45,8 +46,52 @@ class BuildCase(unittest.TestCase):
             shutil.copyfile(SOURCE / name, dest / name)
         shutil.copytree(SOURCE / "cmake", dest / "cmake")
 
+    def configured_tests(self, build, env=None):
+        result = self.invoke(CMAKE.parent / "ctest", "--test-dir", build, "--show-only=json-v1", env=env)
+        return {test["name"] for test in json.loads(result)["tests"]}
+
 
 class BuildConfig(BuildCase):
+    def test_runtime_only_without_compiler_packages(self):
+        build = self.tmp / "standalone runtime"
+        env = dict(self.env, LLVM_CONFIG=str(self.tmp / "missing llvm-config"))
+        self.invoke(CMAKE, "-S", SOURCE, "-B", build, "-DFORGE_RUNTIME_ONLY=ON",
+                    "-DCMAKE_DISABLE_FIND_PACKAGE_LLVM=TRUE", "-DCMAKE_DISABLE_FIND_PACKAGE_CLI11=TRUE",
+                    "-DCMAKE_DISABLE_FIND_PACKAGE_Python3=TRUE", "-DCMAKE_EXPORT_COMPILE_COMMANDS=ON",
+                    "-DBUILD_TESTING=ON", f"-DCMAKE_BUILD_TYPE={CONFIG}", env=env)
+        # No managed toolchain or installed compiler package may leak into the public interface.
+        self.assertNotIn("CMAKE_TOOLCHAIN_FILE", read_cache(build))
+        entries = json.loads((build / "compile_commands.json").read_text())
+        for entry in entries:
+            self.assertNotIn(str(SOURCE / "compiler"), entry["command"])
+            self.assertNotIn(str(SOURCE / "cli"), entry["command"])
+            self.assertNotIn(str(LLVM_BIN.parent / "include"), entry["command"])
+
+        ctest = CMAKE.parent / "ctest"
+        self.invoke(CMAKE, "--build", build, "--parallel", "4", env=env)
+        self.assertTrue((build / "libforge_runtime.a").is_file())
+        native_tests = {"runtime_contract", "runtime_c_smoke"}
+        self.assertEqual(self.configured_tests(build, env), native_tests)
+        self.invoke(ctest, "--test-dir", build, "--output-on-failure", "--no-tests=error", env=env)
+
+        if sys.platform == "darwin" and platform.machine() == "arm64":
+            # Supply just the two optional tools while LLVM package discovery remains disabled.
+            bin_dir = self.tmp / "ir tools"
+            bin_dir.mkdir()
+            (bin_dir / "opt").symlink_to(LLVM_BIN / "opt")
+            partial = self.invoke(CMAKE, "-S", SOURCE, "-B", build, f"-DFORGE_RUNTIME_IR_TOOLS_DIR={bin_dir}", env=env)
+            self.assertIn("Omitting runtime_ir_smoke", partial)
+            self.assertEqual(self.configured_tests(build, env), native_tests)
+
+            (bin_dir / "llc").symlink_to(LLVM_BIN / "llc")
+            self.invoke(CMAKE, "-S", SOURCE, "-B", build, "-DFORGE_ENABLE_SANITIZERS=ON", env=env)
+            self.invoke(CMAKE, "--build", build, "--parallel", "4", env=env)
+            self.assertEqual(self.configured_tests(build, env), native_tests | {"runtime_ir_smoke"})
+            self.invoke(ctest, "--test-dir", build, "--output-on-failure", "--no-tests=error", env=env)
+            entries = json.loads((build / "compile_commands.json").read_text())
+            for entry in entries:
+                self.assertIn("-fsanitize=address,undefined", entry["command"])
+
     def test_in_source_configure_preserves_makefile(self):
         for name, command in [("make", ["make", "configure", "BUILD_DIR=."]),
                               ("cmake", [CMAKE, "-S", ".", "-B", "."])]:
@@ -93,10 +138,10 @@ class BuildConfig(BuildCase):
         self.assertNotIn("forge", targets)
         self.assertIn("forge_core", targets)
         self.invoke(CMAKE, "--build", build, "--target", "forge_native_harness", "lift_command", "--parallel", "4")
+        self.assertFalse((build / "libforge_runtime.a").exists())
         self.invoke(CMAKE.parent / "ctest", "--test-dir", build, "-R", "^lift_command$", "--output-on-failure",
                     "--no-tests=error")
-        result = self.invoke(CMAKE.parent / "ctest", "--test-dir", build, "--show-only=json-v1")
-        names = {test["name"] for test in json.loads(result)["tests"]}
+        names = self.configured_tests(build)
         self.assertTrue({"fixtures", "input_lifetime", "recovery_contract", "lift_contract",
                          "lift_command", "build_config"} <= names)
         self.assertFalse({"cli", "codegen", "native", "differential", "build_provisioning"} & names)
@@ -243,10 +288,11 @@ class BuildConfig(BuildCase):
         self.assertEqual(args[:2], ["-p", str(build)])
         expected = self.invoke(sys.executable, "-B", "cmake/style.py", "native-sources").splitlines()
         self.assertTrue(any(arg.startswith("--vfsoverlay=") for arg in args))
-        self.assertCountEqual([arg for arg in args if arg.endswith(".cpp")], expected)
+        self.assertCountEqual([arg for arg in args if arg.endswith((".cpp", ".c"))], expected)
         self.assertEqual(database.read_bytes(), contents)
 
         for missing in (harness, SOURCE / "cli/src/parsing.cpp", SOURCE / "compiler/src/pe/pe.cpp",
+                        SOURCE / "runtime/src/runtime.cpp", SOURCE / "tests/integration/runtime_smoke.c",
                         SOURCE / "tests/unit/integer.cpp"):
             with self.subTest(missing=missing):
                 database.write_text(json.dumps([e for e in entries if e["file"] != str(missing)]))
@@ -375,7 +421,7 @@ class Provisioning(BuildCase):
     def test_named_configurations_in_clean_checkout(self):
         src = self.tmp / "clean checkout"
         self.copy_build_files(src)
-        for name in ("cli", "compiler", "tests", "conan"):
+        for name in ("cli", "compiler", "runtime", "tests", "conan"):
             shutil.copytree(SOURCE / name, src / name)
         for name in ("conanfile.py", "conan.lock", "requirements-build.txt", ".gitignore"):
             shutil.copyfile(SOURCE / name, src / name)

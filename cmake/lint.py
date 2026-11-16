@@ -36,7 +36,7 @@ def check_changed_style(command, translation_units, changes):
         if ranges is not None:
             entry["lines"] = ranges
         filters.append(entry)
-        if path.suffix == ".cpp":
+        if path.suffix in {".cpp", ".c"}:
             inputs.append(name)
     if not filters:
         return 0
