@@ -136,3 +136,31 @@ table_budget:
     movq $53, %rax
     ret
 .seh_endproc
+
+.text
+.globl case_caller
+.seh_proc case_caller
+case_caller:
+    subq $40, %rsp
+    .seh_stackalloc 40
+    .seh_endprologue
+    cmpl $1, %ecx
+    ja .Lcase_done
+    movl %ecx, %eax
+    leaq .Lcase_table(%rip), %r8
+    movslq (%r8,%rax,4), %rax
+    addq %r8, %rax
+    jmp *%rax
+.Lcase_call:
+    callq .Lcase_leaf
+.Lcase_done:
+    movl $1, %eax
+    addq $40, %rsp
+    ret
+.seh_endproc
+.Lcase_leaf:
+    addq %r10, %rax             # R10 is undefined at the only call site.
+    ret
+.section .jtcall,"dr"
+.Lcase_table:
+    .long .Lcase_call-.Lcase_table, .Lcase_done-.Lcase_table

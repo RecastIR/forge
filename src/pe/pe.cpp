@@ -887,6 +887,31 @@ namespace forge {
         return {begin, end};
     }
 
+    bool ParsedImage::advertisesDynamicRelocations() const {
+        if (coff->getDynamicRelocTable()) {
+            return true;
+        }
+
+        const auto *config = coff->getLoadConfig64();
+
+        if (!config) {
+            return false;
+        }
+
+        // Older directories end before these fields. A section index with offset zero
+        // names a table at the beginning of the section.
+        using Config = llvm::object::coff_load_configuration64;
+        return (config->Size >= offsetof(Config, DynamicValueRelocTable) +
+                                    sizeof(config->DynamicValueRelocTable) &&
+                config->DynamicValueRelocTable) ||
+               (config->Size >= offsetof(Config, DynamicValueRelocTableOffset) +
+                                    sizeof(config->DynamicValueRelocTableOffset) &&
+                config->DynamicValueRelocTableOffset) ||
+               (config->Size >= offsetof(Config, DynamicValueRelocTableSection) +
+                                    sizeof(config->DynamicValueRelocTableSection) &&
+                config->DynamicValueRelocTableSection);
+    }
+
     std::vector<RvaRange> ParsedImage::loaderWrittenRanges() const {
         std::vector<RvaRange> ranges;
 

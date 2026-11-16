@@ -130,8 +130,17 @@ namespace forge::x86 {
                         description + " requires stable, read-only image data");
         }
 
+        if (image.advertisesDynamicRelocations()) {
+            jump.reject(FailureCode::UnsupportedControlFlow,
+                        description + ": dynamic relocation write ranges are unknown");
+        }
+
         if (!initialization) {
-            initialization = image.imageInitialization();
+            try {
+                initialization = image.imageInitialization();
+            } catch (const InspectionError &error) {
+                jump.reject(error.kind, description + ": " + error.what());
+            }
         }
 
         const auto *codeSection = image.sectionAtRva(function.begin);

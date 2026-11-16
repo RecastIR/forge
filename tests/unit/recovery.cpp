@@ -329,9 +329,37 @@ namespace {
                   "standalone analysis lost the failing nested instruction");
         }
     }
+
+    // Check PE stability for the differential runner's independently disassembled caller.
+    // The first interval is code. Each following interval is a relative table.
+    void checkDispatchSpans(const fs::path &path, llvm::ArrayRef<char *> bounds) {
+        check(bounds.size() >= 4 && bounds.size() % 2 == 0, "expected code and table RVA spans");
+        ParsedImage image(InputFile(path), ParsePolicy::FunctionAnalysis);
+        check(!image.advertisesDynamicRelocations(), "unknown dynamic relocation writes");
+        const auto init = image.imageInitialization();
+
+        for (size_t i = 0; i < bounds.size(); i += 2) {
+            uint32_t begin = 0, end = 0;
+            check(!llvm::StringRef(bounds[i]).getAsInteger(0, begin) &&
+                      !llvm::StringRef(bounds[i + 1]).getAsInteger(0, end) && begin < end,
+                  "invalid dispatch span");
+            const auto mapped = image.mapRva(begin, end - begin);
+            check(mapped && mapped->section.immutable() &&
+                      (mapped->section.permissions[2] == 'x') == (i == 0),
+                  "dispatch requires stable file-backed bytes");
+            check(init.exclusionsIn({begin, end}).empty() &&
+                      init.relocationsIn({begin, end}).empty(),
+                  "dispatch overlaps loader-written bytes or relocations");
+        }
+    }
 } // namespace
 
 int main(int argc, char **argv) try {
+    if (argc >= 3 && llvm::StringRef(argv[1]) == "--check-dispatch-spans") {
+        checkDispatchSpans(argv[2], llvm::ArrayRef(argv + 3, static_cast<size_t>(argc - 3)));
+        return 0;
+    }
+
     check(argc == 4, "expected stack.exe, leaves.exe and jump.exe");
     const AnalyzedImage analysis(
         std::make_unique<ParsedImage>(InputFile(argv[1]), ParsePolicy::Inspection),

@@ -298,7 +298,7 @@ The version is the integer `1`. The stage, category, code, and human-readable me
 | Stage | Category | Codes and meaning |
 | --- | --- | --- |
 | `input` | `io` | `INPUT_OPEN` for opening or validating the descriptor, `INPUT_READ` for acquiring the snapshot |
-| `pe` | `invalid_input` | `INVALID_PE` for malformed or unmappable container metadata. Conflicting fixups in a jump-table entry include the dispatch location and identify the affected entry in the message. |
+| `pe` | `invalid_input` | `INVALID_PE` for malformed or unmappable container metadata. PE initialization failures during jump-table recovery include the dispatch location and table range. Conflicting fixups within an entry also identify its index. |
 | `pe` | `unsupported` | `UNSUPPORTED_ARCHITECTURE` for the PE machine or hybrid image |
 | `entry` | `invalid_input` | `ENTRY_INVALID_START` for missing, invalid or ambiguous starts, `ENTRY_UNMAPPED_CODE` for a unique, non-overlapping exact record whose code bytes lack file backing |
 | `entry` | `unsupported` | `ENTRY_DLL`, `ENTRY_UNWIND_VERSION`, `ENTRY_CHAINED_FRAGMENT`, `ENTRY_RELOCATION_OVERLAP` |

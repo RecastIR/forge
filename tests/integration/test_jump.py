@@ -3,7 +3,6 @@ import json
 import os
 from pathlib import Path
 import platform
-import re
 import struct
 import subprocess
 import sys
@@ -12,6 +11,9 @@ import unittest
 from image_scaling import image_stats
 from pe_layout import Layout
 from test_stack import FORGE, IMAGE, GuestExecution, run
+
+sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "differential"))
+import differential as diff
 
 
 class JumpTables(GuestExecution):
@@ -41,12 +43,18 @@ class JumpTables(GuestExecution):
         ir = self.work / "mismatch.ll"
         run(FORGE, "lift", IMAGE, "--rva", hex(self.exports["entry"]),
             "--signature", "i64(i64,i64)", "--output", ir)
-        # Perturb only the value consumed by the generated terminator in a private IR copy.
-        changed, count = re.subn(r"switch i64 %[^,]+,", "switch i64 0,", ir.read_text())
-        self.assertEqual(count, 1)
-        ir.write_text(changed)
+        # A zero displacement sends entry 0 to the table VA. Entry 2 still points at
+        # the original shared destination, through the same runtime load and switch.
+        table = self.layout.u32(self.headers[".jtab"] + 12)
+        start = self.layout.file_offset(table)
+        prefix = f'@image_{table:x} = private constant [12 x i8] c"'
+        word = "".join(f"\\{byte:02X}" for byte in self.original[start:start+4])
+        source = ir.read_text()
+        self.assertEqual(source.count(prefix + word), 1)
+        ir.write_text(source.replace(prefix + word, prefix + r"\00" * 4))
         for exe in self.compile_variants(ir):
             self.trap(exe, [(0, 2)])
+            self.expect(exe, 2, 42, 43)
             self.expect(exe, 3, 2, -91)
 
     def diagnostic(self, root, edits):
@@ -126,6 +134,120 @@ class JumpTables(GuestExecution):
                               f"at RVA {hex(table)} indices 0..2, entry 1: overlapping base relocations",
                               code="INVALID_PE")
         self.assertEqual((report["stage"], report["category"]), ("pe", "invalid_input"))
+
+    def test_dynamic_relocations_block_only_table_recovery(self):
+        image = Path(IMAGE).with_name("jump-dvrt.exe")
+        data = image.read_bytes()
+        layout = Layout(data)
+        config = layout.file_offset(layout.directory(10)[0])
+        offset, section = struct.unpack_from("<IH", data, config + 224)
+        self.assertEqual(offset, 0)
+        _, dvrt, _, disk = layout.sections[section - 1]
+        self.assertEqual(struct.unpack_from("<IIQ", data, disk), (1, 24, 5))
+        module = json.loads(run(FORGE, "inspect", image, "--format", "json"))["modules"][0]
+        exports = {name: row["rva"] for row in module["exports"] for name in row["names"]}
+        jump = int(exports["entry"], 16) + 20
+        self.assertEqual(layout.u32(disk + 20) + struct.unpack_from("<H", data, disk + 28)[0], jump)
+
+        # Both the section/offset and legacy preferred-VA advertisement are sufficient.
+        legacy = bytearray(data)
+        struct.pack_into("<IH", legacy, config + 224, 0, 0)
+        struct.pack_into("<Q", legacy, config + 192, int(module["image_base_va"], 16) + dvrt)
+        old = self.work / "dvrt-va.exe"
+        old.write_bytes(legacy)
+        for fixture in (image, old):
+            ir = self.work / "dvrt.ll"
+            ir.write_bytes(b"sentinel")
+            args = [FORGE, "lift", fixture, "--signature", "i64(i64,i64)", "--output", ir]
+            failure = subprocess.run([*args, "--rva", exports["entry"], "--diagnostics-format", "json"],
+                                     capture_output=True, timeout=10)
+            self.assertEqual((failure.returncode, ir.read_bytes()), (1, b"sentinel"))
+            report = json.loads(failure.stderr)
+            self.assertEqual((report["code"], report["context"]["instruction_rva"]),
+                             ("LIFT_UNSUPPORTED_CONTROL_FLOW", hex(jump)))
+            self.assertIn("dynamic relocation", report["message"])
+            run(*args, "--rva", exports["direct_only"])
+
+    def test_initialization_failure_reaches_differential_parser(self):
+        table = self.layout.u32(self.headers[".jtab"] + 12)
+        reloc, size = self.layout.directory(5)
+        block = struct.pack("<IIHH", table & ~0xfff, size, 0xa000 | ((table+8) & 0xfff), 0)
+        edits = [(self.layout.file_offset(reloc), block)]
+        jump = self.exports["entry"] + 21
+        ir = self.work / "generated" / "case.ll"
+        ir.parent.mkdir(exist_ok=True)
+        for name in ("entry", "table_caller"):
+            report = self.diagnostic(self.exports[name], edits)
+            where = report["context"]
+            self.assertEqual((where["instruction_rva"], where["bytes"], where["file_offset"]),
+                             (hex(jump), "ffe0", self.layout.file_offset(jump)))
+            self.assertEqual(where.get("function_rva"), hex(self.exports["entry"]) if name == "table_caller" else None)
+            self.assertIn(f"at RVA {hex(table)} indices 0..2", report["message"])
+            image = self.work / "edited.exe"
+            selected = diff.analyze(FORGE, image, name, self.work)
+            with self.assertRaisesRegex(ValueError, "^pe/INVALID_PE: .*relocation target outside"):
+                diff.lift(FORGE, image, {"signature": "i64(i64,i64)"}, selected, ir)
+
+    def test_table_decode_crosses_default_leader(self):
+        root = self.exports["entry"]
+        table = self.layout.u32(self.headers[".jtab"] + 12)
+        # Entries 0 and 1 now reach the same instruction, spanning the known JA target.
+        edits = [(self.layout.file_offset(table), struct.pack("<i", root+31-table)),
+                 (self.layout.file_offset(root+31), b"\xb8")]
+        # Alternatively, entry 2 branches to the preceding NOP. Its direct successor
+        # falls through the table target before crossing the same default leader.
+        via_direct = [(self.layout.file_offset(root+23), b"\xeb\x05"),
+                      (self.layout.file_offset(root+30), b"\x90")]
+        for patch in (edits, edits + via_direct):
+            report = self.rejects(root, root+21, patch, "entry 0: branch enters an instruction",
+                                  code="LIFT_INVALID_BRANCH_TARGET", target=root+31)
+            self.assertIn(f"at {hex(root+32)} (instruction begins at {hex(root+31)})", report["message"])
+            self.assertEqual(self.diagnostic(root, patch), report)
+
+    def test_inferred_leaf_call_via_table(self):
+        image = self.work / "case-caller.exe"
+        image.write_bytes(self.original)
+        ir = self.work / "generated" / "case.ll"
+        ir.parent.mkdir(exist_ok=True)
+        selected = diff.analyze(FORGE, image, "case_caller", self.work)
+        with self.assertRaisesRegex(diff.Unsupported, "LIFT_UNDEFINED_REGISTER"):
+            diff.lift(FORGE, image, {"signature": "i64(i64,i64)"}, selected, ir)
+        raw = (self.work / "lifting.log").read_bytes()
+        module = diff.read_json(self.work / "inspect.json")["modules"][0]
+        analysis = diff.read_json(self.work / "analysis.json")
+
+        def verify():
+            return diff.parse_diagnostic(raw, image, selected, ir, lambda leaf, caller, site:
+                                         diff.resolve_leaf_window(module, analysis, image, leaf, caller, site, FORGE))
+
+        self.assertEqual(verify()["context"]["opcode"], "ADD64rr")
+        table = self.layout.file_offset(self.layout.u32(self.headers[".jtcall"] + 12))
+        changed = bytearray(self.original)
+        changed[table:table+4] = changed[table+4:table+8]
+        image.write_bytes(changed)
+        with self.assertRaisesRegex(ValueError, "reachable direct CALL"):
+            verify()
+
+        start = self.layout.file_offset(selected.start)
+        for pos, replacement, reason in [
+                (start+8, b"\x00", "bypasses the dispatch guard"),  # Both JA edges enter the MOV.
+                (start+9, b"\x89\xd0", "unproven caller dispatch bound"),  # Copy unchecked EDX.
+                (self.layout.directories + 12*8,
+                 struct.pack("<II", self.layout.u32(self.headers[".jtcall"] + 12), 4),
+                 "loader-written")]:
+            with self.subTest(reason=reason):
+                changed = bytearray(self.original)
+                changed[pos:pos+len(replacement)] = replacement
+                image.write_bytes(changed)
+                with self.assertRaisesRegex(ValueError, reason):
+                    verify()
+
+        # An equivalent full-width guard reads RCX directly, with no register copy.
+        changed = bytearray(self.original)
+        changed[start+4:start+11] = b"\x90\x48\x83\xf9\x01\x77" + bytes([self.original[start+8] - 2])
+        changed[start+21] = 0x88  # MOVSXD index RCX, formerly RAX.
+        image.write_bytes(changed)
+        self.assertEqual(verify()["context"]["opcode"], "ADD64rr")
 
     def test_bounds_and_encoding(self):
         root = self.exports["entry"]

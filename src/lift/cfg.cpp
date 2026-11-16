@@ -6,6 +6,7 @@
 #include "llvm/MC/MCDisassembler/MCDisassembler.h"
 #include "llvm/MC/MCInstrInfo.h"
 
+#include <algorithm>
 #include <set>
 
 namespace forge::x86 {
@@ -151,18 +152,30 @@ namespace forge::x86 {
             unsigned tableEntries = 0;
             void resolve(uint32_t site);
             void validateGuards() const;
-            // Keep the edge that introduced each leader for overlap diagnostics.
-            std::map<uint32_t, uint32_t> leaders;
+
+            using TableOrigin = std::pair<uint32_t, unsigned>; // Dispatch RVA, entry index.
+
+            struct Leader {
+                uint32_t firstSource;
+                bool explicitEntry;
+                std::optional<TableOrigin> table;
+            };
+
+            std::map<uint32_t, Leader> leaders;
             std::vector<uint32_t> pending;
-            void schedule(const Step &s, int64_t address);
+            void schedule(const Step &s, int64_t address, bool explicitEntry,
+                          std::optional<unsigned> index = {});
             void recordEdges(const Step &s, Flow flow);
             void trace(uint32_t start);
-            void rejectTableTarget(uint32_t target, const Twine &reason) const;
-            void overlap(uint32_t target) const;
+            [[noreturn]] void rejectTableTarget(TableOrigin origin, const Twine &reason) const;
+            std::optional<TableOrigin> overlapOrigin(std::optional<TableOrigin> origin,
+                                                     uint32_t instruction) const;
+            [[noreturn]] void overlap(uint32_t target, uint32_t instruction) const;
             ControlFlowGraph partition();
         };
 
-        void Discovery::schedule(const Step &s, int64_t address) {
+        void Discovery::schedule(const Step &s, int64_t address, bool explicitEntry,
+                                 std::optional<unsigned> index) {
             if (address < begin || address >= end) {
                 auto dest = address < 0 ? "-" + hex(static_cast<uint64_t>(-address))
                                         : hex(static_cast<uint64_t>(address));
@@ -176,44 +189,86 @@ namespace forge::x86 {
             }
 
             auto target = static_cast<uint32_t>(address);
-            if (leaders.try_emplace(target, s.rva).second) {
+            auto [found, inserted] = leaders.try_emplace(target, Leader{s.rva, explicitEntry, {}});
+            auto &leader = found->second;
+            leader.explicitEntry |= explicitEntry;
+
+            if (index) {
+                TableOrigin origin{s.rva, *index};
+
+                if (!leader.table || origin < *leader.table) {
+                    leader.table = origin;
+                }
+            }
+
+            if (inserted) {
                 pending.push_back(target);
             }
         }
 
-        void Discovery::rejectTableTarget(uint32_t target, const Twine &reason) const {
-            const auto leader = leaders.find(target);
+        void Discovery::rejectTableTarget(TableOrigin origin, const Twine &reason) const {
+            const auto [site, index] = origin;
+            const auto &edges = resolved.at(site);
+            edges.proof.rejectEntry(decoded.at(site), index, FailureCode::InvalidBranchTarget,
+                                    reason, edges.targets[index]);
+        }
 
-            if (leader == leaders.end()) {
-                return;
+        std::optional<Discovery::TableOrigin>
+        Discovery::overlapOrigin(std::optional<TableOrigin> origin, uint32_t instruction) const {
+            if (resolved.empty()) {
+                return {};
             }
 
-            const auto dispatch = resolved.find(leader->second);
+            // A case may fall through other leaders before its instruction crosses
+            // the target. On failure, consider every such table edge on either side.
+            auto before = decoded.lower_bound(instruction);
 
-            if (dispatch != resolved.end()) {
-                const auto &edges = dispatch->second;
-                const auto index = llvm::find(edges.targets, target) - edges.targets.begin();
-                edges.proof.rejectEntry(decoded.at(dispatch->first), static_cast<unsigned>(index),
-                                        FailureCode::InvalidBranchTarget, reason, target);
+            for (;;) {
+                const auto leader = leaders.find(instruction);
+
+                if (leader != leaders.end() && leader->second.table &&
+                    (!origin || leader->second.table < origin)) {
+                    origin = leader->second.table;
+                }
+
+                if (before == decoded.begin()) {
+                    return origin;
+                }
+
+                const auto &previous = (--before)->second;
+
+                if (previous.next != instruction ||
+                    control(previous, info, true) != Flow::Fallthrough) {
+                    return origin;
+                }
+
+                instruction = previous.rva;
             }
         }
 
-        void Discovery::overlap(uint32_t target) const {
-            rejectTableTarget(target, "branch enters an instruction at " + hex(target));
-            const auto &source = decoded.at(leaders.at(target));
+        void Discovery::overlap(uint32_t target, uint32_t instruction) const {
+            const auto &leader = leaders.at(target);
+            const auto reason = "branch enters an instruction at " + hex(target);
+
+            if (const auto origin = overlapOrigin(leader.table, instruction)) {
+                rejectTableTarget(*origin,
+                                  reason + " (instruction begins at " + hex(instruction) + ")");
+            }
+
+            const auto &source = decoded.at(leader.firstSource);
             source.reject(validateLeaf ? FailureCode::InvalidCallTarget
                                        : FailureCode::UnsupportedControlFlow,
-                          "branch enters an instruction at " + hex(target), target);
+                          reason, target);
         }
 
         void Discovery::recordEdges(const Step &s, Flow flow) {
             if (flow == Flow::Indirect) {
                 unresolved.insert(s.rva);
             } else if (flow == Flow::Conditional || flow == Flow::Jump) {
-                schedule(s, int64_t(s.next) + s.inst.getOperand(0).getImm());
+                schedule(s, int64_t(s.next) + s.inst.getOperand(0).getImm(), true);
 
                 if (flow == Flow::Conditional) {
-                    schedule(s, s.next);
+                    schedule(s, s.next, false);
                 }
             }
         }
@@ -226,7 +281,8 @@ namespace forge::x86 {
                 }
 
                 if (after != decoded.begin() && std::prev(after)->second.next > rva) {
-                    overlap(rva);
+                    const auto instruction = std::prev(after)->first;
+                    overlap(rva, instruction);
                 }
 
                 if (validateLeaf && decoded.size() >= maxLeafInstructions) {
@@ -240,7 +296,7 @@ namespace forge::x86 {
                 // A forward target may already be scheduled, even before its decode.
                 auto leader = leaders.upper_bound(rva);
                 if (leader != leaders.end() && leader->first < s.next) {
-                    overlap(leader->first);
+                    overlap(leader->first, rva);
                 }
 
                 checkPrefix(s);
@@ -259,8 +315,16 @@ namespace forge::x86 {
                 rva = step.next;
             }
         } catch (const InspectionError &error) {
-            if (error.kind == FailureCode::InvalidInstruction && error.context.instructionRva) {
-                rejectTableTarget(*error.context.instructionRva, error.what());
+            const auto location = error.context.instructionRva;
+
+            if (error.kind != FailureCode::InvalidInstruction || !location) {
+                throw;
+            }
+
+            const auto leader = leaders.find(*location);
+
+            if (leader != leaders.end() && leader->second.table) {
+                rejectTableTarget(leader->second.table.value(), error.what());
             }
 
             throw;
@@ -281,42 +345,26 @@ namespace forge::x86 {
             auto &edges =
                 resolved.emplace(site, TableEdges{proof, std::move(targets)}).first->second;
 
-            for (auto target : edges.targets) {
-                schedule(jump, target);
+            for (unsigned i = 0; i < edges.targets.size(); ++i) {
+                schedule(jump, edges.targets[i], true, i);
             }
         }
 
         void Discovery::validateGuards() const {
-            if (resolved.empty()) {
-                return;
-            }
-
             // Only sequential execution from CMP may reach its JA and the dispatch prefix.
             // Include edges discovered through other tables and case/loop backedges.
-            std::set<uint32_t> entries{begin};
-
-            for (const auto &[rva, step] : decoded) {
-                const auto flow = control(step, info, tables != nullptr);
-
-                if (flow == Flow::Jump || flow == Flow::Conditional) {
-                    entries.insert(static_cast<uint32_t>(int64_t(step.next) +
-                                                         step.inst.getOperand(0).getImm()));
-                }
-            }
-
             for (const auto &[site, edges] : resolved) {
-                entries.insert(edges.targets.begin(), edges.targets.end());
-            }
+                const auto stop = leaders.upper_bound(site);
+                const auto alternate =
+                    std::find_if(leaders.upper_bound(edges.proof.compareRva), stop,
+                                 [](const auto &leader) { return leader.second.explicitEntry; });
 
-            for (const auto &[site, edges] : resolved) {
-                auto alternate = entries.upper_bound(edges.proof.compareRva);
-
-                if (alternate != entries.end() && *alternate <= site) {
+                if (alternate != stop) {
                     decoded.at(site).reject(FailureCode::UnsupportedControlFlow,
                                             edges.proof.describe() +
                                                 ": unproven bounds: edge bypasses proof at " +
-                                                hex(*alternate),
-                                            *alternate);
+                                                hex(alternate->first),
+                                            alternate->first);
                 }
             }
         }
@@ -373,7 +421,7 @@ namespace forge::x86 {
                                       FailureCode::FunctionSize);
             }
 
-            leaders.emplace(begin, begin);
+            leaders.emplace(begin, Leader{begin, true, {}});
             pending.push_back(begin);
 
             while (!pending.empty() || !unresolved.empty()) {

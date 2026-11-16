@@ -117,7 +117,7 @@ def direct_target(operands):
     return int(target[1], 16) if target else None
 
 
-def reachable_instructions(entry, decode, in_body, allow_call, ordinary, *, end=None):
+def reachable_instructions(entry, decode, in_body, allow_call, ordinary, *, end=None, indirect=None):
     # Follow numeric disassembly addresses from the entry, including both conditional edges.
     graph = {}
     pending = [entry]
@@ -133,9 +133,12 @@ def reachable_instructions(entry, decode, in_body, allow_call, ordinary, *, end=
             continue
         if opcode == "jmp" or opcode in CONDITIONS:
             target = direct_target(operands)
-            if target is None or not in_body(target):
+            if target is None and opcode == "jmp" and indirect is not None:
+                successors = indirect(address, operands, graph)
+            elif target is None or not in_body(target):
                 raise ValueError(f"invalid direct target at {address:x}: {text}")
-            successors.append(target)
+            else:
+                successors.append(target)
         elif opcode == "call":
             target = direct_target(operands)
             if target is None or not allow_call(target):
