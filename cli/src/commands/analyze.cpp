@@ -1,7 +1,7 @@
-#include "cli/commands/analyze.h"
-#include "cli/analysis_input.h"
-#include "cli/parsing.h"
-#include "cli/report.h"
+#include "commands/analyze.h"
+#include "analysis_input.h"
+#include "parsing.h"
+#include "report.h"
 
 namespace forge::cli {
     namespace {

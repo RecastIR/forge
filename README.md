@@ -4,16 +4,18 @@ Forge inspects Windows PE32+ AMD64 executables and DLLs on macOS. It reports the
 
 ## Repository layout
 
-The root CMake project builds the `forge` CLI on a private `forge_core` library. Core contract tests link the same production code. All headers are internal to the repository.
+The root CMake project builds the `forge_core` compiler library and registers the `forge` executable when `FORGE_BUILD_CLI` is enabled. The CLI and core contract tests both call the compiler library. All headers are internal to the repository.
 
 | Location | Responsibility |
 | --- | --- |
-| `src/cli/` | Application entry point, argument compatibility, shared analysis input, and report and diagnostic rendering |
-| `src/cli/commands/` | Typed options, CLI11 registration, and execution for inspect, analyze, and lift |
-| `src/pe/` | File input, PE parsing, image metadata, and DLL dependency resolution |
-| `src/analysis/` | Function discovery, range validation, findings, and optional debug enrichment |
-| `src/lift/` | Translation of supported function instructions to LLVM IR |
-| `src/output/` | Publication of completed LLVM modules |
+| `cli/src/` | Application entry point, argument compatibility, shared analysis input, and report and diagnostic rendering |
+| `cli/src/commands/` | Typed options, CLI11 registration, and execution for inspect, analyze, and lift |
+| `compiler/src/diagnostic.*`, `compiler/src/diagnostics.def` | Diagnostic model and failure codes shared by compiler stages and CLI renderers |
+| `compiler/src/pe/` | File input, PE parsing, image metadata, and DLL dependency resolution |
+| `compiler/src/analysis/` | Function discovery, range validation, findings, and optional debug enrichment |
+| `compiler/src/lift/` | Translation of supported function instructions to LLVM IR |
+| `compiler/src/output/` | Publication of completed LLVM modules |
+| `runtime/` | Reserved for the future native macOS ARM64 runtime and Windows compatibility services |
 | `cmake/` | Formatting and static-analysis commands |
 | `tests/integration/` | Build, CLI, code generation, and native execution suites and their Python helpers |
 | `tests/fixtures/` | SDK-free PE fixture sources and their generator |
@@ -21,7 +23,7 @@ The root CMake project builds the `forge` CLI on a private `forge_core` library.
 | `tests/support/` | C++ harness for calling a lifted function from a test |
 | `tests/differential/` | Windows x64 fixtures, manifests, cross-build tooling, and Wine reference capture |
 
-Add new production code to the component that owns it. Create `runtime/` when generated code first needs a shared native implementation. Register tests in `tests/CMakeLists.txt`. Build the whole-executable fixtures with `make provision-fixtures` and `./tools/build-windows-fixtures.sh --all`, then capture their Wine references with `./tools/run-windows-references.sh --all`. On Apple Silicon, compare enabled lifted functions with `./tools/run-differential.sh --all --config debug` or `--config release`. See the [fixture guide](tests/differential/README.md).
+Add new production code to the component that owns it. See the [component responsibilities](docs/design-guide.md#component-responsibilities) when adding a component. Register tests in `tests/CMakeLists.txt`. Build the whole-executable fixtures with `make provision-fixtures` and `./tools/build-windows-fixtures.sh --all`, then capture their Wine references with `./tools/run-windows-references.sh --all`. On Apple Silicon, compare enabled lifted functions with `./tools/run-differential.sh --all --config debug` or `--config release`. See the [fixture guide](tests/differential/README.md).
 
 ### Image ownership and stage contracts
 
@@ -68,6 +70,8 @@ The checked-in `CMakePresets.json` defines the workflows. Conan writes generated
 | Debug ASan + UBSan | `make provision PRESET=sanitize` | `make sanitize` | `build/sanitize/` |
 | Clang analysis | `make provision PRESET=lint` | `make lint` | `build/lint/compile_commands.json` |
 | Xcode | `make provision PRESET=xcode` | `make test PRESET=xcode CONFIG=Release` | `build/xcode/Release/` |
+
+To place `forge` or `libforge_core.a` elsewhere, set `CMAKE_RUNTIME_OUTPUT_DIRECTORY` or `CMAKE_ARCHIVE_OUTPUT_DIRECTORY`, respectively. Relative paths such as `bin` resolve from the preset's build directory. A per-configuration setting such as `CMAKE_RUNTIME_OUTPUT_DIRECTORY_DEBUG` takes precedence. If a setting begins with a generator expression, CMake evaluates it in the target's component build directory.
 
 Hosted builds write each configuration under `build/<preset>/`. The cache holds Conan packages; provisioning regenerates the toolchain for the selected preset on each runner. The cache key includes the locked graph, profiles, preset configuration, architecture, compiler, LLVM and macOS SDK identities. A warm run still configures, links and executes the tests. To bound compilation locally, set `CMAKE_BUILD_PARALLEL_LEVEL` before running `make`.
 

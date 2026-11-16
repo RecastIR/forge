@@ -7,8 +7,10 @@ import sys
 from xml.etree import ElementTree
 
 
-NATIVE_ROOTS = ('src', 'tests/support', 'tests/unit')
+NATIVE_ROOTS = ('cli/src', 'compiler/src', 'tests/support', 'tests/unit')
 ROOTS = (*NATIVE_ROOTS, 'tests/fixtures', 'tests/differential/fixtures', 'tests/differential/reference')
+# Git needs both sides of a rename when comparing with a pre-monorepo revision.
+DIFF_ROOTS = (*ROOTS, 'src')
 EXCLUDED = {'generated', 'vendor', 'vendored', 'third_party', 'third-party', 'external', '_deps', 'CMakeFiles'}
 HUNK = re.compile(rb'^@@ -\d+(?:,\d+)? \+(\d+)(?:,(\d+))? @@', re.MULTILINE)
 
@@ -17,8 +19,8 @@ def git(*args):
     return subprocess.check_output(['git', '--literal-pathspecs', *args])
 
 
-def owned(path):
-    return (path.suffix in {'.h', '.cpp', '.c'} and any(Path(root) in path.parents for root in ROOTS)
+def owned(path, roots=ROOTS):
+    return (path.suffix in {'.h', '.cpp', '.c'} and any(Path(root) in path.parents for root in roots)
             and not any(p in EXCLUDED or p == 'build' or p.startswith(('build-', 'cmake-build-'))
                         for p in path.parts[:-1]))
 
@@ -48,7 +50,7 @@ def changed_sources():
     """Return inclusive working-tree line ranges, or None for a whole new file."""
     base = comparison_base()
     fields = iter(git('diff', '--name-status', '-z', '--find-renames', '--no-ext-diff',
-                      base, '--', *ROOTS).split(b'\0'))
+                      base, '--', *DIFF_ROOTS).split(b'\0'))
     changes = {}
     for status in fields:
         if not status:
@@ -59,7 +61,7 @@ def changed_sources():
             raise SystemExit(f'{path}: resolve the Git conflict before running style checks.')
         if status == b'D' or not regular_source(path):
             continue
-        if status in (b'A', b'T') or not owned(old):
+        if status in (b'A', b'T') or not owned(old, DIFF_ROOTS):
             changes[path] = None
             continue
         patch = git('diff', '--text', '--no-color', '--no-ext-diff', '--no-textconv', '-U0',

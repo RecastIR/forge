@@ -1,4 +1,4 @@
-#include "cli/analysis_input.h"
+#include "analysis_input.h"
 
 namespace forge::cli {
     AnalyzedImage analyzeInput(const fs::path &input, DebugInfo debugInfo, FailureCode &stage) {

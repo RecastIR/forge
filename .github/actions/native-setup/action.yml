@@ -117,7 +117,7 @@ runs:
       uses: actions/cache@v4
       with:
         path: ${{ runner.temp }}/forge-ccache
-        key: forge-ccache-v1-${{ inputs.presets }}-${{ steps.toolchain.outputs.id }}-${{ hashFiles('.github/actions/native-setup/action.yml', '.github/actions/llvm/action.yml', 'conan.lock', 'conanfile.py', 'conan/profiles/**', 'CMakePresets.json') }}-${{ hashFiles('src/**','tests/unit/**','tests/support/**','**/CMakeLists.txt','cmake/**') }}
+        key: forge-ccache-v1-${{ inputs.presets }}-${{ steps.toolchain.outputs.id }}-${{ hashFiles('.github/actions/native-setup/action.yml', '.github/actions/llvm/action.yml', 'conan.lock', 'conanfile.py', 'conan/profiles/**', 'CMakePresets.json') }}-${{ hashFiles('cli/src/**','compiler/src/**','tests/unit/**','tests/support/**','**/CMakeLists.txt','cmake/**') }}
         restore-keys: |
           forge-ccache-v1-${{ inputs.presets }}-${{ steps.toolchain.outputs.id }}-${{ hashFiles('.github/actions/native-setup/action.yml', '.github/actions/llvm/action.yml', 'conan.lock', 'conanfile.py', 'conan/profiles/**', 'CMakePresets.json') }}-
     - name: Reset counters for this build

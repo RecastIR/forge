@@ -1,7 +1,7 @@
 #include "diagnostic.h"
-#include "cli/report.h"
 #include "lift/lift.h"
 #include "pe/image.h"
+#include "report.h"
 
 #include "llvm/Support/JSON.h"
 

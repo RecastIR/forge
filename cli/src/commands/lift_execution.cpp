@@ -1,7 +1,7 @@
-#include "cli/analysis_input.h"
-#include "cli/commands/lift.h"
-#include "cli/report.h"
+#include "analysis_input.h"
+#include "commands/lift.h"
 #include "output/publication.h"
+#include "report.h"
 
 #include "llvm/IR/LLVMContext.h"
 #include "llvm/IR/Module.h"
