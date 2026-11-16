@@ -12,6 +12,7 @@
 #include "llvm/MC/MCSubtargetInfo.h"
 #include "llvm/Support/TargetSelect.h"
 
+#include <algorithm>
 #include <mutex>
 #include <utility>
 
@@ -170,6 +171,9 @@ namespace forge::x86 {
             const InstructionOperands operands;
             std::optional<std::vector<RvaRange>> loaderWrites;
 
+            ArrayRef<RvaRange> loaderWrittenRanges();
+            std::optional<uint64_t> firstLoaderWrite(uint32_t start, const MappedRange &code);
+            void checkCalledExtent(uint32_t target, const MappedRange &code, const Step &step);
             void validateCallEvidence(const RecoveredFunction &caller, const Step &call,
                                       int64_t target);
             bool schedule(uint32_t target, const Step &step);
@@ -178,7 +182,41 @@ namespace forge::x86 {
                      const MCRegisterInfo &regs);
         };
 
+        ArrayRef<RvaRange> GroupDiscovery::loaderWrittenRanges() {
+            if (!loaderWrites) {
+                loaderWrites = entry.analysis.image().loaderWrittenRanges();
+            }
+
+            return *loaderWrites;
+        }
+
+        std::optional<uint64_t> GroupDiscovery::firstLoaderWrite(uint32_t start,
+                                                                 const MappedRange &code) {
+            const RvaRange extent{start, uint64_t(start) + code.bytes.size()};
+            const auto overlaps = rangesIn(loaderWrittenRanges(), extent);
+            if (overlaps.empty()) {
+                return {};
+            }
+
+            return std::max(extent.begin, overlaps.front().begin);
+        }
+
+        void GroupDiscovery::checkCalledExtent(uint32_t target, const MappedRange &code,
+                                               const Step &step) {
+            if (const auto write = firstLoaderWrite(target, code)) {
+                step.reject(FailureCode::UnsupportedControlFlow,
+                            "callee overlaps loader-written bytes at " + hex(*write), target);
+            }
+        }
+
         bool GroupDiscovery::schedule(uint32_t target, const Step &step) {
+            // The selected root was seeded without an incoming call. A recursive call
+            // can reach it before the root's final extent check.
+            if (target == entry.rva) {
+                checkCalledExtent(target, entry.code, step);
+                return true;
+            }
+
             if (functions.contains(target) || pending.contains(target)) {
                 return true;
             }
@@ -196,6 +234,7 @@ namespace forge::x86 {
                 return false;
             }
 
+            checkCalledExtent(target, *code, step);
             pending.emplace(target, *code);
             return true;
         }
@@ -210,18 +249,22 @@ namespace forge::x86 {
                     target);
             }
 
-            if (!loaderWrites) {
-                try {
-                    loaderWrites = image.loaderWrittenRanges();
-                } catch (const InspectionError &error) {
-                    call.reject(error.kind, error.what(), target);
-                }
+            // Nested recorded extents have already passed the loader-write check at admission.
+            if (caller.entry != entry.rva) {
+                return;
             }
 
-            const RvaRange extent{caller.entry, uint64_t(caller.entry) + caller.code.bytes.size()};
-            if (!rangesIn(*loaderWrites, extent).empty()) {
+            std::optional<uint64_t> write;
+            try {
+                write = firstLoaderWrite(caller.entry, caller.code);
+            } catch (const InspectionError &error) {
+                call.reject(error.kind, error.what(), target);
+            }
+
+            if (write) {
                 call.reject(FailureCode::UnsupportedControlFlow,
-                            "register call proof depends on loader-written code", target);
+                            "register call proof depends on loader-written code at " + hex(*write),
+                            target);
             }
         }
 
@@ -268,7 +311,10 @@ namespace forge::x86 {
                 }
             }
         } catch (InspectionError &error) {
-            error.context.blockRva = block.steps.front().rva;
+            if (error.context.instructionRva) {
+                error.context.blockRva = block.steps.front().rva;
+            }
+
             throw;
         }
 
@@ -290,6 +336,14 @@ namespace forge::x86 {
                     for (const auto &[leader, block] : function.graph) {
                         scanCalls(function, block);
                     }
+
+                    // Give a register CALL or table JMP its more specific proof diagnostic first.
+                    if (rva == entry.rva) {
+                        if (const auto write = firstLoaderWrite(rva, function.code)) {
+                            throw atRva(FailureCode::ImageMemory, rva,
+                                        "function overlaps loader-written bytes at " + hex(*write));
+                        }
+                    }
                 } catch (InspectionError &error) {
                     if (rva != entry.rva) {
                         error.context.functionRva = rva;
@@ -300,7 +354,8 @@ namespace forge::x86 {
             }
 
             if (!deferred.empty()) {
-                recoverLeaves(entry, functions, deferred, dis, instructions, regs);
+                recoverLeaves(entry, functions, deferred, loaderWrittenRanges(), dis, instructions,
+                              regs);
             }
 
             // Incoming indices follow source order even when discovery began at a higher RVA.

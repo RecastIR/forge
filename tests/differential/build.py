@@ -120,6 +120,33 @@ def direct_target(operands):
 GPRS = set("rax rbx rcx rdx rsi rdi rsp rbp".split()) | {f"r{i}" for i in range(8, 16)}
 
 
+def split_rex(raw):
+    """Return extension bits and opcode bytes for the primary opcode map."""
+    rex = 0
+    if raw and 0x40 <= raw[0] <= 0x4f:
+        rex, raw = raw[0] & 0x0f, raw[1:]
+    if len(raw) >= 2 and raw[0] == 0xd5 and raw[1] < 0x80:
+        return raw[1], raw[2:]
+    return rex, raw
+
+
+def register_call_encoding(raw, *, rejected_prefix=False):
+    _, body = split_rex(raw)
+    if rejected_prefix:
+        # An accepted extension prefix cannot justify a prefix failure.
+        if len(body) == 2:
+            return False
+        # LLVM decodes a leading LOCK and the acquire/release LOCK sequences
+        # as separate instructions. They cannot be part of the reported CALL.
+        if raw.startswith(b"\xf0") or b"\xf2\xf0" in raw or b"\xf3\xf0" in raw:
+            return False
+        legacy = {0xf0, 0xf2, 0xf3, 0x2e, 0x36, 0x3e, 0x26, 0x64, 0x65, 0x66, 0x67}
+        while raw and (raw[0] in legacy or 0x40 <= raw[0] <= 0x4f):
+            raw = raw[1:]
+        _, body = split_rex(raw)
+    return len(body) == 2 and body[0] == 0xff and body[1] & 0xf8 == 0xd0
+
+
 def call_padding(asm, raw):
     if asm == "nop":
         return raw is None or raw == b"\x90"
@@ -147,8 +174,7 @@ def register_call_targets(graph, decode, *, encoding=None):
             continue
         if encoding:
             raw = encoding(address, continuation)
-            body = raw[1:] if raw and 0x40 <= raw[0] <= 0x4f else raw
-            if len(body) != 2 or body[0] != 0xff or body[1] & 0xf8 != 0xd0:
+            if not register_call_encoding(raw):
                 raise ValueError(f"unsupported register call encoding at {address:x}")
         cursor = address
         while cursor != next(iter(graph)):
@@ -171,8 +197,9 @@ def register_call_targets(graph, decode, *, encoding=None):
                 # GNU objdump sometimes prints a negative disp32 as an unsigned hex word.
                 disp = ((disp + (1 << 31)) % (1 << 32)) - (1 << 31)
                 if raw is not None:
-                    if (len(raw) != 7 or raw[0] & 0xf8 != 0x48 or raw[1] != 0x8d
-                            or raw[2] & 0xc7 != 5 or int.from_bytes(raw[3:], "little", signed=True) != disp):
+                    rex, body = split_rex(raw)
+                    if (not rex & 8 or len(body) != 6 or body[0] != 0x8d or body[1] & 0xc7 != 5
+                            or int.from_bytes(body[2:], "little", signed=True) != disp):
                         break
                 targets[address] = end + disp
             break
@@ -182,7 +209,7 @@ def register_call_targets(graph, decode, *, encoding=None):
 
 
 def reachable_instructions(entry, decode, in_body, allow_call, ordinary, *, end=None, indirect=None,
-                           register_calls=False):
+                           register_calls=False, terminals=("ret",)):
     # Follow numeric disassembly addresses from the entry, including both conditional edges.
     graph = {}
     pending = [entry]
@@ -193,7 +220,7 @@ def reachable_instructions(entry, decode, in_body, allow_call, ordinary, *, end=
         text, following = decode(address)
         opcode, _, operands = text.partition(" ")
         successors = []
-        if opcode == "ret" and not operands:
+        if opcode in terminals and not operands:
             graph[address] = successors
             continue
         if opcode == "jmp" or opcode in CONDITIONS:

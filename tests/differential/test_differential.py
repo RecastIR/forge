@@ -552,6 +552,22 @@ class LiftDiagnosticTests(unittest.TestCase):
                 lift_diagnostics.parse_diagnostic(self.encode(dict(record, context=dict(context, **changed))),
                                                   self.image, self.selected, self.ir)
 
+    def test_rejected_call_prefix_requires_matching_instruction_bytes(self):
+        for encoded, reported, valid in [("f3ffd0", "f3ffd0", True), ("f3ffd0", "f3ffd1", False),
+                                          ("f3ff10", "f3ff10", False), ("41ffd0", "41ffd0", False),
+                                          ("40d500ffd0", "40d500ffd0", False), ("f0ffd0", "f0ffd0", False),
+                                          ("f3f0ffd0", "f3f0ffd0", False)]:
+            with self.subTest(encoded=encoded, reported=reported):
+                self.image.write_bytes(b"MZ" + bytes.fromhex(encoded))
+                context = dict(self.diagnostic["context"], instruction_rva=self.rva, opcode="CALL64r", bytes=reported)
+                record = dict(self.diagnostic, code="LIFT_UNSUPPORTED_PREFIX", context=context)
+                if valid:
+                    self.assertEqual(lift_diagnostics.parse_diagnostic(self.encode(record), self.image,
+                                     self.selected, self.ir), record)
+                else:
+                    with self.assertRaises(ValueError):
+                        lift_diagnostics.parse_diagnostic(self.encode(record), self.image, self.selected, self.ir)
+
     def test_invalid_call_target_verifies_displacement(self):
         self.image.write_bytes(b"MZ\xe8\x00\x00\x00\x80")
         context = dict(self.diagnostic["context"], instruction_rva="0x10", opcode="CALL64pcrel32",

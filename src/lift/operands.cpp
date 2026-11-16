@@ -26,6 +26,23 @@ namespace forge::x86 {
         static_assert(std::size(registerNames) == registerCount);
         static_assert(std::string_view(registerNames[rspIndex].wide) == "RSP");
         static_assert(std::string_view(registerNames[framePointer.index].wide) == "RBP");
+
+        std::optional<RegisterView> modeledRegister(StringRef name, unsigned width) {
+            for (unsigned index = 0; index < std::size(registerNames); ++index) {
+                const auto &names = registerNames[index];
+
+                if ((width == 64 && names.wide == name) || (width == 32 && names.dword == name) ||
+                    (width == 16 && names.word == name) || (width == 8 && names.lowByte == name)) {
+                    return RegisterView{index, width};
+                }
+
+                if (width == 8 && names.highByte == name) {
+                    return RegisterView{index, width, 8};
+                }
+            }
+
+            return {};
+        }
     } // namespace
 
     StringRef registerName(unsigned index) { return registerNames[index].wide; }
@@ -61,17 +78,8 @@ namespace forge::x86 {
 
         auto name = StringRef(regs.getName(op.getReg()));
 
-        for (unsigned index = 0; index < std::size(registerNames); ++index) {
-            const auto &names = registerNames[index];
-
-            if ((width == 64 && names.wide == name) || (width == 32 && names.dword == name) ||
-                (width == 16 && names.word == name) || (width == 8 && names.lowByte == name)) {
-                return {index, width};
-            }
-
-            if (width == 8 && names.highByte == name) {
-                return {index, width, 8};
-            }
+        if (auto view = modeledRegister(name, width)) {
+            return *view;
         }
 
         s.reject(FailureCode::UnsupportedRegister, "unsupported register " + name);
@@ -202,7 +210,12 @@ namespace forge::x86 {
                         "unsupported register call: target LEA is not RIP-relative");
         }
 
-        reg(call, call.inst.getOperand(0), 64);
+        const StringRef name = regs.getName(call.inst.getOperand(0).getReg());
+        if (!modeledRegister(name, 64)) {
+            call.reject(FailureCode::UnsupportedControlFlow,
+                        "unsupported register call through unmodeled register " + name, target);
+        }
+
         decodeAddress(*previous, 1, false);
         return *target;
     }

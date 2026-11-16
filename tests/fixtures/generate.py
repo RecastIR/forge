@@ -79,7 +79,7 @@ def generate(output, mc, link, dlltool, clang):
                   exports=["entry"], link_flags=["/base:0x10000000"])
         leaf_calls = sources.parent / "differential/fixtures/functions/call_leaves.S"
         indirect = leaf_calls.with_name("call_indirect.S")
-        image("indirect.exe", stub + indirect.read_text() + '\n.section .rdata,"dr"\n.quad entry\n',
+        image("indirect.exe", metadata + indirect.read_text(),
               exports=["indirect_preserve", "indirect_leaf", "indirect_recurse"])
         image("stack.exe", (sources / "stack.s").read_text())
         # A separate file-backed section lets CLI tests exercise both limits and boundary types.

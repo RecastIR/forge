@@ -4,6 +4,7 @@ from dataclasses import dataclass
 from pathlib import Path
 import re
 
+from build import register_call_encoding
 from manifests import field, unique_keys
 
 
@@ -95,6 +96,8 @@ def validate_context(context, stage, category, code, image, selected, ir, resolv
     if code == "LIFT_INVALID_CALL_TARGET" and (context.get("opcode") not in {"CALL64pcrel32", "CALL64r"}
             or not {"instruction_rva", "branch_target", "bytes"} <= context.keys()):
         raise ValueError("invalid call target diagnostic lacks a resolved call site")
+    if context.get("opcode") == "CALL64r" and "bytes" not in context:
+        raise ValueError("register call diagnostic lacks instruction bytes")
     if code == "LIFT_INVALID_BRANCH_TARGET" and (context.get("opcode") != "JMP64r"
             or not {"instruction_rva", "branch_target", "bytes"} <= context.keys()):
         raise ValueError("invalid branch target diagnostic lacks a dispatch site")
@@ -152,8 +155,7 @@ def validate_context(context, stage, category, code, image, selected, ir, resolv
             if len(body) != 2 or body[0] != 0xff or body[1] & 0xf8 != 0xe0:
                 raise ValueError("invalid register jump encoding")
         if context.get("opcode") == "CALL64r":
-            body = encoded[1:] if 0x40 <= encoded[0] <= 0x4f else encoded
-            if len(body) != 2 or body[0] != 0xff or body[1] & 0xf8 != 0xd0:
+            if not register_call_encoding(encoded, rejected_prefix=code == "LIFT_UNSUPPORTED_PREFIX"):
                 raise ValueError("invalid register call encoding")
             if code == "LIFT_INVALID_CALL_TARGET" and (register_target is None
                     or register_target(owner, instruction) != context["branch_target"]):

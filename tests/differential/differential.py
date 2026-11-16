@@ -175,7 +175,8 @@ def verified_call_target(image, module, caller, site, forge, *, require_continua
         ordinary = FALLTHROUGH | {"adc", "sbb", "leave", "lahf", "sal"} | {
             prefix + jump[1:] for prefix in ("cmov", "set") for jump in CONDITIONS}
         graph = reachable_instructions(begin, decode, lambda a: begin <= a < end,
-                                       lambda _: True, ordinary, end=end, indirect=tables.targets, register_calls=True)
+                                       lambda _: True, ordinary, end=end, indirect=tables.targets,
+                                       register_calls=True, terminals=("ret", "ud2"))
         with image.open("rb") as source:
             def encoding(first, last):
                 source.seek(caller.file_offset + first - begin)

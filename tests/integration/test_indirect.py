@@ -26,6 +26,9 @@ class IndirectCalls(GuestExecution):
         cls.recursive = cls.exports["indirect_recurse"]
         cls.original = Path(IMAGE).read_bytes()
         cls.layout = Layout(cls.original)
+        pdata, size = cls.layout.directory(3)
+        first = cls.layout.file_offset(pdata)
+        cls.records = {cls.layout.u32(off): off for off in range(first, first + size, 12)}
 
     def test_state(self):
         for exe in self.variants("call_indirect", state=True):
@@ -51,9 +54,10 @@ class IndirectCalls(GuestExecution):
                 self.expect(exe, 0, 1, 5)
 
             # Corrupt only the R11 LEA to the shared helper. The earlier RAX call, the
-            # expected VA, and the guest frame stay valid. The alternative is a real callee.
+            # expected VA, and the guest frame stay valid. The recursive callee would return
+            # normally on (7, 2), so dispatching there cannot satisfy the trap assertion.
             store = rf"(getelementptr inbounds i64, ptr %registers, i32 6\n  store i64 ){base + self.shared},"
-            modified, count = re.subn(store, rf"\g<1>{base + self.leaf},", source)
+            modified, count = re.subn(store, rf"\g<1>{base + self.recursive},", source)
             self.assertEqual(count, 1)
             ir.write_text(modified)
             for exe in self.compile_variants(ir):
@@ -146,9 +150,7 @@ class IndirectCalls(GuestExecution):
                 body = b"\x48\x8d\x05" + struct.pack("<i", target - site) + b"\xff\xd0\xc3"
                 self.check_site([(start, body)], site, b"\xff\xd0", code=code, target=target)
 
-        records = self.layout.file_offset(pdata)
-        helper_record = records + 12
-        self.assertEqual(self.layout.u32(helper_record), self.shared)
+        helper_record = self.records[self.shared]
         # Overlap the helper with the next recorded function, leaving the caller eligible.
         self.check_site([(helper_record + 4, struct.pack("<I", self.recursive + 1))],
                         self.root + 26, b"\xff\xd0", code="LIFT_INVALID_CALL_TARGET", target=self.shared)
@@ -165,6 +167,109 @@ class IndirectCalls(GuestExecution):
         self.check_site([(self.layout.file_offset(self.shared), b"\xff\xd0\xc3")],
                         self.shared, b"\xff\xd0", owner=self.shared)
 
+    def test_loader_writes_in_called_bodies(self):
+        tls_index = self.layout.file_offset(self.layout.directory(9)[0]) + 16
+        # Align the loader's four-byte TLS index with the entire MOV immediate.
+        padding = (-(self.shared + 1)) % 4
+        helper = b"\x90" * padding + bytes.fromhex("b8 0d 00 00 00 c3")
+        witness = self.shared + padding + 1
+        edits = [(self.layout.file_offset(self.shared), helper),
+                 (tls_index, struct.pack("<Q", self.image_base + witness))]
+        for sequence in (("direct",), ("register",), ("direct", "register"), ("register", "direct")):
+            with self.subTest(sequence=sequence):
+                body = bytearray()
+                sites = []
+                for kind in sequence:
+                    if kind == "register":
+                        after = self.root + len(body) + 7
+                        body.extend(b"\x48\x8d\x05" + struct.pack("<i", self.shared - after))
+                        call, opcode = b"\xff\xd0", "CALL64r"
+                    else:
+                        after = self.root + len(body) + 5
+                        call, opcode = b"\xe8" + struct.pack("<i", self.shared - after), "CALL64pcrel32"
+                    sites.append((self.root + len(body), call, opcode))
+                    body.extend(call)
+                site, call, opcode = sites[0]
+                report = self.check_site([*edits, (self.layout.file_offset(self.root), body + b"\xc3")],
+                                         site, call, opcode=opcode, target=self.shared)
+                self.assertIn(f"loader-written bytes at {witness:#x}", report["message"])
+
+    def test_recorded_root_extent(self):
+        tls_index = self.layout.file_offset(self.layout.directory(9)[0]) + 16
+        end = self.layout.u32(self.records[self.root] + 4)
+        start = self.layout.file_offset(self.root)
+        leaf = bytes.fromhex("b8 0d 00 00 00 c3")
+        recurse = bytes.fromhex("e8 fb ff ff ff c3")
+        for slot, witness in [(self.root - 2, self.root), (self.root + 1, self.root + 1), (end - 1, end - 1)]:
+            with self.subTest(slot=slot):
+                report = self.diagnostic([(start, leaf), (tls_index, struct.pack("<Q", self.image_base + slot))])
+                where = report["context"]
+                self.assertEqual((report["code"], where["entry_rva"], where["end_rva"], where["file_offset"]),
+                                 ("LIFT_IMAGE_MEMORY", hex(self.root), hex(end), start))
+                self.assertIn(f"loader-written bytes at {witness:#x}", report["message"])
+
+        self.check_site([(start, recurse), (tls_index, struct.pack("<Q", self.image_base + end - 1))],
+                        self.root, recurse[:5], opcode="CALL64pcrel32", target=self.root)
+        data = bytearray(self.original)
+        data[start:start+len(leaf)] = leaf
+        struct.pack_into("<Q", data, tls_index, self.image_base + end)
+        image = self.work / "neighbor.exe"
+        image.write_bytes(data)
+        run(FORGE, "lift", image, "--rva", hex(self.root), "--signature", "i64(i64,i64)",
+            "--output", self.work / "neighbor.ll")
+
+    def test_malformed_loader_metadata(self):
+        # Half of an IAT directory cannot establish the loader's write footprint.
+        start = self.layout.file_offset(self.root)
+        call = b"\xe8" + struct.pack("<i", self.shared - self.root - 5)
+        report = self.diagnostic([(start, call + b"\xc3"),
+                                  (self.layout.directories + 12*8, struct.pack("<II", self.shared, 0))])
+        self.assertEqual((report["stage"], report["code"]), ("pe", "INVALID_PE"))
+        self.assertIn("incomplete import address table", report["message"])
+        self.assertNotIn("block_rva", report["context"])
+
+    def test_register_call_encodings(self):
+        image = self.work / "edited.exe"
+        start = self.layout.file_offset(self.root)
+        ir = self.work / "encodings" / "lift.ll"
+        ir.parent.mkdir(exist_ok=True)
+        for prefix in ("f3", "3e", "66", "41 41"):
+            with self.subTest(prefix=prefix):
+                call = bytes.fromhex(prefix + " ff d0")
+                self.check_site([(start, call + b"\xc3")], self.root, call, code="LIFT_UNSUPPORTED_PREFIX")
+                selected = diff.analyze(FORGE, image, "call_indirect", self.work)
+                with self.assertRaisesRegex(diff.Unsupported, "LIFT_UNSUPPORTED_PREFIX"):
+                    diff.lift(FORGE, image, {"signature": "i64(i64,i64)"}, selected, ir)
+
+        for reg, lea, call in [("RAX", "d5 08 8d 05", "d5 00 ff d0"),
+                               ("RAX", "40 d5 08 8d 05", "40 d5 00 ff d0"),
+                               ("R16", "d5 48 8d 05", "d5 10 ff d0")]:
+            with self.subTest(reg=reg):
+                target = -1 if reg == "RAX" else self.shared
+                site = self.root + len(bytes.fromhex(lea)) + 4
+                producer = bytes.fromhex(lea) + struct.pack("<i", target - site)
+                encoded = bytes.fromhex(call)
+                code = "LIFT_INVALID_CALL_TARGET" if reg == "RAX" else "LIFT_UNSUPPORTED_CONTROL_FLOW"
+                self.check_site([(start, producer + encoded + b"\xc3")], site, encoded,
+                                code=code, target=target)
+                selected = diff.analyze(FORGE, image, "call_indirect", self.work)
+                with self.assertRaisesRegex(ValueError, "lifting/" + code):
+                    diff.lift(FORGE, image, {"signature": "i64(i64,i64)"}, selected, ir)
+
+        # A modeled REX2 call also executes, and the independent walk agrees on its callee.
+        data = bytearray(self.original)
+        code = bytes.fromhex("48 83 ec 28 d5 08 8d 05") + struct.pack("<i", self.shared - self.root - 12)
+        code += bytes.fromhex("d5 00 ff d0 48 83 c4 28 c3")
+        data[start:start+len(code)] = code
+        image.write_bytes(data)
+        selected = diff.analyze(FORGE, image, "call_indirect", self.work)
+        module = diff.read_json(self.work / "inspect.json")["modules"][0]
+        self.assertEqual(diff.verified_call_target(image, module, selected, self.root + 12, FORGE,
+                                                   require_continuation=True), self.shared)
+        diff.lift(FORGE, image, {"signature": "i64(i64,i64)"}, selected, ir)
+        for exe in self.compile_variants(ir):
+            self.expect(exe, 7, 2, self.image_base + self.shared)
+
     def test_independent_diagnostic_evidence(self):
         image = self.work / "reported.exe"
         data = bytearray(self.original)
@@ -177,6 +282,15 @@ class IndirectCalls(GuestExecution):
         ir.parent.mkdir(exist_ok=True)
         with self.assertRaisesRegex(diff.Unsupported, "LIFT_UNSUPPORTED_INSTRUCTION"):
             diff.lift(FORGE, image, {"signature": "i64(i64,i64)"}, selected, ir)
+        # A trap in the continuation ends only that path in the independent caller walk.
+        continuation = self.layout.file_offset(self.root + 64)
+        data[continuation:continuation+3] = b"\x0f\x0b\xc3"
+        image.write_bytes(data)
+        with self.assertRaisesRegex(diff.Unsupported, "LIFT_UNSUPPORTED_INSTRUCTION"):
+            diff.lift(FORGE, image, {"signature": "i64(i64,i64)"}, selected, ir)
+        diagnostic = diff.read_json(self.work / "lifting.log")["context"]
+        self.assertEqual((diagnostic["function_rva"], diagnostic["instruction_rva"],
+                          diagnostic["call_site_rva"]), (hex(self.leaf), hex(self.leaf), hex(self.root + 61)))
         with self.assertRaisesRegex(ValueError, "CALL evidence|register call evidence"):
             diff.resolve_leaf_window(module, analysis, image, self.leaf + 1, self.root, self.root + 61, FORGE)
         # Preserve the CALL bytes, but redirect the earlier conditional to bypass the second LEA.
@@ -194,6 +308,12 @@ class IndirectCalls(GuestExecution):
         image.write_bytes(changed)
         with self.assertRaisesRegex(ValueError, "lifting/LIFT_INVALID_CALL_TARGET"):
             diff.lift(FORGE, image, {"signature": "i64(i64,i64)"}, selected, ir)
+        forged = diff.read_json(self.work / "lifting.log")
+        forged["context"]["branch_target"] = target + 1
+        with self.assertRaisesRegex(ValueError, "disagrees with the reachable RIP-relative LEA"):
+            diff.parse_diagnostic((json.dumps(forged) + "\n").encode(), image, selected, ir,
+                                  register_target=lambda owner, site: diff.verified_call_target(
+                                      image, module, owner, site, FORGE, require_continuation=False))
 
 
 if __name__ == "__main__":

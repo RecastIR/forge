@@ -100,7 +100,7 @@ namespace forge::x86 {
             std::map<uint32_t, RecoveredFunction> &functions;
             const std::map<uint32_t, const ResolvedCallSite *> &deferred;
             ArrayRef<RvaRange> recorded;
-            std::vector<RvaRange> loaderWrites;
+            ArrayRef<RvaRange> loaderWrites;
             const MCDisassembler &dis;
             const MCInstrInfo &instructions;
             const InstructionOperands operands;
@@ -282,14 +282,14 @@ namespace forge::x86 {
     void recoverLeaves(const ValidatedEntry &entry,
                        std::map<uint32_t, RecoveredFunction> &functions,
                        const std::map<uint32_t, const ResolvedCallSite *> &deferred,
-                       const MCDisassembler &dis, const MCInstrInfo &instructions,
-                       const MCRegisterInfo &regs) {
+                       ArrayRef<RvaRange> loaderWrites, const MCDisassembler &dis,
+                       const MCInstrInfo &instructions, const MCRegisterInfo &regs) {
         const auto ranges = recordedRanges(entry.analysis);
         LeafRecovery recovery{entry,
                               functions,
                               deferred,
                               ranges,
-                              entry.analysis.image().loaderWrittenRanges(),
+                              loaderWrites,
                               dis,
                               instructions,
                               InstructionOperands(regs, entry.analysis.module().imageBase),
