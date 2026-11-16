@@ -2,6 +2,7 @@
 #include "analysis/analysis.h"
 #include "lift/group_analysis.h"
 #include "lift/memory.h"
+#include "lift/operands.h"
 
 #include "llvm/ADT/STLExtras.h"
 #include "llvm/ADT/StringExtras.h"
@@ -121,6 +122,74 @@ namespace {
                   "entry proofs lost their authoritative call site");
             ++index;
         }
+    }
+
+    void checkRipOffsets(x86::Step lea, const llvm::MCRegisterInfo &regs) {
+        constexpr uint64_t base = 0x140000000;
+        const x86::InstructionOperands operands(regs, base);
+        lea.next = UINT32_MAX;
+        lea.inst.getOperand(4).setImm(INT32_MAX);
+        const auto above = int64_t(UINT32_MAX) + INT32_MAX;
+        check(operands.ripRva(lea, 1) == above && operands.ripAddress(lea, 1) == base + above,
+              "RIP-relative calculation narrowed a destination above the RVA space");
+
+        lea.next = 7;
+        lea.inst.getOperand(4).setImm(0x80000000);
+        const auto below = int64_t(7) + INT32_MIN;
+        check(operands.ripRva(lea, 1) == below &&
+                  operands.ripAddress(lea, 1) == base - static_cast<uint64_t>(-below),
+              "RIP-relative calculation lost the sign bit of disp32");
+    }
+
+    void checkRegisterCalls(const AnalyzedImage &analysis) {
+        const auto root = exportedRva(analysis, "call_indirect");
+        const auto shared = exportedRva(analysis, "indirect_preserve");
+        const auto leaf = exportedRva(analysis, "indirect_leaf");
+        const auto recursive = exportedRva(analysis, "indirect_recurse");
+        const RecoveredFunctionGroup group(analysis, root);
+        const auto &caller = group.function(root);
+        const auto &incoming = group.function(shared).incoming;
+        check(group.functions().size() == 4 && caller.calls.size() == 5 && incoming.size() == 3 &&
+                  group.function(shared).origin == x86::RecoveryOrigin::UnwindBacked &&
+                  group.function(leaf).origin == x86::RecoveryOrigin::InferredLeaf,
+              "mixed call sites lost a shared body or its recovery origin");
+
+        const x86::InstructionOperands operands(group.registers(), 0);
+        const auto flow =
+            x86::analyzeGroup(group, analysis.module().imageBase, EntryMode::WindowsX64I64Pair);
+        uint32_t previous = 0;
+        for (const auto *site : incoming) {
+            const auto *step = caller.instructionContaining(site->instruction);
+            const auto &calls = flow.flows.at(root).blocks.at(site->block).calls;
+            check(
+                step && step->rva == site->instruction && site == caller.callAt(step->rva) &&
+                    site->callee == shared && site->caller == root &&
+                    site->continuation == step->next && site->continuation > previous &&
+                    llvm::any_of(calls, [site](const auto &effect) { return effect.site == site; }),
+                "mixed call proof or continuation does not refer to the recovered site");
+            previous = site->continuation;
+
+            if (site == incoming.back()) {
+                check(site->kind == x86::CallKind::Direct && step->isDirectCall() &&
+                          site->evidenceRva == step->rva,
+                      "direct call lost its encoded target evidence");
+                continue;
+            }
+
+            const auto *lea = caller.instructionContaining(site->evidenceRva);
+            check(site->kind == x86::CallKind::RipRelativeRegister && step->isRegisterCall() &&
+                      lea && lea->opcode == "LEA64r" && operands.ripRva(*lea, 1) == shared &&
+                      lea->inst.getOperand(0).getReg() == step->inst.getOperand(0).getReg(),
+                  "register call lost its source LEA or operand");
+        }
+
+        checkRipOffsets(*caller.instructionContaining(incoming.front()->evidenceRva),
+                        group.registers());
+        const auto &self = group.function(recursive);
+        check(self.calls.size() == 1 && self.incoming.size() == 2 &&
+                  self.calls.begin()->second.callee == recursive &&
+                  self.incoming.back() == &self.calls.begin()->second,
+              "recursive register call did not reuse its own function");
     }
 
     void checkSelfRecursion(const AnalyzedImage &analysis) {
@@ -333,7 +402,8 @@ namespace {
     // Check PE stability for the differential runner's independently disassembled caller.
     // The first interval is code. Each following interval is a relative table.
     void checkDispatchSpans(const fs::path &path, llvm::ArrayRef<char *> bounds) {
-        check(bounds.size() >= 4 && bounds.size() % 2 == 0, "expected code and table RVA spans");
+        check(bounds.size() >= 2 && bounds.size() % 2 == 0,
+              "expected a code RVA span and optional table spans");
         ParsedImage image(InputFile(path), ParsePolicy::FunctionAnalysis);
         check(!image.advertisesDynamicRelocations(), "unknown dynamic relocation writes");
         const auto init = image.imageInitialization();
@@ -360,7 +430,7 @@ int main(int argc, char **argv) try {
         return 0;
     }
 
-    check(argc == 4, "expected stack.exe, leaves.exe and jump.exe");
+    check(argc == 5, "expected stack.exe, leaves.exe, jump.exe and indirect.exe");
     const AnalyzedImage analysis(
         std::make_unique<ParsedImage>(InputFile(argv[1]), ParsePolicy::Inspection),
         DebugInfo::Omit);
@@ -404,6 +474,10 @@ int main(int argc, char **argv) try {
         std::make_unique<ParsedImage>(InputFile(argv[3]), ParsePolicy::Inspection),
         DebugInfo::Omit);
     checkJumpTable(jumps);
+    const AnalyzedImage indirect(
+        std::make_unique<ParsedImage>(InputFile(argv[4]), ParsePolicy::Inspection),
+        DebugInfo::Omit);
+    checkRegisterCalls(indirect);
     return 0;
 } catch (const std::exception &error) {
     llvm::errs() << error.what() << "\n";

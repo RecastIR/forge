@@ -1,0 +1,26 @@
+{
+  "schema_version": 1,
+  "id": "functions/indirect_calls",
+  "description": "Use same-block RIP-relative register calls for shared, leaf and recursive callees. Observe live carry, caller stack writes and a persistent counter across inputs.",
+  "source": "fixtures/arithmetic/integer_driver.c",
+  "binary": "call_indirect.exe",
+  "args": [
+    "0",
+    "1",
+    "7",
+    "2",
+    "2",
+    "-1",
+    "-1",
+    "-2",
+    "0",
+    "0",
+    "7",
+    "2"
+  ],
+  "expected": {
+    "exit_code": 0,
+    "stdout": "5\n18\n9\n12\n8\n22\n",
+    "stderr": ""
+  }
+}

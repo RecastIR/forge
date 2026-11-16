@@ -25,6 +25,8 @@ namespace forge::x86 {
 
         bool isDirectCall() const { return opcode == "CALL64pcrel32"; }
 
+        bool isRegisterCall() const { return opcode == "CALL64r"; }
+
         [[noreturn]] void reject(FailureCode kind, const llvm::Twine &reason,
                                  std::optional<int64_t> target = {}) const;
     };

@@ -1,8 +1,10 @@
 #include "lift/cfg.h"
 #include "lift/integer.h"
 #include "lift/jump_table.h"
+#include "lift/operands.h"
 #include "pe/image.h"
 
+#include "llvm/MC/MCContext.h"
 #include "llvm/MC/MCDisassembler/MCDisassembler.h"
 #include "llvm/MC/MCInstrInfo.h"
 
@@ -89,7 +91,7 @@ namespace forge::x86 {
                     tail.take_front(size)};
         }
 
-        Flow control(const Step &s, const MCInstrInfo &info, bool allowTables) {
+        Flow control(const Step &s, const MCInstrInfo &info, bool recordedExtent) {
             if (s.opcode == "RET64") {
                 return Flow::Return;
             }
@@ -102,18 +104,18 @@ namespace forge::x86 {
                 return Flow::Conditional;
             }
 
-            if (allowTables && s.opcode == "JMP64r") {
+            if (recordedExtent && s.opcode == "JMP64r") {
                 return Flow::Indirect;
             }
 
             const auto &desc = info.get(s.inst.getOpcode());
-            if (!allowTables && desc.isIndirectBranch()) {
+            if (!recordedExtent && desc.isIndirectBranch()) {
                 s.reject(FailureCode::UnsupportedControlFlow,
                          "unsupported control transfer in inferred leaf: indirect jump recovery "
                          "requires a validated unwind-backed function extent");
             }
 
-            if (desc.isCall() && !s.isDirectCall()) {
+            if (desc.isCall() && !s.isDirectCall() && !(recordedExtent && s.isRegisterCall())) {
                 s.reject(FailureCode::UnsupportedControlFlow, "unsupported indirect or far call");
             }
 
@@ -262,7 +264,18 @@ namespace forge::x86 {
         }
 
         void Discovery::recordEdges(const Step &s, Flow flow) {
-            if (flow == Flow::Indirect) {
+            if (s.isRegisterCall()) {
+                // Trace has decoded the entire interval from this leader to CALL. An
+                // impossible prefix must fail before we attempt to decode its continuation.
+                // Later branch or table targets can still split this provisional block.
+                const auto leader = std::prev(leaders.upper_bound(s.rva))->first;
+                const auto first = std::make_reverse_iterator(decoded.find(s.rva));
+                const auto stop = std::make_reverse_iterator(decoded.find(leader));
+                const auto producer =
+                    std::find_if(first, stop, [](const auto &row) { return !isNoop(row.second); });
+                const InstructionOperands operands(*dis.getContext().getRegisterInfo(), 0);
+                operands.registerCallRva(s, producer == stop ? nullptr : &producer->second);
+            } else if (flow == Flow::Indirect) {
                 unresolved.insert(s.rva);
             } else if (flow == Flow::Conditional || flow == Flow::Jump) {
                 schedule(s, int64_t(s.next) + s.inst.getOperand(0).getImm(), true);

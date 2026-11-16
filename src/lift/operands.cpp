@@ -26,6 +26,23 @@ namespace forge::x86 {
         static_assert(std::size(registerNames) == registerCount);
         static_assert(std::string_view(registerNames[rspIndex].wide) == "RSP");
         static_assert(std::string_view(registerNames[framePointer.index].wide) == "RBP");
+
+        std::optional<RegisterView> modeledRegister(StringRef name, unsigned width) {
+            for (unsigned index = 0; index < std::size(registerNames); ++index) {
+                const auto &names = registerNames[index];
+
+                if ((width == 64 && names.wide == name) || (width == 32 && names.dword == name) ||
+                    (width == 16 && names.word == name) || (width == 8 && names.lowByte == name)) {
+                    return RegisterView{index, width};
+                }
+
+                if (width == 8 && names.highByte == name) {
+                    return RegisterView{index, width, 8};
+                }
+            }
+
+            return {};
+        }
     } // namespace
 
     StringRef registerName(unsigned index) { return registerNames[index].wide; }
@@ -61,23 +78,14 @@ namespace forge::x86 {
 
         auto name = StringRef(regs.getName(op.getReg()));
 
-        for (unsigned index = 0; index < std::size(registerNames); ++index) {
-            const auto &names = registerNames[index];
-
-            if ((width == 64 && names.wide == name) || (width == 32 && names.dword == name) ||
-                (width == 16 && names.word == name) || (width == 8 && names.lowByte == name)) {
-                return {index, width};
-            }
-
-            if (width == 8 && names.highByte == name) {
-                return {index, width, 8};
-            }
+        if (auto view = modeledRegister(name, width)) {
+            return *view;
         }
 
         s.reject(FailureCode::UnsupportedRegister, "unsupported register " + name);
     }
 
-    std::optional<uint64_t> InstructionOperands::ripAddress(const Step &s, unsigned first) const {
+    std::optional<int64_t> InstructionOperands::ripRva(const Step &s, unsigned first) const {
         const auto base = s.inst.getOperand(first).getReg();
 
         if (!base || StringRef(regs.getName(base)) != "RIP") {
@@ -86,7 +94,15 @@ namespace forge::x86 {
 
         const auto displacement = s.inst.getOperand(first + 3).getImm();
         const auto signedOffset = llvm::SignExtend64<32>(static_cast<uint64_t>(displacement));
-        return guestBase + s.next + static_cast<uint64_t>(signedOffset);
+        return int64_t(s.next) + signedOffset;
+    }
+
+    std::optional<uint64_t> InstructionOperands::ripAddress(const Step &s, unsigned first) const {
+        if (const auto rva = ripRva(s, first)) {
+            return guestBase + static_cast<uint64_t>(*rva);
+        }
+
+        return {};
     }
 
     AddressOperand InstructionOperands::decodeAddress(const Step &s, unsigned first,
@@ -178,6 +194,30 @@ namespace forge::x86 {
         }
 
         return reg(s, s.inst.getOperand(0), width);
+    }
+
+    int64_t InstructionOperands::registerCallRva(const Step &call, const Step *previous) const {
+        if (!previous || previous->opcode != "LEA64r" ||
+            previous->inst.getOperand(0).getReg() != call.inst.getOperand(0).getReg()) {
+            call.reject(FailureCode::UnsupportedControlFlow,
+                        "unsupported register call: expected a same-block RIP-relative LEA to the "
+                        "target register");
+        }
+
+        const auto target = ripRva(*previous, 1);
+        if (!target) {
+            call.reject(FailureCode::UnsupportedControlFlow,
+                        "unsupported register call: target LEA is not RIP-relative");
+        }
+
+        const StringRef name = regs.getName(call.inst.getOperand(0).getReg());
+        if (!modeledRegister(name, 64)) {
+            call.reject(FailureCode::UnsupportedControlFlow,
+                        "unsupported register call through unmodeled register " + name, target);
+        }
+
+        decodeAddress(*previous, 1, false);
+        return *target;
     }
 
     bool memoryDestination(Form form) {

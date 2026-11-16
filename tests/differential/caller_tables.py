@@ -82,8 +82,8 @@ class CallerTables:
             raise ValueError("caller dispatch target outside its recorded function")
         return [self.base + dest for dest in targets]
 
-    def validate(self, graph, forge):
-        if not self.proofs:
+    def validate(self, graph, forge, *, register_calls=False):
+        if not self.proofs and not register_calls:
             return
         explicit = {self.base + self.caller.start}
         for addr, edges in graph.items():

@@ -319,6 +319,26 @@ class JumpTables(GuestExecution):
         self.rejects(root, jump, [(self.layout.file_offset(fourth), struct.pack("<i", fifth-fourth))],
                      "function jump-table recovery budget exceeded")
 
+    def test_dynamic_relocations_prevent_register_call_proof(self):
+        image = Path(IMAGE).with_name("jump-dvrt.exe")
+        data = bytearray(image.read_bytes())
+        module = json.loads(run(FORGE, "inspect", image, "--format", "json"))["modules"][0]
+        exports = {name: int(row["rva"], 16) for row in module["exports"] for name in row["names"]}
+        root, target = exports["entry"], exports["direct_only"]
+        offset = Layout(data).file_offset(root)
+        body = b"\x48\x8d\x05" + struct.pack("<i", target - root - 7) + b"\xff\xd0\xc3"
+        data[offset:offset+len(body)] = body
+        edited = self.work / "register-call-dvrt.exe"
+        edited.write_bytes(data)
+        result = subprocess.run([FORGE, "lift", edited, "--rva", hex(root), "--diagnostics-format", "json",
+                                 "--output", self.work / "dvrt.ll"], capture_output=True, timeout=15)
+        self.assertEqual(result.returncode, 1)
+        error = json.loads(result.stderr)
+        where = error["context"]
+        self.assertEqual((error["code"], where["instruction_rva"], where["opcode"], where["bytes"],
+                          where["branch_target"]), ("LIFT_UNSUPPORTED_CONTROL_FLOW", hex(root+7),
+                                                    "CALL64r", "ffd0", target))
+
     def test_second_table_can_invalidate_first_guard(self):
         for exe in self.variants("two_tables"):
             self.expect(exe, 0, 0, 77)

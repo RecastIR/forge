@@ -695,11 +695,23 @@ int main() { printf("%lld %lld\\n", first, forge_lifted(0, 0)); }
                 self.expect(exe, 0, 0, expected)
 
     def test_protected_continuation_bytes(self):
-        def protect(data, layout, headers):
-            # The IAT is a loader-written interval. The word read starts one
-            # byte before it, so selecting solely by the first byte is unsound.
-            struct.pack_into("<II", data, layout.directories+12*8, self.exports["inspect_saved"]+11, 8)
-        image = self.edit("protected-continuation", protect)
+        data = bytearray(Path(IMAGE).read_bytes())
+        layout = Layout(data)
+        resume = self.exports["inspect_saved"] + 9
+        slot = self.exports["unused_saved"]
+        pos = layout.file_offset(resume)
+        self.assertEqual(data[pos:pos+4], bytes.fromhex("0f b7 40 01"))
+        # Read the word spanning the end of the caller and the next, uncalled function.
+        struct.pack_into("b", data, pos+3, slot - 1 - resume)
+        expected, = struct.unpack_from("<H", data, layout.file_offset(slot - 1))
+        image = self.work / "protected-continuation.exe"
+        image.write_bytes(data)
+        for exe in self.variants("inspect_saved", image=image):
+            self.expect(exe, 0, 0, expected)
+
+        # Only the second byte of the same read is now inside the loader-written IAT.
+        struct.pack_into("<II", data, layout.directories+12*8, slot, 8)
+        image.write_bytes(data)
         for exe in self.variants("inspect_saved", image=image):
             self.trap(exe, [(0, 0)])
 

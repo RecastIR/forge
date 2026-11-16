@@ -109,9 +109,9 @@ namespace forge::x86 {
             jump.reject(FailureCode::UnsupportedControlFlow, unknown);
         }
 
-        const auto table = operands.ripAddress(lea, 1);
+        const auto table = operands.ripRva(lea, 1);
 
-        if (!table || *table > UINT32_MAX) {
+        if (!table || *table < 0 || *table > UINT32_MAX) {
             jump.reject(FailureCode::UnsupportedControlFlow, "unresolved relative jump-table base");
         }
 

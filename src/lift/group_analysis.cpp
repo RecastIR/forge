@@ -71,7 +71,7 @@ namespace forge::x86 {
             }
 
             void recordReturn(uint32_t rva, const AddressFact &value,
-                              llvm::ArrayRef<const DirectCall *> sites) {
+                              llvm::ArrayRef<const ResolvedCallSite *> sites) {
                 auto &state = functions.at(rva);
 
                 if (!state.returned) {
@@ -147,7 +147,7 @@ namespace forge::x86 {
             void traceInteger(const Step &s, const IntegerInstruction &op, AddressFacts &facts,
                               bool collect, const std::optional<RelativeTable> &table);
             AddressFact savedAddress(const AddressFacts &facts, const AddressFact &address) const;
-            bool traceCall(const DirectCall &site, AddressFacts &facts, CallAddresses &calls,
+            bool traceCall(const ResolvedCallSite &site, AddressFacts &facts, CallAddresses &calls,
                            bool collect) const;
             size_t traceAddresses(const GuestBlock &block, AddressFacts &facts,
                                   CallAddresses &calls, bool collect, size_t start = 0);
@@ -346,7 +346,7 @@ namespace forge::x86 {
             }
         }
 
-        bool FunctionAnalyzer::traceCall(const DirectCall &site, AddressFacts &facts,
+        bool FunctionAnalyzer::traceCall(const ResolvedCallSite &site, AddressFacts &facts,
                                          CallAddresses &calls, bool collect) const {
             if (!collect) {
                 CallInputs inputs;

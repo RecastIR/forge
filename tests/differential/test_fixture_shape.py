@@ -4,7 +4,7 @@ import tempfile
 import unittest
 from unittest.mock import patch
 
-from build import check_call_group, check_frame, check_global_leaf, check_image_leaf, check_leaf, check_nested_exits, leaf_instructions
+from build import check_call_group, check_frame, check_global_leaf, check_image_leaf, check_leaf, check_nested_exits, leaf_instructions, register_call_targets
 
 
 # Both loops are laid out after a shared return. Absolute addresses are immaterial.
@@ -31,6 +31,20 @@ class FixtureShapeTests(unittest.TestCase):
     def reject(self, listing):
         with self.assertRaisesRegex(ValueError, "nested natural loops"):
             self.check(listing)
+
+    def test_register_call_evidence_uses_numeric_target_and_all_incoming_edges(self):
+        # The symbol comment deliberately disagrees with the signed displacement.
+        code = {0x100: ("lea r11,[rip-0x30] # cafe <other>", 0x107),
+                0x107: ("nop DWORD PTR [rax]", 0x10a), 0x10a: ("call r11", 0x10d)}
+        graph = {0x100: [0x107], 0x107: [0x10a], 0x10a: []}
+        self.assertEqual(register_call_targets(graph, code.__getitem__), {0x10a: 0xd7})
+        for replacement in ("lea eax,[rip-0x30]", "lea r11,[rax]", "lea rax,[rip-0x30]"):
+            with self.subTest(replacement=replacement), self.assertRaisesRegex(ValueError, "unproven"):
+                changed = {**code, 0x100: (replacement, 0x107)}
+                register_call_targets(graph, changed.__getitem__)
+        bypass = {0xfe: ("je 107", 0x100), **code}
+        with self.assertRaisesRegex(ValueError, "unproven"):
+            register_call_targets({0xfe: [0x107, 0x100], **graph}, bypass.__getitem__)
 
     def test_lookup_requires_a_reachable_load_through_the_table_base(self):
         sections = "  0 .literal 00000020 00002000 00002000\n  CONTENTS, ALLOC, LOAD, READONLY, DATA"

@@ -75,7 +75,7 @@ namespace forge {
             }
 
             void storeFlags();
-            void lowerCall(const Step &s, const x86::DirectCall &call);
+            void lowerCall(const Step &s, const x86::ResolvedCallSite &call);
             void emitReturn(const Step &s);
             void emitDispatch(const x86::GuestBlock &block, const BlockStates &states);
             void lowerStack(const Step &s, StackOp op);
@@ -336,7 +336,7 @@ namespace forge {
                 return;
             }
 
-            if (x86::isNoop(s.opcode)) {
+            if (x86::isNoop(s)) {
                 return;
             }
 
@@ -391,8 +391,14 @@ namespace forge {
             }
         }
 
-        void Translator::lowerCall(const Step &s, const x86::DirectCall &call) {
-            const uint64_t nextVA = analysis.image.guestBase() + call.continuation;
+        void Translator::lowerCall(const Step &s, const x86::ResolvedCallSite &call) {
+            const auto guestBase = analysis.image.guestBase();
+            if (call.kind == x86::CallKind::RipRelativeRegister) {
+                auto *target = value(s, s.inst.getOperand(0), 64);
+                memory.guard(ir.CreateICmpEQ(target, ir.getInt64(guestBase + call.callee)));
+            }
+
+            const uint64_t nextVA = guestBase + call.continuation;
             auto *calleeRsp = memory.pushReturn(read(s, stackPointer), entryRsp, nextVA);
             write(stackPointer, calleeRsp);
             const auto &callee = analysis.functions.at(call.callee);
