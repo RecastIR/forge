@@ -560,6 +560,26 @@
       "id": "functions/continuations",
       "config": "release",
       "target": "macos-arm64"
+    },
+    {
+      "id": "control_flow/switch",
+      "config": "debug",
+      "target": "macos-arm64"
+    },
+    {
+      "id": "control_flow/switch",
+      "config": "release",
+      "target": "macos-arm64"
+    },
+    {
+      "id": "control_flow/jump_table",
+      "config": "debug",
+      "target": "macos-arm64"
+    },
+    {
+      "id": "control_flow/jump_table",
+      "config": "release",
+      "target": "macos-arm64"
     }
   ]
 }

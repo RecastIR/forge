@@ -1,0 +1,30 @@
+{
+  "schema_version": 1,
+  "id": "control_flow/jump_table",
+  "description": "Exercise parallel table entries, returns, joins and repeated dispatch.",
+  "source": "fixtures/arithmetic/integer_driver.c",
+  "binary": "cfg_jump_table.exe",
+  "args": [
+    "0",
+    "32",
+    "1",
+    "6",
+    "2",
+    "7",
+    "3",
+    "-19",
+    "4",
+    "22",
+    "-1",
+    "8",
+    "5",
+    "2",
+    "4294967296",
+    "3"
+  ],
+  "expected": {
+    "exit_code": 0,
+    "stdout": "41\n15\n1\n19\n41\n-17\n-17\n-17\n",
+    "stderr": ""
+  }
+}

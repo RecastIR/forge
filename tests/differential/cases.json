@@ -398,5 +398,19 @@
     "export": "call_continuations",
     "signature": "i64(i64,i64)",
     "harness": "decimal_pairs"
+  },
+  {
+    "fixture_id": "control_flow/switch",
+    "scope": "function",
+    "export": "cfg_switch",
+    "signature": "i64(i64,i64)",
+    "harness": "decimal_pairs"
+  },
+  {
+    "fixture_id": "control_flow/jump_table",
+    "scope": "function",
+    "export": "cfg_jump_table",
+    "signature": "i64(i64,i64)",
+    "harness": "decimal_pairs"
   }
 ]

@@ -662,7 +662,7 @@ def check_leaf(path, config="debug", pe_report=""):
             raise ValueError(f"{path}: {path.stem} instruction contract: {error}") from error
         return
     witnesses = INTEGER_WITNESSES.get(path.stem)
-    if (witnesses is None and path.stem != "cfg_nested_exits"
+    if (witnesses is None and path.stem not in ("cfg_nested_exits", "cfg_switch", "cfg_jump_table")
             and path.stem not in FRAME_LOCALS and path.stem not in IMAGE_LEAVES and path.stem not in GLOBAL_SYMBOLS):
         return
     output = subprocess.check_output(["x86_64-w64-mingw32-objdump", "-d", "--no-show-raw-insn",
@@ -679,6 +679,20 @@ def check_leaf(path, config="debug", pe_report=""):
             check_padding(path)
         if path.stem in FRAME_LOCALS:
             check_frame(path.stem, instructions, config)
+        if path.stem in ("cfg_switch", "cfg_jump_table"):
+            # These are the first reachable instructions, starting at the exported entry.
+            body = list(instructions.values())
+            if path.stem == "cfg_jump_table":
+                if body[0] != "mov rax,rdx":
+                    raise ValueError("missing jump table accumulator")
+                body = body[1:]
+            target, limit = ("rax", 6) if path.stem == "cfg_switch" else ("r9", 4)
+            if (len(body) < 6 or body[0] != f"cmp rcx,0x{limit:x}"
+                    or not body[1].startswith("ja ") or direct_target(body[1][3:]) not in instructions
+                    or not body[2].startswith("lea r8,[rip")
+                    or body[3:6] != [f"movsxd {target},DWORD PTR [r8+rcx*4]",
+                                     f"add {target},r8", f"jmp {target}"]):
+                raise ValueError("expected an in-function unsigned guard and signed relative jump table")
         if path.stem == "cfg_nested_exits":
             check_nested_exits(instructions)
         if witnesses is not None:

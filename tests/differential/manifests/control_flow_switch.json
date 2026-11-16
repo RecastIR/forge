@@ -1,0 +1,38 @@
+{
+  "schema_version": 1,
+  "id": "control_flow/switch",
+  "description": "Dispatch a dense MinGW switch on a signed 64-bit input.",
+  "source": "fixtures/control_flow/switch.c",
+  "binary": "cfg_switch.exe",
+  "args": [
+    "0",
+    "86",
+    "1",
+    "31",
+    "2",
+    "8",
+    "3",
+    "7",
+    "4",
+    "0",
+    "4",
+    "2",
+    "5",
+    "-8",
+    "5",
+    "31",
+    "6",
+    "32",
+    "-1",
+    "11",
+    "7",
+    "41",
+    "4294967296",
+    "2"
+  ],
+  "expected": {
+    "exit_code": 0,
+    "stdout": "22\n22\n11\n-8\n1\n0\n1\n0\n8\n-17\n-17\n-17\n",
+    "stderr": ""
+  }
+}

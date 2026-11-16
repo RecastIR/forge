@@ -145,7 +145,7 @@ namespace forge::x86 {
             AddressFact integerFact(const Step &s, const IntegerInstruction &op, RegisterView dest,
                                     const AddressFacts &facts) const;
             void traceInteger(const Step &s, const IntegerInstruction &op, AddressFacts &facts,
-                              bool collect);
+                              bool collect, const std::optional<RelativeTable> &table);
             AddressFact savedAddress(const AddressFacts &facts, const AddressFact &address) const;
             bool traceCall(const DirectCall &site, AddressFacts &facts, CallAddresses &calls,
                            bool collect) const;
@@ -308,7 +308,8 @@ namespace forge::x86 {
         }
 
         void FunctionAnalyzer::traceInteger(const Step &s, const IntegerInstruction &op,
-                                            AddressFacts &facts, bool collect) {
+                                            AddressFacts &facts, bool collect,
+                                            const std::optional<RelativeTable> &table) {
             if (!hasMemoryOperand(op.form)) {
                 if (writesRegister(op)) {
                     auto dest = operands.destination(s, op);
@@ -321,7 +322,9 @@ namespace forge::x86 {
             const auto operand = operands.decodeAddress(s, memoryOperand(s, op), true);
             const auto address = addressFact(operand, facts);
 
-            if (collect) {
+            if (collect && table && table->loadRva == s.rva) {
+                imageMemory.tableRead(s, *table);
+            } else if (collect) {
                 planMemoryAccess(s, op, operand, address);
             }
 
@@ -396,7 +399,7 @@ namespace forge::x86 {
                 }
 
                 if (auto op = integerInstruction(s.opcode)) {
-                    traceInteger(s, *op, facts, collect);
+                    traceInteger(s, *op, facts, collect, block.table);
                     continue;
                 }
 

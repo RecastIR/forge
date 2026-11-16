@@ -250,19 +250,28 @@ namespace forge::x86 {
         }
 
         const auto rva = va - loadBase;
-        const auto *section = source.sectionAtRva(rva);
+        fixedImageAccess(step, {rva, rva + bytes}, write);
+    }
+
+    void ImageMemory::tableRead(const Step &step, const RelativeTable &table) {
+        fixedImageAccess(step, {table.tableRva, uint64_t(table.tableRva) + 4ULL * table.count},
+                         false);
+    }
+
+    void ImageMemory::fixedImageAccess(const Step &step, RvaRange access, bool write) {
+        const auto *section = source.sectionAtRva(access.begin);
 
         if (!section || (!section->immutable() && !section->writableData()) ||
-            rva + bytes > uint64_t(section->rva) + section->virtualSize) {
-            step.reject(FailureCode::ImageMemory,
-                        "unmapped or unsupported image access at VA " + hex(va));
+            access.end > uint64_t(section->rva) + section->virtualSize) {
+            step.reject(FailureCode::ImageMemory, "unmapped or unsupported image access at VA " +
+                                                      hex(loadBase + access.begin));
         }
 
         if (write && !section->writableData()) {
-            step.reject(FailureCode::ImageMemory, "write to immutable image at VA " + hex(va));
+            step.reject(FailureCode::ImageMemory,
+                        "write to immutable image at VA " + hex(loadBase + access.begin));
         }
 
-        const RvaRange access{rva, rva + bytes};
         const auto &init = contents();
         init.validateRelocations(access);
         auto holes = init.exclusionsIn(access);

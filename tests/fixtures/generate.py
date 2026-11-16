@@ -66,6 +66,9 @@ def generate(output, mc, link, dlltool, clang):
             (output / f"{name}.exe").write_bytes((work / f"{name}.exe").read_bytes())
         cfg_leaves = sources.parent / "differential/fixtures/control_flow/cfg_cases.S"
         image("cfg.exe", (sources / "cfg.s").read_text() + cfg_leaves.read_text())
+        jump_table = cfg_leaves.with_name("jump_table.S")
+        image("jump.exe", (sources / "jump.s").read_text() + jump_table.read_text(),
+              exports=["entry", "two_tables", "table_budget", "width_paths", "table_caller"])
         image_assembly = (sources / "image.s").read_text()
         image("image.exe", image_assembly)
         image("image-fixed.exe", image_assembly, link_flags=["/fixed"])

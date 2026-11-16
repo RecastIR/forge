@@ -15,6 +15,8 @@ namespace llvm {
 } // namespace llvm
 
 namespace forge::x86 {
+    class JumpTableReader;
+
     struct Step {
         uint32_t rva, next;
         llvm::MCInst inst;
@@ -27,13 +29,25 @@ namespace forge::x86 {
                                  std::optional<int64_t> target = {}) const;
     };
 
-    enum class Flow : uint8_t { Fallthrough, Jump, Conditional, Return, FallOff };
+    enum class Flow : uint8_t { Fallthrough, Jump, Conditional, Indirect, Return, FallOff };
+
+    struct RelativeTable {
+        uint32_t compareRva, guardRva, loadRva, tableRva;
+        // Entries correspond one-for-one to the owning block's ordered successors.
+        unsigned count;
+
+        std::string describe() const;
+        [[noreturn]] void rejectEntry(const Step &jump, unsigned index, FailureCode kind,
+                                      const llvm::Twine &reason,
+                                      std::optional<int64_t> target = {}) const;
+    };
 
     struct GuestBlock {
         std::vector<Step> steps;
         Flow exit;
-        // For Jcc the taken edge comes first. Parallel edges are retained for LLVM PHIs.
+        // Jcc: taken then fallthrough. Indirect: one edge per index, including duplicates.
         llvm::SmallVector<uint32_t, 2> successors;
+        std::optional<RelativeTable> table;
     };
 
     using ControlFlowGraph = std::map<uint32_t, GuestBlock>;
@@ -44,5 +58,8 @@ namespace forge::x86 {
 
     ControlFlowGraph discoverCFG(llvm::StringRef bytes, uint32_t begin,
                                  const llvm::MCDisassembler &dis, const llvm::MCInstrInfo &info,
-                                 LeafStepCheck validateLeaf = {});
+                                 LeafStepCheck validateLeaf);
+    ControlFlowGraph discoverCFG(llvm::StringRef bytes, uint32_t begin,
+                                 const llvm::MCDisassembler &dis, const llvm::MCInstrInfo &info,
+                                 JumpTableReader &tables);
 } // namespace forge::x86

@@ -9,6 +9,7 @@ from manifests import field, unique_keys
 
 INSTRUCTION_FAILURES = {"LIFT_IMAGE_MEMORY", "LIFT_UNSUPPORTED_INSTRUCTION", "LIFT_UNSUPPORTED_REGISTER", "LIFT_UNSUPPORTED_PREFIX",
                         "LIFT_UNSUPPORTED_CONTROL_FLOW", "LIFT_UNDEFINED_REGISTER", "LIFT_UNDEFINED_FLAG"}
+INVALID_TARGETS = {"LIFT_INVALID_CALL_TARGET", "LIFT_INVALID_BRANCH_TARGET"}
 FAILURE_KINDS = {
     ("input", "io"): {"INPUT_OPEN", "INPUT_READ"},
     ("input", "internal"): {"INPUT_INTERNAL"},
@@ -20,7 +21,7 @@ FAILURE_KINDS = {
     ("entry", "unsupported"): {"ENTRY_DLL", "ENTRY_UNWIND_VERSION", "ENTRY_CHAINED_FRAGMENT",
                                "ENTRY_RELOCATION_OVERLAP"},
     ("entry", "internal"): {"ENTRY_INTERNAL"},
-    ("lifting", "invalid_input"): {"LIFT_INVALID_ENCODING", "LIFT_INVALID_CALL_TARGET"},
+    ("lifting", "invalid_input"): {"LIFT_INVALID_ENCODING", *INVALID_TARGETS},
     ("lifting", "unsupported"): {"LIFT_FUNCTION_SIZE", *INSTRUCTION_FAILURES},
     ("lifting", "internal"): {"LIFT_BACKEND_SETUP", "LIFTING_INTERNAL"},
     ("verification", "internal"): {"IR_VERIFICATION_FAILED", "VERIFICATION_INTERNAL"},
@@ -59,7 +60,10 @@ def context_rva(context, name):
 def validate_context(context, stage, category, code, image, selected, ir, resolve_callee):
     allowed = {"input", "entry_rva", "signature"}
     owner = selected
-    instruction_failure = code in INSTRUCTION_FAILURES or code in ("LIFT_INVALID_CALL_TARGET", "LIFT_INVALID_ENCODING")
+    # A malformed fixup selected by a jump table has both PE and dispatch provenance.
+    dispatch_pe = code == "INVALID_PE" and "instruction_rva" in context
+    instruction_failure = (code in INSTRUCTION_FAILURES or code in INVALID_TARGETS
+                           or code == "LIFT_INVALID_ENCODING" or dispatch_pe)
     if "function_rva" in context and (instruction_failure or code == "LIFT_FUNCTION_SIZE"):
         start = context_rva(context, "function_rva")
         if resolve_callee is None or start == selected.start or selected.entry_restriction():
@@ -82,18 +86,23 @@ def validate_context(context, stage, category, code, image, selected, ir, resolv
             start = context_rva(context, "block_rva")
             if not owner.start <= start <= context_rva(context, "instruction_rva"):
                 raise ValueError("basic block disagrees with the instruction location")
-    if code in ("LIFT_UNSUPPORTED_CONTROL_FLOW", "LIFT_INVALID_CALL_TARGET"):
+    if code == "LIFT_UNSUPPORTED_CONTROL_FLOW" or code in INVALID_TARGETS:
         allowed.add("branch_target")
         if "branch_target" in context:
             target = field(context, "branch_target", int)
             if not -(1 << 31) <= target < (1 << 32) + (1 << 31):
-                raise ValueError("invalid direct branch destination")
+                raise ValueError("invalid branch destination")
     if code == "LIFT_INVALID_CALL_TARGET" and (context.get("opcode") != "CALL64pcrel32"
             or not {"instruction_rva", "branch_target", "bytes"} <= context.keys()):
         raise ValueError("invalid call target diagnostic lacks a direct call site")
+    if code == "LIFT_INVALID_BRANCH_TARGET" and (context.get("opcode") != "JMP64r"
+            or not {"instruction_rva", "branch_target", "bytes"} <= context.keys()):
+        raise ValueError("invalid branch target diagnostic lacks a dispatch site")
+    if dispatch_pe and (context.get("opcode") != "JMP64r" or "bytes" not in context):
+        raise ValueError("PE diagnostic at a dispatch lacks register jump evidence")
     if stage in ("pe", "entry", "lifting", "verification"):
         allowed.add("file_offset")
-    if stage in ("entry", "lifting", "verification"):
+    if stage in ("entry", "lifting", "verification") or dispatch_pe:
         allowed.add("end_rva")
     if stage == "publication":
         allowed.add("output")
@@ -103,7 +112,7 @@ def validate_context(context, stage, category, code, image, selected, ir, resolv
         restriction = owner.entry_restriction()
         if code != restriction and (restriction is not None or code not in INSTRUCTION_FAILURES):
             raise ValueError("capability diagnostic contradicts inspection or discovery")
-    if code in INSTRUCTION_FAILURES or code == "LIFT_INVALID_CALL_TARGET":
+    if code in INSTRUCTION_FAILURES or code in INVALID_TARGETS or dispatch_pe:
         allowed.update(("instruction_rva", "bytes", "opcode"))
     elif code == "LIFT_INVALID_ENCODING":
         allowed.update(("instruction_rva", "bytes"))
@@ -128,7 +137,7 @@ def validate_context(context, stage, category, code, image, selected, ir, resolv
         supplied = field(context, "file_offset", int)
         if not 0 <= supplied <= 0xffffffffffffffff:
             raise ValueError("invalid file offset")
-        if stage in ("entry", "lifting", "verification") and supplied != offset:
+        if (stage in ("entry", "lifting", "verification") or dispatch_pe) and supplied != offset:
             raise ValueError("file offset disagrees with the inspected section")
     if "bytes" in context:
         text = field(context, "bytes", str)
@@ -137,6 +146,11 @@ def validate_context(context, stage, category, code, image, selected, ir, resolv
         encoded = bytes.fromhex(text)
         if instruction + len(encoded) > owner.end:
             raise ValueError("instruction bytes extend beyond the diagnostic function range")
+        if code == "LIFT_INVALID_BRANCH_TARGET" or dispatch_pe:
+            # JMP r64 is FF /4 with register addressing and one optional REX.
+            body = encoded[1:] if 0x40 <= encoded[0] <= 0x4f else encoded
+            if len(body) != 2 or body[0] != 0xff or body[1] & 0xf8 != 0xe0:
+                raise ValueError("invalid register jump encoding")
         if code == "LIFT_INVALID_CALL_TARGET":
             if len(encoded) < 5 or encoded[-5] != 0xe8:
                 raise ValueError("invalid direct call encoding")

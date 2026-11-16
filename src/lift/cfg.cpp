@@ -1,9 +1,12 @@
 #include "lift/cfg.h"
 #include "lift/integer.h"
+#include "lift/jump_table.h"
 #include "pe/image.h"
 
 #include "llvm/MC/MCDisassembler/MCDisassembler.h"
 #include "llvm/MC/MCInstrInfo.h"
+
+#include <set>
 
 namespace forge::x86 {
     using namespace llvm;
@@ -85,7 +88,7 @@ namespace forge::x86 {
                     tail.take_front(size)};
         }
 
-        Flow control(const Step &s, const MCInstrInfo &info) {
+        Flow control(const Step &s, const MCInstrInfo &info, bool allowTables) {
             if (s.opcode == "RET64") {
                 return Flow::Return;
             }
@@ -98,7 +101,17 @@ namespace forge::x86 {
                 return Flow::Conditional;
             }
 
+            if (allowTables && s.opcode == "JMP64r") {
+                return Flow::Indirect;
+            }
+
             const auto &desc = info.get(s.inst.getOpcode());
+            if (!allowTables && desc.isIndirectBranch()) {
+                s.reject(FailureCode::UnsupportedControlFlow,
+                         "unsupported control transfer in inferred leaf: indirect jump recovery "
+                         "requires a validated unwind-backed function extent");
+            }
+
             if (desc.isCall() && !s.isDirectCall()) {
                 s.reject(FailureCode::UnsupportedControlFlow, "unsupported indirect or far call");
             }
@@ -113,9 +126,9 @@ namespace forge::x86 {
         class Discovery {
           public:
             Discovery(StringRef bytes, uint32_t begin, const MCDisassembler &dis,
-                      const MCInstrInfo &info, LeafStepCheck validateLeaf)
+                      const MCInstrInfo &info, LeafStepCheck validateLeaf, JumpTableReader *tables)
                 : bytes(bytes), begin(begin), end(begin + static_cast<uint32_t>(bytes.size())),
-                  dis(dis), info(info), validateLeaf(validateLeaf) {}
+                  dis(dis), info(info), validateLeaf(validateLeaf), tables(tables) {}
 
             ControlFlowGraph run();
 
@@ -125,12 +138,26 @@ namespace forge::x86 {
             const MCDisassembler &dis;
             const MCInstrInfo &info;
             LeafStepCheck validateLeaf;
+            JumpTableReader *tables;
             std::map<uint32_t, Step> decoded;
+
+            struct TableEdges {
+                RelativeTable proof;
+                SmallVector<uint32_t, 2> targets;
+            };
+
+            std::map<uint32_t, TableEdges> resolved;
+            std::set<uint32_t> unresolved;
+            unsigned tableEntries = 0;
+            void resolve(uint32_t site);
+            void validateGuards() const;
             // Keep the edge that introduced each leader for overlap diagnostics.
             std::map<uint32_t, uint32_t> leaders;
             std::vector<uint32_t> pending;
             void schedule(const Step &s, int64_t address);
+            void recordEdges(const Step &s, Flow flow);
             void trace(uint32_t start);
+            void rejectTableTarget(uint32_t target, const Twine &reason) const;
             void overlap(uint32_t target) const;
             ControlFlowGraph partition();
         };
@@ -154,14 +181,44 @@ namespace forge::x86 {
             }
         }
 
-        void Discovery::overlap(uint32_t target) const {
-            decoded.at(leaders.at(target))
-                .reject(validateLeaf ? FailureCode::InvalidCallTarget
-                                     : FailureCode::UnsupportedControlFlow,
-                        "branch enters an instruction at " + hex(target), target);
+        void Discovery::rejectTableTarget(uint32_t target, const Twine &reason) const {
+            const auto leader = leaders.find(target);
+
+            if (leader == leaders.end()) {
+                return;
+            }
+
+            const auto dispatch = resolved.find(leader->second);
+
+            if (dispatch != resolved.end()) {
+                const auto &edges = dispatch->second;
+                const auto index = llvm::find(edges.targets, target) - edges.targets.begin();
+                edges.proof.rejectEntry(decoded.at(dispatch->first), static_cast<unsigned>(index),
+                                        FailureCode::InvalidBranchTarget, reason, target);
+            }
         }
 
-        void Discovery::trace(uint32_t start) {
+        void Discovery::overlap(uint32_t target) const {
+            rejectTableTarget(target, "branch enters an instruction at " + hex(target));
+            const auto &source = decoded.at(leaders.at(target));
+            source.reject(validateLeaf ? FailureCode::InvalidCallTarget
+                                       : FailureCode::UnsupportedControlFlow,
+                          "branch enters an instruction at " + hex(target), target);
+        }
+
+        void Discovery::recordEdges(const Step &s, Flow flow) {
+            if (flow == Flow::Indirect) {
+                unresolved.insert(s.rva);
+            } else if (flow == Flow::Conditional || flow == Flow::Jump) {
+                schedule(s, int64_t(s.next) + s.inst.getOperand(0).getImm());
+
+                if (flow == Flow::Conditional) {
+                    schedule(s, s.next);
+                }
+            }
+        }
+
+        void Discovery::trace(uint32_t start) try {
             for (auto rva = start; rva < end;) {
                 auto after = decoded.lower_bound(rva);
                 if (after != decoded.end() && after->first == rva) {
@@ -187,25 +244,80 @@ namespace forge::x86 {
                 }
 
                 checkPrefix(s);
-                auto flow = control(s, info);
+                auto flow = control(s, info, tables != nullptr);
                 if (validateLeaf) {
                     validateLeaf(s, flow);
                 }
 
                 auto &step = decoded.emplace_hint(after, rva, std::move(s))->second;
-                if (flow == Flow::Conditional || flow == Flow::Jump) {
-                    schedule(step, int64_t(step.next) + step.inst.getOperand(0).getImm());
-
-                    if (flow == Flow::Conditional) {
-                        schedule(step, step.next);
-                    }
-                }
+                recordEdges(step, flow);
 
                 if (flow != Flow::Fallthrough) {
                     return;
                 }
 
                 rva = step.next;
+            }
+        } catch (const InspectionError &error) {
+            if (error.kind == FailureCode::InvalidInstruction && error.context.instructionRva) {
+                rejectTableTarget(*error.context.instructionRva, error.what());
+            }
+
+            throw;
+        }
+
+        void Discovery::resolve(uint32_t site) {
+            const auto &jump = decoded.at(site);
+            auto proof = tables->recognize(decoded, jump);
+            constexpr unsigned maxFunctionEntries = 4096;
+
+            if (proof.count > maxFunctionEntries - tableEntries) {
+                jump.reject(FailureCode::UnsupportedControlFlow,
+                            proof.describe() + ": function jump-table recovery budget exceeded");
+            }
+
+            tableEntries += proof.count;
+            auto targets = tables->targets(jump, proof, {begin, end});
+            auto &edges =
+                resolved.emplace(site, TableEdges{proof, std::move(targets)}).first->second;
+
+            for (auto target : edges.targets) {
+                schedule(jump, target);
+            }
+        }
+
+        void Discovery::validateGuards() const {
+            if (resolved.empty()) {
+                return;
+            }
+
+            // Only sequential execution from CMP may reach its JA and the dispatch prefix.
+            // Include edges discovered through other tables and case/loop backedges.
+            std::set<uint32_t> entries{begin};
+
+            for (const auto &[rva, step] : decoded) {
+                const auto flow = control(step, info, tables != nullptr);
+
+                if (flow == Flow::Jump || flow == Flow::Conditional) {
+                    entries.insert(static_cast<uint32_t>(int64_t(step.next) +
+                                                         step.inst.getOperand(0).getImm()));
+                }
+            }
+
+            for (const auto &[site, edges] : resolved) {
+                entries.insert(edges.targets.begin(), edges.targets.end());
+            }
+
+            for (const auto &[site, edges] : resolved) {
+                auto alternate = entries.upper_bound(edges.proof.compareRva);
+
+                if (alternate != entries.end() && *alternate <= site) {
+                    decoded.at(site).reject(FailureCode::UnsupportedControlFlow,
+                                            edges.proof.describe() +
+                                                ": unproven bounds: edge bypasses proof at " +
+                                                hex(*alternate),
+                                            *alternate);
+                }
             }
         }
 
@@ -217,10 +329,16 @@ namespace forge::x86 {
 
                 for (;;) {
                     auto &step = block.steps.emplace_back(std::move(it->second));
-                    block.exit = control(step, info);
+                    block.exit = control(step, info, tables != nullptr);
                     if (block.exit == Flow::Jump || block.exit == Flow::Conditional) {
                         block.successors.push_back(static_cast<uint32_t>(
                             int64_t(step.next) + step.inst.getOperand(0).getImm()));
+                    }
+
+                    if (block.exit == Flow::Indirect) {
+                        auto &edges = resolved.at(step.rva);
+                        block.table = edges.proof;
+                        block.successors = std::move(edges.targets);
                     }
 
                     if (block.exit == Flow::Conditional) {
@@ -248,34 +366,46 @@ namespace forge::x86 {
             return graph;
         }
 
-        ControlFlowGraph Discovery::run() {
-            leaders.emplace(begin, begin);
-            pending.push_back(begin);
-            while (!pending.empty()) {
-                const auto start = pending.back();
-                pending.pop_back();
-                try {
-                    trace(start);
-                } catch (InspectionError &error) {
-                    if (error.context.instructionRva) {
-                        auto leader = std::prev(leaders.upper_bound(*error.context.instructionRva));
-                        error.context.blockRva = leader->first;
-                    }
-                    throw;
-                }
+        ControlFlowGraph Discovery::run() try {
+            if (bytes.size() > maxFunctionBytes) {
+                throw InspectionError(hex(begin) +
+                                          ": experimental lift limit is 64 KiB per function",
+                                      FailureCode::FunctionSize);
             }
 
+            leaders.emplace(begin, begin);
+            pending.push_back(begin);
+
+            while (!pending.empty() || !unresolved.empty()) {
+                if (pending.empty()) {
+                    resolve(unresolved.extract(unresolved.begin()).value());
+                    continue;
+                }
+
+                const auto start = pending.back();
+                pending.pop_back();
+                trace(start);
+            }
+
+            validateGuards();
             return partition();
+        } catch (InspectionError &error) {
+            if (error.context.instructionRva) {
+                auto leader = std::prev(leaders.upper_bound(*error.context.instructionRva));
+                error.context.blockRva = leader->first;
+            }
+
+            throw;
         }
     } // namespace
 
     ControlFlowGraph discoverCFG(StringRef bytes, uint32_t begin, const MCDisassembler &dis,
                                  const MCInstrInfo &info, LeafStepCheck validateLeaf) {
-        if (bytes.size() > maxFunctionBytes) {
-            throw InspectionError(hex(begin) + ": experimental lift limit is 64 KiB per function",
-                                  FailureCode::FunctionSize);
-        }
+        return Discovery(bytes, begin, dis, info, validateLeaf, nullptr).run();
+    }
 
-        return Discovery(bytes, begin, dis, info, validateLeaf).run();
+    ControlFlowGraph discoverCFG(StringRef bytes, uint32_t begin, const MCDisassembler &dis,
+                                 const MCInstrInfo &info, JumpTableReader &tables) {
+        return Discovery(bytes, begin, dis, info, {}, &tables).run();
     }
 } // namespace forge::x86
