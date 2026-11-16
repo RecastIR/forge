@@ -1,0 +1,7 @@
+add_library(forge_runtime STATIC src/runtime.cpp)
+target_include_directories(forge_runtime PUBLIC include)
+find_package(Threads REQUIRED)
+target_link_libraries(forge_runtime PRIVATE Threads::Threads)
+target_link_options(forge_runtime INTERFACE ${sanitizer_link_flags})
+configure_forge_output(forge_runtime ARCHIVE_OUTPUT_DIRECTORY LIBRARY_OUTPUT_PATH)
+configure_forge_cxx(forge_runtime)

@@ -246,10 +246,11 @@ def workflow(action, name, configs, directory, identity):
                          "Use PRESET, BUILD_DIR, or BUILD_ROOT to select a configuration.")
     owned = ("CMAKE_TOOLCHAIN_FILE", "CMAKE_GENERATOR", "CMAKE_BUILD_TYPE", "CMAKE_CONFIGURATION_TYPES",
              "CMAKE_HOME_DIRECTORY", "CMAKE_CACHEFILE_DIR", "FORGE_BUILD_CLI", "FORGE_ENABLE_SANITIZERS",
-             "FORGE_PRESET", "FORGE_BUILD_ROOT", "FORGE_CONFIGURED_", "FORGE_CONAN_")
+             "FORGE_RUNTIME_ONLY", "FORGE_PRESET", "FORGE_BUILD_ROOT", "FORGE_CONFIGURED_", "FORGE_CONAN_")
     if any(arg.removeprefix("-D").startswith(owned) for arg in args):
         raise ValueError("Use PRESET or CONFIG to choose the workflow, PRESET=sanitize for sanitizers, "
-                         "and WITH_CLI during make provision to select the CLI.")
+                         "and WITH_CLI during make provision to select the CLI. For a runtime-only build, "
+                         "use plain CMake in a separate directory.")
     for key in ("LLVM_DIR", "LLVM_CONFIG", "BUILD_TESTING"):
         if ENV.get(key):
             args.append(f"-D{key}={ENV[key]}")

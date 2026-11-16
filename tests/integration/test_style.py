@@ -176,6 +176,7 @@ int measure(const int start, const int End) {
 
     def test_whole_tree_formatting_and_entry_points(self):
         shutil.copytree(SOURCE / 'compiler', self.root / 'compiler', dirs_exist_ok=True)
+        shutil.copytree(SOURCE / 'runtime', self.root / 'runtime', dirs_exist_ok=True)
         self.run_command('cmake', '-S', '.', '-B', 'build/dev', '-DFORGE_BUILD_CLI=OFF', '-DBUILD_TESTING=OFF')
         target = ('cmake', '--build', 'build/dev', '--target')
         bad = FORMATTED.replace('    int Value', '  int Value')
@@ -196,6 +197,21 @@ int measure(const int start, const int End) {
                 self.run_command(*command, 'format', env=env)
                 self.assertEqual(self.run_command('git', 'diff'), changes)
                 self.run_command(*command, 'format-check', env=env)
+
+    def test_standalone_runtime_formatting(self):
+        shutil.copytree(SOURCE / 'runtime', self.root / 'runtime')
+        env = dict(self.env, LLVM_CONFIG=str(self.root / 'missing-llvm-config'),
+                   PATH=str(LLVM_BIN) + os.pathsep + self.env['PATH'])
+        self.run_command('cmake', '-S', '.', '-B', 'build/standalone',
+                         '-DFORGE_RUNTIME_ONLY=ON', '-DBUILD_TESTING=OFF', env=env)
+        header = self.root / 'runtime/include/forge/example.h'
+        header.write_text('int  value;\n')
+        target = ('cmake', '--build', 'build/standalone', '--target')
+        output = self.run_command(*target, 'format-check', env=env, success=False)
+        self.assertIn('runtime/include/forge/example.h:', output)
+        self.run_command(*target, 'format', env=env)
+        self.assertEqual(header.read_text(), 'int value;\n')
+        self.run_command(*target, 'format-check', env=env)
 
     def test_namespace_indentation_and_paragraphs(self):
         self.file.write_bytes(b"""\
@@ -255,8 +271,13 @@ namespace forge {
         renamed.write_text(FORMATTED.replace('Value = 4', 'Value=5'))
         new = self.root / 'cli/src/new.cpp'
         new.write_text('int  Other;\n')
+        runtime = self.root / 'runtime/src/runtime.cpp'
+        smoke = self.root / 'tests/integration/runtime_smoke.c'
+        for path in (runtime, smoke):
+            path.parent.mkdir(parents=True)
+            path.write_text('int sample;\n')
         native = self.run_command(sys.executable, '-B', 'cmake/style.py', 'native-sources').splitlines()
-        self.assertCountEqual(native, [str(renamed), str(self.caller), str(new)])
+        self.assertCountEqual(native, [str(renamed), str(self.caller), str(new), str(runtime), str(smoke)])
         output = self.run_command('make', 'format-check', success=False)
         self.assertIn('cli/src/new.cpp:1:', output)
         self.assertIn('compiler/src/renamed file.cpp:3:', output)
@@ -280,6 +301,16 @@ namespace forge {
                                       f'LINT_DATABASE={self.root / "compile_commands.json"}', success=False)
             self.assertIn('23.1.5', output)
             self.assertIn('23.1.50', output)
+            self.assertIn('LLVM_CONFIG', output)
+
+        (tools / 'clang-format-23').symlink_to('clang-format')
+        env = dict(self.env, PATH=str(tools) + os.pathsep + self.env['PATH'])
+        output = self.run_command('cmake', '-DFORGE_RUNTIME_ONLY=ON', '-DACTION=format-check',
+                                  '-P', 'cmake/quality.cmake', env=env, success=False)
+        self.assertIn('23.1.50', output)
+        self.assertIn('PATH', output)
+        self.assertNotIn('LLVM_CONFIG', output)
+        self.assertNotIn('LLVM_DIR', output)
 
     def test_fixture_brace_probe(self):
         fixture = self.root / 'tests/differential/fixtures/example.c'
