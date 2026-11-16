@@ -47,67 +47,121 @@ class NativeDifferentialTests(unittest.TestCase):
                 self.assertEqual(diff.run(config, fixture, output=output, forge=self.forge), 0)
                 for variant in diff.VARIANTS:
                     exe = output / config / fixture / variant / "native/bin/differential_runtime_pairs"
-                    for mode in ("isolation", "zero", "foreign", "retired", "null"):
-                        for operation in ("set", "get"):
-                            with self.subTest(config=config, variant=variant, mode=mode, operation=operation):
-                                result = subprocess.run([exe, "--probe", mode, operation], capture_output=True, timeout=10)
-                                self.assertEqual(result.returncode, 0 if mode == "isolation" else -signal.SIGTRAP)
-                                self.assertEqual(result.stdout, b"")
+                    for args, expected in ((["--probe", "isolation", "get"], 0),
+                                           (["5", "0", "bad", "0"], 2)):
+                        with self.subTest(config=config, variant=variant, args=args):
+                            result = subprocess.run([exe, *args], capture_output=True, timeout=10)
+                            self.assertEqual((result.returncode, result.stdout, result.stderr), (expected, b"", b""))
+
+    def test_mixed_import_and_guest_call_evidence(self):
+        image = diff.BINARIES / "release/last_error.exe"
+        with tempfile.TemporaryDirectory(dir=self.tmp) as tmp:
+            work = Path(tmp)
+            caller = diff.analyze(self.forge, image, "last_error", work)
+            module = diff.read_json(work / "inspect.json")["modules"][0]
+            base = int(module["image_base_va"], 16)
+            code = image.read_bytes()
+            decode = diff.caller_decoder(image, base + caller.start, base + caller.end)
+            address = base + caller.start
+            guests, imports = [], []
+            while address < base + caller.end:
+                asm, following = decode(address)
+                if asm.startswith("call "):
+                    site = address - base
+                    offset = caller.file_offset + site - caller.start
+                    raw = code[offset:offset + following - address]
+                    if raw[0] == 0xe8:
+                        guests.append((site, following - base + int.from_bytes(raw[1:], "little", signed=True)))
+                    else:
+                        imports.append(site)
+                address = following
+            self.assertTrue(guests and imports)
+            for site, target in guests:
+                self.assertEqual(diff.verified_call_target(image, module, caller, site, self.forge,
+                                                           require_continuation=True), target)
+            with self.assertRaisesRegex(ValueError, "reachable direct CALL"):
+                diff.verified_call_target(image, module, caller, imports[0], self.forge, require_continuation=True)
+
+            # The same FF /2 bytes fall through only when the addressed slot can be proved.
+            changed = bytearray(code)
+            site = imports[0]
+            struct.pack_into("<i", changed, caller.file_offset + site - caller.start + 2, 0)
+            forged = work / "forged.exe"
+            forged.write_bytes(changed)
+            with self.assertRaisesRegex(ValueError, "unproven last-error IAT call"):
+                diff.verified_call_target(forged, module, caller, guests[0][0], self.forge, require_continuation=True)
 
     def test_bound_iat_and_external_call_frames(self):
-        # The same original getter slot is used in the bound and frame-fault probes.
+        for config in diff.CONFIGS:
+            with self.subTest(config=config):
+                self.check_external_call_frames(config)
+
+    def check_external_call_frames(self, config):
         sys.path.insert(0, str(diff.SUITE.parent / "integration"))
         from pe_layout import Layout
         sys.path.pop(0)
-        source = diff.BINARIES / "release/last_error.exe"
-        for fault in (False, True):
-            with self.subTest(fault=fault), tempfile.TemporaryDirectory(dir=self.tmp) as tmp:
+        source = diff.BINARIES / config / "last_error.exe"
+        data = bytearray(source.read_bytes())
+        layout = Layout(data)
+        desc = layout.file_offset(layout.directory(1)[0])
+        slots = {}
+        while layout.u32(desc + 12):
+            name = layout.file_offset(layout.u32(desc + 12))
+            if data[name:name+13].lower() == b"kernel32.dll\0":
+                lookup, iat = layout.u32(desc), layout.u32(desc + 16)
+                struct.pack_into("<I", data, desc + 4, 0xffffffff)
+                i = 0
+                while (hint := layout.u32(layout.file_offset(lookup) + 8*i)):
+                    start = layout.file_offset(hint) + 2
+                    slots[data[start:data.index(0, start)].decode()] = iat + 8*i
+                    struct.pack_into("<Q", data, layout.file_offset(iat) + 8*i, 0x7ffa00001000 + 32*i)
+                    i += 1
+                break
+            desc += 20
+
+        for api, frame in ((None, None), ("SetLastError", 40), ("GetLastError", 40),
+                           ("GetLastError", 8), ("GetLastError", 32)):
+            with self.subTest(api=api, frame=frame), tempfile.TemporaryDirectory(dir=self.tmp) as tmp:
                 work = Path(tmp).resolve()
-                data = bytearray(source.read_bytes())
-                layout = Layout(data)
-                desc = layout.file_offset(layout.directory(1)[0])
-                found = False
-                while layout.u32(desc + 12):
-                    name = layout.file_offset(layout.u32(desc + 12))
-                    if data[name:name+13].lower() == b"kernel32.dll\0":
-                        lookup, slots = layout.u32(desc), layout.u32(desc + 16)
-                        struct.pack_into("<I", data, desc + 4, 0xffffffff)
-                        i = 0
-                        while (hint := layout.u32(layout.file_offset(lookup) + 8*i)):
-                            start = layout.file_offset(hint) + 2
-                            if data[start:start+13] == b"GetLastError\0":
-                                getter = slots + 8*i
-                                found = True
-                            struct.pack_into("<Q", data, layout.file_offset(slots) + 8*i,
-                                             0x7ffa00001000 + 32*i)
-                            i += 1
-                        break
-                    desc += 20
-                self.assertTrue(found)
                 image = work / source.name
                 image.write_bytes(data)
                 entry = diff.analyze(self.forge, image, "last_error", work)
-                if fault:
-                    # Select insufficient shadow (8) or a misaligned stack (32) at the same IAT call.
-                    prefix = bytes.fromhex("85d2 7506 4883ec08 eb04 4883ec20 ff15")
-                    code = prefix + struct.pack("<i", getter - (entry.start + len(prefix) + 4)) + b"\xc3"
+                if api:
+                    # One service and a balanced frame. Without the specific boundary guard
+                    # each negative can return normally, including after the void setter.
+                    prefix = bytes.fromhex("4883ec") + bytes([frame]) + bytes.fromhex("ff15")
+                    disp = struct.pack("<i", slots[api] - (entry.start + len(prefix) + 4))
+                    result_reg = bytes.fromhex("b807000000") if api == "SetLastError" else b""
+                    code = prefix + disp + result_reg + bytes.fromhex("4883c4") + bytes([frame, 0xc3])
                     self.assertLessEqual(len(code), entry.end - entry.start)
-                    data[entry.file_offset:entry.file_offset+len(code)] = code
-                    image.write_bytes(data)
+                    with image.open("r+b") as output:
+                        output.seek(entry.file_offset)
+                        output.write(code)
+
                 ir = work / diff.CANONICAL_IR
                 ir.parent.mkdir()
                 diff.lift(self.forge, image, {"signature": "i64(i64,i64)", "harness": "runtime_pairs"}, entry, ir)
                 for variant in diff.VARIANTS:
                     directory = work / variant
                     directory.mkdir()
-                    exe, _ = diff.native.build(ir, "runtime_pairs", directory, "release", variant)
-                    if fault:
-                        for mode in ("0", "1"):
-                            result = subprocess.run([exe, "5", mode], capture_output=True, timeout=10)
-                            self.assertEqual(result.returncode, -signal.SIGTRAP)
-                    else:
+                    exe, _ = diff.native.build(ir, "runtime_pairs", directory, config, variant)
+                    if api is None:
                         result = subprocess.run([exe, "4294967295", "0", "0", "1"], capture_output=True, timeout=10)
                         self.assertEqual((result.returncode, result.stdout), (0, b"4294967295\n4294967295\n"))
+                        continue
+
+                    result = subprocess.run([exe, "5", "0"], capture_output=True, timeout=10)
+                    if frame != 40:
+                        self.assertEqual(result.returncode, -signal.SIGTRAP)
+                        continue
+
+                    expected = b"7\n" if api == "SetLastError" else b"0\n"
+                    self.assertEqual((result.returncode, result.stdout, result.stderr), (0, expected, b""))
+                    for mode in ("zero", "foreign", "retired", "null"):
+                        with self.subTest(variant=variant, mode=mode):
+                            operation = "set" if api == "SetLastError" else "get"
+                            result = subprocess.run([exe, "--probe", mode, operation], capture_output=True, timeout=10)
+                            self.assertEqual((result.returncode, result.stdout), (-signal.SIGTRAP, b""))
 
     def test_continuation_faults(self):
         fixture = "functions/continuations"

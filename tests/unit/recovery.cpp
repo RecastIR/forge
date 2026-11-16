@@ -10,6 +10,7 @@
 #include "llvm/Support/raw_ostream.h"
 
 #include <array>
+#include <future>
 #include <type_traits>
 #include <utility>
 
@@ -400,16 +401,44 @@ namespace {
         }
     }
 
+    void checkImportSnapshot(const fs::path &path) {
+        const AnalyzedImage analysis(
+            std::make_unique<ParsedImage>(InputFile(path), ParsePolicy::Inspection),
+            DebugInfo::Omit);
+        auto lookup = [&] { return &analysis.image().importBindings(); };
+        auto pending = std::async(std::launch::async, lookup);
+        const auto *index = lookup();
+        check(pending.get() == index, "concurrent lookups did not share the image index");
+
+        const auto root = exportedRva(analysis, "last_error");
+        const auto helper = exportedRva(analysis, "last_error_set");
+        const RecoveredFunctionGroup first(analysis, root);
+        const RecoveredFunctionGroup second(analysis, helper);
+        const auto &calls = first.function(helper).calls;
+        check(calls.size() == 1, "missing setter in nested helper");
+        const auto &[site, call] = *calls.begin();
+        const auto *target = call.external();
+        const auto *repeat = second.function(helper).callAt(site);
+        check(target && repeat && repeat->external(), "expected the same external call site");
+        const auto slot = index->at(target->slot);
+        check(slot && &target->descriptor == &slot->descriptor &&
+                  &repeat->external()->descriptor == &target->descriptor,
+              "the recovered groups do not share the image-owned descriptor");
+    }
+
     // Check PE stability for the differential runner's independently disassembled caller.
     // The first interval is code. Each following interval is a relative table.
     void checkDispatchSpans(const fs::path &path, llvm::ArrayRef<char *> bounds) {
-        check(bounds.size() >= 2 && bounds.size() % 2 == 0,
+        const auto slots =
+            llvm::find_if(bounds, [](llvm::StringRef arg) { return arg == "--iat-slots"; });
+        const auto intervals = bounds.take_front(static_cast<size_t>(slots - bounds.begin()));
+        check(intervals.size() >= 2 && intervals.size() % 2 == 0,
               "expected a code RVA span and optional table spans");
         ParsedImage image(InputFile(path), ParsePolicy::FunctionAnalysis);
         check(!image.advertisesDynamicRelocations(), "unknown dynamic relocation writes");
         const auto init = image.imageInitialization();
 
-        for (size_t i = 0; i < bounds.size(); i += 2) {
+        for (size_t i = 0; i < intervals.size(); i += 2) {
             uint32_t begin = 0, end = 0;
             check(!llvm::StringRef(bounds[i]).getAsInteger(0, begin) &&
                       !llvm::StringRef(bounds[i + 1]).getAsInteger(0, end) && begin < end,
@@ -422,6 +451,21 @@ namespace {
                       init.relocationsIn({begin, end}).empty(),
                   "dispatch overlaps loader-written bytes or relocations");
         }
+
+        if (slots != bounds.end()) {
+            const RelocationIndex relocations(image.module().relocations);
+            for (const auto *arg : bounds.drop_front(intervals.size() + 1)) {
+                uint32_t rva = 0;
+                check(!llvm::StringRef(arg).getAsInteger(0, rva), "invalid IAT slot RVA");
+                const auto slot = image.importBindings().at(rva);
+                check(slot && !slot->descriptor.delayed &&
+                          slot->descriptor.normalizedName == "kernel32.dll" &&
+                          (slot->symbol.name == "GetLastError" ||
+                           slot->symbol.name == "SetLastError") &&
+                          !slot->unstableIdentityRva(relocations, init.excluded),
+                      "unproven last-error IAT call");
+            }
+        }
     }
 } // namespace
 
@@ -431,7 +475,8 @@ int main(int argc, char **argv) try {
         return 0;
     }
 
-    check(argc == 5, "expected stack.exe, leaves.exe, jump.exe and indirect.exe");
+    check(argc == 6, "expected stack.exe, leaves.exe, jump.exe, indirect.exe and last-error.exe");
+    checkImportSnapshot(argv[5]);
     const AnalyzedImage analysis(
         std::make_unique<ParsedImage>(InputFile(argv[1]), ParsePolicy::Inspection),
         DebugInfo::Omit);

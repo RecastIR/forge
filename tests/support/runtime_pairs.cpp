@@ -9,6 +9,7 @@
 #include <memory>
 #include <stdexcept>
 #include <string_view>
+#include <vector>
 
 // Match the generated entry symbol in the native C ABI.
 // NOLINTNEXTLINE(readability-identifier-naming)
@@ -112,13 +113,16 @@ int main(int argc, char **argv) try {
         return 2;
     }
 
-    for (int i = 1; i < argc; i += 2) {
-        int64_t value, readOnly;
-        if (!parse_operand(argv[i], &value) || !parse_operand(argv[i + 1], &readOnly)) {
+    std::vector<int64_t> operands(static_cast<size_t>(argc - 1));
+    for (size_t i = 0; i < operands.size(); ++i) {
+        if (!parse_operand(argv[i + 1], &operands[i])) {
             return 2;
         }
+    }
 
-        const auto result = forge_lifted_with_runtime(runtime.get(), thread, value, readOnly);
+    for (size_t i = 0; i < operands.size(); i += 2) {
+        const auto result =
+            forge_lifted_with_runtime(runtime.get(), thread, operands[i], operands[i + 1]);
         if (std::printf("%" PRId64 "\n", result) < 0) {
             return 1;
         }

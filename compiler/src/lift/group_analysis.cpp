@@ -350,8 +350,9 @@ namespace forge::x86 {
                                          CallAddresses &calls, bool collect) const {
             if (site.external()) {
                 std::fill_n(facts.registers.begin(), callerSlots, AddressFact{});
-                // CALL overwrites the return slot below RSP, including any earlier spill there.
-                facts.spills = {};
+                // These services take no guest pointers. Only CALL writes guest memory.
+                const auto slot = facts.registers[rspIndex].plus(AddressFact(uint64_t(0) - 8));
+                facts.spills.write(slot, 64, {});
                 return true;
             }
 

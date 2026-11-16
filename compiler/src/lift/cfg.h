@@ -31,7 +31,8 @@ namespace forge::x86 {
 
         [[noreturn]] void reject(FailureCode kind, const llvm::Twine &reason,
                                  std::optional<int64_t> target = {},
-                                 std::optional<uint32_t> importSlot = {}) const;
+                                 std::optional<uint32_t> importSlot = {},
+                                 const std::optional<ImportOwnershipFailure> &ownership = {}) const;
     };
 
     enum class Flow : uint8_t { Fallthrough, Jump, Conditional, Indirect, Return, FallOff };

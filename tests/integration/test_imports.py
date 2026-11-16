@@ -1,6 +1,8 @@
 """Exercise IAT proofs and Windows ABI effects through the normal lift command."""
 import json
+from pathlib import Path
 import struct
+import sys
 import unittest
 
 from cli_case import Case, FIXTURES
@@ -28,16 +30,17 @@ class Imports(Case):
                     start = self.layout.file_offset(hint) + 2
                     self.slots[self.original[start:self.original.index(0, start)].decode()] = iat + 8*i
 
-    def invoke_lift(self, data, *opts, reason=None, code=None, symbol=None, name=None):
+    def invoke_lift(self, data, *opts, reason=None, code=None, symbol=None, name=None, entry=None):
         image = self.dir / "guest.exe"
         image.write_bytes(data)
         args = ("--signature", "i64(i64,i64)", "--runtime") if not opts else opts
         if reason:
             self.output.write_bytes(b"previous module")
-        result = self.invoke("lift", image, "--rva", hex(self.root), "--output", self.output,
+        result = self.invoke("lift", image, "--rva", hex(self.root if entry is None else entry), "--output", self.output,
                              "--diagnostics-format", "json", *args, code=int(reason is not None))
         if not reason:
             return self.output.read_text()
+        self.lift_stderr = result.stderr
         diag = json.loads(result.stderr)
         self.assertIn(reason, diag["message"])
         self.assertEqual(diag["code"], code)
@@ -76,7 +79,7 @@ class Imports(Case):
         self.assertNotIn("@forge_lifted_", ir.replace("@forge_lifted_with_runtime", ""))
         self.assertNotIn("@forge_lifted(", ir)
         self.assertEqual(ir.count("call i32 @forge_rt_set_last_error"), 1)
-        self.assertEqual(ir.count("call i32 @forge_rt_get_last_error"), 2)
+        self.assertEqual(ir.count("call i32 @forge_rt_get_last_error"), 3)
         ctx = self.invoke_lift(self.original, "--signature", "i64(i64,i64)", reason="--runtime",
                                code="LIFT_UNSUPPORTED_CONTROL_FLOW")
         raw = self.invoke("lift", FIXTURES / "last-error.exe", "--rva", hex(self.root), "--output", self.output,
@@ -139,7 +142,58 @@ class Imports(Case):
         base = struct.unpack_from("<Q", data, self.layout.opt + 24)[0]
         struct.pack_into("<Q", data, self.layout.file_offset(reloc) + size + 16,
                          base + self.slots["GetLastError"] + 4)
-        self.invoke_lift(data, reason="another loader-written field", code="INVALID_PE")
+        ctx = self.invoke_lift(data, reason="another loader-written field", code="INVALID_PE")
+        self.assertEqual(ctx["import_ownership_reason"], "overlapping_loader_field")
+        # Pass the real CLI diagnostic through the differential runner and test a forged slot.
+        sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "differential"))
+        from lift_diagnostics import SelectedFunction, parse_diagnostic
+        sys.path.pop(0)
+        image = self.dir / "guest.exe"
+        end = int(ctx["end_rva"], 16)
+        selected = SelectedFunction(self.root, end, self.code, "exe", False)
+        parsed = parse_diagnostic(self.lift_stderr, image, selected, self.output)
+        self.assertEqual(parsed["context"], ctx)
+        parsed["context"]["iat_slot_rva"] = hex(self.slots["GetLastError"] + 1)
+        with self.assertRaisesRegex(ValueError, "IAT slot disagrees"):
+            parse_diagnostic((json.dumps(parsed) + "\n").encode(), image, selected, self.output)
+
+        other = self.descriptors + (20 if self.descriptor == self.descriptors else 0)
+        owner = self.layout.directory(1)[0] + other - self.descriptors
+        struct.pack_into("<Q", data, self.layout.file_offset(reloc) + size + 16, base + owner + 16)
+        ctx = self.invoke_lift(data, reason="ownership depends on loader-written", code="LIFT_UNSUPPORTED_CONTROL_FLOW")
+        self.assertEqual((ctx["import_descriptor_rva"], ctx["import_ownership_reason"]),
+                         (hex(owner), "loader_written_ownership"))
+
+    def test_other_descriptor_ownership(self):
+        slot = self.slots["GetLastError"]
+        directory = self.layout.directory(1)[0]
+        other = self.descriptors + (20 if self.descriptors == self.descriptor else 0)
+        owner = directory + other - self.descriptors
+        lookup = self.layout.u32(other)
+        iat = self.layout.u32(other + 16)
+        # Physics.DLL supplies one symbol. Its zero terminators bound its writes.
+        for field, descriptor in ((owner + 16, owner), (owner, owner), (lookup + 8, owner),
+                                  (iat + 8, owner), (directory + 40, directory + 40)):
+            data = self.patch(("ff15", slot), "c3")
+            reloc = self.layout.file_offset(self.layout.directory(5)[0])
+            struct.pack_into("<I", data, self.layout.directories + 5*8+4, 12)
+            struct.pack_into("<IIHH", data, reloc, field & ~4095, 12, 0x3000 | (field & 4095), 0)
+            for entry, site, requested in ((self.root, self.root, slot),
+                                            (self.helper, self.helper + 4, self.slots["SetLastError"])):
+                with self.subTest(field=field, entry=entry):
+                    ctx = self.invoke_lift(data, entry=entry, reason="ownership depends on relocated bytes",
+                                           code="LIFT_UNSUPPORTED_CONTROL_FLOW")
+                    self.assertEqual((ctx["import_descriptor_rva"], ctx["import_ownership_reason"],
+                                      ctx["iat_slot_rva"], ctx["instruction_rva"]),
+                                     (hex(descriptor), "relocated_ownership", hex(requested), hex(site)))
+
+        # An unrelated symbol's name can be relocated without moving its descriptor's IAT.
+        hint = self.layout.u32(self.layout.file_offset(lookup))
+        data = self.patch(("ff15", slot), "c3")
+        reloc = self.layout.file_offset(self.layout.directory(5)[0])
+        struct.pack_into("<I", data, self.layout.directories + 5*8+4, 12)
+        struct.pack_into("<IIHH", data, reloc, hint & ~4095, 12, 0x3000 | (hint & 4095), 0)
+        self.assertIn("@forge_rt_get_last_error", self.invoke_lift(data))
 
     def test_import_identities_and_indirections(self):
         slot = self.slots["GetLastError"]
@@ -184,6 +238,23 @@ class Imports(Case):
                 struct.pack_into("<IIHH", data, reloc, field & ~4095, 12, 0xa000 | (field & 4095), 0)
                 self.invoke_lift(data, reason="import identity overlaps", code="LIFT_UNSUPPORTED_CONTROL_FLOW",
                                  name="KERNEL32.dll", symbol="GetLastError")
+
+    def test_call_overwrites_partial_spill(self):
+        # The spill helper's caller resumes at ADD RSP,40. Its byte is selected only
+        # while the saved pointer survives the imported call.
+        epilogue = bytes.fromhex("4883c428 c3")
+        cont = self.original.index(epilogue, self.code)
+        self.assertEqual(self.original[cont-5], 0xe8)
+        backing = f"@image_{self.root + cont - self.code:x} ="
+        self.assertIn(backing, self.invoke_lift(self.original))
+        data = bytearray(self.original)
+        for encoding in ("4c89442420", "4c8b442420"):
+            # Move the store and reload from RSP+32 to RSP-4. Four bytes now
+            # overlap the eight-byte return slot installed by the service CALL.
+            op = bytes.fromhex(encoding)
+            self.assertEqual(data.count(op), 1)
+            data[data.index(op) + len(op) - 1] = 0xfc
+        self.assertNotIn(backing, self.invoke_lift(data))
 
     def test_external_effects(self):
         get, put = (("ff15", self.slots[name]) for name in ("GetLastError", "SetLastError"))

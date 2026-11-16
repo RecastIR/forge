@@ -122,8 +122,6 @@ namespace forge::x86 {
         uint32_t entryRva;
         // Destroy steps and call indices before the MC objects backing the decoded instructions.
         std::unique_ptr<Decoder> decoder;
-        // External sites borrow descriptors in this index, populated once on the first IAT call.
-        std::optional<ImportBindings> imports;
         std::map<uint32_t, RecoveredFunction> recovered;
     };
 } // namespace forge::x86

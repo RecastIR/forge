@@ -168,7 +168,6 @@ namespace forge::x86 {
             std::map<uint32_t, MappedRange> pending;
             std::map<uint32_t, const ResolvedCallSite *> deferred;
 
-            std::optional<ImportBindings> &imports;
             const InstructionOperands operands;
             std::optional<std::vector<RvaRange>> loaderWrites;
 
@@ -282,15 +281,13 @@ namespace forge::x86 {
             const auto slot = static_cast<uint32_t>(*target);
             std::string identity;
 
-            try {
-                if (!imports) {
-                    imports = entry.analysis.image().importBindings();
+            const auto imported = [&] {
+                try {
+                    return entry.analysis.image().importBindings().at(slot);
+                } catch (const InspectionError &error) {
+                    step.reject(error.kind, error.what(), {}, slot, error.context.importOwnership);
                 }
-            } catch (const InspectionError &error) {
-                step.reject(error.kind, error.what(), {}, slot);
-            }
-
-            const auto imported = imports->at(slot);
+            }();
             try {
                 if (!imported) {
                     step.reject(FailureCode::UnsupportedControlFlow,
@@ -578,7 +575,7 @@ namespace forge::x86 {
         withLocation(source, location, FailureCode::LiftingInternal, [&] {
             decoder = std::make_unique<Decoder>(entryRva);
             GroupDiscovery discovery{
-                entry, recovered, {}, {}, imports, InstructionOperands(*decoder->regs, 0), {}};
+                entry, recovered, {}, {}, InstructionOperands(*decoder->regs, 0), {}};
             discovery.run(*decoder->dis, *decoder->instructions, *decoder->regs);
         });
     }

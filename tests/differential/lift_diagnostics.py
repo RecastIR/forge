@@ -4,7 +4,7 @@ from dataclasses import dataclass
 from pathlib import Path
 import re
 
-from build import register_call_encoding
+from build import iat_call_slot, register_call_encoding
 from manifests import field, unique_keys
 
 
@@ -61,7 +61,7 @@ def context_rva(context, name):
 def validate_context(context, stage, category, code, image, selected, ir, resolve_callee, register_target):
     allowed = {"input", "entry_rva", "signature"}
     owner = selected
-    # A malformed fixup selected by a jump table has both PE and dispatch provenance.
+    # A PE failure at an indirect transfer has both metadata and instruction provenance.
     dispatch_pe = code == "INVALID_PE" and "instruction_rva" in context
     instruction_failure = (code in INSTRUCTION_FAILURES or code in INVALID_TARGETS
                            or code == "LIFT_INVALID_ENCODING" or dispatch_pe)
@@ -101,8 +101,10 @@ def validate_context(context, stage, category, code, image, selected, ir, resolv
     if code == "LIFT_INVALID_BRANCH_TARGET" and (context.get("opcode") != "JMP64r"
             or not {"instruction_rva", "branch_target", "bytes"} <= context.keys()):
         raise ValueError("invalid branch target diagnostic lacks a dispatch site")
-    if dispatch_pe and (context.get("opcode") not in {"JMP64r", "CALL64r"} or "bytes" not in context):
-        raise ValueError("PE diagnostic at a dispatch lacks register jump evidence")
+    if dispatch_pe and (context.get("opcode") not in {"JMP64r", "CALL64r", "CALL64m"}
+                        or "bytes" not in context
+                        or (context["opcode"] == "CALL64m" and "iat_slot_rva" not in context)):
+        raise ValueError("PE diagnostic at a dispatch lacks instruction or slot evidence")
     if stage in ("pe", "entry", "lifting", "verification"):
         allowed.add("file_offset")
     if stage in ("entry", "lifting", "verification") or dispatch_pe:
@@ -120,7 +122,16 @@ def validate_context(context, stage, category, code, image, selected, ir, resolv
     elif code == "LIFT_INVALID_ENCODING":
         allowed.update(("instruction_rva", "bytes"))
     if context.get("opcode") == "CALL64m" and "iat_slot_rva" in context:
+        if "bytes" not in context:
+            raise ValueError("IAT call diagnostic lacks instruction bytes")
         allowed.update(("iat_slot_rva", "import_dll", "import_symbol"))
+        if "import_descriptor_rva" in context or "import_ownership_reason" in context:
+            allowed.update(("import_descriptor_rva", "import_ownership_reason"))
+            context_rva(context, "import_descriptor_rva")
+            reasons = {"INVALID_PE": {"overlapping_iat", "overlapping_lookup", "overlapping_loader_field"},
+                       "LIFT_UNSUPPORTED_CONTROL_FLOW": {"relocated_ownership", "loader_written_ownership"}}
+            if field(context, "import_ownership_reason", str) not in reasons.get(code, ()):
+                raise ValueError("invalid import ownership reason")
         for key in ("import_dll", "import_symbol"):
             if key in context and not field(context, key, str):
                 raise ValueError("empty import identity")
@@ -162,10 +173,7 @@ def validate_context(context, stage, category, code, image, selected, ir, resolv
             if len(body) != 2 or body[0] != 0xff or body[1] & 0xf8 != 0xe0:
                 raise ValueError("invalid register jump encoding")
         if "iat_slot_rva" in context:
-            body = encoded[1:] if 0x40 <= encoded[0] <= 0x4f else encoded
-            if (len(body) != 6 or body[:2] != b"\xff\x15"
-                    or context_rva(context, "iat_slot_rva") != instruction + len(encoded)
-                    + int.from_bytes(body[2:], "little", signed=True)):
+            if iat_call_slot(encoded, instruction) != context_rva(context, "iat_slot_rva"):
                 raise ValueError("IAT slot disagrees with RIP-relative CALL")
         if context.get("opcode") == "CALL64r":
             if not register_call_encoding(encoded, rejected_prefix=code == "LIFT_UNSUPPORTED_PREFIX"):

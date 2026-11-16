@@ -56,6 +56,11 @@ namespace forge {
             fields["iat_slot_rva"] = hex(*context.importSlot);
         }
 
+        if (context.importOwnership) {
+            fields["import_descriptor_rva"] = hex(context.importOwnership->descriptorRva);
+            fields["import_ownership_reason"] = context.importOwnership->reason;
+        }
+
         if (!context.importDll.empty()) {
             fields["import_dll"] = context.importDll;
         }

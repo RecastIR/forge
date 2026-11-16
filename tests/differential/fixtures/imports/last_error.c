@@ -2,7 +2,7 @@
 #include "streams.h"
 #include <stdlib.h>
 
-extern int64_t last_error(int64_t value, int64_t read_only);
+extern int64_t last_error(int64_t value, int64_t mode);
 
 int main(int argc, char **argv) {
     if (!open_binary_streams() || argc < 3 || argc % 2 == 0) {

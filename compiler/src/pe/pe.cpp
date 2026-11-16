@@ -426,7 +426,7 @@ namespace forge {
                         std::nullopt, static_cast<uint32_t>(value)};
             }
 
-            void read(const COFFObjectFile &coff, bool delayed);
+            std::optional<uint32_t> read(const COFFObjectFile &coff, bool delayed);
             void readTable(const ImportDescriptor &d, Import *record, bool delayed);
         };
 
@@ -466,11 +466,11 @@ namespace forge {
             }
         }
 
-        void ImportReader::read(const COFFObjectFile &coff, bool delayed) {
+        std::optional<uint32_t> ImportReader::read(const COFFObjectFile &coff, bool delayed) {
             const auto *dir =
                 coff.getDataDirectory(delayed ? COFF::DELAY_IMPORT_DESCRIPTOR : COFF::IMPORT_TABLE);
             if (!dir || (!dir->Size && !dir->RelativeVirtualAddress)) {
-                return;
+                return {};
             }
 
             const StringRef label = delayed ? "delay imports" : "imports";
@@ -485,7 +485,7 @@ namespace forge {
                 const auto start = pos;
                 const auto descriptor = readImportDescriptor(view, pos, delayed);
                 if (!descriptor) {
-                    return;
+                    return static_cast<uint32_t>(dir->RelativeVirtualAddress + start);
                 }
 
                 consume(view, start);
@@ -516,6 +516,17 @@ namespace forge {
             }
         }
 
+        [[noreturn]] void ownershipFailure(uint32_t descriptorRva, StringRef reason,
+                                           const Twine &message, FailureCode kind,
+                                           std::optional<uint64_t> offset = {}) {
+            const auto location =
+                offset ? "file offset " + hex(*offset) : "RVA " + hex(descriptorRva);
+            InspectionError error("import descriptor at " + location + ": " + message.str(), kind);
+            error.context.fileOffset = offset;
+            error.context.importOwnership = ImportOwnershipFailure{descriptorRva, reason.str()};
+            throw error;
+        }
+
         void validateImportOwnership(ArrayRef<Import> descriptors) {
             std::map<uint32_t, uint64_t> spans;
             for (const auto &descriptor : descriptors) {
@@ -525,8 +536,9 @@ namespace forge {
                 if ((next != spans.end() && next->first < end) ||
                     (next != spans.begin() &&
                      std::prev(next)->second > descriptor.addressTableRva)) {
-                    invalid("import descriptor", descriptor.descriptorOffset,
-                            "overlapping IAT slot ownership");
+                    ownershipFailure(descriptor.descriptorRva, "overlapping_iat",
+                                     "overlapping IAT slot ownership", FailureCode::InvalidPe,
+                                     descriptor.descriptorOffset);
                 }
 
                 spans.emplace_hint(next, descriptor.addressTableRva, end);
@@ -545,8 +557,9 @@ namespace forge {
                 const auto start = spans.lower_bound(descriptor.lookupRva);
                 if ((start != spans.end() && start->first < end) ||
                     (start != spans.begin() && std::prev(start)->second > descriptor.lookupRva)) {
-                    invalid("import descriptor", descriptor.descriptorOffset,
-                            "lookup table overlaps an IAT");
+                    ownershipFailure(descriptor.descriptorRva, "overlapping_lookup",
+                                     "lookup table overlaps an IAT", FailureCode::InvalidPe,
+                                     descriptor.descriptorOffset);
                 }
             }
         }
@@ -1016,17 +1029,80 @@ namespace forge {
         return ranges;
     }
 
-    std::vector<RvaRange> ParsedImage::loaderWrittenRanges() const {
-        auto ranges = tlsAndConfigWrites();
-        const auto *iat = coff->getDataDirectory(llvm::COFF::IAT);
-        if (iat && bool(iat->Size) != bool(iat->RelativeVirtualAddress)) {
-            throw InspectionError("incomplete import address table directory");
+    namespace {
+        void appendIatDirectory(const llvm::object::COFFObjectFile &coff,
+                                std::vector<RvaRange> &ranges) {
+            const auto *iat = coff.getDataDirectory(llvm::COFF::IAT);
+            if (iat && bool(iat->Size) != bool(iat->RelativeVirtualAddress)) {
+                throw InspectionError("incomplete import address table directory");
+            }
+
+            if (iat && iat->Size) {
+                ranges.push_back({iat->RelativeVirtualAddress,
+                                  uint64_t(iat->RelativeVirtualAddress) + iat->Size});
+            }
         }
 
-        if (iat && iat->Size) {
-            ranges.push_back(
-                {iat->RelativeVirtualAddress, uint64_t(iat->RelativeVirtualAddress) + iat->Size});
+        void requireStableOwnership(uint32_t owner, RvaRange field,
+                                    const RelocationIndex &relocations,
+                                    ArrayRef<RvaRange> exclusions) {
+            if (const auto *fixup = relocations.firstOverlap(field)) {
+                ownershipFailure(owner, "relocated_ownership",
+                                 "ownership depends on relocated bytes at RVA " + hex(fixup->rva),
+                                 FailureCode::UnsupportedControlFlow);
+            }
+
+            if (const auto overlaps = rangesIn(exclusions, field); !overlaps.empty()) {
+                ownershipFailure(owner, "loader_written_ownership",
+                                 "ownership depends on loader-written bytes at RVA " +
+                                     hex(std::max(overlaps.front().begin, field.begin)),
+                                 FailureCode::UnsupportedControlFlow);
+            }
         }
+
+        void validateOwner(const Import &descriptor, ArrayRef<RvaRange> writes,
+                           const RelocationIndex &relocations, ArrayRef<RvaRange> otherWrites) {
+            const uint64_t bytes = descriptor.symbols.size() * uint64_t{importSlotWidth};
+            const uint64_t iatEnd = descriptor.addressTableRva + bytes;
+            const auto owner = descriptor.descriptorRva;
+            if (!rangesIn(otherWrites, {descriptor.addressTableRva, iatEnd + importSlotWidth})
+                     .empty()) {
+                ownershipFailure(owner, "overlapping_loader_field",
+                                 "IAT overlaps another loader-written field",
+                                 FailureCode::InvalidPe, descriptor.descriptorOffset);
+            }
+
+            // Each descriptor contributes a possible destination, including delay module handles.
+            const uint64_t start = owner;
+            if (descriptor.delayed) {
+                requireStableOwnership(owner,
+                                       {start, start + offsetof(delay_import_directory_table_entry,
+                                                                BoundDelayImportTable)},
+                                       relocations, writes);
+            } else {
+                requireStableOwnership(owner, {start, start + sizeof(ulittle32_t)}, relocations,
+                                       writes);
+                requireStableOwnership(
+                    owner,
+                    {start + offsetof(coff_import_directory_table_entry, NameRVA),
+                     start + sizeof(coff_import_directory_table_entry)},
+                    relocations, writes);
+            }
+
+            // The aggregate IAT directory normally covers its own zero terminators.
+            // Other IAT spans and actual loader destinations were checked above.
+            requireStableOwnership(owner, {iatEnd, iatEnd + importSlotWidth}, relocations,
+                                   otherWrites);
+            if (descriptor.lookupRva && descriptor.lookupRva != descriptor.addressTableRva) {
+                const auto end = descriptor.lookupRva + bytes;
+                requireStableOwnership(owner, {end, end + importSlotWidth}, relocations, writes);
+            }
+        }
+    } // namespace
+
+    std::vector<RvaRange> ParsedImage::loaderWrittenRanges() const {
+        auto ranges = tlsAndConfigWrites();
+        appendIatDirectory(*coff, ranges);
 
         size_t records = 1'000'000, names = 0;
         ImportReader reader{
@@ -1037,15 +1113,35 @@ namespace forge {
         return mergeRanges(std::move(ranges));
     }
 
-    ImportBindings ParsedImage::importBindings() const {
+    const ImportBindings &ParsedImage::importBindings() const & {
+        std::call_once(importValidation, [this] {
+            try {
+                bindings = buildImportBindings();
+            } catch (const InspectionError &error) {
+                bindings = error;
+            }
+        });
+
+        if (const auto *error = std::get_if<InspectionError>(&bindings)) {
+            // Each caller annotates its own copy with the requesting instruction.
+            auto failure = *error;
+            throw failure;
+        }
+
+        return std::get<ImportBindings>(bindings);
+    }
+
+    ImportBindings ParsedImage::buildImportBindings() const {
         size_t records = 1'000'000, names = size_t{64} * 1024 * 1024;
         ImportBindings result;
         auto &descriptors = result.descriptors;
+        std::vector<RvaRange> writes;
         ImportReader reader{
-            metadata.sections, buffer->getBuffer(), records, names, &descriptors, nullptr};
-        reader.read(*coff, false);
-        reader.read(*coff, true);
+            metadata.sections, buffer->getBuffer(), records, names, &descriptors, &writes};
+        const auto ordinaryEnd = reader.read(*coff, false);
+        const auto delayEnd = reader.read(*coff, true);
         validateImportOwnership(descriptors);
+
         auto otherWrites = tlsAndConfigWrites();
         for (const auto &descriptor : descriptors) {
             if (descriptor.delayHandleRva) {
@@ -1055,14 +1151,27 @@ namespace forge {
         }
 
         otherWrites = mergeRanges(std::move(otherWrites));
+        writes.insert(writes.end(), otherWrites.begin(), otherWrites.end());
+        appendIatDirectory(*coff, writes);
+        writes = mergeRanges(std::move(writes));
+        const RelocationIndex relocations(metadata.relocations);
         for (const auto &descriptor : descriptors) {
-            const RvaRange iat{descriptor.addressTableRva,
-                               descriptor.addressTableRva +
-                                   (descriptor.symbols.size() + uint64_t{1}) * importSlotWidth};
-            if (!rangesIn(otherWrites, iat).empty()) {
-                invalid("import descriptor", descriptor.descriptorOffset,
-                        "IAT overlaps another loader-written field");
-            }
+            validateOwner(descriptor, writes, relocations, otherWrites);
+        }
+
+        // A changed null descriptor could introduce another owner beyond the parsed list.
+        if (ordinaryEnd) {
+            requireStableOwnership(
+                *ordinaryEnd,
+                {*ordinaryEnd, uint64_t(*ordinaryEnd) + sizeof(coff_import_directory_table_entry)},
+                relocations, writes);
+        }
+
+        if (delayEnd) {
+            requireStableOwnership(
+                *delayEnd,
+                {*delayEnd, uint64_t(*delayEnd) + sizeof(delay_import_directory_table_entry)},
+                relocations, writes);
         }
 
         llvm::sort(descriptors, [](const auto &a, const auto &b) {
@@ -1107,12 +1216,18 @@ namespace forge {
         }
 
         // With an unbound shared table, the loader consumes the lookup value before replacing it.
-        const RvaRange lookup{lookupEntryRva, uint64_t(lookupEntryRva) + importSlotWidth};
+        const uint32_t first =
+            descriptor.lookupRva ? descriptor.lookupRva : descriptor.addressTableRva;
+        // An earlier entry becoming zero would terminate lookup before this slot.
+        const RvaRange lookup{first, uint64_t(lookupEntryRva) + importSlotWidth};
         const bool separate =
             descriptor.lookupRva && descriptor.lookupRva != descriptor.addressTableRva;
-        if (relocations.firstOverlap(lookup) ||
-            (separate && !rangesIn(loaderWrites, lookup).empty())) {
-            return lookupEntryRva;
+        if (const auto *fixup = relocations.firstOverlap(lookup)) {
+            return fixup->rva;
+        }
+
+        if (const auto overlaps = rangesIn(loaderWrites, lookup); separate && !overlaps.empty()) {
+            return static_cast<uint32_t>(std::max(lookup.begin, overlaps.front().begin));
         }
 
         return {};

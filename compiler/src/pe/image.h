@@ -1,5 +1,6 @@
 #pragma once
 
+#include "diagnostic.h"
 #include "input.h"
 
 #include "llvm/ADT/ArrayRef.h"
@@ -8,8 +9,10 @@
 
 #include <algorithm>
 #include <cstdint>
+#include <mutex>
 #include <optional>
 #include <string>
+#include <variant>
 #include <vector>
 
 namespace llvm::object {
@@ -197,8 +200,9 @@ namespace forge {
         llvm::StringRef initializedBytes(RvaRange range) const;
         bool advertisesDynamicRelocations() const;
         std::vector<RvaRange> loaderWrittenRanges() const;
-        // Detached descriptor records, sorted by validated, disjoint IAT spans.
-        ImportBindings importBindings() const;
+        // Borrows the immutable index for this snapshot. Ownership failures are cached too.
+        const ImportBindings &importBindings() const &;
+        const ImportBindings &importBindings() const && = delete;
         ImageInitialization imageInitialization() const;
         ImageBytes imageBytes(RvaRange range, const ImageInitialization &init,
                               uint64_t guestLoadBase) const;
@@ -206,6 +210,7 @@ namespace forge {
         const llvm::object::ObjectFile &object() const;
 
       private:
+        ImportBindings buildImportBindings() const;
         friend Module inspectPE(const InputFile &input);
         std::vector<RvaRange> tlsAndConfigWrites() const;
 
@@ -215,6 +220,8 @@ namespace forge {
         std::unique_ptr<llvm::MemoryBuffer> buffer;
         std::unique_ptr<llvm::object::COFFObjectFile> coff;
         Module metadata;
+        mutable std::once_flag importValidation;
+        mutable std::variant<ImportBindings, InspectionError> bindings;
     };
 
     // Inspection reports keep detached metadata after the image releases its bytes.

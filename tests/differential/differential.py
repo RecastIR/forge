@@ -16,7 +16,7 @@ import sys
 import tempfile
 import time
 
-from build import CONDITIONS, FALLTHROUGH, direct_target, reachable_instructions, register_call_targets
+from build import CONDITIONS, FALLTHROUGH, direct_target, iat_call_slot, reachable_instructions, register_call_targets
 from caller_tables import CallerTables
 from comparison import describe, differences
 from lift_diagnostics import SelectedFunction, parse_diagnostic
@@ -174,15 +174,26 @@ def verified_call_target(image, module, caller, site, forge, *, require_continua
         tables = CallerTables(image, module, caller, decode)
         ordinary = FALLTHROUGH | {"adc", "sbb", "leave", "lahf", "sal"} | {
             prefix + jump[1:] for prefix in ("cmov", "set") for jump in CONDITIONS}
-        graph = reachable_instructions(begin, decode, lambda a: begin <= a < end,
-                                       lambda _: True, ordinary, end=end, indirect=tables.targets,
-                                       register_calls=True, terminals=("ret", "ud2"))
+        slots = set()
         with image.open("rb") as source:
             def encoding(first, last):
                 source.seek(caller.file_offset + first - begin)
                 return source.read(last - first)
+
+            def iat_call(first, last):
+                if last >= end:
+                    return False
+                slot = iat_call_slot(encoding(first, last), first - base)
+                if slot is None or not 0 <= slot <= 0xffffffff:
+                    return False
+                slots.add(slot)
+                return True
+
+            graph = reachable_instructions(begin, decode, lambda a: begin <= a < end,
+                                           lambda _: True, ordinary, end=end, indirect=tables.targets,
+                                           register_calls=True, iat_call=iat_call, terminals=("ret", "ud2"))
             registers = register_call_targets(graph, decode, encoding=encoding)
-        tables.validate(graph, forge, register_calls=bool(registers))
+        tables.validate(graph, forge, register_calls=bool(registers), iat_slots=slots)
     except (OSError, subprocess.SubprocessError) as error:
         raise ValueError(f"cannot disassemble the leaf caller: {error}") from error
 

@@ -15,7 +15,8 @@ namespace forge::x86 {
     using namespace llvm;
 
     void Step::reject(FailureCode kind, const Twine &reason, std::optional<int64_t> target,
-                      std::optional<uint32_t> importSlot) const {
+                      std::optional<uint32_t> importSlot,
+                      const std::optional<ImportOwnershipFailure> &ownership) const {
         auto encoded = toHex(bytes, true);
         InspectionError failure(hex(rva) + ": " + (opcode + " [" + encoded + "]: " + reason).str(),
                                 kind);
@@ -24,6 +25,7 @@ namespace forge::x86 {
         failure.context.bytes = std::move(encoded);
         failure.context.branchTarget = target;
         failure.context.importSlot = importSlot;
+        failure.context.importOwnership = ownership;
         throw failure;
     }
 

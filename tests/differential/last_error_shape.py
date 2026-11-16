@@ -30,16 +30,22 @@ def check(objdump, path):
         return address + len(raw) + int.from_bytes(raw[-4:], "little", signed=True)
 
     root, helper = body("last_error"), body("last_error_set")
-    if ([row[2] for row in root] != ["sub", "test", "jne", "call", "call", "mov", "call",
-                                      "cmp", "je", "mov", "add", "ret"]
+    spill = body("last_error_spill")
+    if ([row[2] for row in root] != ["sub", "cmp", "je", "test", "jne", "call", "call", "mov",
+                                      "call", "cmp", "je", "mov", "jmp", "call", "add", "ret"]
             or [row[2] for row in helper] != ["sub", "call", "add", "ret"]
-            or root[3][1][:1] != b"\xe8" or target(root[3]) != helper[0][0]):
+            or [row[2] for row in spill] != ["sub", "mov", "mov", "call", "mov", "movzx", "add", "ret"]
+            or root[14][1][0] != 0x48):
         raise ValueError("unexpected last-error guest call or continuation")
-    for index, destination in ((2, 4), (8, 10)):
+    for index, callee in ((5, helper), (13, spill)):
+        if root[index][1][:1] != b"\xe8" or target(root[index]) != callee[0][0]:
+            raise ValueError("unexpected last-error guest callee")
+    for index, destination in ((2, 13), (4, 6), (10, 14), (12, 14)):
         address, raw, _ = root[index]
         if len(raw) != 2 or address + 2 + int.from_bytes(raw[1:], "little", signed=True) != root[destination][0]:
             raise ValueError("branch bypasses the last-error fixture contract")
-    for row, api in ((root[4], "GetLastError"), (root[6], "GetLastError"), (helper[1], "SetLastError")):
+    for row, api in ((root[6], "GetLastError"), (root[8], "GetLastError"), (helper[1], "SetLastError"),
+                     (spill[3], "GetLastError")):
         if len(row[1]) != 6 or row[1][:2] != b"\xff\x15" or target(row) != slots.get(api):
             raise ValueError(f"expected RIP-relative CALL through KERNEL32.dll!{api} slot")
 
