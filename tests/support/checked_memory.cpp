@@ -5,9 +5,11 @@
 #include <cstdio>
 #include <cstdlib>
 #include <latch>
+#include <string_view>
 #include <thread>
+#include <unistd.h>
 
-// Link the two independent artifacts generated from the same input PE.
+// These symbols belong to distinct native artifacts linked from the same input PE.
 // NOLINTBEGIN(readability-identifier-naming)
 extern "C" const forge_rt_image *forge_lifted_image();
 extern "C" const forge_rt_image *second_lifted_image();
@@ -15,6 +17,8 @@ extern "C" uint64_t forge_lifted_with_runtime(forge_rt_instance *, forge_rt_thre
                                               uint64_t);
 extern "C" uint64_t second_lifted_with_runtime(forge_rt_instance *, forge_rt_thread_token, uint64_t,
                                                uint64_t);
+extern "C" uint64_t guard_lifted_with_runtime(forge_rt_instance *, forge_rt_thread_token, uint64_t,
+                                              uint64_t);
 // NOLINTEND(readability-identifier-naming)
 
 namespace {
@@ -99,6 +103,14 @@ namespace {
 } // namespace
 
 // NOLINTNEXTLINE(readability-identifier-naming)
+extern "C" forge_rt_status marker_get_last_error(forge_rt_instance *instance,
+                                                 forge_rt_thread_token thread, uint32_t *outValue) {
+    // Publish entry into the service even if the guest subsequently traps.
+    require(::write(STDOUT_FILENO, "G", 1) == 1, "write service marker");
+    return forge_rt_get_last_error(instance, thread, outValue);
+}
+
+// NOLINTNEXTLINE(readability-identifier-naming)
 extern "C" forge_rt_status probe_get_last_error(forge_rt_instance *instance,
                                                 forge_rt_thread_token thread, uint32_t *outValue) {
     uint64_t invocation = 0;
@@ -133,6 +145,22 @@ extern "C" forge_rt_status probe_get_last_error(forge_rt_instance *instance,
 }
 
 int main(int argc, char **argv) {
+    if (argc == 3 && std::string_view(argv[1]) == "--guard") {
+        int64_t offset = 0;
+        if (!parse_operand(argv[2], &offset)) {
+            return 2;
+        }
+
+        Process process;
+        constexpr uint32_t lastError = 1234;
+        require(forge_rt_set_last_error(process.instance, process.thread, lastError) == FORGE_RT_OK,
+                "seed last error");
+        const auto result = guard_lifted_with_runtime(process.instance, process.thread,
+                                                      static_cast<uint64_t>(offset), 17);
+        require(result == lastError, "guarded GetLastError result");
+        return 0;
+    }
+
     int64_t mutableVA = 0, immutableVA = 0;
     if (argc != 3 || !parse_operand(argv[1], &mutableVA) || !parse_operand(argv[2], &immutableVA)) {
         return 2;

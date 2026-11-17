@@ -91,7 +91,7 @@ def generate(output, mc, link, dlltool, clang):
         image("last-error.exe", stub + ".globl last_error_set\n" + last_error, imports + [("Physics.DLL", "Named")], exports=["last_error_set"])
         image("last-error-delay.exe", stub + last_error, imports, delays=["KERNEL32.dll"])
         image("checked-memory.exe", (sources / "checked-memory.s").read_text(), [("KERNEL32.dll", "GetLastError")],
-              exports=["entry", "bridge_value,data", "bridge_constant,data"])
+              exports=["entry", "guard_then_service", "bridge_value,data", "bridge_constant,data"])
         image("import-call.exe", (sources / "import-call.s").read_text(), [("Physics.DLL", "Named")])
         image("chained.exe", (sources / "chained.s").read_text())
         image("unicode.exe", stub + '.section ".donnée","dr"\n.byte 1\n.section ".界区","dr"\n.byte 1\n')

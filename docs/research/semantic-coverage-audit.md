@@ -72,6 +72,21 @@ The full suite exercised the sanitized lifter with Xcode for Debug PEs and the d
 
 The Release run enabled the provisioning test and used the same locked CLI11 cache as the native gate. The JUnit reports distinguish executed tests from environment skips. During reconciliation with the research report, a focused dev CTest rerun passed all nine selected tests, including fixture setup, the runtime contract, C and IR ABI callers, integer semantics, lift contract, guest imports, guest stack and checked memory.
 
+### Terminal guard before GetLastError
+
+The original fault probes could observe the expected signal even if a misplaced service call ran first. The checked-memory PE now exports `guard_then_service`. It allocates a 40-byte frame, stores eight bytes at `RSP + 32 + RCX`, calls the imported `GetLastError`, and returns. Each child starts the same executable with a fresh instance, live thread and last-error value of 1234. Only the store offset changes. [Assembly fixture](../../tests/fixtures/checked-memory.s) · [Fixture exports](../../tests/fixtures/generate.py)
+
+At entry to the getter, the linked shim writes one `G` byte directly to the child's stdout pipe with `write(2)`, then calls the real runtime getter. The harness checks the returned value on normal completion. Python drains the pipe, captures stderr separately, and checks the complete marker bytes and child status with a ten-second timeout. A failed marker write aborts the harness. [Native shim](../../tests/support/checked_memory.cpp) · [Parent assertions](../../tests/integration/test_checked_memory.py)
+
+| Store offset and destination | Baseline IR | `default<O2>` IR |
+| --- | --- | --- |
+| 0, eight-byte local above shadow space | Exit 0, one `G` | Exit 0, one `G` |
+| 8, protected entry return slot | SIGTRAP, zero bytes | SIGTRAP, zero bytes |
+
+`make test PRESET=dev BUILD_TESTING=ON CTEST_ARGS='-R guest_checked_memory'` passed fixture setup and the linked integration. `make test PRESET=release BUILD_TESTING=ON CTEST_ARGS='-R "guest_checked_memory|guest_imports"'` also passed all three selected CTests.
+
+In a disposable copy of the canonical IR, the failing edge of the store's stack bounds and return-slot check called the instrumented getter and then branched to the original trap. In both variants the valid case still passed. The invalid child still received SIGTRAP, emitted one `G`, and failed the integration assertion. This identifies the guard reached by the invalid input.
+
 ## Defects and follow-up
 
 No semantic correctness defect was reproduced. To cover the four gaps, the audit extended one integer unit and one differential fixture, and added one differential fixture, one negative lifting test and one image integration test.

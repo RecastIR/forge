@@ -19,6 +19,19 @@ entry:
     ret
 .seh_endproc
 
+.globl guard_then_service
+.seh_proc guard_then_service
+guard_then_service:
+    subq $40, %rsp
+    .seh_stackalloc 40
+    .seh_endprologue
+    # Offset 0 selects the local above shadow space. Offset 8 selects the entry return slot.
+    movq %rdx, 32(%rsp,%rcx)
+    call *__imp_GetLastError(%rip)
+    addq $40, %rsp
+    ret
+.seh_endproc
+
 .data
 .globl bridge_value
 bridge_value:

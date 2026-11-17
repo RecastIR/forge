@@ -1,7 +1,8 @@
-"""Exercise guest and service access to the same backing in linked ARM64 code."""
+"""Exercise checked guest memory across native service calls in linked ARM64 code."""
 import json
 from pathlib import Path
 import platform
+import signal
 import subprocess
 import sys
 import tempfile
@@ -15,47 +16,59 @@ def run(*args):
     return subprocess.check_output(args, timeout=30)
 
 
+def compile_object(ir, prefix=None):
+    if prefix:
+        # Each independently linked artifact needs distinct public entry and image symbols.
+        renamed = ir.with_suffix(f".{prefix}.ll")
+        renamed.write_text(ir.read_text().replace("@forge_lifted_", f"@{prefix}_lifted_"))
+        ir = renamed
+    obj = ir.with_suffix(".o")
+    run(LLC, "-filetype=obj", ir, "-o", obj)
+    return obj
+
+
 class CheckedMemory(unittest.TestCase):
-    def test_suspended_service(self):
+    def lift_variants(self, rva, ir, getter):
+        run(FORGE, "lift", IMAGE, "--signature", "i64(i64,i64)", "--checked-memory",
+            "--rva", hex(rva), "--output", ir)
+        source = ir.read_text()
+        self.assertEqual(source.count("call i32 @forge_rt_enter("), 1)
+        self.assertEqual(source.count("call i32 @forge_rt_leave("), 1)
+        self.assertNotIn("@forge_rt_read_guest(", source)
+        self.assertNotIn("@forge_rt_write_guest(", source)
+
+        self.assertEqual(source.count("call i32 @forge_rt_get_last_error("), 1)
+        ir.write_text(source.replace("@forge_rt_get_last_error(", f"@{getter}("))
+        optimized = ir.with_suffix(".o2.ll")
+        run(OPT, "-passes=verify", "-disable-output", ir)
+        run(OPT, "-S", "-passes=default<O2>", ir, "-o", optimized)
+        run(OPT, "-passes=verify", "-disable-output", optimized)
+        return ir, optimized
+
+    def check_guard(self, exe):
+        for offset, status, markers in ((0, 0, b"G"), (8, -signal.SIGTRAP, b"")):
+            with self.subTest(offset=offset):
+                child = subprocess.run([exe, "--guard", str(offset)], capture_output=True, timeout=10)
+                self.assertEqual((child.returncode, child.stdout), (status, markers), child.stderr)
+
+    def test_linked_services(self):
         module = json.loads(run(FORGE, "inspect", IMAGE, "--format", "json"))["modules"][0]
         exports = {name: int(entry["rva"], 16) for entry in module["exports"] for name in entry["names"]}
         base = int(module["image_base_va"], 16)
         data = next(section for section in module["sections"] if section["name"] == ".data")
         self.assertGreater(data["virtual_size"], data["raw_size"])
         with tempfile.TemporaryDirectory() as directory:
-            ir = Path(directory) / "bridge.ll"
-            run(FORGE, "lift", IMAGE, "--signature", "i64(i64,i64)", "--checked-memory",
-                "--rva", hex(exports["entry"]), "--output", ir)
-            source = ir.read_text()
-            self.assertEqual(source.count("call i32 @forge_rt_enter("), 1)
-            self.assertEqual(source.count("call i32 @forge_rt_leave("), 1)
-            self.assertNotIn("@forge_rt_read_guest(", source)
-            self.assertNotIn("@forge_rt_write_guest(", source)
-
-            # Interpose only this import. The real shim uses the public bridge and
-            # forwards to GetLastError while the guest frame and return slot are live.
-            self.assertEqual(source.count("call i32 @forge_rt_get_last_error("), 1)
-            ir.write_text(source.replace("@forge_rt_get_last_error(", "@probe_get_last_error("))
-            optimized = ir.with_suffix(".o2.ll")
-            run(OPT, "-passes=verify", "-disable-output", ir)
-            run(OPT, "-S", "-passes=default<O2>", ir, "-o", optimized)
-            for variant in (ir, optimized):
-                with self.subTest(variant=variant.name):
-                    run(OPT, "-passes=verify", "-disable-output", variant)
-                    # A second native artifact supplies fresh image globals at
-                    # the identical guest VA for the second guest process.
-                    other = variant.with_suffix(".second.ll")
-                    other.write_text(variant.read_text().replace("@forge_lifted_with_runtime(",
-                                                                 "@second_lifted_with_runtime(")
-                                     .replace("@forge_lifted_image(", "@second_lifted_image("))
-                    objects = []
-                    for source in (variant, other):
-                        obj = source.with_suffix(".o")
-                        run(LLC, "-filetype=obj", source, "-o", obj)
-                        objects.append(obj)
-                    exe = variant.with_suffix(".exe")
-                    run(*LINKER, HARNESS, *objects, RUNTIME, "-o", exe)
+            work = Path(directory)
+            bridges = self.lift_variants(exports["entry"], work / "bridge.ll", "probe_get_last_error")
+            guards = self.lift_variants(exports["guard_then_service"], work / "guard.ll", "marker_get_last_error")
+            for bridge, guard in zip(bridges, guards):
+                with self.subTest(variant=guard.name):
+                    # The second guest process needs fresh bridge globals at the identical guest VA.
+                    exe = bridge.with_suffix(".exe")
+                    run(*LINKER, HARNESS, compile_object(bridge), compile_object(bridge, "second"),
+                        compile_object(guard, "guard"), RUNTIME, "-o", exe)
                     run(exe, str(base + exports["bridge_value"]), str(base + exports["bridge_constant"]))
+                    self.check_guard(exe)
 
 
 if __name__ == "__main__":
