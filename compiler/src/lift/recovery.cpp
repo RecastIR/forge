@@ -165,6 +165,7 @@ namespace forge::x86 {
 
         struct GroupDiscovery {
             const ValidatedEntry &entry;
+            std::span<const win64::ServiceBinding> services;
             std::map<uint32_t, RecoveredFunction> &functions;
             std::map<uint32_t, MappedRange> pending;
             std::map<uint32_t, const ResolvedCallSite *> deferred;
@@ -303,26 +304,10 @@ namespace forge::x86 {
                                 "bound IAT has no independent import lookup table");
                 }
 
-                static constexpr ServiceArgument dword[] = {
-                    {ServiceValue::Dword, ServiceMemory::None}};
-                static constexpr ServiceArgument string[] = {
-                    {ServiceValue::GuestAddress, ServiceMemory::ReadString}};
-                static constexpr ServiceBinding services[] = {
-                    {"SetLastError", "forge_rt_set_last_error", dword, ServiceValue::Void, false,
-                     ServiceFailure::Trap, LastErrorEffect::Write},
-                    {"GetLastError",
-                     "forge_rt_get_last_error",
-                     {},
-                     ServiceValue::Dword,
-                     false,
-                     ServiceFailure::Trap,
-                     LastErrorEffect::Read},
-                    {"lstrlenA", "forge_rt_lstrlen_a", string, ServiceValue::Int, true,
-                     ServiceFailure::Trap, LastErrorEffect::Preserve}};
-                const auto *binding = llvm::find_if(
-                    services, [&](const auto &service) { return service.name == symbol.name; });
-                if (descriptor.delayed || descriptor.normalizedName != "kernel32.dll" ||
-                    binding == std::end(services)) {
+                const auto binding = std::ranges::find_if(services, [&](const auto &service) {
+                    return service.dll == descriptor.normalizedName && service.name == symbol.name;
+                });
+                if (descriptor.delayed || binding == services.end()) {
                     step.reject(FailureCode::UnsupportedControlFlow,
                                 Twine(descriptor.delayed ? "unsupported delay import "
                                                          : "unsupported import ") +
@@ -330,10 +315,10 @@ namespace forge::x86 {
                 }
 
                 validateCallEvidence(caller, step, slot);
-                if (!binding->supported()) {
+                if (const auto error = binding->error(); !error.empty()) {
                     step.reject(FailureCode::UnsupportedControlFlow,
                                 "unsupported native service signature for " + descriptor.name +
-                                    "!" + identity);
+                                    "!" + identity + ": " + std::string(error));
                 }
                 if (const auto changed =
                         imported->unstableIdentityRva(entry.relocations, loaderWrittenRanges())) {
@@ -588,13 +573,14 @@ namespace forge::x86 {
     RecoveredFunctionGroup::RecoveredFunctionGroup(const AnalyzedImage &analysis, uint32_t rva)
         : RecoveredFunctionGroup(validateEntry(analysis, rva)) {}
 
-    RecoveredFunctionGroup::RecoveredFunctionGroup(const ValidatedEntry &entry)
+    RecoveredFunctionGroup::RecoveredFunctionGroup(const ValidatedEntry &entry,
+                                                   std::span<const win64::ServiceBinding> services)
         : source(entry.analysis.image()), entryRva(entry.rva) {
         const auto location = entryLocation(source, entryRva, entry.code);
         withLocation(source, location, FailureCode::LiftingInternal, [&] {
             decoder = std::make_unique<Decoder>(entryRva);
             GroupDiscovery discovery{
-                entry, recovered, {}, {}, InstructionOperands(*decoder->regs, 0), {}};
+                entry, services, recovered, {}, {}, InstructionOperands(*decoder->regs, 0), {}};
             discovery.run(*decoder->dis, *decoder->instructions, *decoder->regs);
         });
     }
@@ -617,7 +603,7 @@ namespace forge::x86 {
                 failure.context.blockRva = site->block;
                 failure.context.importSlot = target.slot;
                 failure.context.importDll = target.descriptor.name;
-                failure.context.importSymbol = target.binding.name.str();
+                failure.context.importSymbol = std::string(target.binding.name);
             }
 
             if (rva == entryRva || !owner.instructionContaining(*instruction)) {

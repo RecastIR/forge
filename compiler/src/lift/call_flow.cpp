@@ -62,8 +62,8 @@ namespace forge::x86 {
         DefinitionEffect result;
         std::fill_n(result.carried.begin(), callerSlots, 0);
         result.flags = {};
-        if (serviceWidth(external->binding.result) == 32) {
-            // The EAX write defines all 64 bits, including the zero-extended high half.
+        if (external->binding.result != win64::Value::Void) {
+            // Both full RAX writes and zero-extending EAX writes define all 64 bits.
             result.writes[0] = result.carried[0] = UINT64_MAX;
         }
 

@@ -1,5 +1,6 @@
 #pragma once
 
+#include "forge/service_signature.h"
 #include "lift/cfg.h"
 #include "pe/image.h"
 
@@ -56,7 +57,7 @@ namespace forge::x86 {
 
         void checkStackMapping(const Step &step) const;
         void addressTaken(const Step &step, uint64_t va);
-        void stringArgument(const Step &step, uint64_t va);
+        void serviceArgument(const Step &step, uint64_t va, win64::Argument arg);
         void fixedAccess(const Step &step, uint64_t va, unsigned width, bool write);
         void tableRead(const Step &step, const RelativeTable &table);
         void computedAccess(const Step &step, std::optional<uint64_t> va, unsigned width,

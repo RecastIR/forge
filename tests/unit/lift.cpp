@@ -1,4 +1,5 @@
 #include "lift/lift.h"
+#include "../support/abi_services.h"
 #include "analysis/analysis.h"
 #include "diagnostic.h"
 #include "lift/address_fact.h"
@@ -607,7 +608,8 @@ namespace {
     // The native image suite compiles this output with both LLVM pipelines. Printing
     // after analysis destruction also exercises the returned module's ownership.
     void emitRebased(const fs::path &path, llvm::StringRef entry, llvm::StringRef base,
-                     bool checked = false) {
+                     bool checked, bool runtime = false,
+                     std::span<const win64::ServiceBinding> catalogue = win64::services) {
         uint32_t rva;
         uint64_t guestBase;
         check(!entry.getAsInteger(0, rva) && !base.getAsInteger(0, guestBase),
@@ -618,9 +620,10 @@ namespace {
             AnalyzedImage analysis(
                 std::make_unique<ParsedImage>(InputFile(path), ParsePolicy::FunctionAnalysis),
                 DebugInfo::Omit);
-            module = generateIR(analysis,
-                                {rva, EntryMode::WindowsX64I64Pair, guestBase, checked, checked},
-                                context);
+            module = generateIR(
+                analysis,
+                {rva, EntryMode::WindowsX64I64Pair, guestBase, runtime || checked, checked},
+                context, catalogue);
         }
 
         check(!llvm::verifyModule(*module), "rebased module lost its backing storage");
@@ -796,6 +799,13 @@ namespace {
 } // namespace
 
 int main(int argc, char **argv) try {
+    if (argc == 5 && (std::string_view(argv[1]) == "--emit-abi" ||
+                      std::string_view(argv[1]) == "--emit-abi-checked")) {
+        emitRebased(argv[2], argv[3], argv[4], std::string_view(argv[1]) == "--emit-abi-checked",
+                    true, forge::test::abiServices);
+        return 0;
+    }
+
     if (argc == 5 && (std::string_view(argv[1]) == "--emit-rebased" ||
                       std::string_view(argv[1]) == "--emit-rebased-checked")) {
         emitRebased(argv[2], argv[3], argv[4],

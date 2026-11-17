@@ -1,6 +1,7 @@
 #include <forge/runtime.h>
 
 #include "../../runtime/src/instance.h"
+#include "forge/service_memory.h"
 
 #include <algorithm>
 #include <array>
@@ -141,6 +142,43 @@ namespace {
         REQUIRE(forge_rt_get_last_error(instance.get(), active.thread, &lastError) == FORGE_RT_OK);
         REQUIRE(lastError == 0xaaff);
         REQUIRE(active.leave() == FORGE_RT_OK);
+    }
+
+    void testBoundedServiceBuffer() {
+        using namespace forge::win64;
+        constexpr Argument buffer{Value::Address, Access::InOut, Extent::CountArgument, 1};
+        static constexpr ServiceBinding binding{
+            "test.dll",  "Buffer",           "testBuffer", parameters<buffer, Argument{Value::U32}>,
+            Value::Void, LastError::Preserve};
+        std::array<uint8_t, 8> bytes{};
+        uint64_t claim = 0;
+        const forge_rt_image_region row{0x1000, bytes.size(), bytes.data(), readWrite, &claim};
+        const forge_rt_image image{row.start, row.size, &row, 1};
+        const auto process = createInstance();
+        Activation active{process.get(), createThread(process.get())};
+        REQUIRE(active.enter(image) == FORGE_RT_OK);
+        forge_rt_memory_fault fault{17, 18, 19};
+        ServiceInvocation call{active.instance, active.thread, fault};
+        REQUIRE(call.resolveCurrent() == FORGE_RT_OK);
+
+        const auto view = guestBuffer<binding, 0>(call, std::tuple{row.start, 4u});
+        REQUIRE(view.validate() == FORGE_RT_OK);
+        const std::array<uint8_t, 4> data{1, 2, 3, 4};
+        REQUIRE(view.write(0, data) == FORGE_RT_OK);
+        uint32_t value = 0;
+        REQUIRE(view.readScalar(0, value) == FORGE_RT_OK && value == 0x04030201);
+        // The backing is eight bytes, but this argument lends only the first four.
+        REQUIRE(view.writeScalar(1, UINT32_MAX) == FORGE_RT_INVALID_ARGUMENT);
+        REQUIRE(view.readScalar(UINT64_MAX, value) == FORGE_RT_INVALID_ARGUMENT);
+        REQUIRE(value == 0x04030201 && bytes[4] == 0 && bytes[1] == 2);
+        expectFault(fault, {17, 18, 19});
+
+        const auto crossing = guestBuffer<binding, 0>(call, std::tuple{row.start + 6, 4u});
+        REQUIRE(crossing.write(0, data) == FORGE_RT_GUEST_FAULT);
+        expectFault(fault, {row.start + 8, FORGE_RT_WRITE, FORGE_RT_FAULT_UNMAPPED});
+        REQUIRE(bytes[6] == 0 && bytes[7] == 0);
+        REQUIRE(active.leave() == FORGE_RT_OK);
+        REQUIRE(view.readScalar(0, value) == FORGE_RT_INVALID_INVOCATION);
     }
 
     void testRangeBoundaries() {
@@ -753,6 +791,7 @@ void forgeMemoryTransferProbe() noexcept {
 }
 
 void testRuntimeMemory() {
+    testBoundedServiceBuffer();
     testStringService();
     testStringLimitAndOverflow();
     testStringStackAndPermissions();

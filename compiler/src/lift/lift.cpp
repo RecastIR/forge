@@ -5,6 +5,7 @@
 #include "lift/group_analysis.h"
 #include "lift/operands.h"
 #include "lift/recovery.h"
+#include "lift/service_location.h"
 
 #include "llvm/IR/CFG.h"
 #include "llvm/IR/Module.h"
@@ -75,7 +76,8 @@ namespace forge {
             }
 
             void storeFlags();
-            void lowerService(const Step &s, const x86::ServiceBinding &binding);
+            void lowerService(const Step &s, const win64::ServiceBinding &binding,
+                              Value *calleeRsp);
             void lowerCall(const Step &s, const x86::ResolvedCallSite &call);
             void emitReturn(const Step &s);
             void emitDispatch(const x86::GuestBlock &block, const BlockStates &states);
@@ -392,25 +394,32 @@ namespace forge {
             }
         }
 
-        void Translator::lowerService(const Step &s, const x86::ServiceBinding &binding) {
+        void Translator::lowerService(const Step &s, const win64::ServiceBinding &binding,
+                                      Value *calleeRsp) {
             auto *instance = ir.CreateLoad(ir.getPtrTy(), context.instance);
             auto *thread = ir.CreateLoad(ir.getInt64Ty(), context.thread);
             SmallVector<Value *, 5> arguments{instance, thread};
             for (size_t i = 0; i < binding.arguments.size(); ++i) {
-                arguments.push_back(read(s, {static_cast<unsigned>(i + 1),
-                                             x86::serviceWidth(binding.arguments[i].type)}));
+                const x86::ServiceLocation location{i};
+                const auto width = win64::width(binding.arguments[i].type);
+                if (location.inRegister()) {
+                    arguments.push_back(read(s, {location.registerIndex(), width}));
+                } else {
+                    auto *slot = ir.CreateAdd(calleeRsp, ir.getInt64(location.entryOffset()));
+                    arguments.push_back(memory.load(slot, width, true));
+                }
             }
 
             // Allocate once per activation, even when the guest CALL is inside a loop.
             IRBuilder<> entry(&impl->getEntryBlock(), impl->getEntryBlock().begin());
-            const auto resultWidth = x86::serviceWidth(binding.result);
+            const auto resultWidth = win64::width(binding.result);
             Value *output = nullptr;
             if (resultWidth) {
                 output = entry.CreateAlloca(ir.getIntNTy(resultWidth), nullptr, "service.out");
                 arguments.push_back(output);
             }
 
-            if (binding.checkedMemory) {
+            if (binding.checkedMemory()) {
                 auto *faultType =
                     StructType::get(ir.getInt64Ty(), ir.getInt32Ty(), ir.getInt32Ty());
                 arguments.push_back(entry.CreateAlloca(faultType, nullptr, "service.fault"));
@@ -442,7 +451,7 @@ namespace forge {
             write(stackPointer, calleeRsp);
             x86::SavedRegisters saved{};
             if (const auto *external = call.external()) {
-                lowerService(s, external->binding);
+                lowerService(s, external->binding, calleeRsp);
             } else {
                 const auto target = call.guest().rva;
                 saved =
@@ -696,9 +705,15 @@ namespace forge {
 
     std::unique_ptr<llvm::Module> generateIR(const AnalyzedImage &analysis, LiftRequest request,
                                              llvm::LLVMContext &context) {
+        return generateIR(analysis, request, context, win64::services);
+    }
+
+    std::unique_ptr<llvm::Module> generateIR(const AnalyzedImage &analysis, LiftRequest request,
+                                             llvm::LLVMContext &context,
+                                             std::span<const win64::ServiceBinding> services) {
         const auto entry = x86::validateEntry(analysis, request.startRva);
         const auto guestBase = x86::validateGuestBase(entry, request.guestLoadBase);
-        const x86::RecoveredFunctionGroup group(entry);
+        const x86::RecoveredFunctionGroup group(entry, services);
         auto stage = FailureCode::LiftingInternal;
 
         try {
@@ -707,7 +722,7 @@ namespace forge {
             for (const auto &[address, function] : group.functions()) {
                 for (const auto &[rva, site] : function.calls) {
                     const auto *external = site.external();
-                    if (external && external->binding.checkedMemory && !request.checkedMemory) {
+                    if (external && external->binding.checkedMemory() && !request.checkedMemory) {
                         function.instructionContaining(rva)->reject(
                             FailureCode::UnsupportedControlFlow,
                             "imported service requires --checked-memory --signature "

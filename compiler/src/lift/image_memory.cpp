@@ -307,7 +307,7 @@ namespace forge::x86 {
         }
     }
 
-    void ImageMemory::stringArgument(const Step &step, uint64_t va) {
+    void ImageMemory::serviceArgument(const Step &step, uint64_t va, win64::Argument arg) {
         if (va == 0 || va - GuestMemory::base < GuestMemory::capacity) {
             return;
         }
@@ -318,19 +318,29 @@ namespace forge::x86 {
             (!section->immutable() && !section->writableData())) {
             step.reject(
                 FailureCode::ImageMemory,
-                "string argument at guest VA " + hex(va) +
+                "service argument at guest VA " + hex(va) +
                     " requires a readable non-executable PE data section or the guest stack");
+        }
+
+        if (arg.writes() && !section->writableData()) {
+            step.reject(FailureCode::ImageMemory,
+                        "output argument at guest VA " + hex(va) +
+                            " requires writable PE data or the guest stack");
         }
 
         if (!contents().exclusionsIn({rva, rva + 1}).empty()) {
             step.reject(FailureCode::ImageMemory,
-                        "string argument at guest VA " + hex(va) +
+                        "service argument at guest VA " + hex(va) +
                             " overlaps a protected loader-written field or relocation");
         }
 
-        // The terminator can move after a guest store. Select the proven section,
-        // not a snapshot string length; finish() retains every protected hole.
-        select(step, *section, {section->rva, uint64_t(section->rva) + section->virtualSize});
+        // Dynamic lengths and mutable terminators can reach anywhere in this section.
+        // Leave holes and the section boundary to the checked transfer at execution.
+        const uint64_t end = uint64_t(section->rva) + section->virtualSize;
+        const RvaRange range = arg.extent == win64::Extent::Fixed
+                                   ? RvaRange{rva, std::min(end, rva + arg.size)}
+                                   : RvaRange{section->rva, end};
+        select(step, *section, range);
     }
 
     void ImageMemory::fixedAccess(const Step &step, uint64_t va, unsigned width, bool write) {

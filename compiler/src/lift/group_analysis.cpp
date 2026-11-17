@@ -1,7 +1,9 @@
 #include "lift/group_analysis.h"
+#include "forge/guest_range.h"
 #include "lift/address_fact.h"
 #include "lift/operands.h"
 #include "lift/recovery.h"
+#include "lift/service_location.h"
 
 #include <algorithm>
 #include <set>
@@ -147,8 +149,8 @@ namespace forge::x86 {
             void traceInteger(const Step &s, const IntegerInstruction &op, AddressFacts &facts,
                               bool collect, const std::optional<RelativeTable> &table);
             AddressFact savedAddress(const AddressFacts &facts, const AddressFact &address) const;
-            void planServiceArguments(const ResolvedCallSite &site,
-                                      const AddressFacts &facts) const;
+            void traceServiceArguments(const ResolvedCallSite &site, AddressFacts &facts,
+                                       bool collect) const;
             bool traceCall(const ResolvedCallSite &site, AddressFacts &facts, CallAddresses &calls,
                            bool collect) const;
             size_t traceAddresses(const GuestBlock &block, AddressFacts &facts,
@@ -305,7 +307,7 @@ namespace forge::x86 {
                                  ? facts.registers[operands.reg(s, operand, 64).index]
                                  : AddressFact(static_cast<uint64_t>(operand.getImm()));
                 rsp = rsp.plus(AddressFact(uint64_t(0) - 8));
-                facts.spills.write(rsp, 64, saved);
+                facts.spills.write(rsp, 64, saved.project(entryAddresses));
             }
         }
 
@@ -344,34 +346,86 @@ namespace forge::x86 {
                                          : AddressFact(static_cast<uint64_t>(src.getImm()));
                 }
 
-                facts.spills.write(address, op.width, stored);
+                facts.spills.write(address, op.width, stored.project(entryAddresses));
             }
         }
 
-        void FunctionAnalyzer::planServiceArguments(const ResolvedCallSite &site,
-                                                    const AddressFacts &facts) const {
+        void invalidateServiceOutput(StackSpills &spills, const AddressFact &address,
+                                     const AddressFact &entryRsps, win64::Argument arg) {
+            const auto starts = address.project(entryRsps);
+            if (!starts.known()) {
+                spills = {};
+                return;
+            }
+
+            constexpr auto stack =
+                *GuestRange::fromOffset({GuestMemory::base}, 0, GuestMemory::capacity);
+            bool touchesStack = false;
+            for (const auto va : starts.values()) {
+                if (!va || va >= GuestMemory::base + GuestMemory::capacity) {
+                    continue;
+                }
+
+                if (arg.extent != win64::Extent::Fixed) {
+                    spills = {};
+                    return;
+                }
+
+                const auto range = GuestRange::fromOffset({va}, 0, arg.size);
+                if (!range || !range->overlaps(stack)) {
+                    continue;
+                }
+
+                if (!stack.contains({va}) || arg.size > GuestMemory::capacity) {
+                    spills = {};
+                    return;
+                }
+
+                touchesStack = true;
+            }
+
+            if (touchesStack) {
+                // Keep frame-relative coordinates when available, so disjoint saves in the
+                // same activation survive. A concrete write also invalidates symbolic aliases.
+                spills.write(address, arg.size * 8, {});
+            }
+        }
+
+        void FunctionAnalyzer::traceServiceArguments(const ResolvedCallSite &site,
+                                                     AddressFacts &facts, bool collect) const {
             const auto &binding = site.external()->binding;
-            const auto &step = *function.instructionContaining(site.instruction);
+            // All argument values precede any writes by the service, including aliased stack slots.
+            const auto incoming = facts.spills;
             for (size_t i = 0; i < binding.arguments.size(); ++i) {
-                if (binding.arguments[i].memory != ServiceMemory::ReadString) {
+                const auto arg = binding.arguments[i];
+                if (arg.access == win64::Access::None) {
                     continue;
                 }
 
-                const auto &address = facts.registers[i + 1];
-                if (address.stackDerived()) {
+                const ServiceLocation location{i};
+                const auto address = location.inRegister()
+                                         ? facts.registers[location.registerIndex()]
+                                         : incoming.read(facts.registers[rspIndex].plus(
+                                               AddressFact(location.callerOffset())));
+                if (arg.writes()) {
+                    invalidateServiceOutput(facts.spills, address, entryAddresses, arg);
+                }
+
+                if (!collect || address.stackDerived()) {
                     continue;
                 }
 
+                const auto &step = *function.instructionContaining(site.instruction);
                 if (!address.known()) {
                     step.reject(FailureCode::ImageMemory,
-                                "string argument " + std::to_string(i + 1) + " to " + binding.name +
+                                "argument " + std::to_string(i + 1) + " to " +
+                                    std::string(binding.name) +
                                     " requires proven image/stack provenance or bounded address "
-                                    "alternatives; "
-                                    "unresolved pointer origins are not supported");
+                                    "alternatives");
                 }
 
                 for (const auto va : address.values()) {
-                    imageMemory.stringArgument(step, va);
+                    imageMemory.serviceArgument(step, va, arg);
                 }
             }
         }
@@ -379,12 +433,10 @@ namespace forge::x86 {
         bool FunctionAnalyzer::traceCall(const ResolvedCallSite &site, AddressFacts &facts,
                                          CallAddresses &calls, bool collect) const {
             if (site.external()) {
-                if (collect) {
-                    planServiceArguments(site, facts);
-                }
+                traceServiceArguments(site, facts, collect);
 
                 std::fill_n(facts.registers.begin(), callerSlots, AddressFact{});
-                // Supported services do not write through guest pointers. Only CALL writes memory.
+                // CALL itself overwrites the slot below the caller's RSP.
                 const auto slot = facts.registers[rspIndex].plus(AddressFact(uint64_t(0) - 8));
                 facts.spills.write(slot, 64, {});
                 return true;

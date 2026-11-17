@@ -1,4 +1,4 @@
-#include "forge/runtime.h"
+#include "forge/service_memory.h"
 
 #include <algorithm>
 #include <array>
@@ -14,12 +14,10 @@ namespace {
         bool terminated = false;
     };
 
-    StringChunk readChunk(forge_rt_instance *instance, forge_rt_thread_token thread,
-                          forge_rt_invocation_token invocation, uint64_t address, size_t count,
-                          forge_rt_memory_fault &fault) {
+    StringChunk readChunk(const forge::win64::GuestBuffer<forge::win64::nullableString> &string,
+                          size_t offset, size_t count) {
         std::array<uint8_t, chunkSize> bytes{};
-        const auto status = forge_rt_read_guest(instance, thread, invocation, address, count,
-                                                bytes.data(), bytes.size(), &fault);
+        const auto status = string.read(offset, std::span(bytes).first(count));
         if (status == FORGE_RT_OK) {
             const auto end = bytes.begin() + static_cast<ptrdiff_t>(count);
             const auto nul = std::find(bytes.begin(), end, uint8_t{0});
@@ -33,14 +31,8 @@ namespace {
         // A speculative chunk may include an inaccessible byte after the terminator.
         // Re-read through the same checked API; failed copies provided no usable bytes.
         for (size_t i = 0; i < count; ++i) {
-            if (i > UINT64_MAX - address) {
-                fault = {address, FORGE_RT_READ, FORGE_RT_FAULT_OVERFLOW};
-                return {FORGE_RT_GUEST_FAULT};
-            }
-
             uint8_t byte = 0;
-            const auto single = forge_rt_read_guest(instance, thread, invocation, address + i, 1,
-                                                    &byte, sizeof(byte), &fault);
+            const auto single = string.readScalar(offset + i, byte);
             if (single != FORGE_RT_OK) {
                 return {single};
             }
@@ -62,27 +54,24 @@ extern "C" forge_rt_status forge_rt_lstrlen_a(forge_rt_instance *instance,
         return FORGE_RT_INVALID_ARGUMENT;
     }
 
-    forge_rt_invocation_token invocation = 0;
-    const auto status = forge_rt_current_invocation(instance, thread, &invocation);
+    forge_rt_memory_fault detail{};
+    forge::win64::ServiceInvocation call{instance, thread, detail};
+    const auto status = call.resolveCurrent();
     if (status != FORGE_RT_OK) {
         return status;
     }
 
-    if (address == 0) {
+    const auto string =
+        forge::win64::guestBuffer<forge::win64::stringLength, 0>(call, std::tie(address));
+    if (string.absent()) {
         *outLength = 0;
         return FORGE_RT_OK;
     }
 
     size_t length = 0;
     while (length < stringLimit) {
-        forge_rt_memory_fault detail{};
-        if (length > UINT64_MAX - address) {
-            *fault = {address, FORGE_RT_READ, FORGE_RT_FAULT_OVERFLOW};
-            return FORGE_RT_GUEST_FAULT;
-        }
-
         const auto count = std::min(chunkSize, stringLimit - length);
-        const auto chunk = readChunk(instance, thread, invocation, address + length, count, detail);
+        const auto chunk = readChunk(string, length, count);
         if (chunk.status == FORGE_RT_GUEST_FAULT) {
             if (detail.reason == FORGE_RT_FAULT_OVERFLOW) {
                 detail.address = address;

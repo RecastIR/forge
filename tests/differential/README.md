@@ -51,6 +51,8 @@ The pinned Wine 8 reference returns zero for NULL but changes last error to `ERR
 
 The case uses `runtime_pairs` with the optional Boolean `checked_memory` setting. This setting is valid only for that runtime harness and defaults to false, preserving existing scalar-service cases. Native comparisons run both baseline and `default<O2>` for Debug and Release PEs. The native regression suite additionally rebases each PE and compares both variants to the validated Wine observations. `guest_lstrlen` covers SDK-free rebasing, provenance/mapping diagnostics, and a terminal stack-read fault before a subsequent service marker; it does not equate a host trap with Windows exception dispatch. Runtime contract tests cover segmented/chunk boundaries, permissions, invalid associations, unchanged outputs and the temporary 1 MiB service limit.
 
+The native CTest suite `guest_service_abi` also lifts Windows PE calls with one through six arguments. Its private DLL bindings supply deterministic adapters, including a five-argument buffer transfer. Baseline and O2 executables check guest results, writes and traps against explicit expectations. These fixtures run in the native gate. The Wine comparison matrix uses the production last-error and string imports. [ABI fixture](../fixtures/service-abi.s) · [Native expectations](../integration/test_service_abi.py)
+
 ## Build and inspect
 
 From the repository root, use Docker with Linux amd64 container support. Apple Silicon uses Docker Desktop's amd64 emulation. Explicit image preparation needs access to the Debian image registry and package snapshot. Fixture compilation and inspection run with networking disabled. Rerun image preparation when a pinned image input changes. The native Forge dependency setup is independent.
