@@ -552,6 +552,22 @@ class LiftDiagnosticTests(unittest.TestCase):
                 lift_diagnostics.parse_diagnostic(self.encode(dict(record, context=dict(context, **changed))),
                                                   self.image, self.selected, self.ir)
 
+    def test_iat_pe_diagnostic_requires_a_matching_slot(self):
+        for prefix in ("", "48", "d500"):
+            with self.subTest(prefix=prefix):
+                raw = bytes.fromhex(prefix + "ff15f8ffffff")
+                self.image.write_bytes(b"MZ" + raw)
+                selected = diff.SelectedFunction(0x10, 0x10 + len(raw), 2, "exe", False)
+                context = dict(self.diagnostic["context"], instruction_rva="0x10", end_rva=hex(selected.end),
+                               file_offset=2, opcode="CALL64m", bytes=raw.hex(), iat_slot_rva=hex(selected.end - 8))
+                record = dict(self.diagnostic, stage="pe", category="invalid_input", code="INVALID_PE", context=context)
+                self.assertEqual(lift_diagnostics.parse_diagnostic(self.encode(record), self.image, selected, self.ir), record)
+                for key in ("iat_slot_rva", "bytes"):
+                    missing = {k: v for k, v in context.items() if k != key}
+                    with self.assertRaises(ValueError):
+                        lift_diagnostics.parse_diagnostic(self.encode(dict(record, context=missing)), self.image,
+                                                          selected, self.ir)
+
     def test_rejected_call_prefix_requires_matching_instruction_bytes(self):
         for encoded, reported, valid in [("f3ffd0", "f3ffd0", True), ("f3ffd0", "f3ffd1", False),
                                           ("f3ff10", "f3ff10", False), ("41ffd0", "41ffd0", False),

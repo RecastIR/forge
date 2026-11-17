@@ -26,6 +26,11 @@ namespace forge::x86 {
     // incoming flags. This also represents a join of a definition and a pass-through.
     struct DefinitionEffect {
         Defined writes{};
+        Defined carried = [] {
+            Defined bits;
+            bits.fill(UINT64_MAX);
+            return bits;
+        }();
         FlagEffect flags{{}, FlagSet().set()};
         Definitions apply(Definitions incoming) const;
         void append(const DefinitionEffect &next);
@@ -53,6 +58,8 @@ namespace forge::x86 {
     };
 
     using FunctionFlows = std::map<uint32_t, FunctionFlow>;
+
+    DefinitionEffect callEffect(const ResolvedCallSite &site, const FunctionFlows &flows);
 
     void proveCallFlow(const RecoveredFunctionGroup &group, FunctionFlows &flows,
                        const Definitions &initial);

@@ -26,12 +26,20 @@ namespace forge {
         uint32_t caller, instruction;
     };
 
+    struct ImportOwnershipFailure {
+        uint32_t descriptorRva;
+        std::string reason;
+    };
+
     struct FailureContext {
         std::filesystem::path input, output;
         std::optional<uint32_t> entryRva, endRva, instructionRva, blockRva, functionRva;
         // Source call evidence when the primary instruction belongs to an inferred callee.
         std::optional<CallLocation> sourceCall;
         std::optional<int64_t> branchTarget;
+        std::optional<uint32_t> importSlot;
+        std::optional<ImportOwnershipFailure> importOwnership;
+        std::string importDll, importSymbol;
         std::optional<uint64_t> fileOffset;
         std::string opcode, bytes, architecture;
     };

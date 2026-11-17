@@ -35,6 +35,10 @@ namespace forge {
                           {"normalized_name", i.normalizedName},
                           {"load_type", loadType(i)},
                           {"symbols", array(i.symbols, [](const Symbol &s) {
+                               if (!s.ordinal && s.name.empty()) {
+                                   return Object{{"unresolved", true}};
+                               }
+
                                return s.ordinal ? Object{{"ordinal", *s.ordinal}}
                                                 : Object{{"name", s.name}};
                            })}};
@@ -243,6 +247,8 @@ namespace forge {
                 for (const auto &s : i.symbols) {
                     if (s.ordinal) {
                         out << "    ordinal " << *s.ordinal << "\n";
+                    } else if (s.name.empty()) {
+                        out << "    unresolved bound slot\n";
                     } else {
                         out << "    " << s.name << "\n";
                     }

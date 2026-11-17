@@ -1,5 +1,6 @@
 #pragma once
 
+#include "diagnostic.h"
 #include "input.h"
 
 #include "llvm/ADT/ArrayRef.h"
@@ -8,8 +9,10 @@
 
 #include <algorithm>
 #include <cstdint>
+#include <mutex>
 #include <optional>
 #include <string>
+#include <variant>
 #include <vector>
 
 namespace llvm::object {
@@ -50,12 +53,41 @@ namespace forge {
     struct Symbol {
         std::string name;
         std::optional<uint16_t> ordinal;
+        uint32_t hintNameRva = 0;
     };
+
+    inline constexpr unsigned importSlotWidth = 8;
 
     struct Import {
         std::string name, normalizedName;
-        bool delayed;
+        bool delayed, bound;
+        uint32_t descriptorRva, nameRva, lookupRva, addressTableRva, delayHandleRva;
+        uint64_t descriptorOffset;
+        // Entry i describes the slot at addressTableRva + i * importSlotWidth.
+        // lookupRva is the original table, zero when the descriptor uses FirstThunk alone.
         std::vector<Symbol> symbols;
+    };
+
+    class RelocationIndex;
+
+    struct ImportSlot {
+        const Import &descriptor;
+        const Symbol &symbol;
+        uint32_t lookupEntryRva;
+        // Check the original named-import evidence used for an executable binding.
+        std::optional<uint32_t> unstableIdentityRva(const RelocationIndex &relocations,
+                                                    llvm::ArrayRef<RvaRange> loaderWrites) const;
+    };
+
+    class ImportBindings {
+      public:
+        std::optional<ImportSlot> at(uint32_t slotRva) const &;
+        std::optional<ImportSlot> at(uint32_t) const && = delete;
+
+      private:
+        friend class ParsedImage;
+        // Sorted by the beginning of each disjoint descriptor-owned IAT span.
+        std::vector<Import> descriptors;
     };
 
     struct Export {
@@ -168,6 +200,9 @@ namespace forge {
         llvm::StringRef initializedBytes(RvaRange range) const;
         bool advertisesDynamicRelocations() const;
         std::vector<RvaRange> loaderWrittenRanges() const;
+        // Borrows the immutable index for this snapshot. Ownership failures are cached too.
+        const ImportBindings &importBindings() const &;
+        const ImportBindings &importBindings() const && = delete;
         ImageInitialization imageInitialization() const;
         ImageBytes imageBytes(RvaRange range, const ImageInitialization &init,
                               uint64_t guestLoadBase) const;
@@ -175,7 +210,9 @@ namespace forge {
         const llvm::object::ObjectFile &object() const;
 
       private:
+        ImportBindings buildImportBindings() const;
         friend Module inspectPE(const InputFile &input);
+        std::vector<RvaRange> tlsAndConfigWrites() const;
 
         llvm::sys::fs::UniqueID identity;
         fs::path openedPath;
@@ -183,6 +220,8 @@ namespace forge {
         std::unique_ptr<llvm::MemoryBuffer> buffer;
         std::unique_ptr<llvm::object::COFFObjectFile> coff;
         Module metadata;
+        mutable std::once_flag importValidation;
+        mutable std::variant<ImportBindings, InspectionError> bindings;
     };
 
     // Inspection reports keep detached metadata after the image releases its bytes.

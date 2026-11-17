@@ -25,10 +25,14 @@ namespace forge::x86 {
 
         bool isDirectCall() const { return opcode == "CALL64pcrel32"; }
 
+        bool isMemoryCall() const { return opcode == "CALL64m"; }
+
         bool isRegisterCall() const { return opcode == "CALL64r"; }
 
         [[noreturn]] void reject(FailureCode kind, const llvm::Twine &reason,
-                                 std::optional<int64_t> target = {}) const;
+                                 std::optional<int64_t> target = {},
+                                 std::optional<uint32_t> importSlot = {},
+                                 const std::optional<ImportOwnershipFailure> &ownership = {}) const;
     };
 
     enum class Flow : uint8_t { Fallthrough, Jump, Conditional, Indirect, Return, FallOff };

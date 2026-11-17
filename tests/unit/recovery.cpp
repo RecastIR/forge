@@ -10,6 +10,7 @@
 #include "llvm/Support/raw_ostream.h"
 
 #include <array>
+#include <future>
 #include <type_traits>
 #include <utility>
 
@@ -93,7 +94,7 @@ namespace {
             const auto *site = caller.callAt(step.rva);
             check(site && site == callee.incoming[i] && site->caller == root &&
                       site->instruction == step.rva && site->block == root &&
-                      site->continuation == steps[2 * i + 2].rva && site->callee == target &&
+                      site->continuation == steps[2 * i + 2].rva && site->guest().rva == target &&
                       step.opcode == "CALL64pcrel32",
                   "wrong ordered site, decoded opcode or same-block continuation");
         }
@@ -163,31 +164,32 @@ namespace {
             const auto &calls = flow.flows.at(root).blocks.at(site->block).calls;
             check(
                 step && step->rva == site->instruction && site == caller.callAt(step->rva) &&
-                    site->callee == shared && site->caller == root &&
+                    site->guest().rva == shared && site->caller == root &&
                     site->continuation == step->next && site->continuation > previous &&
                     llvm::any_of(calls, [site](const auto &effect) { return effect.site == site; }),
                 "mixed call proof or continuation does not refer to the recovered site");
             previous = site->continuation;
 
             if (site == incoming.back()) {
-                check(site->kind == x86::CallKind::Direct && step->isDirectCall() &&
-                          site->evidenceRva == step->rva,
+                check(site->guest().kind == x86::CallKind::Direct && step->isDirectCall() &&
+                          site->guest().evidenceRva == step->rva,
                       "direct call lost its encoded target evidence");
                 continue;
             }
 
-            const auto *lea = caller.instructionContaining(site->evidenceRva);
-            check(site->kind == x86::CallKind::RipRelativeRegister && step->isRegisterCall() &&
-                      lea && lea->opcode == "LEA64r" && operands.ripRva(*lea, 1) == shared &&
+            const auto *lea = caller.instructionContaining(site->guest().evidenceRva);
+            check(site->guest().kind == x86::CallKind::RipRelativeRegister &&
+                      step->isRegisterCall() && lea && lea->opcode == "LEA64r" &&
+                      operands.ripRva(*lea, 1) == shared &&
                       lea->inst.getOperand(0).getReg() == step->inst.getOperand(0).getReg(),
                   "register call lost its source LEA or operand");
         }
 
-        checkRipOffsets(*caller.instructionContaining(incoming.front()->evidenceRva),
+        checkRipOffsets(*caller.instructionContaining(incoming.front()->guest().evidenceRva),
                         group.registers());
         const auto &self = group.function(recursive);
         check(self.calls.size() == 1 && self.incoming.size() == 2 &&
-                  self.calls.begin()->second.callee == recursive &&
+                  self.calls.begin()->second.guest().rva == recursive &&
                   self.incoming.back() == &self.calls.begin()->second,
               "recursive register call did not reuse its own function");
     }
@@ -198,7 +200,7 @@ namespace {
         const auto &function = recursive.function(root);
         const auto *self = function.callAt(root + 12);
         check(recursive.functions().size() == 1 && function.incoming.size() == 1 && self &&
-                  self == function.incoming.front() && self->caller == self->callee &&
+                  self == function.incoming.front() && self->caller == self->guest().rva &&
                   self->caller == root && self->continuation == root + 17,
               "self-recursion did not return to the selected function");
         const auto &branch = function.graph.at(root);
@@ -219,9 +221,9 @@ namespace {
         check(mutual.root() == b && mutual.functions().size() == 2 && first.incoming.size() == 1 &&
                   second.incoming.size() == 2 && toSecond && toFirst && self &&
                   first.incoming.front() == toFirst && second.incoming[0] == toSecond &&
-                  second.incoming[1] == self && self->caller == b && self->callee == b &&
-                  toSecond->caller == a && toSecond->callee == b && toFirst->caller == b &&
-                  toFirst->callee == a,
+                  second.incoming[1] == self && self->caller == b && self->guest().rva == b &&
+                  toSecond->caller == a && toSecond->guest().rva == b && toFirst->caller == b &&
+                  toFirst->guest().rva == a,
               "mutual recursion lost a function or a cycle edge");
     }
 
@@ -284,8 +286,8 @@ namespace {
               "incorrect leaf group");
         const auto &first = caller.calls.begin()->second;
         const auto &second = std::next(caller.calls.begin())->second;
-        const auto &shared = group.function(first.callee);
-        check(first.callee == second.callee && shared.incoming.size() == 2 &&
+        const auto &shared = group.function(first.guest().rva);
+        check(first.guest().rva == second.guest().rva && shared.incoming.size() == 2 &&
                   shared.incoming.front() == &first && shared.incoming.back() == &second &&
                   first.continuation == first.instruction + 5 &&
                   second.continuation == second.instruction + 5,
@@ -323,7 +325,7 @@ namespace {
 
         const auto root = exportedRva(analysis, "recovery_saved_input");
         const RecoveredFunctionGroup group(analysis, root);
-        const auto target = group.function(root).calls.begin()->second.callee;
+        const auto target = group.function(root).calls.begin()->second.guest().rva;
         check(group.function(target).origin == x86::RecoveryOrigin::InferredLeaf,
               "reading a supported nonvolatile source disqualified a leaf");
     }
@@ -399,16 +401,44 @@ namespace {
         }
     }
 
+    void checkImportSnapshot(const fs::path &path) {
+        const AnalyzedImage analysis(
+            std::make_unique<ParsedImage>(InputFile(path), ParsePolicy::Inspection),
+            DebugInfo::Omit);
+        auto lookup = [&] { return &analysis.image().importBindings(); };
+        auto pending = std::async(std::launch::async, lookup);
+        const auto *index = lookup();
+        check(pending.get() == index, "concurrent lookups did not share the image index");
+
+        const auto root = exportedRva(analysis, "last_error");
+        const auto helper = exportedRva(analysis, "last_error_set");
+        const RecoveredFunctionGroup first(analysis, root);
+        const RecoveredFunctionGroup second(analysis, helper);
+        const auto &calls = first.function(helper).calls;
+        check(calls.size() == 1, "missing setter in nested helper");
+        const auto &[site, call] = *calls.begin();
+        const auto *target = call.external();
+        const auto *repeat = second.function(helper).callAt(site);
+        check(target && repeat && repeat->external(), "expected the same external call site");
+        const auto slot = index->at(target->slot);
+        check(slot && &target->descriptor == &slot->descriptor &&
+                  &repeat->external()->descriptor == &target->descriptor,
+              "the recovered groups do not share the image-owned descriptor");
+    }
+
     // Check PE stability for the differential runner's independently disassembled caller.
     // The first interval is code. Each following interval is a relative table.
     void checkDispatchSpans(const fs::path &path, llvm::ArrayRef<char *> bounds) {
-        check(bounds.size() >= 2 && bounds.size() % 2 == 0,
+        const auto slots =
+            llvm::find_if(bounds, [](llvm::StringRef arg) { return arg == "--iat-slots"; });
+        const auto intervals = bounds.take_front(static_cast<size_t>(slots - bounds.begin()));
+        check(intervals.size() >= 2 && intervals.size() % 2 == 0,
               "expected a code RVA span and optional table spans");
         ParsedImage image(InputFile(path), ParsePolicy::FunctionAnalysis);
         check(!image.advertisesDynamicRelocations(), "unknown dynamic relocation writes");
         const auto init = image.imageInitialization();
 
-        for (size_t i = 0; i < bounds.size(); i += 2) {
+        for (size_t i = 0; i < intervals.size(); i += 2) {
             uint32_t begin = 0, end = 0;
             check(!llvm::StringRef(bounds[i]).getAsInteger(0, begin) &&
                       !llvm::StringRef(bounds[i + 1]).getAsInteger(0, end) && begin < end,
@@ -421,6 +451,21 @@ namespace {
                       init.relocationsIn({begin, end}).empty(),
                   "dispatch overlaps loader-written bytes or relocations");
         }
+
+        if (slots != bounds.end()) {
+            const RelocationIndex relocations(image.module().relocations);
+            for (const auto *arg : bounds.drop_front(intervals.size() + 1)) {
+                uint32_t rva = 0;
+                check(!llvm::StringRef(arg).getAsInteger(0, rva), "invalid IAT slot RVA");
+                const auto slot = image.importBindings().at(rva);
+                check(slot && !slot->descriptor.delayed &&
+                          slot->descriptor.normalizedName == "kernel32.dll" &&
+                          (slot->symbol.name == "GetLastError" ||
+                           slot->symbol.name == "SetLastError") &&
+                          !slot->unstableIdentityRva(relocations, init.excluded),
+                      "unproven last-error IAT call");
+            }
+        }
     }
 } // namespace
 
@@ -430,7 +475,8 @@ int main(int argc, char **argv) try {
         return 0;
     }
 
-    check(argc == 5, "expected stack.exe, leaves.exe, jump.exe and indirect.exe");
+    check(argc == 6, "expected stack.exe, leaves.exe, jump.exe, indirect.exe and last-error.exe");
+    checkImportSnapshot(argv[5]);
     const AnalyzedImage analysis(
         std::make_unique<ParsedImage>(InputFile(argv[1]), ParsePolicy::Inspection),
         DebugInfo::Omit);

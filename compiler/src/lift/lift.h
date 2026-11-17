@@ -20,6 +20,7 @@ namespace forge {
         EntryMode mode;
         // Guest VAs default to the PE's preferred base. Native storage has its own address.
         std::optional<uint64_t> guestLoadBase = std::nullopt;
+        bool runtime = false;
     };
 
     // The module is independent of the image after generation. The caller's context

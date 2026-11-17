@@ -794,7 +794,8 @@ class Lift(Case):
         self.assertGreaterEqual(size, 8)
         encoded = b"\xff\x15" + struct.pack("<i", iat - (entry + 6))
         pos = layout.file_offset(entry)
-        data[pos:pos + len(encoded)] = encoded
+        # The replaced call has its own reachable continuation in the recorded extent.
+        data[pos:pos + len(encoded) + 1] = encoded + b"\xc3"
         image = self.dir / "import.exe"
         image.write_bytes(data)
         failure = self.invoke("lift", image, "--rva", hex(entry), "--output", self.dir / "import.ll",

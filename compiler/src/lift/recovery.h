@@ -3,6 +3,8 @@
 #include "lift/cfg.h"
 #include "pe/image.h"
 
+#include <variant>
+
 namespace llvm {
     class MCRegisterInfo;
 }
@@ -34,12 +36,35 @@ namespace forge::x86 {
 
     enum class CallKind : uint8_t { Direct, RipRelativeRegister };
 
+    struct GuestCallTarget {
+        uint32_t rva;
+        CallKind kind;
+        uint32_t evidenceRva;
+    };
+
+    enum class ServiceSignature { DwordToVoid, VoidToDword };
+
+    struct ServiceBinding {
+        llvm::StringLiteral name, nativeSymbol;
+        ServiceSignature signature;
+    };
+
+    struct ExternalCallTarget {
+        uint32_t slot;
+        const Import &descriptor;
+        const ServiceBinding &binding;
+    };
+
     // All RVAs in a recovered group belong to its one immutable source snapshot.
     struct ResolvedCallSite {
-        uint32_t caller, block, instruction, callee, continuation;
-        CallKind kind;
-        // Direct calls carry their own displacement. Register calls cite the producing LEA.
-        uint32_t evidenceRva;
+        uint32_t caller, block, instruction, continuation;
+        std::variant<GuestCallTarget, ExternalCallTarget> target;
+
+        const GuestCallTarget &guest() const { return std::get<GuestCallTarget>(target); }
+
+        const ExternalCallTarget *external() const {
+            return std::get_if<ExternalCallTarget>(&target);
+        }
     };
 
     enum class RecoveryOrigin { UnwindBacked, InferredLeaf };

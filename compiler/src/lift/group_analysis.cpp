@@ -348,6 +348,14 @@ namespace forge::x86 {
 
         bool FunctionAnalyzer::traceCall(const ResolvedCallSite &site, AddressFacts &facts,
                                          CallAddresses &calls, bool collect) const {
+            if (site.external()) {
+                std::fill_n(facts.registers.begin(), callerSlots, AddressFact{});
+                // These services take no guest pointers. Only CALL writes guest memory.
+                const auto slot = facts.registers[rspIndex].plus(AddressFact(uint64_t(0) - 8));
+                facts.spills.write(slot, 64, {});
+                return true;
+            }
+
             if (!collect) {
                 CallInputs inputs;
                 inputs.rsp = facts.registers[rspIndex]
@@ -358,10 +366,10 @@ namespace forge::x86 {
                     inputs.arguments[i] = facts.registers[i + 1].project(entryAddresses);
                 }
 
-                calls.enter(site.callee, inputs);
+                calls.enter(site.guest().rva, inputs);
             }
 
-            auto &callee = calls.functions.at(site.callee);
+            auto &callee = calls.functions.at(site.guest().rva);
 
             if (!callee.returned) {
                 if (!collect) {

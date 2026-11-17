@@ -14,7 +14,9 @@
 namespace forge::x86 {
     using namespace llvm;
 
-    void Step::reject(FailureCode kind, const Twine &reason, std::optional<int64_t> target) const {
+    void Step::reject(FailureCode kind, const Twine &reason, std::optional<int64_t> target,
+                      std::optional<uint32_t> importSlot,
+                      const std::optional<ImportOwnershipFailure> &ownership) const {
         auto encoded = toHex(bytes, true);
         InspectionError failure(hex(rva) + ": " + (opcode + " [" + encoded + "]: " + reason).str(),
                                 kind);
@@ -22,6 +24,8 @@ namespace forge::x86 {
         failure.context.opcode = opcode.str();
         failure.context.bytes = std::move(encoded);
         failure.context.branchTarget = target;
+        failure.context.importSlot = importSlot;
+        failure.context.importOwnership = ownership;
         throw failure;
     }
 
@@ -115,7 +119,8 @@ namespace forge::x86 {
                          "requires a validated unwind-backed function extent");
             }
 
-            if (desc.isCall() && !s.isDirectCall() && !(recordedExtent && s.isRegisterCall())) {
+            if (desc.isCall() && !s.isDirectCall() &&
+                !(recordedExtent && (s.isRegisterCall() || s.isMemoryCall()))) {
                 s.reject(FailureCode::UnsupportedControlFlow, "unsupported indirect or far call");
             }
 

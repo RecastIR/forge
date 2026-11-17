@@ -57,7 +57,7 @@ native_tests() (
 import sys
 from xml.etree import ElementTree
 tests = ElementTree.parse(sys.argv[1]).findall(".//testcase")
-for name in ("native", "differential", "guest_stack", "guest_image", "guest_jump", "guest_indirect",
+for name in ("native", "differential", "guest_stack", "guest_image", "guest_jump", "guest_indirect", "guest_imports",
              "runtime_contract", "runtime_c_smoke", "runtime_ir_smoke", "build_provisioning"):
     found = [t for t in tests if t.get("name") == name]
     if len(found) != 1 or found[0].get("status") != "run" or len(found[0].findall("skipped")):

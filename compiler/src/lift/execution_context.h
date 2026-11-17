@@ -10,15 +10,16 @@ namespace forge::x86 {
     // LLVM owns the layout and all emitted storage. An external activation owns
     // one instance, and every guest body borrows it through its sole argument.
     struct ContextLayout {
-        ContextLayout(llvm::LLVMContext &context, bool origins, bool stack);
+        ContextLayout(llvm::LLVMContext &context, bool origins, bool stack, bool runtime);
         llvm::StructType *type;
-        bool origins, stack;
+        bool origins, stack, runtime;
     };
 
     struct ContextView {
         ContextView() = default;
         ContextView(llvm::IRBuilder<> &ir, const ContextLayout &layout, llvm::Value *context);
         llvm::Value *registers = nullptr, *marks = nullptr, *flags = nullptr;
+        llvm::Value *instance = nullptr, *thread = nullptr;
         llvm::Value *bytes = nullptr, *validity = nullptr;
     };
 

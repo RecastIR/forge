@@ -419,5 +419,12 @@
     "export": "call_indirect",
     "signature": "i64(i64,i64)",
     "harness": "decimal_pairs"
+  },
+  {
+    "fixture_id": "imports/last_error",
+    "scope": "function",
+    "export": "last_error",
+    "signature": "i64(i64,i64)",
+    "harness": "runtime_pairs"
   }
 ]

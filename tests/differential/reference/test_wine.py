@@ -21,6 +21,13 @@ class WineTests(unittest.TestCase):
                     result = execute(image, BINARIES / config / "calculate.exe", args)
                     self.assertEqual((result.exit_code, result.stdout, result.stderr), (status, stdout, b""))
 
+    def test_late_invalid_runtime_pair(self):
+        image = reference_environment(SUITE)["container_image_id"]
+        for config in ("debug", "release"):
+            with self.subTest(config=config):
+                result = execute(image, BINARIES / config / "last_error.exe", ["5", "0", "bad", "0"])
+                self.assertEqual((result.exit_code, result.stdout, result.stderr), (2, b"", b""))
+
     def test_continuation_faults(self):
         image = reference_environment(SUITE)["container_image_id"]
         for config in ("debug", "release"):

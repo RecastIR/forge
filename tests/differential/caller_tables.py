@@ -82,8 +82,8 @@ class CallerTables:
             raise ValueError("caller dispatch target outside its recorded function")
         return [self.base + dest for dest in targets]
 
-    def validate(self, graph, forge, *, register_calls=False):
-        if not self.proofs and not register_calls:
+    def validate(self, graph, forge, *, register_calls=False, iat_slots=()):
+        if not self.proofs and not register_calls and not iat_slots:
             return
         explicit = {self.base + self.caller.start}
         for addr, edges in graph.items():
@@ -105,8 +105,10 @@ class CallerTables:
         if not helper.is_file():  # Multi-configuration CMake layout.
             helper = binary_dir.parent / "tests" / binary_dir.name / "recovery_contract"
         ranges = [(self.caller.start, self.caller.end), *sorted(self.spans)]
-        result = subprocess.run([helper, "--check-dispatch-spans", self.image,
-                                 *(hex(rva) for pair in ranges for rva in pair)],
+        args = [hex(rva) for pair in ranges for rva in pair]
+        if iat_slots:
+            args.extend(["--iat-slots", *map(hex, sorted(iat_slots))])
+        result = subprocess.run([helper, "--check-dispatch-spans", self.image, *args],
                                 capture_output=True, text=True, timeout=30)
         if result.returncode:
             raise ValueError(f"unstable caller dispatch: {result.stderr.strip()}")

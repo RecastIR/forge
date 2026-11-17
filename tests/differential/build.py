@@ -130,6 +130,13 @@ def split_rex(raw):
     return rex, raw
 
 
+def iat_call_slot(raw, address):
+    _, body = split_rex(raw)
+    if len(body) == 6 and body[:2] == b"\xff\x15":
+        return address + len(raw) + int.from_bytes(body[2:], "little", signed=True)
+    return None
+
+
 def register_call_encoding(raw, *, rejected_prefix=False):
     _, body = split_rex(raw)
     if rejected_prefix:
@@ -209,7 +216,7 @@ def register_call_targets(graph, decode, *, encoding=None):
 
 
 def reachable_instructions(entry, decode, in_body, allow_call, ordinary, *, end=None, indirect=None,
-                           register_calls=False, terminals=("ret",)):
+                           register_calls=False, iat_call=None, terminals=("ret",)):
     # Follow numeric disassembly addresses from the entry, including both conditional edges.
     graph = {}
     pending = [entry]
@@ -233,7 +240,12 @@ def reachable_instructions(entry, decode, in_body, allow_call, ordinary, *, end=
                 successors.append(target)
         elif opcode == "call":
             target = direct_target(operands)
-            if not (register_calls and operands in GPRS) and (target is None or not allow_call(target)):
+            if target is not None:
+                accepted = allow_call(target)
+            else:
+                accepted = ((register_calls and operands in GPRS) or
+                            (iat_call is not None and iat_call(address, following)))
+            if not accepted:
                 raise ValueError(f"unexpected direct call target at {address:x}: {text}")
         elif opcode not in ordinary:
             raise ValueError(f"unsupported instruction or transfer at {address:x}: {text}")

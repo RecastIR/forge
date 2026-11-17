@@ -17,7 +17,7 @@ def generate(output, mc, link, dlltool, clang):
         "Bridge.dll": ["Bridge=entry"],
         "Middle.dll": ["Middle=entry"],
         "MissingLeaf.dll": ["Leaf"],
-        "KERNEL32.dll": ["Sleep"],
+        "KERNEL32.dll": ["Sleep", "SetLastError", "GetLastError"],
         "vcruntime140.dll": ["Runtime"],
         contract: ["Contract"],
     }
@@ -86,6 +86,10 @@ def generate(output, mc, link, dlltool, clang):
         probe = ('.section .probe,"xr"\n.space 65568, 0xcc\n.quad entry\n.space 12, 0xcc\n'
                  '.seh_proc leaf_fence\nleaf_fence:\n.seh_endprologue\nret\n.seh_endproc\n.byte 0x0f\n')
         image("leaves.exe", stub + leaf_calls.read_text() + probe)
+        last_error = (sources.parent / "differential/fixtures/imports/last_error.S").read_text()
+        imports = [("KERNEL32.dll", name) for name in ("SetLastError", "GetLastError", "Sleep")]
+        image("last-error.exe", stub + ".globl last_error_set\n" + last_error, imports + [("Physics.DLL", "Named")], exports=["last_error_set"])
+        image("last-error-delay.exe", stub + last_error, imports, delays=["KERNEL32.dll"])
         image("import-call.exe", (sources / "import-call.s").read_text(), [("Physics.DLL", "Named")])
         image("chained.exe", (sources / "chained.s").read_text())
         image("unicode.exe", stub + '.section ".donnée","dr"\n.byte 1\n.section ".界区","dr"\n.byte 1\n')
