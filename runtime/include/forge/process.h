@@ -68,6 +68,16 @@ typedef struct forge_rt_execution {
     uint8_t flags[6];
 } forge_rt_execution;
 
+/* Generated entry slow path for a failed scalar image lookup or stack
+ * bounds/outer-return check. Size is in bytes. Stack selects the stack
+ * domain (1) or image domain (0). Access uses the checked-copy permission bits
+ * or READ_SAVED for a guest load that can copy opaque register-origin marks.
+ * Requires the current entry view. Only its tagged result is written. Full
+ * accessible coverage across image rows produces UNSUPPORTED with status OK. */
+#define FORGE_RT_SCALAR_READ_SAVED UINT32_C(8)
+void forge_rt_report_scalar_boundary(forge_rt_execution *execution, uint64_t address, uint32_t size,
+                                     uint32_t access, uint32_t stack) FORGE_PROCESS_NOEXCEPT;
+
 typedef struct forge_rt_fragment {
     uint64_t offset;
     uint64_t size;

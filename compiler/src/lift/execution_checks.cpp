@@ -1,6 +1,7 @@
 #include "lift/execution_checks.h"
 
 #include "llvm/IR/Intrinsics.h"
+#include "llvm/IR/Module.h"
 
 namespace forge::x86 {
     using namespace llvm;
@@ -71,26 +72,37 @@ namespace forge::x86 {
         onFailure(condition, [&] { recordFault(fault); });
     }
 
-    void ExecutionChecks::memory(Value *condition, Value *address, uint32_t access, Value *reason,
-                                 Value *invalidLanes) {
+    void ExecutionChecks::scalarBoundary(Value *condition, Value *address, unsigned size,
+                                         uint32_t access, bool stack) {
         onFailure(condition, [&] {
+            // A managed entry and each guest body borrow the same execution record in argument 0.
+            auto *function = ir.GetInsertBlock()->getParent();
+            auto *word = ir.getInt32Ty();
+            auto report = function->getParent()->getOrInsertFunction(
+                "forge_rt_report_scalar_boundary", ir.getVoidTy(), ir.getPtrTy(), ir.getInt64Ty(),
+                word, word, word);
+            ir.CreateCall(report, {function->getArg(0), address, ir.getInt32(size),
+                                   ir.getInt32(access), ir.getInt32(stack)});
+        });
+    }
+
+    void ExecutionChecks::stackMarks(Value *allowed, Value *offset, uint32_t access) {
+        onFailure(ir.CreateAndReduce(allowed), [&] {
             recordFault(FORGE_RT_FAULT_MEMORY);
             auto *type = memoryFaultType(ir.getContext());
             auto *detail = field(3);
 
-            if (invalidLanes) {
-                // The failure edge has at least one invalid byte. The guest and target
-                // are little endian, so its first byte is the mask's lowest set bit.
-                const auto width = cast<FixedVectorType>(invalidLanes->getType())->getNumElements();
-                auto *bits = ir.CreateBitCast(invalidLanes, ir.getIntNTy(width));
-                auto *first =
-                    ir.CreateIntrinsic(Intrinsic::cttz, {bits->getType()}, {bits, ir.getTrue()});
-                address = ir.CreateAdd(address, ir.CreateZExt(first, ir.getInt64Ty()));
-            }
-
-            ir.CreateStore(address, ir.CreateStructGEP(type, detail, 0));
+            // The failure edge has at least one invalid byte. The guest and target
+            // are little endian, so its first byte is the mask's lowest set bit.
+            const auto width = cast<FixedVectorType>(allowed->getType())->getNumElements();
+            auto *bits = ir.CreateBitCast(ir.CreateNot(allowed), ir.getIntNTy(width));
+            auto *first =
+                ir.CreateIntrinsic(Intrinsic::cttz, {bits->getType()}, {bits, ir.getTrue()});
+            auto *start = ir.CreateAdd(offset, ir.getInt64(FORGE_RT_STACK_BASE));
+            ir.CreateStore(ir.CreateAdd(start, ir.CreateZExt(first, ir.getInt64Ty())),
+                           ir.CreateStructGEP(type, detail, 0));
             ir.CreateStore(ir.getInt32(access), ir.CreateStructGEP(type, detail, 1));
-            ir.CreateStore(reason, ir.CreateStructGEP(type, detail, 2));
+            ir.CreateStore(ir.getInt32(FORGE_RT_FAULT_STACK), ir.CreateStructGEP(type, detail, 2));
         });
     }
 

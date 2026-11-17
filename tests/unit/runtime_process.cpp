@@ -206,6 +206,47 @@ namespace {
         REQUIRE(forge_rt_process_register(process.get(), &artifact) == FORGE_RT_INVALID_STATE);
     }
 
+    void checkScalarBoundaries() {
+        const auto artifact = artifactWith([](forge_rt_execution *execution) {
+            constexpr auto address = FORGE_RT_ENTRY_RSP - 1;
+            execution->stackMarks[address - FORGE_RT_STACK_BASE] = 1; // Opaque saved-register byte.
+            auto &result = execution->result;
+
+            forge_rt_report_scalar_boundary(execution, address, 2, FORGE_RT_READ, 1);
+            REQUIRE(result.kind == FORGE_RT_EXECUTION_FAULT && result.memory.address == address);
+            forge_rt_report_scalar_boundary(execution, address, 2, FORGE_RT_SCALAR_READ_SAVED, 1);
+            REQUIRE(result.kind == FORGE_RT_EXECUTION_FAULT &&
+                    result.memory.address == FORGE_RT_ENTRY_RSP &&
+                    result.memory.access == FORGE_RT_READ &&
+                    result.memory.reason == FORGE_RT_FAULT_STACK);
+
+            forge_rt_invocation_token invocation = 0;
+            forge_rt_memory_fault fault{};
+            REQUIRE(forge_rt_current_invocation(execution->instance, execution->thread,
+                                                &invocation) == FORGE_RT_OK);
+            REQUIRE(forge_rt_validate_guest(execution->instance, execution->thread, invocation,
+                                            address, 2, FORGE_RT_READ,
+                                            &fault) == FORGE_RT_GUEST_FAULT);
+            REQUIRE(fault.address == address && fault.reason == FORGE_RT_FAULT_STACK);
+
+            forge_rt_report_scalar_boundary(execution, base + 8, 2, FORGE_RT_READ, 0);
+            REQUIRE(result.kind == FORGE_RT_UNSUPPORTED);
+
+            // A stale thread must remain a runtime failure even on a failed guest guard.
+            auto stale = *execution;
+            stale.thread = 0;
+            forge_rt_report_scalar_boundary(&stale, address, 2, FORGE_RT_READ, 1);
+            REQUIRE(stale.result.kind == FORGE_RT_RUNTIME_FAILURE &&
+                    stale.result.status == FORGE_RT_INVALID_THREAD);
+        });
+        const auto process = create();
+        REQUIRE(forge_rt_process_register(process.get(), &artifact) == FORGE_RT_OK);
+        forge_rt_process_result result{};
+        REQUIRE(forge_rt_process_run(process.get(), nullptr, &result) == FORGE_RT_OK);
+        REQUIRE(result.kind == FORGE_RT_UNSUPPORTED);
+        expectState(process.get(), FORGE_RT_PROCESS_FAULTED);
+    }
+
     void checkFaultCleanup() {
         const auto artifact = artifactWith([](forge_rt_execution *execution) {
             if (execution->rcx) {
@@ -237,5 +278,6 @@ namespace {
 void testRuntimeProcess() {
     checkRegistration();
     checkIsolation();
+    checkScalarBoundaries();
     checkFaultCleanup();
 }

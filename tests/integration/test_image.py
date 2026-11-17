@@ -115,11 +115,7 @@ class ImageTests(ImageScaling, GuestExecution):
         boundary = self.va(".mutable")
 
         def abut(data, layout, headers):
-            literal = headers[".literal"]
-            mutable = headers[".mutable"]
-            # Extend the zero-filled tail to the next section and give both the same permissions.
-            struct.pack_into("<I", data, literal + 8, boundary - self.va(".literal"))
-            struct.pack_into("<I", data, literal + 36, layout.u32(mutable + 36))
+            layout.abut_writable_sections(self.va(".literal") - self.base, boundary - self.base)
 
         image = self.edit("adjacent-sections", abut)
         for exe in self.variants("load32", image=image):

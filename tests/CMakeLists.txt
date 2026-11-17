@@ -6,7 +6,8 @@ if(BUILD_TESTING OR CMAKE_EXPORT_COMPILE_COMMANDS)
   target_link_libraries(runtime_transfer_probe PRIVATE forge_runtime)
   target_compile_definitions(runtime_transfer_probe PRIVATE FORGE_RUNTIME_TEST_TRANSFER
     forge_rt_read_guest=forgeTestReadGuest forge_rt_write_guest=forgeTestWriteGuest
-    forge_rt_validate_guest=forgeTestValidateGuest)
+    forge_rt_validate_guest=forgeTestValidateGuest
+    forge_rt_report_scalar_boundary=forgeTestReportScalarBoundary)
   configure_forge_cxx(runtime_transfer_probe)
   add_executable(runtime_contract unit/runtime.cpp unit/runtime_memory.cpp unit/runtime_process.cpp
     $<TARGET_OBJECTS:runtime_transfer_probe>)

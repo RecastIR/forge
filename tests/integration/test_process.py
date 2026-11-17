@@ -2,16 +2,19 @@
 import json
 from pathlib import Path
 import platform
+import struct
 import subprocess
 import sys
 import tempfile
 import unittest
 
+from pe_layout import Layout
 
 FORGE, FIXTURES, OPT, LLC, LIFT, DRIVER, ADAPTERS, RUNTIME, *LINKER = sys.argv[1:]
-ENTRY_RSP = 0x70001000 - 40
+STACK_END = 0x70001000
+ENTRY_RSP = STACK_END - 40
 READ, WRITE = 1, 2
-UNMAPPED, PERMISSION, STACK = 2, 3, 4
+OVERFLOW, UNMAPPED, PERMISSION, STACK = 1, 2, 3, 4
 
 
 def run(*args):
@@ -24,7 +27,7 @@ def memory(address, access, reason):
 
 class ProcessExecution(unittest.TestCase):
     def exercise(self, image, entry, cases, *, base=None, imports=(), probe=False, fail_get=False):
-        pe = Path(FIXTURES) / f"{image}.exe"
+        pe = (Path(FIXTURES) / image).with_suffix(".exe")
         module = json.loads(run(FORGE, "inspect", pe, "--format", "json"))["modules"][0]
         pe_entry = int(module["entry_point_rva"], 16)
         exports = {n: int(e["rva"], 16) for e in module.get("exports", []) for n in e["names"]}
@@ -82,8 +85,60 @@ class ProcessExecution(unittest.TestCase):
         end = start + literal["virtual_size"]
         self.exercise("image", "load32", [(start, 0, "return 2018915346"),
                                            (end-1, 0, memory(end, READ, UNMAPPED)),
-                                           (1, 0, memory(1, READ, UNMAPPED))])
+                                           (1, 0, memory(1, READ, UNMAPPED)),
+                                           (-1, 0, memory(2**64-1, READ, OVERFLOW))])
         self.exercise("image", "write32", [(start, 123, memory(start, WRITE, PERMISSION))])
+
+    def test_scalar_stack_boundaries(self):
+        # A fresh prefix is unreadable but writable right up to either boundary.
+        for entry, access in (("load32", READ), ("write32", WRITE), ("update", READ | WRITE)):
+            cases = []
+            for boundary in (ENTRY_RSP, STACK_END):
+                start = boundary - 1
+                first_invalid = boundary if access == WRITE else start
+                cases.append((start, 7, memory(first_invalid, access, STACK)))
+            self.exercise("image", entry, cases)
+
+        cases = []
+        for boundary in (ENTRY_RSP, STACK_END):
+            # One concrete byte, then an uninitialized byte before the boundary.
+            cases.append((boundary - 2, 0, memory(boundary - 1, READ, STACK)))
+            # With a valid one-byte prefix the first failure is the boundary itself.
+            cases.append((boundary - 1, 0, memory(boundary, READ, STACK)))
+            # The same opaque prefix is readable by a register copy but not by MOVZX.
+            cases.append((boundary - 1, 1, memory(boundary, READ, STACK)))
+            cases.append((boundary - 1, 2, memory(boundary - 1, READ, STACK)))
+        self.exercise("stack", "scalar_boundary_prefix", cases)
+
+    def test_scalar_crosses_image_intervals(self):
+        source = Path(FIXTURES) / "image.exe"
+        module = json.loads(run(FORGE, "inspect", source, "--format", "json"))["modules"][0]
+        sections = {s["name"]: s for s in module["sections"]}
+        left = int(sections[".literal"]["rva"], 16)
+        right = int(sections[".mutable"]["rva"], 16)
+        boundary = int(module["image_base_va"], 16) + right
+        gap = boundary + sections[".mutable"]["virtual_size"]
+        data = bytearray(source.read_bytes())
+        layout = Layout(data)
+        left_header, right_header = layout.section_header(left), layout.section_header(right)
+        read_only = layout.u32(left_header + 36)
+        layout.abut_writable_sections(left, right)
+        with tempfile.TemporaryDirectory() as tmp:
+            image = Path(tmp) / "adjacent.exe"
+            image.write_bytes(data)
+            for entry, access, left_value, right_value in (
+                    ("load32", READ, 0, 0x1234), ("write32", WRITE, 7, 7),
+                    ("update", READ | WRITE, 1, 0x1235)):
+                self.exercise(image, entry, [(boundary - 4, 7, f"return {left_value}"),
+                                             (boundary, 7, f"return {right_value}"),
+                                             (boundary - 2, 7, "unsupported"),
+                                             (gap - 2, 7, memory(gap, access, UNMAPPED))])
+
+            # A write admitted in the first interval reaches a read-only second one.
+            struct.pack_into("<I", data, right_header + 36, read_only)
+            image.write_bytes(data)
+            for entry, access in (("write32", WRITE), ("update", READ | WRITE)):
+                self.exercise(image, entry, [(boundary - 2, 7, memory(boundary, access, PERMISSION))])
 
     def test_stack_guard_and_service_failures(self):
         getter = [("kernel32.dll", "GetLastError")]

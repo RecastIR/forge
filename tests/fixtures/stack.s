@@ -692,3 +692,25 @@ saved_input:
 .section .rdata,"dr"
 call_constant:
     .quad 0x12345678
+
+.text
+# Leave the remaining bytes untouched before a read that will cross a stack boundary.
+probe scalar_boundary_prefix
+    testq %rdx, %rdx
+    jne 1f
+    movb $1, (%rcx)
+    xorl %eax, %eax
+    addl (%rcx), %eax
+    ret
+1:
+    movb %bl, (%rcx)
+    cmpq $1, %rdx
+    jne 2f
+    # A plain MOV may copy the opaque saved byte, even though arithmetic cannot use it.
+    movw (%rcx), %r8w
+    xorl %eax, %eax
+    ret
+2:
+    movzwl (%rcx), %eax
+    ret
+    .seh_endproc

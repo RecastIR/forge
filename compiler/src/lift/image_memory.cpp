@@ -210,10 +210,33 @@ namespace forge::x86 {
             return ir.CreateSub(nextLow, ir.getInt64(1));
         }
 
-        Function *resolver(llvm::Module &module, GlobalVariable *table, bool checked) {
+        // Fold known immutable accesses to a module constant. Writable bytes always come
+        // from the live region table shared by the process and its native services.
+        Value *processRegionBytes(IRBuilder<> &ir, GlobalVariable *backings, Value *backingIndex,
+                                  Value *backingOffset, Value *regions, Value *regionIndex) {
+            auto *backingType = cast<StructType>(backings->getValueType()->getArrayElementType());
+            auto *backing = ir.CreateInBoundsGEP(backingType, backings, backingIndex);
+            auto *immutable =
+                ir.CreateLoad(ir.getPtrTy(), ir.CreateStructGEP(backingType, backing, 1));
+            auto *initialBytes = ir.CreateGEP(ir.getInt8Ty(), immutable, backingOffset);
+
+            auto *materialized = StructType::get(ir.getInt64Ty(), ir.getInt64Ty(), ir.getPtrTy(),
+                                                 ir.getInt32Ty(), ir.getPtrTy());
+            auto *liveRow = ir.CreateInBoundsGEP(materialized, regions, regionIndex);
+            auto *liveBytes =
+                ir.CreateLoad(ir.getPtrTy(), ir.CreateStructGEP(materialized, liveRow, 2));
+            return ir.CreateSelect(ir.CreateIsNull(immutable), liveBytes, initialBytes);
+        }
+
+        Function *resolver(llvm::Module &module, GlobalVariable *table, bool checked,
+                           GlobalVariable *processBackings = nullptr) {
             IRBuilder<> ir(module.getContext());
-            auto *type = FunctionType::get(
-                ir.getPtrTy(), {ir.getInt64Ty(), ir.getInt64Ty(), ir.getInt1Ty()}, false);
+            SmallVector<Type *, 4> parameters{ir.getInt64Ty(), ir.getInt64Ty(), ir.getInt1Ty()};
+            if (processBackings) {
+                parameters.push_back(ir.getPtrTy());
+            }
+
+            auto *type = FunctionType::get(ir.getPtrTy(), parameters, false);
             auto *function =
                 Function::Create(type, GlobalValue::InternalLinkage, "forge_image_address", module);
             auto *entry = BasicBlock::Create(module.getContext(), "entry", function);
@@ -224,13 +247,16 @@ namespace forge::x86 {
             ir.SetInsertPoint(entry);
             auto *index = findInterval(ir, table, row, fault);
             auto *record = ir.CreateInBoundsGEP(row, table, index);
-            auto *base = ir.CreateLoad(ir.getInt64Ty(), ir.CreateStructGEP(row, record, 0));
-            auto *size = ir.CreateLoad(ir.getInt64Ty(), ir.CreateStructGEP(row, record, 1));
+            auto loadField = [&](unsigned field) {
+                return ir.CreateLoad(row->getElementType(field),
+                                     ir.CreateStructGEP(row, record, field));
+            };
+            auto *base = loadField(0);
+            auto *size = loadField(1);
             auto *width = function->getArg(1);
             auto *offset = ir.CreateSub(function->getArg(0), base);
             auto *fits = ir.CreateICmpULE(offset, ir.CreateSub(size, width));
-            Value *writable =
-                ir.CreateLoad(row->getElementType(3), ir.CreateStructGEP(row, record, 3));
+            Value *writable = loadField(processBackings ? 4 : 3);
 
             if (checked) {
                 writable = ir.CreateIsNotNull(ir.CreateAnd(writable, ir.getInt32(FORGE_RT_WRITE)));
@@ -241,12 +267,20 @@ namespace forge::x86 {
             ir.CreateCondBr(ir.CreateAnd(inRange, permitted), found, fault);
 
             ir.SetInsertPoint(found);
-            auto *bytes = ir.CreateLoad(ir.getPtrTy(), ir.CreateStructGEP(row, record, 2));
+            auto *bytes = processBackings
+                              ? processRegionBytes(ir, processBackings, loadField(2), loadField(3),
+                                                   function->getArg(3), index)
+                              : loadField(2);
             ir.CreateRet(ir.CreateInBoundsGEP(ir.getInt8Ty(), bytes, offset));
 
             ir.SetInsertPoint(fault);
-            ir.CreateIntrinsic(Intrinsic::trap, {});
-            ir.CreateUnreachable();
+            if (processBackings) {
+                ir.CreateRet(ConstantPointerNull::get(ir.getPtrTy()));
+            } else {
+                ir.CreateIntrinsic(Intrinsic::trap, {});
+                ir.CreateUnreachable();
+            }
+
             return function;
         }
 
@@ -326,95 +360,6 @@ namespace forge::x86 {
             return imports;
         }
 
-        // Fold known immutable accesses to a module constant. Writable bytes always come
-        // from the live region table shared by the process and its native services.
-        Value *processRegionBytes(IRBuilder<> &ir, GlobalVariable *backings, Value *backingIndex,
-                                  Value *backingOffset, Value *regions, Value *regionIndex) {
-            auto *backingType = cast<StructType>(backings->getValueType()->getArrayElementType());
-            auto *backing = ir.CreateInBoundsGEP(backingType, backings, backingIndex);
-            auto *immutable =
-                ir.CreateLoad(ir.getPtrTy(), ir.CreateStructGEP(backingType, backing, 1));
-            auto *initialBytes = ir.CreateGEP(ir.getInt8Ty(), immutable, backingOffset);
-
-            auto *materialized = StructType::get(ir.getInt64Ty(), ir.getInt64Ty(), ir.getPtrTy(),
-                                                 ir.getInt32Ty(), ir.getPtrTy());
-            auto *liveRow = ir.CreateInBoundsGEP(materialized, regions, regionIndex);
-            auto *liveBytes =
-                ir.CreateLoad(ir.getPtrTy(), ir.CreateStructGEP(materialized, liveRow, 2));
-            return ir.CreateSelect(ir.CreateIsNull(immutable), liveBytes, initialBytes);
-        }
-
-        Function *processResolver(llvm::Module &module, GlobalVariable *regions,
-                                  GlobalVariable *backings) {
-            IRBuilder<> ir(module.getContext());
-            auto *result = StructType::get(ir.getPtrTy(), ir.getInt32Ty(), ir.getInt64Ty());
-            auto *type = FunctionType::get(
-                result, {ir.getInt64Ty(), ir.getInt64Ty(), ir.getInt1Ty(), ir.getPtrTy()}, false);
-            auto *function =
-                Function::Create(type, GlobalValue::InternalLinkage, "forge_image_address", module);
-            auto block = [&](StringRef name) {
-                return BasicBlock::Create(module.getContext(), name, function);
-            };
-            auto *entry = block("entry");
-            auto *lookup = block("lookup");
-            auto *check = block("permission");
-            auto *extent = block("extent");
-            auto *mapped = block("mapped");
-            auto *overflow = block("overflow");
-            auto *unmapped = block("unmapped");
-            auto *denied = block("denied");
-            auto *boundary = block("boundary");
-            auto *address = function->getArg(0);
-            auto *width = function->getArg(1);
-            auto *row = cast<StructType>(regions->getValueType()->getArrayElementType());
-            ir.SetInsertPoint(entry);
-            auto *remaining = ir.CreateNot(address);
-            ir.CreateCondBr(ir.CreateICmpULE(ir.CreateSub(width, ir.getInt64(1)), remaining),
-                            lookup, overflow);
-
-            ir.SetInsertPoint(lookup);
-            auto *index = findInterval(ir, regions, row, unmapped);
-            auto *record = ir.CreateInBoundsGEP(row, regions, index);
-            auto loadField = [&](unsigned field) {
-                return ir.CreateLoad(row->getElementType(field),
-                                     ir.CreateStructGEP(row, record, field));
-            };
-            auto *offset = ir.CreateSub(address, loadField(0));
-            auto *size = loadField(1);
-            ir.CreateCondBr(ir.CreateICmpULT(offset, size), check, unmapped);
-
-            ir.SetInsertPoint(check);
-            auto *permissions = loadField(4);
-            auto *writable =
-                ir.CreateIsNotNull(ir.CreateAnd(permissions, ir.getInt32(FORGE_RT_WRITE)));
-            ir.CreateCondBr(ir.CreateOr(ir.CreateNot(function->getArg(2)), writable), extent,
-                            denied);
-
-            ir.SetInsertPoint(extent);
-            auto *available = ir.CreateSub(size, offset);
-            ir.CreateCondBr(ir.CreateICmpULE(width, available), mapped, boundary);
-
-            ir.SetInsertPoint(mapped);
-            auto *bytes = processRegionBytes(ir, backings, loadField(2), loadField(3),
-                                             function->getArg(3), index);
-            auto *ptr = ir.CreateInBoundsGEP(ir.getInt8Ty(), bytes, offset);
-            ir.CreateRet(ir.CreateInsertValue(ConstantAggregateZero::get(result), ptr, 0));
-
-            auto fail = [&](uint32_t reason, Value *firstInvalid) {
-                auto *failure = ir.CreateInsertValue(ConstantAggregateZero::get(result),
-                                                     ir.getInt32(reason), 1);
-                ir.CreateRet(ir.CreateInsertValue(failure, firstInvalid, 2));
-            };
-            ir.SetInsertPoint(overflow);
-            fail(FORGE_RT_FAULT_OVERFLOW, address);
-            ir.SetInsertPoint(unmapped);
-            fail(FORGE_RT_FAULT_UNMAPPED, address);
-            ir.SetInsertPoint(denied);
-            fail(FORGE_RT_FAULT_PERMISSION, address);
-            ir.SetInsertPoint(boundary);
-            fail(FORGE_RT_FAULT_UNMAPPED, ir.CreateAdd(address, available));
-            return function;
-        }
     } // namespace
 
     ImageMemory::ImageMemory(const ParsedImage &image, uint64_t guestLoadBase, bool checkedMemory)
@@ -900,7 +845,7 @@ namespace forge::x86 {
             return nullptr;
         }
 
-        return processResolver(module, cast<GlobalVariable>(regionTable),
-                               cast<GlobalVariable>(storageTable));
+        return resolver(module, cast<GlobalVariable>(regionTable), true,
+                        cast<GlobalVariable>(storageTable));
     }
 } // namespace forge::x86

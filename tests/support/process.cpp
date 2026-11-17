@@ -40,6 +40,13 @@ namespace {
         case FORGE_RT_RUNTIME_FAILURE:
             std::printf("runtime %u\n", result.status);
             break;
+        case FORGE_RT_UNSUPPORTED:
+            require(result.status == FORGE_RT_OK && result.value == 0 && result.fault == 0 &&
+                        result.memory.address == 0 && result.memory.access == 0 &&
+                        result.memory.reason == 0,
+                    "unsupported result");
+            std::puts("unsupported");
+            break;
         default:
             require(false, "unexpected outcome");
         }
@@ -84,6 +91,12 @@ int main(int argc, char **argv) {
         require(forge_rt_process_run(processes[i].get(), rcx || rdx ? &inputs : nullptr, &result) ==
                     FORGE_RT_OK,
                 "run");
+        forge_rt_process_state state = 0;
+        const auto terminal =
+            result.kind == FORGE_RT_RETURNED ? FORGE_RT_PROCESS_EXITED : FORGE_RT_PROCESS_FAULTED;
+        require(forge_rt_process_get_state(processes[i].get(), &state) == FORGE_RT_OK &&
+                    state == terminal,
+                "terminal state");
         report(result);
         require(forge_rt_process_close(processes[i].get()) == FORGE_RT_OK, "close");
     }

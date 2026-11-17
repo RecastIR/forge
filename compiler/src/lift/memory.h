@@ -49,7 +49,12 @@ namespace forge::x86 {
 
         llvm::Function *imageResolver = nullptr;
 
-        enum class Access { Read, ReadSaved, Write, Modify };
+        enum class Access : uint32_t {
+            Read = FORGE_RT_READ,
+            ReadSaved = FORGE_RT_SCALAR_READ_SAVED,
+            Write = FORGE_RT_WRITE,
+            Modify = FORGE_RT_READ | FORGE_RT_WRITE
+        };
 
         struct Location {
             llvm::Value *data;
@@ -59,7 +64,6 @@ namespace forge::x86 {
 
         Location resolve(llvm::Value *address, unsigned width, Access access, bool stackOnly,
                          llvm::Value *storeMarks = nullptr);
-        static uint32_t permissions(Access access);
         llvm::Value *checkedOffset(llvm::Value *address, unsigned width, Access access);
         void installReturn(llvm::Value *offset, uint64_t address);
         void verifyReturn(llvm::Value *offset, uint64_t address);

@@ -31,14 +31,6 @@ namespace forge::x86 {
         regions = imageRegions;
     }
 
-    uint32_t GuestMemory::permissions(Access access) {
-        if (access == Access::Modify) {
-            return FORGE_RT_READ | FORGE_RT_WRITE;
-        }
-
-        return access == Access::Write ? FORGE_RT_WRITE : FORGE_RT_READ;
-    }
-
     Value *GuestMemory::checkedOffset(Value *address, unsigned width, Access access) {
         const unsigned size = width / 8;
         auto *offset = ir.CreateSub(address, ir.getInt64(base));
@@ -47,18 +39,7 @@ namespace forge::x86 {
         auto *below = ir.CreateICmpULE(offset, ir.getInt64(returnOffset - size));
         auto *above = ir.CreateICmpUGE(offset, ir.getInt64(returnOffset + 8));
         auto *allowed = ir.CreateAnd(mapped, ir.CreateOr(below, above));
-        Value *badAddress = address;
-
-        if (checks.managed()) {
-            auto *inside = ir.CreateICmpULT(offset, ir.getInt64(capacity));
-            auto *crossesEnd = ir.CreateAnd(inside, ir.CreateNot(mapped));
-            badAddress = ir.CreateSelect(crossesEnd, ir.getInt64(base + capacity), address);
-            auto *crossesReturn =
-                ir.CreateAnd(mapped, ir.CreateICmpULT(address, ir.getInt64(entryRsp)));
-            badAddress = ir.CreateSelect(crossesReturn, ir.getInt64(entryRsp), badAddress);
-        }
-
-        checks.memory(allowed, badAddress, permissions(access), ir.getInt32(FORGE_RT_FAULT_STACK));
+        checks.scalarBoundary(allowed, address, size, static_cast<uint32_t>(access), true);
 
         return offset;
     }
@@ -73,13 +54,9 @@ namespace forge::x86 {
         auto *byteType = FixedVectorType::get(ir.getInt8Ty(), width / 8);
         auto *lanes = ir.CreateBitCast(marks, byteType);
         const auto checkLanes = [&](Value *allowed) {
-            if (checks.managed()) {
-                checks.memory(ir.CreateAndReduce(allowed), ir.CreateAdd(offset, ir.getInt64(base)),
-                              permissions(access), ir.getInt32(FORGE_RT_FAULT_STACK),
-                              ir.CreateNot(allowed));
-            } else {
-                checks.guard(ir.CreateAndReduce(allowed));
-            }
+            const auto mask =
+                access == Access::ReadSaved ? FORGE_RT_READ : static_cast<uint32_t>(access);
+            checks.stackMarks(allowed, offset, mask);
         };
 
         if (access == Access::Modify) {
@@ -117,11 +94,8 @@ namespace forge::x86 {
             if (!stackOnly && checks.managed()) {
                 auto *onStack = ir.CreateICmpULT(ir.CreateSub(address, ir.getInt64(base)),
                                                  ir.getInt64(capacity));
-                auto *overflow =
-                    ir.CreateICmpUGT(address, ir.getInt64(UINT64_MAX - (width / 8 - 1)));
-                auto *reason = ir.CreateSelect(overflow, ir.getInt32(FORGE_RT_FAULT_OVERFLOW),
-                                               ir.getInt32(FORGE_RT_FAULT_UNMAPPED));
-                checks.memory(onStack, address, permissions(access), reason);
+                checks.scalarBoundary(onStack, address, width / 8, static_cast<uint32_t>(access),
+                                      false);
             }
 
             return stackLocation(checkedOffset(address, width, access), width, access, storeMarks);
@@ -147,13 +121,11 @@ namespace forge::x86 {
             arguments.push_back(regions);
         }
 
-        Value *ptr = ir.CreateCall(imageResolver, arguments);
+        auto *ptr = ir.CreateCall(imageResolver, arguments);
 
         if (checks.managed()) {
-            auto *reason = ir.CreateExtractValue(ptr, 1);
-            auto *faultAddress = ir.CreateExtractValue(ptr, 2);
-            checks.memory(ir.CreateIsNull(reason), faultAddress, permissions(access), reason);
-            ptr = ir.CreateExtractValue(ptr, 0);
+            checks.scalarBoundary(ir.CreateIsNotNull(ptr), address, width / 8,
+                                  static_cast<uint32_t>(access), false);
         }
 
         if (storeMarks) {
