@@ -3,6 +3,7 @@
 #include "forge/guest_range.h"
 
 #include <algorithm>
+#include <cassert>
 #include <span>
 
 using namespace forge;
@@ -13,8 +14,12 @@ namespace {
     // orders transactions involving multiple claim words across independent processes.
     std::mutex claimMutex;
 
+    auto guestRange(const auto &mapping) {
+        return GuestRange::fromOffset({mapping.base}, 0, mapping.size);
+    }
+
     bool validImage(const forge_rt_image &image) {
-        const auto extent = GuestRange::fromOffset({image.base}, 0, image.size);
+        const auto extent = guestRange(image);
 
         if (!extent || (image.count != 0 && !image.regions) ||
             image.count > PTRDIFF_MAX / sizeof(forge_rt_image_region)) {
@@ -29,7 +34,7 @@ namespace {
 
             if (!range || !row.bytes || row.size > SIZE_MAX || row.permissions == 0 ||
                 (row.permissions & ~permissions) != 0 ||
-                ((row.permissions & FORGE_RT_WRITE) != 0) != (row.claim != nullptr)) {
+                ((row.permissions & FORGE_RT_WRITE) != 0 && row.claim == nullptr)) {
                 return false;
             }
 
@@ -47,27 +52,27 @@ namespace {
     }
 
     bool validStack(const forge_rt_stack &stack) {
-        const auto range = GuestRange::fromOffset({stack.base}, 0, stack.size);
+        const auto range = guestRange(stack);
         return range && stack.bytes && stack.marks && stack.size <= SIZE_MAX && stack.size >= 8 &&
                stack.outerReturn >= stack.base && stack.outerReturn - stack.base <= stack.size - 8;
-    }
-
-    bool overlaps(uint64_t base, uint64_t size, uint64_t otherBase, uint64_t otherSize) {
-        if (base >= otherBase) {
-            return base - otherBase < otherSize;
-        }
-
-        return otherBase - base < size;
     }
 
     auto position(auto &reservations, uint64_t base) {
         return std::ranges::lower_bound(reservations, base, {}, &Reservation::base);
     }
 
-    bool occupied(const std::vector<Reservation> &reservations, uint64_t base, uint64_t size) {
-        const auto next = position(reservations, base);
+    bool overlaps(const auto &first, const auto &second) {
+        // Publication checks descriptor extents before comparing them with live reservations.
+        const auto left = guestRange(first);
+        const auto right = guestRange(second);
+        assert(left && right);
+        return left.value().overlaps(right.value());
+    }
 
-        if (next != reservations.end() && overlaps(next->base, next->size, base, size)) {
+    bool occupied(const std::vector<Reservation> &reservations, const auto &mapping) {
+        const auto next = position(reservations, mapping.base);
+
+        if (next != reservations.end() && overlaps(mapping, *next)) {
             return true;
         }
 
@@ -75,8 +80,7 @@ namespace {
             return false;
         }
 
-        const auto &previous = *std::prev(next);
-        return overlaps(previous.base, previous.size, base, size);
+        return overlaps(mapping, *std::prev(next));
     }
 
     forge_rt_status claimBacking(const forge_rt_image &image) {
@@ -120,19 +124,30 @@ namespace {
             return FORGE_RT_INVALID_ARGUMENT;
         }
 
-        if (!attached && occupied(reservations, image.base, image.size)) {
+        if (!attached && occupied(reservations, image)) {
             return FORGE_RT_MAPPING_CONFLICT;
         }
 
-        if (stack && (occupied(reservations, stack->base, stack->size) ||
-                      overlaps(stack->base, stack->size, image.base, image.size))) {
+        if (stack && (occupied(reservations, *stack) || overlaps(*stack, image))) {
             return FORGE_RT_MAPPING_CONFLICT;
         }
 
         // No allocation or potentially throwing operation may follow the exclusive claim.
         const size_t additional =
             static_cast<size_t>(!attached) + static_cast<size_t>(stack != nullptr);
-        reservations.reserve(reservations.size() + additional);
+        const auto limit = reservations.max_size();
+
+        if (additional > limit - reservations.size()) {
+            return FORGE_RT_RESOURCE_EXHAUSTED;
+        }
+
+        const auto required = reservations.size() + additional;
+        const auto capacity = reservations.capacity();
+
+        if (required > capacity) {
+            const auto growth = std::min(capacity, limit - capacity);
+            reservations.reserve(std::max(required, capacity + growth));
+        }
 
         if (attached) {
             return FORGE_RT_OK;

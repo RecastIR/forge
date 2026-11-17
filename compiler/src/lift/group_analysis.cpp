@@ -578,9 +578,9 @@ namespace forge::x86 {
     } // namespace
 
     GroupAnalysis analyzeGroup(const RecoveredFunctionGroup &group, uint64_t guestBase,
-                               EntryMode mode) try {
+                               EntryMode mode, bool checkedMemory) try {
         GroupAnalysis result;
-        ImageMemory image(group.image(), guestBase);
+        ImageMemory image(group.image(), guestBase, checkedMemory);
         const InstructionOperands operands(group.registers(), guestBase);
         std::map<uint32_t, FunctionAnalyzer> analyzers;
 

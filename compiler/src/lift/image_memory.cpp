@@ -17,6 +17,8 @@ namespace forge::x86 {
         constexpr uint64_t executableLimit = 8ULL * 1024 * 1024;
         constexpr uint64_t moduleLimit = 32ULL * 1024 * 1024;
         constexpr uint64_t writableLimit = 256ULL * 1024 * 1024;
+        constexpr auto stackRange =
+            GuestRange::fromOffset({GuestMemory::base}, 0, GuestMemory::capacity).value();
 
         Constant *immutableBytes(LLVMContext &context, const ImageBytes &bytes, uint64_t length) {
             SmallVector<Constant *> parts;
@@ -248,10 +250,24 @@ namespace forge::x86 {
         }
     } // namespace
 
-    ImageMemory::ImageMemory(const ParsedImage &image, uint64_t guestLoadBase)
+    ImageMemory::ImageMemory(const ParsedImage &image, uint64_t guestLoadBase, bool checkedMemory)
         : source(image), loadBase(guestLoadBase) {
-        constexpr auto stack =
-            GuestRange::fromOffset({GuestMemory::base}, 0, GuestMemory::capacity).value();
+        if (checkedMemory) {
+            // The process reserves the entire image, even when no resolver rows are emitted.
+            const auto size = image.module().sizeOfImage;
+            const auto reservation = GuestRange::fromOffset({loadBase}, 0, size);
+
+            if (!reservation) {
+                throw InspectionError("checked image reservation at VA " + hex(loadBase) +
+                                          " with SizeOfImage " + hex(size) +
+                                          " overflows the guest address space",
+                                      FailureCode::ImageMemory);
+            }
+
+            overlapsStack = reservation->overlaps(stackRange);
+            return;
+        }
+
         overlapsStack = llvm::any_of(image.module().sections, [&](const Section &section) {
             if (section.virtualSize == 0) {
                 return false;
@@ -260,7 +276,7 @@ namespace forge::x86 {
             // validateGuestBase checked the extent of every nonempty section.
             const auto range =
                 GuestRange::fromOffset({guestLoadBase}, section.rva, section.virtualSize).value();
-            return range.overlaps(stack);
+            return range.overlaps(stackRange);
         });
     }
 
@@ -283,7 +299,11 @@ namespace forge::x86 {
 
     void ImageMemory::checkStackMapping(const Step &step) const {
         if (overlapsStack) {
-            step.reject(FailureCode::ImageMemory, "PE image overlaps the guest stack");
+            step.reject(FailureCode::ImageMemory,
+                        "PE image overlaps the guest stack [" + hex(GuestMemory::base) + ", " +
+                            hex(GuestMemory::base + GuestMemory::capacity) +
+                            ") at selected image base " + hex(loadBase) + " with SizeOfImage " +
+                            hex(source.module().sizeOfImage));
         }
     }
 

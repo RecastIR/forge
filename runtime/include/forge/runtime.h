@@ -47,10 +47,12 @@ typedef uint64_t forge_rt_invocation_token;
 
 /* Generated module descriptors use native C layout. Each row borrows size bytes starting
  * at bytes. The owner provides one initially zero, naturally aligned claim word for each
- * initialized writable backing. Every row exposing that writable backing uses the same
- * word. Only the runtime may access it once registration begins. Immutable backing has
- * a null claim. The descriptor, ordered disjoint rows, and backing must stay live and
- * structurally immutable from registration until successful detach or process destruction. */
+ * initialized writable backing. All its aliases, including read-only rows, use that word.
+ * A row's permissions govern access through its guest address. Immutable backing has a
+ * null claim. The owner keeps descriptors, row tables and claim words outside guest-accessible
+ * storage. Only the runtime may access the claim word once registration begins. Keep the
+ * descriptor and its ordered, disjoint rows immutable and their backing live at stable
+ * addresses while borrowed. */
 typedef struct forge_rt_image_region {
     uint64_t start;
     uint64_t size;
@@ -66,8 +68,10 @@ typedef struct forge_rt_image {
     uint64_t count;
 } forge_rt_image;
 
-/* The owner lends two disjoint size-byte spans until leave. outerReturn is the guest VA
- * of the eight-byte synthetic return slot. Entries without stack storage pass null. */
+/* The owner lends two disjoint size-byte spans exclusively to this activation until leave.
+ * Keep both spans disjoint from image backing, other active stacks and registration metadata
+ * across all instances. outerReturn is the guest VA of the eight-byte synthetic return slot.
+ * Entries without stack storage pass null. */
 typedef struct forge_rt_stack {
     uint64_t base;
     uint64_t size;
@@ -108,8 +112,11 @@ forge_rt_status forge_rt_set_last_error(forge_rt_instance *instance, forge_rt_th
 forge_rt_status forge_rt_get_last_error(forge_rt_instance *instance, forge_rt_thread_token thread,
                                         uint32_t *outValue) FORGE_RT_NOEXCEPT;
 /* A generated descriptor identifies this single-group image while attached. Registration
- * is idempotent while live. A successful detach drains checked copies and retires the
- * occurrence. An executing image returns BUSY. Writable claims survive retirement. */
+ * is idempotent while live. Detach drains checked copies in this instance and retires the
+ * occurrence on success. An executing image returns BUSY. Writable claims survive retirement.
+ * Before releasing descriptor or backing storage, its owner must stop new entries and
+ * registrations that use it, wait for outstanding descriptor users, and detach every
+ * registration borrowing that storage or destroy each such instance. */
 forge_rt_status forge_rt_register_image(forge_rt_instance *instance,
                                         const forge_rt_image *image) FORGE_RT_NOEXCEPT;
 forge_rt_status forge_rt_detach_image(forge_rt_instance *instance,

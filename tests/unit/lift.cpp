@@ -203,6 +203,47 @@ namespace {
         }
     }
 
+    void checkImageReservationBounds(const fs::path &fixture, llvm::LLVMContext &context) {
+        AnalyzedImage analysis(
+            std::make_unique<ParsedImage>(InputFile(fixture), ParsePolicy::FunctionAnalysis),
+            DebugInfo::Omit);
+        const auto &image = analysis.module();
+        const uint64_t topFit = UINT64_MAX - (image.sizeOfImage - 1);
+        LiftRequest request{image.entryPoint, EntryMode::WindowsX64I64Pair, topFit};
+        request.checkedMemory = true;
+        const auto fitting = generateIR(analysis, request, context);
+        const auto *descriptor = fitting->getNamedGlobal("forge_checked_image");
+        check(descriptor && descriptor->hasInitializer(), "missing zero-row image descriptor");
+        const auto &fields = *llvm::cast<llvm::ConstantStruct>(descriptor->getInitializer());
+        check(fields.getNumOperands() == 4 &&
+                  llvm::cast<llvm::ConstantInt>(fields.getAggregateElement(0U))->getZExtValue() ==
+                      topFit &&
+                  llvm::cast<llvm::ConstantInt>(fields.getAggregateElement(1U))->getZExtValue() ==
+                      image.sizeOfImage &&
+                  fields.getAggregateElement(2U)->isNullValue() &&
+                  fields.getAggregateElement(3U)->isNullValue(),
+              "top-inclusive reservation lost its base, size or empty row table");
+
+        request.guestLoadBase = topFit + 1;
+
+        try {
+            generateIR(analysis, request, context);
+            throw std::runtime_error("accepted an overflowing zero-row checked reservation");
+        } catch (const InspectionError &error) {
+            check(error.kind == FailureCode::ImageMemory && error.context.input == fixture &&
+                      error.context.entryRva == image.entryPoint &&
+                      std::string_view(error.what()).find("SizeOfImage") != std::string_view::npos,
+                  "reservation overflow lost its diagnostic or entry provenance");
+        }
+
+        // The fixture's last section ends before the reservation's trailing padding.
+        request.checkedMemory = false;
+        request.runtime = true;
+        const auto legacy = generateIR(analysis, request, context);
+        check(legacy->getFunction("forge_lifted_with_runtime") != nullptr,
+              "legacy runtime lift rejected representable section extents");
+    }
+
     std::unique_ptr<llvm::Module> checkSnapshot(const fs::path &fixture, const fs::path &directory,
                                                 llvm::LLVMContext &context) {
         const auto source = directory / "input.exe";
@@ -784,6 +825,7 @@ int main(int argc, char **argv) try {
     llvm::scope_exit cleanup([&] { (void)llvm::sys::fs::remove_directories(temporary); });
     llvm::LLVMContext context;
     const forge::fs::path directory(temporary.c_str());
+    checkImageReservationBounds(argv[1], context);
     checkImageConstants(argv[3], directory, context);
     const auto artifact = checkSnapshot(argv[1], directory, context);
     check(!llvm::verifyModule(*artifact), "IR did not survive image destruction");

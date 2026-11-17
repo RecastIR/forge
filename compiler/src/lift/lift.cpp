@@ -705,7 +705,8 @@ namespace forge {
                                       FailureCode::UnsupportedControlFlow);
             }
 
-            const auto prepared = x86::analyzeGroup(group, guestBase, request.mode);
+            const auto prepared =
+                x86::analyzeGroup(group, guestBase, request.mode, request.checkedMemory);
             auto module = emitGroup(group, prepared, request, context);
             stage = FailureCode::VerificationInternal;
             verifyLiftedIR(*module, analysis.module().path, group.root());

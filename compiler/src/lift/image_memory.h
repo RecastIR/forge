@@ -52,7 +52,7 @@ namespace forge::x86 {
     // relocation data. Finishing resolves the borrows into an independently owned plan.
     class ImageMemory {
       public:
-        ImageMemory(const ParsedImage &image, uint64_t guestLoadBase);
+        ImageMemory(const ParsedImage &image, uint64_t guestLoadBase, bool checkedMemory);
 
         void checkStackMapping(const Step &step) const;
         void addressTaken(const Step &step, uint64_t va);

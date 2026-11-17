@@ -95,6 +95,25 @@ class Imports(Case):
         self.assertNotIn("@forge_rt_", ir)
         self.assertIn("@forge_lifted_with_runtime(", ir)
 
+    def test_checked_reservation_covers_pe_headers(self):
+        # The fixed guest stack occupies only the first page, before the first section.
+        self.assertGreaterEqual(min(start for size, start, _, _ in self.layout.sections if size), 0x1000)
+        stackful = bytearray(self.original)
+        stackless = self.patch("89c8 c3")
+        for data in (stackful, stackless):
+            struct.pack_into("<Q", data, self.layout.opt + 24, 0x70000000)
+
+        checked = ("--signature", "i64(i64,i64)", "--checked-memory")
+        size = self.layout.u32(self.layout.opt + 56)
+        reason = ("PE image overlaps the guest stack [0x70000000, 0x70001000) "
+                  f"at selected image base 0x70000000 with SizeOfImage {size:#x}")
+        context = self.invoke_lift(stackful, *checked, reason=reason, code="LIFT_IMAGE_MEMORY")
+        self.assertEqual(int(context["entry_rva"], 16), self.root)
+        self.assertIn("instruction_rva", context)
+        self.assertTrue(context["bytes"])
+        self.assertIn("@forge_lifted_with_runtime(", self.invoke_lift(stackful))
+        self.assertIn("call i32 @forge_rt_enter(", self.invoke_lift(stackless, *checked))
+
     def test_bound_and_fallback(self):
         data = self.patch(("ff15", self.slots["GetLastError"]), "c3")
         desc = self.descriptor

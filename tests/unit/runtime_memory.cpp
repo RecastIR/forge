@@ -283,15 +283,16 @@ namespace {
         uint64_t claim = 0;
         const forge_rt_image_region firstRows[]{
             {base, 1, backing.data(), readWrite, &claim},
+            {base + 2, 1, backing.data(), FORGE_RT_READ, &claim},
             {base + 3, 1, backing.data() + 1, readWrite, &claim},
         };
         const forge_rt_image first{base, 4, firstRows, std::size(firstRows)};
-        // Descriptor B has its own first backing and tries A's claimed writable bytes last.
+        // A read-only view of A's mutable bytes still requires their exclusive claim.
         uint8_t fresh = 3;
         uint64_t freshClaim = 0;
         const forge_rt_image_region contenderRows[]{
             {base, 1, &fresh, readWrite, &freshClaim},
-            {base + 1, 1, backing.data(), readWrite, &claim},
+            {base + 1, 1, backing.data(), FORGE_RT_READ, &claim},
         };
         const forge_rt_image contender{base, 4, contenderRows, std::size(contenderRows)};
         const forge_rt_image clean{base, 4, contenderRows, 1};
@@ -312,6 +313,12 @@ namespace {
 
             std::array<uint8_t, 1> byte{0xab};
             REQUIRE(a.write(base, byte, fault) == FORGE_RT_OK);
+            byte[0] = 0;
+            REQUIRE(a.read(base + 2, byte, fault) == FORGE_RT_OK && byte[0] == 0xab);
+            byte[0] = 0xcd;
+            REQUIRE(a.write(base + 2, byte, fault) == FORGE_RT_GUEST_FAULT);
+            expectFault(fault, {base + 2, FORGE_RT_WRITE, FORGE_RT_FAULT_PERMISSION});
+            REQUIRE(a.read(base, byte, fault) == FORGE_RT_OK && byte[0] == 0xab);
             REQUIRE(b.read(base, byte, fault) == FORGE_RT_OK && byte[0] == 3);
             REQUIRE(forge_rt_detach_image(firstProcess.get(), &first) == FORGE_RT_BUSY);
             REQUIRE(b.leave() == FORGE_RT_OK);
@@ -322,21 +329,48 @@ namespace {
         }
 
         REQUIRE(forge_rt_detach_image(secondProcess.get(), &clean) == FORGE_RT_OK);
-        REQUIRE(forge_rt_register_image(secondProcess.get(), &first) == FORGE_RT_MAPPING_CONFLICT);
+        const forge_rt_image alias{base, 4, &firstRows[1], 1};
+        REQUIRE(forge_rt_register_image(secondProcess.get(), &alias) == FORGE_RT_MAPPING_CONFLICT);
         REQUIRE(backing[0] == 0xab);
 
-        // Destruction with an attached image also leaves its initialized backing claimed.
+        // A sole read-only row claims mutable backing even without any writable row.
         uint8_t cell = 7;
         uint64_t attachedClaim = 0;
-        const forge_rt_image_region attachedRow{base, 1, &cell, readWrite, &attachedClaim};
-        const forge_rt_image attached{base, 1, &attachedRow, 1};
+        const forge_rt_image_region readOnly{base, 1, &cell, FORGE_RT_READ, &attachedClaim};
+        const forge_rt_image_region writable{base, 1, &cell, readWrite, &attachedClaim};
+        const forge_rt_image attached{base, 1, &readOnly, 1}, other{base, 1, &writable, 1};
         {
             const auto owner = createInstance();
             REQUIRE(forge_rt_register_image(owner.get(), &attached) == FORGE_RT_OK);
+            REQUIRE(forge_rt_register_image(secondProcess.get(), &other) ==
+                    FORGE_RT_MAPPING_CONFLICT);
         }
 
-        REQUIRE(forge_rt_register_image(secondProcess.get(), &attached) ==
-                FORGE_RT_MAPPING_CONFLICT);
+        REQUIRE(forge_rt_register_image(secondProcess.get(), &other) == FORGE_RT_MAPPING_CONFLICT);
+    }
+
+    void testSharedImmutableBacking() {
+        constexpr uint64_t base = 0x3600;
+        const std::array<uint8_t, 2> bytes{9, 27};
+        const forge_rt_image_region row{base, bytes.size(), bytes.data(), FORGE_RT_READ, nullptr};
+        const forge_rt_image shared{base, bytes.size(), &row, 1};
+        const forge_rt_image execution{base + 16, 1, nullptr, 0};
+        const auto first = createInstance(), second = createInstance();
+        Activation remaining{second.get(), createThread(second.get())};
+        REQUIRE(forge_rt_register_image(first.get(), &shared) == FORGE_RT_OK);
+        REQUIRE(remaining.enter(shared) == FORGE_RT_OK);
+        REQUIRE(forge_rt_detach_image(first.get(), &shared) == FORGE_RT_OK);
+
+        forge_rt_memory_fault fault{};
+        std::array<uint8_t, 2> result{};
+        Activation detached{first.get(), createThread(first.get())};
+        REQUIRE(detached.enter(execution) == FORGE_RT_OK);
+        REQUIRE(detached.read(base, result, fault) == FORGE_RT_GUEST_FAULT);
+        expectFault(fault, {base, FORGE_RT_READ, FORGE_RT_FAULT_UNMAPPED});
+        REQUIRE(detached.leave() == FORGE_RT_OK);
+        REQUIRE(remaining.read(base, result, fault) == FORGE_RT_OK && result == bytes);
+        REQUIRE(remaining.leave() == FORGE_RT_OK);
+        REQUIRE(forge_rt_detach_image(second.get(), &shared) == FORGE_RT_OK);
     }
 
     void testReservations() {
@@ -349,7 +383,11 @@ namespace {
         const forge_rt_image overflowing{UINT64_MAX, 2, nullptr, 0};
         const forge_rt_image_region repeated[]{row, row};
         const forge_rt_image overlap{base, 16, repeated, std::size(repeated)};
+        uint8_t mutableByte = 8;
+        const forge_rt_image_region unclaimed{base, 1, &mutableByte, readWrite, nullptr};
+        const forge_rt_image missingClaim{base, 1, &unclaimed, 1};
         const auto process = createInstance();
+        REQUIRE(forge_rt_register_image(process.get(), &missingClaim) == FORGE_RT_INVALID_ARGUMENT);
         REQUIRE(forge_rt_register_image(process.get(), &overflowing) == FORGE_RT_INVALID_ARGUMENT);
         REQUIRE(forge_rt_register_image(process.get(), &outside) == FORGE_RT_INVALID_ARGUMENT);
         REQUIRE(forge_rt_register_image(process.get(), &overlap) == FORGE_RT_INVALID_ARGUMENT);
@@ -589,6 +627,7 @@ void testRuntimeMemory() {
     testStack();
     testStackAndImageSegments();
     testClaims();
+    testSharedImmutableBacking();
     testCompetingClaims();
     testReservations();
     testEntryRollback();
