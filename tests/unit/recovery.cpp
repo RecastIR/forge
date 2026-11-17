@@ -1,6 +1,7 @@
 #include "lift/recovery.h"
 #include "analysis/analysis.h"
 #include "lift/group_analysis.h"
+#include "lift/guest_address.h"
 #include "lift/memory.h"
 #include "lift/operands.h"
 
@@ -40,6 +41,37 @@ namespace {
         if (!condition) {
             throw std::runtime_error(message);
         }
+    }
+
+    void checkGuestRanges() {
+        const auto bytes = GuestRange::fromOffset({0x1000}, 8, 8);
+        const auto adjacent = GuestRange::fromOffset({0x1010}, 0, 2);
+        const auto overlap = GuestRange::fromOffset({0x100f}, 0, 2);
+        const auto interior = GuestRange::fromOffset({0x100b}, 0, 2);
+
+        if (!bytes || !adjacent || !overlap || !interior) {
+            throw std::runtime_error("valid guest range failed construction");
+        }
+
+        check(bytes->contains({0x1008}) && bytes->contains({0x100f}) &&
+                  !bytes->contains({0x1007}) && !bytes->contains({0x1010}),
+              "guest range did not contain exactly its requested bytes");
+        check(!bytes->overlaps(*adjacent) && !adjacent->overlaps(*bytes) &&
+                  bytes->overlaps(*overlap) && overlap->overlaps(*bytes) &&
+                  bytes->overlaps(*interior) && interior->overlaps(*bytes),
+              "guest range confused adjacency and overlap");
+
+        const auto highest = GuestRange::fromOffset({UINT64_MAX - 4}, 3, 2);
+        const auto lastByte = GuestRange::fromOffset({UINT64_MAX}, 0, 1);
+        const auto lowest = GuestRange::fromOffset({0}, 0, 1);
+        check(highest && lastByte && lowest && highest->overlaps(*lastByte) &&
+                  lastByte->contains({UINT64_MAX}) && !lastByte->contains({UINT64_MAX - 1}) &&
+                  !highest->contains({0}) && !highest->overlaps(*lowest),
+              "guest range at the top of the address space wrapped through zero");
+        check(!GuestRange::fromOffset({UINT64_MAX}, 0, 0) &&
+                  !GuestRange::fromOffset({UINT64_MAX - 4}, 5, 1) &&
+                  !GuestRange::fromOffset({UINT64_MAX - 4}, 3, 3),
+              "guest range accepted an empty span or a wrapping start or last byte");
     }
 
     uint32_t exportedRva(const AnalyzedImage &analysis, llvm::StringRef name) {
@@ -476,6 +508,7 @@ int main(int argc, char **argv) try {
     }
 
     check(argc == 6, "expected stack.exe, leaves.exe, jump.exe, indirect.exe and last-error.exe");
+    checkGuestRanges();
     checkImportSnapshot(argv[5]);
     const AnalyzedImage analysis(
         std::make_unique<ParsedImage>(InputFile(argv[1]), ParsePolicy::Inspection),

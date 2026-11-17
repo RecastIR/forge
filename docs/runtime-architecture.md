@@ -2,7 +2,11 @@
 
 A native host can link `libforge_runtime.a`, create a runtime instance and keep a 32-bit last-error value for each of its guest threads. A C translation unit and hand-authored LLVM IR compiled to ARM64 Mach-O exercise the public ABI alongside real lifted calls. Selecting a function with `forge lift` still produces a function-level LLVM module. [Public C header](../runtime/include/forge/runtime.h) · [Build and linkage](../runtime/README.md)
 
-## Ownership today
+## Guest process and address space
+
+One live `forge_rt_instance` identifies one logical guest process. Its native host creates it and controls its lifetime. Within that lifetime the pair (instance, thread token) selects a guest thread on any host thread. ABI v1 exposes thread services. Module registration, stack publication and checked service access to guest bytes are future operations specified below. A Windows-visible process ID would be a separate process-owned value.
+
+### Ownership today
 
 | Owner | State and lifetime |
 | --- | --- |
@@ -10,6 +14,36 @@ A native host can link `libforge_runtime.a`, create a runtime instance and keep 
 | Generated module | Each invocation initializes its register and flag context. When group analysis requires a checked guest stack, the adapter also allocates and initializes stack storage in that context. Guest bodies share the context across nested calls. Image backing and its resolver belong to the generated module. Writable bytes persist across entry calls to that module, independently of runtime instance lifetime. [Entry adapters](../compiler/src/lift/execution_context.cpp) · [Guest stack](../compiler/src/lift/memory.cpp) · [Image backing](../compiler/src/lift/image_memory.cpp) |
 | Native host | Owns each runtime instance from successful creation until destruction. It chooses which guest thread runs and keeps the instance live while callers use it. The existing lifting harnesses separately supply the selected entry's arguments and observe its return or trap. [Existing test harnesses](../tests/support/) |
 | Runtime (`forge_runtime`) | Owns its thread records and their last-error values for the instance lifetime. Runtime initialization needs only the native C++ runtime and OS facilities. Its implementation has no LLVM, compiler, CLI11 or Wine dependency. [Runtime component](../runtime/) |
+
+Solid arrows show today's execution path and ownership. Dashed arrows show how a process will register and borrow image and stack storage.
+
+```mermaid
+flowchart TD
+    H["Native host"] -->|owns| P["Runtime instance / guest process"]
+    P -->|owns| T["Thread record and last error"]
+    H -->|invokes| A["Generated entry activation"]
+    A -->|borrows instance| P
+    A -->|carries token for| T
+    A -->|owns| S["Registers, flags, optional stack bytes and marks"]
+    G["Nested guest bodies"] -->|share| S
+    M["Generated module"] -->|owns| I["Relocated image backing and resolver intervals"]
+    G -->|use resolver| I
+    P -.->|will own| L["Loaded PE occurrence"]
+    M -.->|translated group attaches to| L
+    L -.->|owns| V["Image reservation and exclusive writable backing claims"]
+    P -.->|will own| R["Active guest mapping registrations"]
+    L -.->|publishes image intervals in| R
+    W["Pointer-taking service"] -.->|will validate and pin| R
+    R -.->|borrow image intervals| I
+    R -.->|borrow active stack bytes and marks| S
+```
+
+An instance's thread records are isolated today. The runtime-enabled adapter stores its instance and token in the private invocation context and forwards them on each imported call. The host must supply a live pair. ABI validation occurs at the service call, so an entry that executes no import may return without looking up a token. Runtime-free entries can execute the generated stack and image paths independently. [Entry adapters](../compiler/src/lift/execution_context.cpp) · [Service lowering](../compiler/src/lift/lift.cpp)
+
+Function-level translation gives image bytes and stack bytes different lifetimes.
+
+- A generated module covers a selected root and its recovered callees. Its private writable globals last as long as the native module. Passing a second runtime instance to the same artifact, even after destroying the first, can expose the previous writes. Mixed initialized/zero-filled sections can use a native constructor and entry fallback with an ordinary initialization flag. Process integration must complete initialization before admitting concurrent callers.
+- Each outer invocation that needs a stack owns 4 KiB of bytes and per-byte marks at the fixed guest range `[0x70000000, 0x70001000)`. Two independent native activations can therefore assign different storage to the same guest VA. Existing nested recovered calls pass the original context and push frames onto its stack. [Group analysis](../compiler/src/lift/group_analysis.cpp) · [Stack model](../compiler/src/lift/memory.h) · [Image initialization](../compiler/src/lift/image_memory.cpp)
 
 ### Native C ABI v1
 
@@ -28,15 +62,67 @@ The public header defines an opaque `forge_rt_instance`, a 64-bit `forge_rt_thre
 
 Operations on a live instance synchronize access to its records. Guest identity follows the explicit token even when calls move between host threads. One host thread can also serve several guest threads. A read racing a thread removal observes a result consistent with their order. A set followed by a get comprises two operations, so a caller requiring both to be indivisible must arrange its own ordering. Before destroying an instance, its owner stops new calls and waits for every in-flight use to finish. After destruction every copy of that instance pointer is unusable. Destroying a guest thread retires its state only. There is no host thread to join on that account.
 
+### Guest addresses and generated memory
+
+The guest is AMD64 PE32+ with unsigned 64-bit virtual addresses. An RVA is relative to one guest image. A file offset indexes input bytes. A native pointer addresses live host storage on the ARM64 target. Only the backing owner supplies the native address. Future services will receive guest pointers as guest VAs. A future x86 guest will validate its own pointer width at decoding and marshalling boundaries before using the same mapping contract. [Guest range checks](../compiler/src/lift/guest_address.h) · [PE address definitions][pe]
+
+A mapped range has a start VA and a positive byte count. For a guest maximum address `maxVA`, require `length - 1 <= maxVA - start` after checking the start fits. A single byte at `UINT64_MAX` is representable in 64-bit range arithmetic. Guest access still requires an eligible active mapping and the right permission. This arithmetic makes no assumption about the Windows user-mode VA layout. Containment and overlap use byte offsets or inclusive last bytes so they also work at this boundary. Two ranges sharing a byte overlap. Adjacent ranges have no shared byte. Empty requests are handled by the access operation.
+
+The compiler selects image storage during group analysis. The completed image plan owns the selected initialized bytes, relocated fragments and accessible RVA intervals. Supported AMD64 DIR64 fixups use the chosen guest load base. Emission builds native globals and resolver rows containing each accessible interval's guest VA, length, native start and writability. A writable section's aliases share one backing. A section can contain several accessible intervals separated by excluded loader-written bytes or unsupported fixups. Native storage allocated for a hole confers no guest access to that hole. [PE initialization](../compiler/src/pe/pe.cpp) · [Image plan and resolver](../compiler/src/lift/image_memory.cpp)
+
+Generated scalar memory operations can use a proved stack path, or dispatch to the stack or the generated image resolver. The image resolver checks the full scalar width and write permission in one interval before deriving a native pointer. Stack access also checks the byte marks. The outer synthetic return slot is inaccessible to guest data operations. Nested return addresses can be read as concrete guest bytes and are protected from writes while live. Opaque saved-register identities can be copied and restored by translated code. They cannot be exposed as concrete buffer bytes. Generated guards trap on invalid accesses. These paths stay inside the generated module and permit direct native access wherever the compiler proves the relevant conditions. [Stack checks](../compiler/src/lift/memory.cpp) · [Generated memory contract](../README.md#pe-image-memory)
+
+### Process mappings and lifecycle (future)
+
+The process will own the logical mappings shared by its guest threads. A registration will identify the guest range, R/W/X guest permissions, origin (loaded image and RVA, invocation stack, or later heap/VM allocation), backing owner and offset, and active lifetime. Each interval refers to a bounded span of that owner's storage. The process can borrow the bytes even when it owns the registration. It will also own future loaded-module records, allocator state and allocations, and the Windows handle table and process services. The guest thread continues to own its thread-local service state.
+
+#### Register a loaded image
+
+Each load of a PE into a live process creates a **loaded image occurrence**. It owns the reservation for the full `SizeOfImage` at its selected base, including headers, gaps, excluded bytes and unselected sections. Even an image with zero resolver rows reserves that extent against other images, stacks and allocations. Only the compiler's accessible intervals grant access within it. Current PE parsing checks the image extent at the preferred base, and the lifter checks rebased section extents. Process registration must check the total extent at the selected base. [PE validation](../compiler/src/pe/pe.cpp) · [Rebase validation](../compiler/src/lift/recovery.cpp)
+
+Before attaching a translated group, verify from trusted provenance that it was compiled from the occurrence's exact PE input snapshot at its selected guest base. One build can establish the source match by using the same immutable snapshot for both. Reject missing or mismatched evidence before publication, even when there are no resolver rows to check. The `address_only` fixture embeds a RIP-relative guest VA in the generated code and returns a different value when lifted at a different base, without emitting any image rows. [RIP-relative address calculation](../compiler/src/lift/operands.cpp) · [Image fixtures](../tests/fixtures/image.s)
+
+The backing owner initializes fresh writable storage before publication and gives that initialized backing a stable, non-recycled identity. A successful claim binds it to one loaded occurrence for its entire initialized lifetime, including after group detach, unload or process destruction. Reuse of a native address cannot transfer the claim. All groups attached to that occurrence must access the same writable bytes through both generated code and services. A new load needs freshly initialized writable backing even in the same process at the same guest VA. Immutable backing may be shared while its owner stays live and its relocated bytes match each occurrence.
+
+Check the reservation against all other reservations and active mappings. Check its accessible intervals for containment and overlap, keeping adjacent intervals distinct. Commit the reservation, all exclusive backing claims and publication of the intervals together, atomically with respect to competing loads. Release provisional claims on failure. Attaching another group to a live occurrence reuses that reservation and its canonical backing.
+
+#### Enter and leave on a guest thread
+
+Verify that the thread and loaded occurrence belong to the process. Admit one independent execution chain per thread token, including entries that need no stack. A nested guest call or callback continues the suspended caller's chain and frame. Reject a second independent entry on a busy token. Concurrent independent chains require separate guest threads. Each outer activation publishes its stack bytes and marks, if present, before a service can use them. Simultaneously published stacks need disjoint guest ranges, so distinct tokens alone cannot admit two stacks at today's fixed base.
+
+Hold the thread and each executing image live through its calls. A cross-image call requires a proven destination in an active occurrence and a calling boundary that preserves the live guest frame. Today's internal bodies interpret a group-specific context layout, and the public entry adapter allocates a fresh activation. Cross-image calls require either compatible layouts or an adapter that carries the existing registers, thread, stack and continuation into the destination and back. [Context layout and entry adapters](../compiler/src/lift/execution_context.cpp) · [Guest call lowering](../compiler/src/lift/lift.cpp)
+
+On return or recoverable failure, close the outer activation to new uses, invalidate its stack mapping and drain outstanding borrows before releasing its storage. Before starting synchronous unload or process shutdown, check whether it would wait for a reference held by the requesting chain, including a suspended caller. If so, return a lifecycle failure immediately, before closing admission or changing state. The owner can retry after the chain unwinds.
+
+For an independent unload, close the occurrence to new entries, group attachments and mapping pins. Drain existing users before releasing its mappings and backing borrows. On process shutdown, stop new uses, drain invocations and services, retire mappings, release borrows, close process-owned resources and destroy the instance. A later mapping at a reused guest VA has its own lifetime.
+
+### Checked guest buffers (future)
+
+Read, write and validation operations take a live process/invocation association, a guest start, byte count and requested access. For a zero-length copy, validate the association and return success without looking up the VA, touching bytes or producing a native pointer. A particular Windows API may impose additional requirements on a null parameter. For a nonempty request, check address width and overflow before lookup. A copy must also fit the native buffer and its size type. Each byte must belong to an active mapping in that process with the required permissions. An in/out buffer needs both read and write access. A guest execute permission describes guest policy only. Transferring control still requires a proven translated entry and the proper guest calling convention.
+
+For a segmented copy, validate the **entire** range and hold every affected mapping and its backing live before transferring any bytes. A request may span adjacent compatible intervals backed by separate native allocations. A gap, expired mapping, denied permission or invalid stack byte anywhere fails the whole request and leaves the destination and marks unchanged. Stack input requires concrete readable bytes, including readable nested return addresses. Stack output may initialize uninitialized bytes. It must respect protected return slots and mark exactly the bytes actually written as concrete. A read/write request satisfies both sets of rules. The existing scalar instruction path retains its one-interval width check.
+
+A pin keeps stack storage live. Frame activity can still change a return-slot protection or an origin mark. Hold those checks valid until the transfer and mark updates finish. A synchronous service can use its suspended activation while it has exclusive access to the affected marks. Cross-thread or callback access must coordinate all users that can change those protections, or fail before taking the borrow.
+
+A direct native buffer borrow requires the entire range to fit one contiguous backed interval and the service to preserve its access rules, including stack mark updates. Derive the pointer from the registered native span and checked offset, and scope its use to the validated operation. A standalone validation result grants no lasting pointer. A service that may retain the input beyond that scope must copy it into owned storage. Deferred output requires a lifetime covering actual write-back. An integer guest VA alone cannot pin an expired activation or authorize a native pointer cast.
+
+Register before admitting users. Serialize lookup and pinning with unmapping, backing replacement and permission changes. A successful preflight holds the approved permissions and backing for the duration of the copy or borrow. Invalidation closes the mapping to new operations and drains existing users before revoking rights, replacing backing or releasing storage. Hold a lifetime reference across native execution or host I/O, and release the mapping-table lock before any callback. Guest threads still require synchronization for conflicting accesses to the bytes. A segmented copy has no guarantee of an atomic data snapshot or update against guest writers.
+
+The first bridge must reject a backing or protection change before modifying the mapping if the change would invalidate the compiled assumptions of any attached group eligible for entry. This applies even between invocations. For example, at O2 the `direct32` fixture can return the constant `0x9a785634` without loading its immutable image bytes. If a later bridge supports such changes, it must close affected entries, drain existing users and keep those entries closed until their code is valid for the new backing and permissions. [Image backing emission](../compiler/src/lift/image_memory.cpp) · [Image execution tests](../tests/integration/test_image.py)
+
+**Coherence.** Publish the exact image resolver intervals and native storage emitted by the compiler, and the active stack bytes **and marks**. A translated write must reach the bytes a future `WriteFile` reads. A future `ReadFile` must write back to the bytes later read by translated code. Validate and pin all required guest outputs before a host operation with external effects, and commit only the count the service actually produces. Proved native accesses borrow the same stable backing through the activation. Dynamic resolution follows the common mapping, permission and lifetime rules. Registration at lifetime boundaries preserves direct loads and stores between service calls.
+
+| Failure domain | Required outcome |
+| --- | --- |
+| Runtime misuse or failure | Invalid native association, resource exhaustion and internal errors are native runtime failures. Report them through the runtime status contract. Current lifted last-error calls trap on a non-success status. |
+| Guest memory fault | Report the failing guest range or address and access direction for overflow, an unmapped byte, expired mapping, denied permission or invalid stack access. Checked copies expose a failure distinct from native status and Windows last error. |
+| Windows service outcome | The API binding applies its documented return value, transfer count, last-error and fault behavior. A guest-buffer fault can become a defined Windows failure or an explicit guest fault according to that binding. The memory helper itself leaves thread last error alone. |
+
 ### Guest addresses and calls
 
-The current guest is a native AMD64 PE32+ image. A guest VA denotes a location in that guest's address space. An RVA denotes an offset from the selected image base. The C pointers in ABI v1 denote live **host** storage. A future Windows pointer parameter remains a guest VA until the appropriate resolver validates the complete byte range and direction of access. Width, guest address arithmetic, access rights, initialized bytes where required, output capacity and borrow lifetime all matter. Validate input, output and in/out buffers before use and perform checked copy-back for outputs. An unmapped or inaccessible range must take the service's defined failure path or an explicit guest fault. Casting the guest integer to a host pointer bypasses these checks. [PE address definitions][pe] · [Generated memory contract](../README.md#pe-image-memory)
+Windows x64 passes the first four integer or pointer arguments in RCX, RDX, R8 and R9 by position and declared width. The caller reserves 32 bytes of shadow space and aligns its stack to 16 bytes before CALL. With the return address on the stack, callee-entry RSP is eight modulo 16, and the fifth argument starts at entry RSP + 40. Later positional slots follow at eight-byte intervals. A general service bridge must read these arguments through the guest frame, apply the service signature's signedness and widths, then issue an ordinary Darwin ARM64 call. Return the service result into the defined guest RAX bits and apply the guest volatile-register and flag effects. RSP, continuation and nonvolatile registers retain their guest guarantees. The implemented last-error bindings use only the part of this convention described below. [Windows x64 ABI][win-abi] · [Apple ARM64 ABI][darwin-abi] · [Forge guest frame](../README.md#guest-stack-memory)
 
-Today the generated resolver understands selected persistent image intervals and the invocation's checked stack supports its own access rules. These resources belong to different lifetimes. ABI v1 has no guest memory accessors. A future pointer-taking service will need a bounded read/write or copy contract backed by the active invocation and image, with explicit lifetime if it borrows host storage. Migrating backing into a runtime instance requires deciding image sharing, initialization, guest VA ownership and protection first. Heap allocation and a complete Windows process address space are open work.
-
-For an integer Windows x64 call, the compiler interprets guest RCX, RDX, R8 and R9 by argument position and declared width. The caller reserves 32 bytes of shadow space and aligns its stack to 16 bytes before CALL. With the return address on the stack, callee-entry RSP is eight modulo 16, and the fifth integer/pointer argument starts at entry RSP + 40. Later positional slots follow at eight-byte intervals. Read arguments through the guest frame and apply the service signature's signedness and widths. Emit an ordinary Darwin ARM64 call with native ABI arguments. Return the service result into the defined guest RAX bits and apply the guest volatile-register and flag effects. RSP, continuation and nonvolatile registers retain their guest guarantees. A native flag, register or C status has no implicit guest meaning. [Windows x64 ABI][win-abi] · [Apple ARM64 ABI][darwin-abi] · [Forge guest frame](../README.md#guest-stack-memory)
-
-Each future nested or callback invocation must carry its originating instance and guest thread and preserve its caller's frame. Calling through a guest callback address requires a proved guest entry, signature and controlled re-entry into lifted code. A callback VA cannot serve as a native function pointer. Floating-point/vector parameters and returns, aggregates, varargs and alternate conventions require separate signature and register rules. PE32 x86 needs a separate guest model, including pointer width. Managed execution and Windows exception dispatch also fall outside v1.
+Calling through a guest callback address requires a proved guest entry, signature and controlled re-entry into lifted code with the originating process, thread and frame. A callback VA cannot serve as a native function pointer. Floating-point/vector parameters and returns, aggregates, varargs and alternate conventions require separate signature and register rules. PE32 x86 needs its own guest ABI and pointer width. Managed execution and Windows exception dispatch also fall outside v1.
 
 ### Lifted last-error services
 
@@ -49,7 +135,32 @@ The host selects the runtime-enabled two-integer entry explicitly. It creates an
 
 Recovery selects the binding by normalized DLL and exact symbol spelling. A static reference to that binding supplies its signature and native symbol to analysis and emission. Each call checks the Windows shadow area and alignment, installs its guest continuation, invokes the service with the Darwin ARM64 C ABI, then validates and pops the guest return slot. The runtime receives only its instance, token and scalar or host output slot. The invocation owns the stack, register state, and native binding arguments. Nested guest bodies share this context. Runtime calls preserve nonvolatile GPRs and RSP and invalidate modeled volatile registers and flags except for the getter’s defined result. Neither last-error service receives a guest pointer. A caller’s saved stack values survive when their slots are provably disjoint from the return slot written by CALL.
 
-The import contract assumes the loader-selected binding remains fixed. Named imports from other modules, delay loads, ordinals, forwarding, runtime hooks, and arbitrary pointer dispatch require additional evidence. A future pointer-taking API needs checked guest range access with direction, size and lifetime, as described above. [PE recovery](program-architecture.md#imported-call-recovery) · [Native linkage](../runtime/README.md#link-a-lifted-windows-function)
+The import contract assumes the loader-selected binding remains fixed. Named imports from other modules, delay loads, ordinals, forwarding, runtime hooks, and arbitrary pointer dispatch require additional evidence. [PE recovery](program-architecture.md#imported-call-recovery) · [Native linkage](../runtime/README.md#link-a-lifted-windows-function)
+
+### Implementation boundaries and acceptance
+
+**12C establishes the contract.** The compiler's guest address and nonempty range checks serve image rebasing and stack overlap validation. ABI v1 continues to provide instance and thread services. There is no runtime region table, copy API or live backing claim today. The following cases belong to the tasks that introduce the respective operations.
+
+#### 12D – Checked Guest Memory Bridge
+
+- Publish the selected image intervals and active stack. On both kinds of backing, verify that a service reads bytes written by guest code and that guest code reads bytes written by a service.
+- Exercise adjacent intervals in separate host allocations, gaps and denied writes in the last segment, protected or expired stack bytes, output mark updates, and invalidation racing a pinned operation.
+- Reject another occurrence's claim on initialized writable backing, including after detach. If the bridge exposes backing or protection changes, reject one that would invalidate compiled code and verify the original mapping still works.
+
+#### 12E – Windows x64 ABI Bridge
+
+Marshal guest arguments by service signature, including stack arguments, buffer direction/length, declared results and failure policy. Group analysis must select bytes reachable solely through an import argument. Writes through a service pointer must invalidate overlapping saved-address facts, including possible aliases when the target is unknown. Test a service receiving a guest buffer that translated instructions never dereference, partial output counts, and subsequent guest loads through an alias. [Import analysis](../compiler/src/lift/group_analysis.cpp) · [Service lowering](../compiler/src/lift/lift.cpp)
+
+#### 12F – Process Lifecycle Integration
+
+- Verify that two groups of one occurrence observe each other's writes. Dirty the image, unload it, and reload at the same VA in the same process. The new occurrence must start with the relocated PE initial bytes. Repeat the isolation check across two processes using the same translation.
+- Attach a matching group with zero resolver rows. Independently change its source PE or its compiled base and verify each attachment fails before publication. Place two images at disjoint VAs, reject placement in a reserved hole even for an image with zero intervals, and verify rollback when the last of several backing claims fails.
+- Hold a stackless entry active while a second independent entry attempts to use its token. Verify rejection of the second entry and successful nested callback continuation on the first chain. Use separate tokens to verify shared image writes and independent last error. Parameterize stack placement before admitting simultaneously active outer stacks.
+- From a callback, separately request synchronous unload and process shutdown that would wait for its caller. Verify immediate failure, continued admission, and successful retirement when the owner retries after return. Also exercise teardown with other active users and reuse of native addresses.
+
+When cross-image calls first become executable, call between groups with different private layouts. Verify the callee sees the caller's guest thread, arguments and live stack, and that return restores the required registers and resumes at the guest continuation.
+
+Today the generated dynamic resolver sees only its own module's image intervals, and the activation resolves its own stack. Translated dereferences into another image, another live stack or a future heap require process-aware dynamic resolution in generated code as well. Adding the 12D service bridge alone leaves that limitation in place. Heap allocation, Windows virtual memory, general DLL loading, scheduling, Windows exception delivery and 32-bit x86 execution require their own implementations.
 
 ## Wine source investigation
 
@@ -61,7 +172,7 @@ The [WineHQ upstream][winehq] is mirrored on GitHub. This investigation reads Wi
 
 **Error-code conversion — suitable for selective reuse.** `RtlNtStatusToDosErrorNoTeb` normalizes a status, handles special cases and searches a generated mapping table. It also emits a diagnostic for an unmapped status. Its neighbor `RtlNtStatusToDosError` first writes `LastStatusValue` in the TEB. The narrower helper could compile as native code with fixed-width Windows types, constants, diagnostic handling and the generated table, independently of a loader or server. Keep its unknown-status behavior and regenerate the mapping with the matching inputs on every refresh. Costs to investigate are table lookup, cache footprint and optional diagnostic emission. ABI v1 needs no such conversion. [Conversion functions][w-map] · [Generated table][w-map-table] · [Generator and inputs][w-generator]
 
-**Process identity and modules.** Windows defines a process ID unique while that process is alive. Wine's query reads the TEB's `ClientId.UniqueProcess`. Its initial thread setup receives IDs from the server and installs them in the TEB. A query needs no IPC after that. Forge could maintain a guest process identity natively once a caller needs it and its visibility scope is defined. Equating multiple guest instances to the host PID would collapse distinct identities. **Better provided through a native implementation initially.** [Windows process IDs][win-pid] · [KernelBase query][w-process] · [Server-assigned IDs][w-server-init] · [TEB setup][w-thread-init]
+**Process identity and modules.** Windows defines a process ID unique while that process is alive. Wine's query reads the TEB's `ClientId.UniqueProcess`. Its initial thread setup receives IDs from the server and installs them in the TEB. A query needs no IPC after that. Forge's logical process identity is its live instance. A future Windows process-ID query needs a guest-visible ID whose uniqueness covers the live guest processes visible to that caller. Equating multiple guest instances to the host PID would collapse distinct identities. **Better provided through a native implementation initially.** [Windows process IDs][win-pid] · [KernelBase query][w-process] · [Server-assigned IDs][w-server-init] · [TEB setup][w-thread-init]
 
 `GetModuleHandleW(NULL)` returns the executable module through the PEB image-base field. The named path builds a Unicode name and calls `LdrGetDllHandleEx`, which takes the loader lock, searches loaded-module records and handles module references according to flags. A module handle must refer to the correct loaded guest image. A future Forge-owned module registry would have to reproduce name matching, aliasing and lifetime semantics. A Mach-O build of the wrapper alone cannot supply this registry. Named lookup **requires deeper Wine infrastructure** as written. Lock contention, path lookup and UTF-16 conversion are relevant costs. [Windows module lookup][win-module] · [KernelBase lookup][w-kb-loader] · [NTDLL lookup][w-loader]
 
