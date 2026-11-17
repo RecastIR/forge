@@ -133,12 +133,18 @@ jobs:
           pattern: tested-macos-arm64-*
           merge-multiple: true
           path: ${{ runner.temp }}/tested
-      - name: Extract and verify the tested Forge executables
+      - name: Extract and verify the tested Forge executables and contract helpers
         env:
           DEV_SHA256: ${{ needs.macos-dev.outputs.release_forge }}
           SANITIZE_SHA256: ${{ needs.macos-sanitize.outputs.debug_forge }}
         run: |
-          for preset in dev sanitize; do tar -xzf "$RUNNER_TEMP/tested/tested-$preset.tgz"; done
+          for preset in dev sanitize; do
+            tar -xzf "$RUNNER_TEMP/tested/tested-$preset.tgz"
+            for executable in forge tests/recovery_contract tests/lift_contract; do
+              artifact="build/$preset/$executable"
+              test -f "$artifact" && test -x "$artifact" || { echo "Missing or non-executable tested artifact: $artifact" >&2; exit 1; }
+            done
+          done
           echo "$DEV_SHA256  build/dev/forge" | shasum -a 256 -c -
           echo "$SANITIZE_SHA256  build/sanitize/forge" | shasum -a 256 -c -
       - uses: actions/download-artifact@v4
