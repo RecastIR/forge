@@ -360,11 +360,25 @@ int main() { printf("%lld %lld\\n", first, forge_lifted(0, 0)); }
             struct.pack_into("<Q", data, layout.u32(header+20), 0x8877665544332211)
             struct.pack_into("<I", data, layout.opt+56, rva+0x1000)
 
+            # This empty section has no bytes to place, even when its RVA plus the
+            # selected load base exceeds UINT64_MAX.
+            count = len(layout.sections)
+            extra = layout.section_table + count * 40
+            self.assertLessEqual(extra + 40, layout.u32(layout.opt + 60))
+            struct.pack_into("<8sII24x", data, extra, b".empty", 0, rva+0x1000)
+            struct.pack_into("<H", data, layout.pe+6, count+1)
+
         image = self.edit("highest", highest)
-        for exe in self.rebased("load32", MASK-rva-7, image):
+        base = MASK-rva-7
+        for exe in self.rebased("load32", base, image):
             self.expect(exe, MASK-3, 0, 0x88776655)
             self.trap(exe, [(MASK-2, 0)])
             self.trap(exe, [(0, 0)])
+
+        proc = subprocess.run(self.rebased_command("load32", base+1, image),
+                              capture_output=True, timeout=10)
+        self.assertEqual((proc.returncode, proc.stdout), (1, b""))
+        self.assertIn(b"selected guest load base overflows section .pool", proc.stderr)
 
     def test_large_writable_virtual_extent(self):
         start = 0x100000

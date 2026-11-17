@@ -25,14 +25,16 @@ typedef uint32_t forge_rt_status;
 #define FORGE_RT_RESOURCE_EXHAUSTED UINT32_C(4)
 #define FORGE_RT_INTERNAL_ERROR UINT32_C(5)
 
-/* All output parameters are written only on success. Null pointers are invalid arguments.
- * A successful create transfers ownership to the caller. Pass the ABI version expected by the
- * calling code. Each instance owns its guest thread contexts. */
+/* Output pointers refer to host storage and are written only on success. Null pointers are
+ * invalid arguments. Pass the ABI version expected by the calling code. A successful create
+ * transfers ownership of the instance to the caller. The live instance identifies one logical
+ * guest process and owns its guest thread records. */
 forge_rt_status forge_rt_create(uint32_t expectedVersion,
                                 forge_rt_instance **outInstance) FORGE_RT_NOEXCEPT;
 
-/* The caller must finish all calls on the instance before destroying it. Destroy also releases
- * every remaining guest thread. The instance pointer expires on successful destruction. */
+/* Before destruction the caller must stop new uses and wait for all runtime calls and lifted
+ * invocations using the instance to finish. Destroy releases all remaining guest thread records.
+ * The instance pointer expires on successful destruction. */
 forge_rt_status forge_rt_destroy(forge_rt_instance *instance) FORGE_RT_NOEXCEPT;
 
 /* Thread operations on a live instance may be called concurrently. A token identifies one guest

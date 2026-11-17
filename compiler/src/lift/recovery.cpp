@@ -2,6 +2,7 @@
 
 #include "analysis/analysis.h"
 #include "lift/asm_info.h"
+#include "lift/guest_address.h"
 #include "lift/jump_table.h"
 #include "lift/leaf_recovery.h"
 
@@ -486,8 +487,8 @@ namespace forge::x86 {
             }
 
             for (const auto &section : module.sections) {
-                const uint64_t endRva = uint64_t(section.rva) + section.virtualSize;
-                if (section.virtualSize && endRva - 1 > UINT64_MAX - guestBase) {
+                if (section.virtualSize &&
+                    !GuestRange::fromOffset({guestBase}, section.rva, section.virtualSize)) {
                     throw atRva(FailureCode::ImageMemory, entry.rva,
                                 "selected guest load base overflows section " + section.name);
                 }

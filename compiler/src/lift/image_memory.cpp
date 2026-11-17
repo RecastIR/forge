@@ -1,5 +1,6 @@
 #include "lift/image_memory.h"
 #include "lift/address_fact.h"
+#include "lift/guest_address.h"
 
 #include "lift/memory.h"
 #include "lift/recovery.h"
@@ -205,12 +206,18 @@ namespace forge::x86 {
 
     ImageMemory::ImageMemory(const ParsedImage &image, uint64_t guestLoadBase)
         : source(image), loadBase(guestLoadBase) {
-        overlapsStack =
-            llvm::any_of(image.module().sections, [guestLoadBase](const Section &section) {
-                const uint64_t start = guestLoadBase + section.rva;
-                return section.virtualSize && start < GuestMemory::base + GuestMemory::capacity &&
-                       start + (section.virtualSize - 1) >= GuestMemory::base;
-            });
+        constexpr auto stack =
+            GuestRange::fromOffset({GuestMemory::base}, 0, GuestMemory::capacity).value();
+        overlapsStack = llvm::any_of(image.module().sections, [&](const Section &section) {
+            if (section.virtualSize == 0) {
+                return false;
+            }
+
+            // validateGuestBase checked the extent of every nonempty section.
+            const auto range =
+                GuestRange::fromOffset({guestLoadBase}, section.rva, section.virtualSize).value();
+            return range.overlaps(stack);
+        });
     }
 
     const ImageInitialization &ImageMemory::contents() {
