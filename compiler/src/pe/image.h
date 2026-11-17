@@ -166,7 +166,7 @@ namespace forge {
         bool dll;
         bool relocationsStripped;
         uint64_t imageBase;
-        uint32_t entryPoint;
+        uint32_t entryPoint, sizeOfImage;
         std::vector<Section> sections;
         std::vector<Import> imports;
         std::vector<Export> exports;

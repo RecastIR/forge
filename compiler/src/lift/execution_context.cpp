@@ -103,6 +103,52 @@ namespace forge::x86 {
             ir.CreateCall(&adapter, state);
             ir.CreateRet(ir.CreateLoad(word, state));
         }
+
+        Value *enterCheckedInvocation(IRBuilder<> &ir, Function &adapter, GuestMemory &memory,
+                                      const ContextView &context, Value *image) {
+            auto *word = ir.getInt64Ty();
+            auto *pointer = ir.getPtrTy();
+            Value *stack = ConstantPointerNull::get(pointer);
+
+            if (context.bytes) {
+                // forge_rt_stack borrows these two arrays until the outer adapter leaves.
+                auto *type = StructType::get(word, word, pointer, pointer, word);
+                stack = ir.CreateAlloca(type, nullptr, "stack.mapping");
+                ir.CreateStore(ir.getInt64(GuestMemory::base), ir.CreateStructGEP(type, stack, 0));
+                ir.CreateStore(ir.getInt64(GuestMemory::capacity),
+                               ir.CreateStructGEP(type, stack, 1));
+                ir.CreateStore(context.bytes, ir.CreateStructGEP(type, stack, 2));
+                ir.CreateStore(context.validity, ir.CreateStructGEP(type, stack, 3));
+                ir.CreateStore(ir.getInt64(GuestMemory::entryRsp),
+                               ir.CreateStructGEP(type, stack, 4));
+            }
+
+            auto *handle = ir.CreateAlloca(word, nullptr, "active.invocation");
+            auto enter = adapter.getParent()->getOrInsertFunction(
+                "forge_rt_enter", ir.getInt32Ty(), pointer, word, pointer, pointer, pointer);
+            auto *status =
+                ir.CreateCall(enter, {adapter.getArg(0), adapter.getArg(1), image, stack, handle});
+            memory.guard(ir.CreateIsNull(status));
+            return ir.CreateLoad(word, handle);
+        }
+
+        void emitRuntimeReturn(IRBuilder<> &ir, Function &adapter, GuestMemory &memory,
+                               const ContextView &context, Value *active) {
+            if (context.marks) {
+                auto *marks = ir.CreateLoad(ir.getInt64Ty(), context.marks);
+                memory.guard(ir.CreateICmpEQ(marks, ir.getInt64(UINT64_MAX)));
+            }
+
+            if (active) {
+                auto leave = adapter.getParent()->getOrInsertFunction(
+                    "forge_rt_leave", ir.getInt32Ty(), ir.getPtrTy(), ir.getInt64Ty(),
+                    ir.getInt64Ty());
+                auto *status = ir.CreateCall(leave, {adapter.getArg(0), adapter.getArg(1), active});
+                memory.guard(ir.CreateIsNull(status));
+            }
+
+            ir.CreateRet(ir.CreateLoad(ir.getInt64Ty(), context.registers));
+        }
     } // namespace
 
     SavedRegisters captureNonvolatiles(IRBuilder<> &ir, const ContextView &context,
@@ -133,7 +179,7 @@ namespace forge::x86 {
 
     Function *emitEntryAdapter(Function &body, uint32_t rva, EntryMode mode,
                                const ContextLayout &layout, const ImagePlan &image,
-                               RegisterSet modified) {
+                               RegisterSet modified, bool checkedMemory) {
         auto &module = *body.getParent();
         IRBuilder<> ir(module.getContext());
         Function *adapter;
@@ -161,10 +207,17 @@ namespace forge::x86 {
 
         initializeRegisters(ir, context, state, *adapter);
         GuestMemory memory(ir);
-        auto *resolver = image.emitResolver(module, ir);
+        const auto emitted = image.emit(module, ir, checkedMemory);
 
         if (context.bytes) {
             memory.initialize(context.bytes, context.validity);
+        }
+
+        Value *active = nullptr;
+
+        if (emitted.descriptorAccessor) {
+            auto *imageDescriptor = ir.CreateCall(emitted.descriptorAccessor);
+            active = enterCheckedInvocation(ir, *adapter, memory, context, imageDescriptor);
         }
 
         const bool typed = mode == EntryMode::WindowsX64I64Pair;
@@ -184,13 +237,8 @@ namespace forge::x86 {
         checkNonvolatiles(ir, memory, context, saved);
 
         if (layout.runtime) {
-            if (context.marks) {
-                auto *marks = ir.CreateLoad(ir.getInt64Ty(), context.marks);
-                memory.guard(ir.CreateICmpEQ(marks, ir.getInt64(UINT64_MAX)));
-            }
-
-            ir.CreateRet(ir.CreateLoad(ir.getInt64Ty(), context.registers));
-            return resolver;
+            emitRuntimeReturn(ir, *adapter, memory, context, active);
+            return emitted.resolver;
         }
 
         for (unsigned i = 0; i < callerSlots; ++i) {
@@ -209,6 +257,6 @@ namespace forge::x86 {
             emitNativeWrapper(*adapter);
         }
 
-        return resolver;
+        return emitted.resolver;
     }
 } // namespace forge::x86

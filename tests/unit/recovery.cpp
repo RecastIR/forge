@@ -1,7 +1,7 @@
 #include "lift/recovery.h"
 #include "analysis/analysis.h"
+#include "forge/guest_range.h"
 #include "lift/group_analysis.h"
-#include "lift/guest_address.h"
 #include "lift/memory.h"
 #include "lift/operands.h"
 

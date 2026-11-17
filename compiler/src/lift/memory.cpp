@@ -1,5 +1,7 @@
 #include "lift/memory.h"
 
+#include "forge/runtime.h"
+
 #include "llvm/IR/Intrinsics.h"
 
 namespace forge::x86 {
@@ -10,13 +12,14 @@ namespace forge::x86 {
         constexpr uint64_t returnMarker = 0x4652474552455401ULL;
         // Incoming nonvolatile identities occupy 1..64. A nested return slot
         // may be inspected by guest code but must never be overwritten.
-        constexpr uint8_t returnMark = 0xfe;
+        constexpr uint8_t returnMark = FORGE_RT_MARK_RETURN;
+        static_assert(FORGE_RT_MARK_CONCRETE == UINT8_MAX);
         constexpr uint64_t returnMarks = 0x0101010101010101ULL * returnMark;
     } // namespace
 
     void GuestMemory::initialize(Value *stackBytes, Value *stackValidity) {
         bind(stackBytes, stackValidity, nullptr);
-        ir.CreateMemSet(validity, ir.getInt8(0), capacity, Align(1));
+        ir.CreateMemSet(validity, ir.getInt8(FORGE_RT_MARK_UNINITIALIZED), capacity, Align(1));
         installReturn(ir.getInt64(entryRsp - base), returnMarker);
     }
 

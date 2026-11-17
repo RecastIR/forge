@@ -21,6 +21,8 @@ namespace forge {
         // Guest VAs default to the PE's preferred base. Native storage has its own address.
         std::optional<uint64_t> guestLoadBase = std::nullopt;
         bool runtime = false;
+        // Publish the selected image and live stack to the runtime at the typed entry.
+        bool checkedMemory = false;
     };
 
     // The module is independent of the image after generation. The caller's context

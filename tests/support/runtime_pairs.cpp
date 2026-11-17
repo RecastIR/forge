@@ -9,6 +9,7 @@
 #include <memory>
 #include <stdexcept>
 #include <string_view>
+#include <utility>
 #include <vector>
 
 // Match the generated entry symbol in the native C ABI.
@@ -96,6 +97,38 @@ namespace {
                     samples.back());
         return 0;
     }
+
+    int benchmarkFirstEntry() {
+        constexpr unsigned count = 1024;
+        std::array<double, 9> samples{};
+        for (auto &sample : samples) {
+            std::vector<std::pair<Instance, forge_rt_thread_token>> guests;
+            guests.reserve(count);
+            for (unsigned i = 0; i < count; ++i) {
+                auto instance = createInstance();
+                auto thread = createThread(instance);
+                guests.emplace_back(std::move(instance), thread);
+            }
+
+            uint64_t checksum = 0;
+            const auto start = std::chrono::steady_clock::now();
+            for (const auto &[instance, thread] : guests) {
+                checksum +=
+                    static_cast<uint64_t>(forge_lifted_with_runtime(instance.get(), thread, 7, 0));
+            }
+
+            const auto elapsed = std::chrono::steady_clock::now() - start;
+            if (checksum != UINT64_C(7) * count) {
+                return 1;
+            }
+            sample = std::chrono::duration<double, std::nano>(elapsed).count() / count;
+        }
+
+        std::ranges::sort(samples);
+        std::printf("%.2f ns/first entry (median), range %.2f..%.2f\n", samples[4], samples.front(),
+                    samples.back());
+        return 0;
+    }
 } // namespace
 
 int main(int argc, char **argv) try {
@@ -103,6 +136,9 @@ int main(int argc, char **argv) try {
     const auto thread = createThread(runtime);
     if (argc == 2 && std::string_view(argv[1]) == "--benchmark") {
         return benchmark(runtime.get(), thread);
+    }
+    if (argc == 2 && std::string_view(argv[1]) == "--benchmark-first-entry") {
+        return benchmarkFirstEntry();
     }
 
     if (argc == 4 && std::string_view(argv[1]) == "--probe") {

@@ -1,26 +1,17 @@
-#include "forge/runtime.h"
+#include "instance.h"
 
+#include <algorithm>
 #include <atomic>
 #include <limits>
-#include <mutex>
-#include <new>
-#include <stdexcept>
-#include <unordered_map>
 
-struct forge_rt_instance {
-    std::mutex mutex;
-    std::unordered_map<forge_rt_thread_token, uint32_t> lastErrors;
-};
-
-namespace {
-    // Only token issuance is shared between instances. A destroyed token is never reused, even
-    // when the host allocator reuses an instance's address.
-    std::atomic<forge_rt_thread_token> lastIssuedToken{0};
-
-    forge_rt_thread_token allocateThreadToken() noexcept {
+namespace forge::runtime {
+    uint64_t issueToken() noexcept {
+        // A thread, invocation, or occurrence identity is never recycled, including when
+        // the host later reuses an instance or backing address.
+        static std::atomic<uint64_t> lastIssuedToken{0};
         auto previous = lastIssuedToken.load(std::memory_order_relaxed);
 
-        while (previous != std::numeric_limits<forge_rt_thread_token>::max()) {
+        while (previous != std::numeric_limits<uint64_t>::max()) {
             const auto next = previous + 1;
 
             if (lastIssuedToken.compare_exchange_weak(previous, next, std::memory_order_relaxed)) {
@@ -31,24 +22,10 @@ namespace {
         return 0;
     }
 
-    template <typename Operation>
-    forge_rt_status withThreadTable(forge_rt_instance *instance, Operation operation) noexcept {
-        if (instance == nullptr) {
-            return FORGE_RT_INVALID_ARGUMENT;
-        }
+    thread_local forge_rt_invocation_token executingInvocation = 0;
+} // namespace forge::runtime
 
-        try {
-            const std::lock_guard lock(instance->mutex);
-            return operation(instance->lastErrors);
-        } catch (const std::bad_alloc &) {
-            return FORGE_RT_RESOURCE_EXHAUSTED;
-        } catch (const std::length_error &) {
-            return FORGE_RT_RESOURCE_EXHAUSTED;
-        } catch (...) {
-            return FORGE_RT_INTERNAL_ERROR;
-        }
-    }
-} // namespace
+using namespace forge::runtime;
 
 extern "C" forge_rt_status forge_rt_create(uint32_t expectedVersion,
                                            forge_rt_instance **outInstance) noexcept {
@@ -75,6 +52,17 @@ extern "C" forge_rt_status forge_rt_destroy(forge_rt_instance *instance) noexcep
         return FORGE_RT_INVALID_ARGUMENT;
     }
 
+    // Host quiescence prevents new uses between the check and release.
+    const auto status = withInstance(instance, [](const auto &process) {
+        const bool active = std::ranges::any_of(
+            process.threads, [](const auto &entry) { return entry.second.invocation != 0; });
+        return active ? FORGE_RT_BUSY : FORGE_RT_OK;
+    });
+
+    if (status != FORGE_RT_OK) {
+        return status;
+    }
+
     delete instance;
     return FORGE_RT_OK;
 }
@@ -85,14 +73,14 @@ extern "C" forge_rt_status forge_rt_thread_create(forge_rt_instance *instance,
         return FORGE_RT_INVALID_ARGUMENT;
     }
 
-    return withThreadTable(instance, [outThread](auto &lastErrors) {
-        const auto thread = allocateThreadToken();
+    return withInstance(instance, [outThread](auto &process) {
+        const auto thread = issueToken();
 
         if (thread == 0) {
             return FORGE_RT_RESOURCE_EXHAUSTED;
         }
 
-        lastErrors.emplace(thread, 0);
+        process.threads.try_emplace(thread);
         *outThread = thread;
         return FORGE_RT_OK;
     });
@@ -100,22 +88,33 @@ extern "C" forge_rt_status forge_rt_thread_create(forge_rt_instance *instance,
 
 extern "C" forge_rt_status forge_rt_thread_destroy(forge_rt_instance *instance,
                                                    forge_rt_thread_token thread) noexcept {
-    return withThreadTable(instance, [thread](auto &lastErrors) {
-        return lastErrors.erase(thread) == 0 ? FORGE_RT_INVALID_THREAD : FORGE_RT_OK;
+    return withInstance(instance, [thread](auto &process) {
+        const auto entry = process.threads.find(thread);
+
+        if (entry == process.threads.end()) {
+            return FORGE_RT_INVALID_THREAD;
+        }
+
+        if (entry->second.invocation != 0) {
+            return FORGE_RT_BUSY;
+        }
+
+        process.threads.erase(entry);
+        return FORGE_RT_OK;
     });
 }
 
 extern "C" forge_rt_status forge_rt_set_last_error(forge_rt_instance *instance,
                                                    forge_rt_thread_token thread,
                                                    uint32_t value) noexcept {
-    return withThreadTable(instance, [thread, value](auto &lastErrors) {
-        const auto entry = lastErrors.find(thread);
+    return withInstance(instance, [thread, value](auto &process) {
+        const auto entry = process.threads.find(thread);
 
-        if (entry == lastErrors.end()) {
+        if (entry == process.threads.end()) {
             return FORGE_RT_INVALID_THREAD;
         }
 
-        entry->second = value;
+        entry->second.lastError = value;
         return FORGE_RT_OK;
     });
 }
@@ -127,14 +126,14 @@ extern "C" forge_rt_status forge_rt_get_last_error(forge_rt_instance *instance,
         return FORGE_RT_INVALID_ARGUMENT;
     }
 
-    return withThreadTable(instance, [thread, outValue](const auto &lastErrors) {
-        const auto entry = lastErrors.find(thread);
+    return withInstance(instance, [thread, outValue](const auto &process) {
+        const auto entry = process.threads.find(thread);
 
-        if (entry == lastErrors.end()) {
+        if (entry == process.threads.end()) {
             return FORGE_RT_INVALID_THREAD;
         }
 
-        *outValue = entry->second;
+        *outValue = entry->second.lastError;
         return FORGE_RT_OK;
     });
 }

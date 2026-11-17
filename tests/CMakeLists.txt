@@ -1,6 +1,15 @@
 if(BUILD_TESTING OR CMAKE_EXPORT_COMPILE_COMMANDS)
   find_package(Threads REQUIRED)
-  add_executable(runtime_contract unit/runtime.cpp)
+  # Build a second copy of the checked operation with a latch immediately before transfer.
+  # The renamed symbols leave every ordinary contract test linked to the production archive.
+  add_library(runtime_transfer_probe OBJECT EXCLUDE_FROM_ALL ../runtime/src/guest_memory.cpp)
+  target_link_libraries(runtime_transfer_probe PRIVATE forge_runtime)
+  target_compile_definitions(runtime_transfer_probe PRIVATE FORGE_RUNTIME_TEST_TRANSFER
+    forge_rt_read_guest=forgeTestReadGuest forge_rt_write_guest=forgeTestWriteGuest
+    forge_rt_validate_guest=forgeTestValidateGuest)
+  configure_forge_cxx(runtime_transfer_probe)
+  add_executable(runtime_contract unit/runtime.cpp unit/runtime_memory.cpp
+    $<TARGET_OBJECTS:runtime_transfer_probe>)
   target_link_libraries(runtime_contract PRIVATE forge_runtime Threads::Threads)
   configure_forge_cxx(runtime_contract)
 
@@ -20,6 +29,7 @@ if(BUILD_TESTING OR CMAKE_EXPORT_COMPILE_COMMANDS)
 
   if(BUILD_TESTING)
     add_test(NAME runtime_contract COMMAND runtime_contract)
+    set_tests_properties(runtime_contract PROPERTIES TIMEOUT 60)
     add_test(NAME runtime_c_smoke COMMAND runtime_c_smoke)
   else()
     set_target_properties(runtime_contract runtime_c_smoke PROPERTIES EXCLUDE_FROM_ALL ON)
@@ -93,6 +103,10 @@ if(BUILD_TESTING OR CMAKE_EXPORT_COMPILE_COMMANDS)
   configure_forge_cxx(register_state_harness)
   if(APPLE)
     set_target_properties(register_state_harness PROPERTIES OSX_ARCHITECTURES arm64)
+    add_library(checked_memory_harness OBJECT support/checked_memory.cpp)
+    target_link_libraries(checked_memory_harness PRIVATE forge_runtime)
+    configure_forge_cxx(checked_memory_harness)
+    set_target_properties(checked_memory_harness PROPERTIES OSX_ARCHITECTURES arm64)
   endif()
 endif()
 if(APPLE)
@@ -189,6 +203,7 @@ if(BUILD_TESTING OR CMAKE_EXPORT_COMPILE_COMMANDS)
   add_executable(asm_info_lifetime unit/asm_info.cpp)
   add_executable(input_lifetime unit/input.cpp)
   add_executable(recovery_contract unit/recovery.cpp)
+  target_include_directories(recovery_contract PRIVATE ../runtime/include)
   add_executable(lift_contract unit/lift.cpp)
   target_link_libraries(lift_contract PRIVATE LLVMAnalysis LLVMAsmParser)
   add_executable(lift_command unit/lift_command.cpp
@@ -305,4 +320,9 @@ if(APPLE)
   endforeach()
   set_tests_properties(guest_stack guest_image guest_jump guest_indirect PROPERTIES ENVIRONMENT "FORGE_TEST_LIFT_CONTRACT=$<TARGET_FILE:lift_contract>")
   set_property(TEST guest_jump guest_indirect APPEND PROPERTY ENVIRONMENT "LLVM_DIR=${LLVM_DIR}")
+  add_test(NAME guest_checked_memory COMMAND "${Python3_EXECUTABLE}" -B
+    "${CMAKE_CURRENT_SOURCE_DIR}/integration/test_checked_memory.py" "$<TARGET_FILE:forge>"
+    "${fixtures}/checked-memory.exe" "${opt}" "${llc}" "$<TARGET_OBJECTS:checked_memory_harness>"
+    "$<TARGET_FILE:forge_runtime>" ${harness_linker})
+  set_tests_properties(guest_checked_memory PROPERTIES FIXTURES_REQUIRED pe_images SKIP_RETURN_CODE 77 TIMEOUT 90)
 endif()
