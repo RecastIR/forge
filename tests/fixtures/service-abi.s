@@ -83,7 +83,8 @@ begin write_nested
     call write_stack_pointer
 finish
 
-begin write_stack_pointer, 104
+.macro stack_record name, saved=0
+begin \name, 104
     # Stack argument five holds a pointer relative to this nested activation.
     leaq 56(%rsp), %rax
     movq %rax, 32(%rsp)
@@ -91,13 +92,38 @@ begin write_stack_pointer, 104
     movq $0, 64(%rsp)
     movq $0, 72(%rsp)
     movq $0, 80(%rsp)
+    .if \saved
+    leaq message(%rip), %rax
+    movq %rax, \saved(%rsp)
+    .endif
     leaq 48(%rsp), %r9
     leaq input_bytes(%rip), %rdx
     movabsq $0xfedcba9876543210, %rcx
     movl $3, %r8d
     call *__imp_WriteProbe(%rip)
+    .if \saved
+    movq \saved(%rsp), %rcx
+    call *__imp_lstrlenA(%rip)
+    .else
     movl 56(%rsp), %eax
+    .endif
 finish 104
+.endm
+stack_record write_stack_pointer
+stack_record disjoint_record, 88
+stack_record overlapping_record, 87
+
+begin nested_disjoint
+    call disjoint_record
+finish
+
+begin nested_overlap
+    call overlapping_record
+finish
+
+begin nested_optional
+    call write_call
+finish
 
 begin unmapped
     leaq -8192(%rsp), %rdx
@@ -206,6 +232,65 @@ begin readonly_output
     movq $0, 32(%rsp)
     call *__imp_WriteProbe(%rip)
 finish
+
+.macro boundary_call name, input, output, read_tail=0
+begin \name
+    .if \read_tail
+    movzwl boundary_tail(%rip), %eax
+    .endif
+    leaq \input(%rip), %rdx
+    leaq \output(%rip), %r9
+    movabsq $0xfedcba9876543210, %rcx
+    movabsq $0x1234567800000003, %r8
+    movq $0, 32(%rsp)
+    call *__imp_WriteProbe(%rip)
+finish
+.endm
+boundary_call counted_boundary, boundary_head, image_count
+boundary_call counted_with_load, boundary_head, image_count, 1
+boundary_call fixed_boundary, input_bytes, output_head
+boundary_call counted_gap, gap_head, image_count
+
+begin zero_count
+    movq %rcx, %rdx
+    movabsq $0xfedcba9876543210, %rcx
+    xorl %r8d, %r8d
+    xorl %r9d, %r9d
+    movq $0, 32(%rsp)
+    call *__imp_WriteProbe(%rip)
+finish
+
+begin stack_count
+    # Only four bytes of the fifth argument are initialized on the short path.
+    movl $1, 32(%rsp)
+    testq %rcx, %rcx
+    jz .Ltail
+    movabsq $0xfedcba9800000003, %rax
+    movq %rax, 32(%rsp)
+.Ltail:
+    leaq boundary_head(%rip), %rcx
+    xorl %edx, %edx
+    xorl %r8d, %r8d
+    xorl %r9d, %r9d
+    call *__imp_TailByte(%rip)
+finish
+
+.section .abia,"dr"
+    .space 4095
+boundary_head:
+    .ascii "A"
+.section .abib,"dr"
+boundary_tail:
+    .ascii "BC"
+.section .abic,"dw"
+    .space 4095
+output_head:
+    .byte 0
+.section .abid,"dw"
+    .space 3
+.section .abie,"dr"
+gap_head:
+    .ascii "A"
 
 .data
 image_count:

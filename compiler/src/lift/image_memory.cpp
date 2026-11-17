@@ -307,7 +307,8 @@ namespace forge::x86 {
         }
     }
 
-    void ImageMemory::serviceArgument(const Step &step, uint64_t va, win64::Argument arg) {
+    void ImageMemory::serviceArgument(const Step &step, uint64_t va, bool write,
+                                      std::optional<uint64_t> size) {
         if (va == 0 || va - GuestMemory::base < GuestMemory::capacity) {
             return;
         }
@@ -322,7 +323,7 @@ namespace forge::x86 {
                     " requires a readable non-executable PE data section or the guest stack");
         }
 
-        if (arg.writes() && !section->writableData()) {
+        if (write && !section->writableData()) {
             step.reject(FailureCode::ImageMemory,
                         "output argument at guest VA " + hex(va) +
                             " requires writable PE data or the guest stack");
@@ -334,13 +335,33 @@ namespace forge::x86 {
                             " overlaps a protected loader-written field or relocation");
         }
 
-        // Dynamic lengths and mutable terminators can reach anywhere in this section.
-        // Leave holes and the section boundary to the checked transfer at execution.
         const uint64_t end = uint64_t(section->rva) + section->virtualSize;
-        const RvaRange range = arg.extent == win64::Extent::Fixed
-                                   ? RvaRange{rva, std::min(end, rva + arg.size)}
-                                   : RvaRange{section->rva, end};
-        select(step, *section, range);
+        if (!size) {
+            // Unbounded counts and mutable terminators can reach anywhere in this section.
+            select(step, *section, {section->rva, end});
+            return;
+        }
+
+        if (*size <= end - rva) {
+            select(step, *section, {rva, rva + *size});
+            return;
+        }
+
+        // Each backing belongs to one PE section. A bounded transfer may touch several,
+        // including a valid subrange after a gap. finish() preserves protected holes.
+        for (const auto &part : source.module().sections) {
+            if (!part.writableData() &&
+                (write || !part.immutable() || part.permissions[2] == 'x')) {
+                continue;
+            }
+
+            const uint64_t first = std::max<uint64_t>(rva, part.rva);
+            const uint64_t limit = uint64_t(part.rva) + part.virtualSize;
+            const uint64_t skip = first - rva;
+            if (first < limit && skip < *size) {
+                select(step, part, {first, first + std::min(limit - first, *size - skip)});
+            }
+        }
     }
 
     void ImageMemory::fixedAccess(const Step &step, uint64_t va, unsigned width, bool write) {

@@ -53,6 +53,7 @@ namespace forge::x86 {
         AddressFact computed() const;
         AddressFact project(const AddressFact &entryRsps) const;
         AddressFact join(const AddressFact &other) const;
+        AddressFact joinInFrame(const AddressFact &other, const AddressFact &entryRsps) const;
         AddressFact plus(const AddressFact &other) const;
         AddressFact times(uint64_t factor) const;
         AddressFact masked(uint64_t mask) const;
@@ -71,7 +72,7 @@ namespace forge::x86 {
         AddressFact addOffsets(const AddressFact &offsets) const;
     };
 
-    // Slots describe eight-byte saves. Distinct CFG paths can save at overlapping
+    // Slots describe DWORD and QWORD saves. Distinct CFG paths can save at overlapping
     // offsets, so a store must invalidate every overlap. Keys use either absolute
     // stack VAs or signed offsets from the current activation's entry RSP. A
     // write using one coordinate system may alias saves in the other.
@@ -79,18 +80,29 @@ namespace forge::x86 {
       public:
         // The returned fact is borrowed until this snapshot is modified.
         const AddressFact *find(uint64_t va) const;
-        bool merge(const StackSpills &other);
-        AddressFact read(const AddressFact &address) const;
+        bool merge(const StackSpills &other, const AddressFact &entryRsps = {});
+        AddressFact read(const AddressFact &address, const AddressFact &entryRsps = {},
+                         unsigned width = 64) const;
         void write(const AddressFact &address, unsigned width, const AddressFact &value);
 
       private:
-        using Slots = std::map<int64_t, AddressFact>;
+        struct Saved {
+            AddressFact value;
+            unsigned width = 64;
+
+            bool operator==(const Saved &) const = default;
+            AddressFact read(unsigned bits, const AddressFact &entryRsps) const;
+            Saved join(const Saved &other, const AddressFact &entryRsps) const;
+        };
+
+        using Slots = std::map<int64_t, Saved>;
         using Snapshot = std::shared_ptr<Slots>;
         Snapshot absolute, relative;
 
-        static const AddressFact *lookup(const Snapshot &slots, int64_t key);
+        static const Saved *lookup(const Snapshot &slots, int64_t key);
         static Slots &writable(Snapshot &slots);
-        static bool mergeSlots(Snapshot &slots, const Snapshot &incoming);
-        static void replace(Snapshot &slots, int64_t key, unsigned bytes, const AddressFact &saved);
+        static bool mergeSlots(Snapshot &slots, const Snapshot &incoming,
+                               const AddressFact &entryRsps);
+        static void replace(Snapshot &slots, int64_t key, unsigned bytes, const Saved &saved);
     };
 } // namespace forge::x86

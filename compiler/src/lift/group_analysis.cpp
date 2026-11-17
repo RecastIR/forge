@@ -1,11 +1,11 @@
 #include "lift/group_analysis.h"
-#include "forge/guest_range.h"
 #include "lift/address_fact.h"
 #include "lift/operands.h"
 #include "lift/recovery.h"
 #include "lift/service_location.h"
 
 #include <algorithm>
+#include <bit>
 #include <set>
 #include <utility>
 
@@ -15,11 +15,11 @@ namespace forge::x86 {
             std::array<AddressFact, registerCount> registers;
             StackSpills spills;
 
-            bool merge(const AddressFacts &other) {
-                bool changed = spills.merge(other.spills);
+            bool merge(const AddressFacts &other, const AddressFact &entryRsps) {
+                bool changed = spills.merge(other.spills, entryRsps);
 
                 for (size_t i = 0; i < registers.size(); ++i) {
-                    auto joined = registers[i].join(other.registers[i]);
+                    auto joined = registers[i].joinInFrame(other.registers[i], entryRsps);
                     changed |= joined != registers[i];
                     registers[i] = std::move(joined);
                 }
@@ -284,7 +284,7 @@ namespace forge::x86 {
                 return AddressFact::continuation(rva);
             }
 
-            return facts.spills.read(address);
+            return facts.spills.read(address, entryAddresses);
         }
 
         void FunctionAnalyzer::traceStackInstruction(const Step &s, StackOp op,
@@ -307,7 +307,7 @@ namespace forge::x86 {
                                  ? facts.registers[operands.reg(s, operand, 64).index]
                                  : AddressFact(static_cast<uint64_t>(operand.getImm()));
                 rsp = rsp.plus(AddressFact(uint64_t(0) - 8));
-                facts.spills.write(rsp, 64, saved.project(entryAddresses));
+                facts.spills.write(rsp, 64, saved);
             }
         }
 
@@ -340,43 +340,50 @@ namespace forge::x86 {
             } else if (memoryDestination(op.form) && op.op != Op::Cmp) {
                 AddressFact stored;
 
-                if (op.form == Form::Store && op.width == 64) {
+                if (op.form == Form::Store && (op.width == 64 || op.width == 32)) {
                     const auto &src = s.inst.getOperand(s.inst.getNumOperands() - 1);
-                    stored = src.isReg() ? facts.registers[operands.reg(s, src, 64).index]
+                    stored = src.isReg() ? facts.registers[operands.reg(s, src, op.width).index]
                                          : AddressFact(static_cast<uint64_t>(src.getImm()));
+                    if (op.width == 32) {
+                        stored = stored.project(entryAddresses).masked(UINT32_MAX);
+                    }
                 }
 
-                facts.spills.write(address, op.width, stored.project(entryAddresses));
+                facts.spills.write(address, op.width, stored);
             }
         }
 
         void invalidateServiceOutput(StackSpills &spills, const AddressFact &address,
-                                     const AddressFact &entryRsps, win64::Argument arg) {
+                                     const AddressFact &entryRsps, std::optional<uint64_t> size) {
+            if (const auto offset = address.frameOffset();
+                offset && size && *size <= GuestMemory::capacity) {
+                const auto key = std::bit_cast<int64_t>(*offset);
+                constexpr int64_t capacity = GuestMemory::capacity;
+                if (key > -capacity && key < capacity) {
+                    spills.write(address, static_cast<unsigned>(*size) * 8, {});
+                    return;
+                }
+            }
+
             const auto starts = address.project(entryRsps);
             if (!starts.known()) {
                 spills = {};
                 return;
             }
 
-            constexpr auto stack =
-                *GuestRange::fromOffset({GuestMemory::base}, 0, GuestMemory::capacity);
             bool touchesStack = false;
             for (const auto va : starts.values()) {
                 if (!va || va >= GuestMemory::base + GuestMemory::capacity) {
                     continue;
                 }
 
-                if (arg.extent != win64::Extent::Fixed) {
-                    spills = {};
-                    return;
-                }
-
-                const auto range = GuestRange::fromOffset({va}, 0, arg.size);
-                if (!range || !range->overlaps(stack)) {
+                // An adapter can write a valid subrange even when the declared
+                // extent would overflow. Compare offsets without forming an end VA.
+                if (va < GuestMemory::base && size && *size <= GuestMemory::base - va) {
                     continue;
                 }
 
-                if (!stack.contains({va}) || arg.size > GuestMemory::capacity) {
+                if (va < GuestMemory::base || !size || *size > GuestMemory::capacity) {
                     spills = {};
                     return;
                 }
@@ -387,7 +394,7 @@ namespace forge::x86 {
             if (touchesStack) {
                 // Keep frame-relative coordinates when available, so disjoint saves in the
                 // same activation survive. A concrete write also invalidates symbolic aliases.
-                spills.write(address, arg.size * 8, {});
+                spills.write(address, static_cast<unsigned>(*size) * 8, {});
             }
         }
 
@@ -396,19 +403,42 @@ namespace forge::x86 {
             const auto &binding = site.external()->binding;
             // All argument values precede any writes by the service, including aliased stack slots.
             const auto incoming = facts.spills;
+            auto argumentValue = [&](size_t position) {
+                const ServiceLocation location{position};
+                const auto width = win64::width(binding.arguments[position].type);
+                if (location.inRegister()) {
+                    const auto &value = facts.registers[location.registerIndex()];
+                    return width == 32 ? value.project(entryAddresses).masked(UINT32_MAX) : value;
+                }
+
+                const auto slot =
+                    facts.registers[rspIndex].plus(AddressFact(location.callerOffset()));
+                return incoming.read(slot, entryAddresses, width);
+            };
+
             for (size_t i = 0; i < binding.arguments.size(); ++i) {
                 const auto arg = binding.arguments[i];
-                if (arg.access == win64::Access::None) {
+                if (arg.access == win64::Access::None || (!collect && !arg.writes())) {
                     continue;
                 }
 
-                const ServiceLocation location{i};
-                const auto address = location.inRegister()
-                                         ? facts.registers[location.registerIndex()]
-                                         : incoming.read(facts.registers[rspIndex].plus(
-                                               AddressFact(location.callerOffset())));
+                std::optional<uint64_t> size;
+                if (arg.extent == win64::Extent::Fixed) {
+                    size = arg.size;
+                } else if (arg.extent == win64::Extent::CountArgument) {
+                    const auto count = argumentValue(arg.size).project(entryAddresses);
+                    if (count.known()) {
+                        size = std::ranges::max(count.values());
+                    }
+                }
+
+                if (size == 0) {
+                    continue;
+                }
+
+                const auto address = argumentValue(i);
                 if (arg.writes()) {
-                    invalidateServiceOutput(facts.spills, address, entryAddresses, arg);
+                    invalidateServiceOutput(facts.spills, address, entryAddresses, size);
                 }
 
                 if (!collect || address.stackDerived()) {
@@ -425,7 +455,7 @@ namespace forge::x86 {
                 }
 
                 for (const auto va : address.values()) {
-                    imageMemory.serviceArgument(step, va, arg);
+                    imageMemory.serviceArgument(step, va, arg.writes(), size);
                 }
             }
         }
@@ -510,7 +540,8 @@ namespace forge::x86 {
                     result = dest->width == 64 ? value : value.masked(dest->mask());
                 } else if (s.opcode == "CMOV64rr") {
                     const auto src = operands.reg(s, s.inst.getOperand(2), 64);
-                    result = result.join(facts.registers[src.index]).computed();
+                    result = result.joinInFrame(facts.registers[src.index], entryAddresses)
+                                 .project(entryAddresses);
                 } else {
                     result = {};
                 }
@@ -567,7 +598,7 @@ namespace forge::x86 {
                 for (auto successor : block.successors) {
                     auto [it, inserted] = blockAddresses.try_emplace(successor, cursor.facts);
 
-                    if (inserted || it->second.merge(cursor.facts)) {
+                    if (inserted || it->second.merge(cursor.facts, entryAddresses)) {
                         suspendedBlocks.erase(successor);
                         pending.insert(successor);
                     }

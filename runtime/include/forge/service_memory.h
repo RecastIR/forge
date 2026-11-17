@@ -27,9 +27,6 @@ namespace forge::win64 {
 
     template <Argument arg> class GuestBuffer {
       public:
-        GuestBuffer(ServiceInvocation &call, GuestAddress start, uint64_t size)
-            : call(call), start(start), size(size) {}
-
         bool absent() const { return arg.optional && !start.value; }
 
         forge_rt_status validate() const
@@ -87,6 +84,12 @@ namespace forge::win64 {
         }
 
       private:
+        template <const ServiceBinding &binding, size_t position, class... Args>
+        friend auto guestBuffer(ServiceInvocation &, const std::tuple<Args...> &);
+
+        GuestBuffer(ServiceInvocation &call, GuestAddress start, uint64_t size)
+            : call(call), start(start), size(size) {}
+
         ServiceInvocation &call;
         GuestAddress start;
         uint64_t size;
@@ -99,13 +102,16 @@ namespace forge::win64 {
                 return FORGE_RT_INVALID_ARGUMENT;
             }
 
-            if (!start.value) {
-                call.fault = {0, access, FORGE_RT_FAULT_UNMAPPED};
-                return FORGE_RT_GUEST_FAULT;
-            }
+            if (!start.value || offset > UINT64_MAX - start.value) {
+                // A zero-byte validation checks the captured token without touching guest memory.
+                const auto live = forge_rt_validate_guest(call.instance, call.thread, call.token,
+                                                          start.value, 0, access, &call.fault);
+                if (live != FORGE_RT_OK) {
+                    return live;
+                }
 
-            if (offset > UINT64_MAX - start.value) {
-                call.fault = {start.value, access, FORGE_RT_FAULT_OVERFLOW};
+                call.fault = {start.value, access,
+                              start.value ? FORGE_RT_FAULT_OVERFLOW : FORGE_RT_FAULT_UNMAPPED};
                 return FORGE_RT_GUEST_FAULT;
             }
 

@@ -147,6 +147,11 @@ namespace {
     void testBoundedServiceBuffer() {
         using namespace forge::win64;
         constexpr Argument buffer{Value::Address, Access::InOut, Extent::CountArgument, 1};
+        constexpr Argument output{Value::Address, Access::Output, Extent::Fixed, 4};
+        static_assert(!std::is_constructible_v<GuestBuffer<output>, ServiceInvocation &,
+                                               forge::GuestAddress, uint64_t>);
+        static constexpr ServiceBinding fixed{"test.dll",         "Fixed",     "testFixed",
+                                              parameters<output>, Value::Void, LastError::Preserve};
         static constexpr ServiceBinding binding{
             "test.dll",  "Buffer",           "testBuffer", parameters<buffer, Argument{Value::U32}>,
             Value::Void, LastError::Preserve};
@@ -171,13 +176,27 @@ namespace {
         REQUIRE(view.writeScalar(1, UINT32_MAX) == FORGE_RT_INVALID_ARGUMENT);
         REQUIRE(view.readScalar(UINT64_MAX, value) == FORGE_RT_INVALID_ARGUMENT);
         REQUIRE(value == 0x04030201 && bytes[4] == 0 && bytes[1] == 2);
+        const auto fixedView = guestBuffer<fixed, 0>(call, std::tie(row.start));
+        REQUIRE(fixedView.writeScalar(4, UINT32_MAX) == FORGE_RT_INVALID_ARGUMENT);
+        REQUIRE(bytes[4] == 0 && bytes[7] == 0);
         expectFault(fault, {17, 18, 19});
 
         const auto crossing = guestBuffer<binding, 0>(call, std::tuple{row.start + 6, 4u});
         REQUIRE(crossing.write(0, data) == FORGE_RT_GUEST_FAULT);
         expectFault(fault, {row.start + 8, FORGE_RT_WRITE, FORGE_RT_FAULT_UNMAPPED});
         REQUIRE(bytes[6] == 0 && bytes[7] == 0);
+        const auto nullView = guestBuffer<fixed, 0>(call, std::tuple{uint64_t{0}});
+        const auto endView = guestBuffer<fixed, 0>(call, std::tuple{UINT64_MAX});
+        REQUIRE(nullView.validate() == FORGE_RT_GUEST_FAULT);
+        expectFault(fault, {0, FORGE_RT_WRITE, FORGE_RT_FAULT_UNMAPPED});
+        REQUIRE(endView.writeScalar(1, uint8_t{1}) == FORGE_RT_GUEST_FAULT);
+        expectFault(fault, {UINT64_MAX, FORGE_RT_WRITE, FORGE_RT_FAULT_OVERFLOW});
         REQUIRE(active.leave() == FORGE_RT_OK);
+        fault = {17, 18, 19};
+        REQUIRE(nullView.validate() == FORGE_RT_INVALID_INVOCATION);
+        expectFault(fault, {17, 18, 19});
+        REQUIRE(endView.writeScalar(1, uint8_t{1}) == FORGE_RT_INVALID_INVOCATION);
+        expectFault(fault, {17, 18, 19});
         REQUIRE(view.readScalar(0, value) == FORGE_RT_INVALID_INVOCATION);
     }
 

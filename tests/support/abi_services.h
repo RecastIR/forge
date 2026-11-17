@@ -19,6 +19,9 @@ namespace forge::test {
                              forge_rt_memory_fault *) noexcept;
     forge_rt_status abiEcho(forge_rt_instance *, forge_rt_thread_token, uint64_t,
                             uint64_t *) noexcept;
+    forge_rt_status abiTailByte(forge_rt_instance *, forge_rt_thread_token, uint64_t, uint64_t,
+                                uint64_t, uint64_t, uint32_t, uint32_t *,
+                                forge_rt_memory_fault *) noexcept;
     }
 
     inline constexpr Argument u32{Value::U32}, i32{Value::I32}, u64{Value::U64}, i64{Value::I64},
@@ -28,6 +31,9 @@ namespace forge::test {
     inline constexpr Argument overlapped{Value::Address, Access::InOut, Extent::Fixed, 32, true};
     inline constexpr auto writeProbe = bind<Value::I32, handle, input, u32, countOut, overlapped>(
         "forgeabi.dll", "WriteProbe", LastError::Preserve, FORGE_SERVICE_ADAPTER(abiWrite));
+    inline constexpr Argument stackCounted{Value::Address, Access::Input, Extent::CountArgument, 4};
+    inline constexpr auto tailByte = bind<Value::U32, stackCounted, word, word, word, u32>(
+        "forgeabi.dll", "TailByte", LastError::Preserve, FORGE_SERVICE_ADAPTER(abiTailByte));
 
     constexpr bool rejected(Argument arg, Convention convention = Convention::WindowsX64) {
         const ServiceBinding binding{"test.dll",          "Test",    "test", {&arg, 1}, Value::Void,
@@ -61,5 +67,6 @@ namespace forge::test {
         bind<Value::Handle, handle>("forgeabi.dll", "Handle", LastError::Preserve,
                                     FORGE_SERVICE_ADAPTER(abiEcho)),
         writeProbe,
+        tailByte,
         {"forgeabi.dll", "Bad", "abiBad", {}, Value::Vector, LastError::Preserve}};
 } // namespace forge::test

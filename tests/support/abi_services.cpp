@@ -37,6 +37,29 @@ namespace forge::test {
         return FORGE_RT_OK;
     }
 
+    extern "C" forge_rt_status abiTailByte(forge_rt_instance *instance,
+                                           forge_rt_thread_token thread, uint64_t start, uint64_t b,
+                                           uint64_t c, uint64_t d, uint32_t count, uint32_t *out,
+                                           forge_rt_memory_fault *fault) noexcept {
+        ServiceInvocation call{instance, thread, *fault};
+        auto status = call.resolveCurrent();
+        if (status != FORGE_RT_OK) {
+            return status;
+        }
+
+        const auto buffer = guestBuffer<tailByte, 0>(call, std::tie(start, b, c, d, count));
+        uint8_t byte = 0;
+        if (count) {
+            status = buffer.readScalar(count - 1, byte);
+        }
+
+        if (status == FORGE_RT_OK) {
+            *out = byte;
+        }
+
+        return status;
+    }
+
     extern "C" forge_rt_status abiWrite(forge_rt_instance *instance, forge_rt_thread_token thread,
                                         uint64_t file, uint64_t buffer, uint32_t count,
                                         uint64_t written, uint64_t state, int32_t *out,

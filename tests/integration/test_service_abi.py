@@ -58,13 +58,24 @@ class ServiceAbi(unittest.TestCase):
         self.execute("write_call", [(0, 0, b"W201\n"), (1, 0, b"W410\n"), (5, 0, b"W198\n"),
                                     (2, 0, None), (3, 0, None), (6, 0, None)], True)
         self.execute("write_nested", [(0, 0, b"W205\n")], True)
+        for entry in ("disjoint_record", "nested_disjoint"):
+            self.execute(entry, [(0, 0, b"W5\n")], True)
+        self.execute("nested_optional", [(0, 0, b"W201\n"), (1, 0, b"W410\n")], True)
         self.execute("disjoint_spill", [(0, 0, b"W5\n")], True)
         self.execute("image_output", [(0, 0, b"W3\n")], True)
         self.execute("unmapped", [(1, 0, None)], True)
 
+    def test_section_boundaries(self):
+        for entry in ("counted_boundary", "counted_with_load", "fixed_boundary"):
+            self.execute(entry, [(0, 0, b"W198\n")], True)
+        self.execute("counted_gap", [(0, 0, None)], True)
+        self.execute("stack_count", [(0, 0, b"65\n"), (1, 0, b"67\n")], True)
+        self.execute("zero_count", [(1, 0, b"W0\n"), (0, 0, None)], True)
+
     def test_rejections(self):
         for entry, checked, reason in (("bad_sig", False, b"vector values"),
                                        ("stale_spill", True, b"proven image/stack provenance"),
+                                       ("nested_overlap", True, b"proven image/stack provenance"),
                                        ("readonly_output", True, b"requires writable PE data"),
                                        ("void_result", False, b"undefined RAX"),
                                        ("write_call", False, b"--checked-memory")):
