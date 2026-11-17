@@ -189,6 +189,27 @@ leaf shift_widths
     xorq %rdx, %rax
     finish
 
+# The low dword holds the result. Bits 32, 40, 48 and 56 hold CF, PF, ZF and SF.
+# A masked-zero count preserves CMP's flags. SHR leaves them defined for every
+# other dword count, so all four can be observed without reading AF or OF.
+leaf shift_dword
+    cmpq %rdx, %rcx
+    shrl %cl, %edx
+    setc %al
+    setp %ah
+    setz %r8b
+    sets %r9b
+    movzwl %ax, %eax
+    movzbl %r8b, %r8d
+    movzbl %r9b, %r9d
+    shll $16, %r8d
+    shll $24, %r9d
+    orl %r8d, %eax
+    orl %r9d, %eax
+    shlq $32, %rax
+    orq %rdx, %rax
+    finish
+
 leaf shift_one
     shlb %dl
     seto %al

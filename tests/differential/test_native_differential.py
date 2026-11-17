@@ -180,6 +180,47 @@ class NativeDifferentialTests(unittest.TestCase):
                             self.assertEqual((raised.exception.outcome, raised.exception.status),
                                              ("signaled", -signal.SIGTRAP))
 
+    def test_undefined_af_at_shared_entry_and_return(self):
+        for config in diff.CONFIGS:
+            with self.subTest(config=config), tempfile.TemporaryDirectory(dir=self.tmp) as tmp:
+                work = Path(tmp)
+                source = diff.BINARIES / config / "call_flags.exe"
+                image = work / source.name
+                original = source.read_bytes()
+                image.write_bytes(original)
+                root = diff.analyze(self.forge, image, "call_flags", work)
+                leaf = diff.resolve_export(diff.read_json(work / "inspect.json"),
+                                           diff.read_json(work / "analysis.json"), "shared_flags")
+                self.assertEqual(original[leaf.file_offset], 0x90)
+
+                # Only the TEST path returns through SETZ AL followed by MOVZX EAX,AL.
+                body = original[root.file_offset:root.file_offset + root.end - root.start]
+                consumer = bytes.fromhex("0f 94 c0 0f b6 c0")
+                self.assertEqual(body.count(consumer), 1)
+                continuation = body.index(consumer)
+                self.assertGreaterEqual(continuation, 5)
+                self.assertEqual(body[continuation - 5], 0xe8)
+
+                ir = work / diff.CANONICAL_IR
+                ir.parent.mkdir()
+                for owner, position, block_rva, replacement in (
+                        (leaf, 0, leaf.start, b"\x9f"),  # NOP -> LAHF at shared entry
+                        (root, continuation, root.start + continuation - 5, b"\x9f\x90\x90")):
+                    with self.subTest(instruction_rva=hex(owner.start + position)):
+                        offset = owner.file_offset + position
+                        data = bytearray(original)
+                        data[offset:offset + len(replacement)] = replacement
+                        image.write_bytes(data)
+                        with self.assertRaisesRegex(diff.Unsupported, r"lifting/LIFT_UNDEFINED_FLAG: .*flags: AF\b"):
+                            diff.lift(self.forge, image, {"signature": "i64(i64,i64)"}, root, ir)
+                        context = diff.read_json(work / "lifting.log")["context"]
+                        self.assertEqual(context.get("function_rva", context["entry_rva"]), hex(owner.start))
+                        self.assertEqual((context["block_rva"], context["instruction_rva"]),
+                                         (hex(block_rva), hex(owner.start + position)))
+                        self.assertEqual((context["file_offset"], context["opcode"], context["bytes"]),
+                                         (offset, "LAHF", "9f"))
+                        self.assertFalse(ir.exists())
+
     def test_inferred_diagnostic_call_sites(self):
         with tempfile.TemporaryDirectory(dir=self.tmp) as tmp:
             work = Path(tmp)

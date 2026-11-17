@@ -1,7 +1,7 @@
 {
   "schema_version": 1,
   "id": "functions/flags",
-  "description": "Pass carry into and out of a direct call, preserve RBX, and read the next guest instruction address from the nested return slot.",
+  "description": "Pass carry through a call, preserve RBX, read the saved continuation and observe flags returned through nested calls to one helper from CMP and TEST contexts.",
   "source": "fixtures/arithmetic/integer_driver.c",
   "binary": "call_flags.exe",
   "args": [
@@ -16,11 +16,21 @@
     "-3",
     "-5",
     "0",
-    "0"
+    "0",
+    "100",
+    "0",
+    "100",
+    "255",
+    "100",
+    "16",
+    "101",
+    "128",
+    "101",
+    "1"
   ],
   "expected": {
     "exit_code": 0,
-    "stdout": "4\n1\n3\n20\n-15\n0\n",
+    "stdout": "4\n1\n3\n20\n-15\n0\n151\n130\n70\n0\n1\n",
     "stderr": ""
   }
 }

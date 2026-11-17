@@ -162,6 +162,16 @@
       "target": "macos-arm64"
     },
     {
+      "id": "arithmetic/shift_dword",
+      "config": "debug",
+      "target": "macos-arm64"
+    },
+    {
+      "id": "arithmetic/shift_dword",
+      "config": "release",
+      "target": "macos-arm64"
+    },
+    {
       "id": "arithmetic/shift_one",
       "config": "debug",
       "target": "macos-arm64"

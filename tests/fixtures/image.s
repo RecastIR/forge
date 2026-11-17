@@ -28,8 +28,14 @@ probe maybe_read
     .seh_endproc
 
 probe write32
+    # UINT64_MAX selects a readback so successive calls can observe earlier stores.
+    cmpq $-1, %rdx
+    je 1f
     movl %edx, (%rcx)
     movl %edx, %eax
+    ret
+1:
+    movl (%rcx), %eax
     ret
     .seh_endproc
 

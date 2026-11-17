@@ -198,6 +198,30 @@ namespace {
         }
     }
 
+    void checkWideCarry(IntegerSemantics &semantics, IRBuilder<> &ir) {
+        struct Case {
+            Op op;
+            unsigned flags;
+            uint64_t input, result;
+            StringLiteral label;
+        };
+
+        constexpr uint64_t signBit = uint64_t{1} << 63U;
+        constexpr Case cases[] = {
+            {Op::Adc, 0x894, signBit - 1, signBit, "64-bit ADC signed overflow"},
+            {Op::Sbb, 0x814, signBit, signBit - 1, "64-bit SBB signed overflow"},
+            {Op::Adc, 0x55, UINT64_MAX, 0, "64-bit ADC carry out"},
+            {Op::Sbb, 0x95, 0, UINT64_MAX, "64-bit SBB borrow out"}};
+
+        for (const auto &sample : cases) {
+            semantics.flags = {};
+            semantics.flags[CF] = ir.getTrue();
+            expect(semantics.arithmetic(sample.op, ir.getInt64(sample.input), ir.getInt64(0)),
+                   sample.result, sample.label);
+            expectFlags(semantics.flags, sample.flags, 0x8d5, sample.label);
+        }
+    }
+
     void check() {
         LLVMContext context;
         Module module("integer-tests", context);
@@ -205,6 +229,7 @@ namespace {
                                     Function::InternalLinkage, "test", module);
         IRBuilder<> ir(BasicBlock::Create(context, "entry", fn));
         IntegerSemantics semantics(ir);
+        checkWideCarry(semantics, ir);
         constexpr unsigned all = 0x8d5;
         constexpr unsigned status = 0xc4;
 

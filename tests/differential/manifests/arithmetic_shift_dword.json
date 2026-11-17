@@ -1,0 +1,26 @@
+{
+  "schema_version": 1,
+  "id": "arithmetic/shift_dword",
+  "description": "Observe a 32-bit SHR by CL and distinguish CMP's preserved flags from SHR's carry, parity, zero and sign.",
+  "source": "fixtures/arithmetic/integer_driver.c",
+  "binary": "shift_dword.exe",
+  "args": [
+    "0", "-2147483647",
+    "0", "0",
+    "1", "-2147483647",
+    "1", "2",
+    "31", "1073741825",
+    "31", "-2147483647",
+    "32", "32",
+    "32", "4294967297",
+    "33", "-2147483647",
+    "63", "1073741825",
+    "64", "-2147483647",
+    "1", "6"
+  ],
+  "expected": {
+    "exit_code": 0,
+    "stdout": "1105954078721\n282574488338432\n1104880336896\n1\n282578783305728\n1\n282574488338464\n72057598332895233\n1104880336896\n282578783305728\n1105954078721\n1099511627779\n",
+    "stderr": ""
+  }
+}

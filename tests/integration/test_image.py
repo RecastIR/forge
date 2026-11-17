@@ -111,6 +111,29 @@ class ImageTests(ImageScaling, GuestExecution):
             self.expect(exe, 2, 0, 0x5463)
             self.trap(exe, [(3, 0)])
 
+    def test_scalar_access_across_adjacent_sections(self):
+        boundary = self.va(".mutable")
+
+        def abut(data, layout, headers):
+            literal = headers[".literal"]
+            mutable = headers[".mutable"]
+            # Extend the zero-filled tail to the next section and give both the same permissions.
+            struct.pack_into("<I", data, literal + 8, boundary - self.va(".literal"))
+            struct.pack_into("<I", data, literal + 36, layout.u32(mutable + 36))
+
+        image = self.edit("adjacent-sections", abut)
+        for exe in self.variants("load32", image=image):
+            self.expect(exe, boundary - 4, 0, 0)
+            self.expect(exe, boundary, 0, 0x1234)
+            self.trap(exe, [(boundary - 2, 0)])
+
+        for exe in self.variants("write32", image=image):
+            left, right = 0x11223344, 0x55667788
+            self.sequence(exe, [(boundary - 4, left), (boundary, right),
+                                (boundary - 4, MASK), (boundary, MASK)],
+                          [left, right, left, right])
+            self.trap(exe, [(boundary - 2, 73)])
+
     def test_unused_read_still_faults_on_its_path(self):
         for exe in self.variants("maybe_read"):
             self.expect(exe, 0, MASK, 0)

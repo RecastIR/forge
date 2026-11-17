@@ -112,6 +112,13 @@
     "harness": "decimal_pairs"
   },
   {
+    "fixture_id": "arithmetic/shift_dword",
+    "scope": "function",
+    "export": "shift_dword",
+    "signature": "i64(i64,i64)",
+    "harness": "decimal_pairs"
+  },
+  {
     "fixture_id": "arithmetic/shift_one",
     "scope": "function",
     "export": "shift_one",

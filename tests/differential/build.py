@@ -69,6 +69,7 @@ INTEGER_WITNESSES = {
     "conditional_moves": ("cmovl ax,dx", "cmovb eax,edx", "cmovp rax,rdx"),
     "shift_flags": ("cmp rdx,rcx", "sar dl,cl", "setp al", "setb ah"),
     "shift_widths": ("shr ax,cl", "shl dh,cl", "shr rdx,cl"),
+    "shift_dword": ("cmp rcx,rdx", "shr edx,cl", "setb al", "setp ah", "sete r8b", "sets r9b"),
     "shift_one": ("shl dl,1", "seto al", "setb ah", "shr cx,1"),
     "joined_flags": ("cmp rcx,rdx", "jbe ", "sub rdx,rcx", "jmp ", "add rdx,rcx", "lahf"),
     "stack_roundtrip": ("mov QWORD PTR [rsp+0x8],rcx", "mov rax,QWORD PTR [rsp+0x8]"),
@@ -264,7 +265,8 @@ def reachable_leaf(instructions, *, call_entries=(), register_calls=False):
     following = dict(zip(addresses, addresses[1:]))
     return reachable_instructions(addresses[0], lambda a: (instructions[a], following.get(a)),
                                   instructions.__contains__, call_entries.__contains__,
-                                  FALLTHROUGH | ({"adc"} if call_entries else set()), register_calls=register_calls)
+                                  FALLTHROUGH | ({"adc", "lahf", "sete"} if call_entries else set()),
+                                  register_calls=register_calls)
 
 
 def natural_loops(graph):
@@ -687,7 +689,9 @@ CALL_GRAPHS = {
                     "leaf_add": [], "leaf_abs": [], "leaf_count": [], "leaf_store": []},
     "call_indirect": {"call_indirect": ["indirect_preserve"] * 3 + ["indirect_leaf", "indirect_recurse"],
                       "indirect_preserve": [], "indirect_leaf": [], "indirect_recurse": ["indirect_recurse"]},
-    "call_flags": {"call_flags": ["add_carry", "inspect_return"], "add_carry": [], "inspect_return": []},
+    "call_flags": {"call_flags": ["add_carry", "inspect_return", "compare_caller", "test_caller"],
+                   "add_carry": [], "inspect_return": [], "compare_caller": ["shared_flags"],
+                   "test_caller": ["shared_flags"], "shared_flags": []},
 }
 
 
