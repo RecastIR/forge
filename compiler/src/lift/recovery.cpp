@@ -1,8 +1,8 @@
 #include "lift/recovery.h"
 
 #include "analysis/analysis.h"
+#include "forge/guest_range.h"
 #include "lift/asm_info.h"
-#include "lift/guest_address.h"
 #include "lift/jump_table.h"
 #include "lift/leaf_recovery.h"
 

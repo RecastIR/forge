@@ -14,6 +14,7 @@ static void require(bool passed, const char *message) {
 
 _Static_assert(sizeof(forge_rt_status) == 4, "ABI status width");
 _Static_assert(sizeof(forge_rt_thread_token) == 8, "ABI thread token width");
+_Static_assert(sizeof(forge_rt_invocation_token) == 8, "ABI invocation token width");
 
 static void checkArguments(forge_rt_instance *runtime) {
     forge_rt_instance *output = runtime;
@@ -69,6 +70,36 @@ static void checkIsolation(forge_rt_instance *first, forge_rt_instance *second) 
     REQUIRE(forge_rt_get_last_error(first, replacement, &value) == FORGE_RT_OK && value == 0);
 }
 
+static void checkMemory(forge_rt_instance *runtime) {
+    const uint8_t byte = 19;
+    const forge_rt_image_region row = {0x1000, 1, &byte, FORGE_RT_READ, NULL};
+    const forge_rt_image image = {0x1000, 1, &row, 1};
+    forge_rt_thread_token thread = 0;
+    forge_rt_invocation_token invocation = 0, current = 17;
+    REQUIRE(forge_rt_thread_create(runtime, &thread) == FORGE_RT_OK);
+    REQUIRE(forge_rt_current_invocation(runtime, thread, &current) == FORGE_RT_INVALID_INVOCATION);
+    REQUIRE(current == 17);
+    REQUIRE(forge_rt_enter(runtime, thread, &image, NULL, &invocation) == FORGE_RT_OK);
+    REQUIRE(invocation != 0);
+    REQUIRE(forge_rt_current_invocation(runtime, thread, &current) == FORGE_RT_OK);
+    REQUIRE(current == invocation);
+    REQUIRE(forge_rt_enter(runtime, thread, &image, NULL, &current) == FORGE_RT_BUSY);
+    REQUIRE(current == invocation);
+
+    uint8_t result = 9;
+    forge_rt_memory_fault fault = {7, 8, 9};
+    REQUIRE(forge_rt_read_guest(runtime, thread, current, row.start, 1, &result, 1, &fault) ==
+            FORGE_RT_OK);
+    REQUIRE(result == byte && fault.address == 7 && fault.access == 8 && fault.reason == 9);
+    REQUIRE(forge_rt_write_guest(runtime, thread, current, row.start, 1, &result, 1, &fault) ==
+            FORGE_RT_GUEST_FAULT);
+    REQUIRE(fault.address == row.start && fault.access == FORGE_RT_WRITE &&
+            fault.reason == FORGE_RT_FAULT_PERMISSION);
+    REQUIRE(forge_rt_leave(runtime, thread, invocation) == FORGE_RT_OK);
+    REQUIRE(forge_rt_detach_image(runtime, &image) == FORGE_RT_OK);
+    REQUIRE(forge_rt_thread_destroy(runtime, thread) == FORGE_RT_OK);
+}
+
 int main(void) {
     forge_rt_instance *first = NULL, *second = NULL;
     REQUIRE(forge_rt_create(FORGE_RT_ABI_VERSION, &first) == FORGE_RT_OK);
@@ -82,6 +113,7 @@ int main(void) {
     REQUIRE(forge_rt_create(FORGE_RT_ABI_VERSION, &second) == FORGE_RT_OK);
     checkArguments(first);
     checkIsolation(first, second);
+    checkMemory(first);
     REQUIRE(forge_rt_set_last_error(first, retired, 42) == FORGE_RT_INVALID_THREAD);
 
     // The first runtime owns two remaining threads and the second owns one.

@@ -743,6 +743,7 @@ namespace forge {
                 object->getCharacteristics() & COFF::IMAGE_FILE_RELOCS_STRIPPED;
             module.imageBase = object->getImageBase();
             module.entryPoint = header.AddressOfEntryPoint;
+            module.sizeOfImage = header.SizeOfImage;
             size_t index = 0;
 
             for (const auto &section : object->sections()) {

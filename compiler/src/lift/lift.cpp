@@ -653,7 +653,7 @@ namespace forge {
                                             request.runtime);
             auto *resolver =
                 x86::emitEntryAdapter(*bodies.at(root), root, request.mode, layout, analysis.image,
-                                      analysis.functions.at(root).modified);
+                                      analysis.functions.at(root).modified, request.checkedMemory);
             const x86::InstructionOperands operands{group.registers(), analysis.image.guestBase()};
 
             for (const auto &[rva, function] : group.functions()) {
@@ -687,6 +687,8 @@ namespace forge {
         auto stage = FailureCode::LiftingInternal;
 
         try {
+            request.runtime = request.runtime || request.checkedMemory;
+
             if (!request.runtime) {
                 for (const auto &[address, function] : group.functions()) {
                     for (const auto &[rva, site] : function.calls) {
@@ -698,7 +700,8 @@ namespace forge {
                     }
                 }
             } else if (request.mode != EntryMode::WindowsX64I64Pair) {
-                throw InspectionError("--runtime requires --signature 'i64(i64,i64)'",
+                const std::string option = request.checkedMemory ? "--checked-memory" : "--runtime";
+                throw InspectionError(option + " requires --signature 'i64(i64,i64)'",
                                       FailureCode::UnsupportedControlFlow);
             }
 

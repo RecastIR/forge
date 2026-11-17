@@ -88,8 +88,9 @@ class Imports(Case):
         self.assertIn(b"--runtime", raw.stderr)
         self.assertEqual(ctx["opcode"], "CALL64m")
         self.assertIn("iat_slot_rva", ctx)
-        self.invoke("lift", FIXTURES / "last-error.exe", "--rva", hex(self.root), "--output",
-                    self.output, "--runtime", code=2)
+        for flag in ("--runtime", "--checked-memory"):
+            self.invoke("lift", FIXTURES / "last-error.exe", "--rva", hex(self.root), "--output",
+                        self.output, flag, code=2)
         ir = self.invoke_lift(self.patch("89c8 c3"))
         self.assertNotIn("@forge_rt_", ir)
         self.assertIn("@forge_lifted_with_runtime(", ir)

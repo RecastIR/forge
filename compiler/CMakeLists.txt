@@ -7,7 +7,7 @@ add_library(forge_core STATIC
   src/lift/integer.cpp src/lift/memory.cpp src/lift/image_memory.cpp src/lift/lift.cpp
   src/output/publication.cpp)
 configure_forge_output(forge_core ARCHIVE_OUTPUT_DIRECTORY LIBRARY_OUTPUT_PATH)
-target_include_directories(forge_core PUBLIC src)
+target_include_directories(forge_core PUBLIC src PRIVATE "${PROJECT_SOURCE_DIR}/runtime/include")
 target_include_directories(forge_core SYSTEM PUBLIC ${LLVM_INCLUDE_DIRS})
 target_link_libraries(forge_core PUBLIC LLVMDebugInfoDWARF LLVMObject LLVMTransformUtils LLVMCore
   LLVMX86Disassembler LLVMX86Desc LLVMX86Info)

@@ -19,13 +19,18 @@ namespace forge::x86 {
     struct Continuation;
     struct ResolvedCallSite;
 
+    struct EmittedImage {
+        llvm::Function *resolver;
+        llvm::Function *descriptorAccessor;
+    };
+
     // Each selected backing owns its relocated initialized bytes and accessible intervals.
     // A plan can emit into independent modules after releasing the recovered steps and image.
     class ImagePlan {
       public:
         uint64_t guestBase() const { return loadBase; }
 
-        llvm::Function *emitResolver(llvm::Module &module, llvm::IRBuilderBase &entryIR) const;
+        EmittedImage emit(llvm::Module &module, llvm::IRBuilderBase &entryIR, bool checked) const;
 
       private:
         friend class ImageMemory;
@@ -33,11 +38,13 @@ namespace forge::x86 {
         struct Backing {
             RvaRange range;
             bool writable;
+            bool executable;
             ImageBytes bytes;
             llvm::SmallVector<RvaRange, 1> intervals;
         };
 
         uint64_t loadBase = 0;
+        uint32_t sizeOfImage = 0;
         std::vector<Backing> backings;
     };
 

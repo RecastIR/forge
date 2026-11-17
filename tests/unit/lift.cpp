@@ -318,7 +318,8 @@ namespace {
         auto *entry =
             llvm::Function::Create(type, llvm::Function::InternalLinkage, "entry", detached);
         ir.SetInsertPoint(llvm::BasicBlock::Create(context, "entry", entry));
-        check(imagePlan.emitResolver(detached, ir) != nullptr, "detached image lost its resolver");
+        check(imagePlan.emit(detached, ir, false).resolver != nullptr,
+              "detached image lost its resolver");
         ir.CreateRetVoid();
         checkDirectImageBytes(detached);
     }

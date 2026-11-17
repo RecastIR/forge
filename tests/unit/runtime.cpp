@@ -5,6 +5,8 @@
 #include <latch>
 #include <thread>
 
+void testRuntimeMemory();
+
 namespace {
     bool observeRetirement(forge_rt_instance *runtime, forge_rt_thread_token thread,
                            const std::atomic<bool> &replaced) {
@@ -78,6 +80,7 @@ namespace {
 } // namespace
 
 int main() {
+    testRuntimeMemory();
     forge_rt_instance *runtime = nullptr;
 
     if (forge_rt_create(FORGE_RT_ABI_VERSION, &runtime) != FORGE_RT_OK) {

@@ -1,6 +1,8 @@
 # Forge Runtime
 
-`forge_runtime` is a native static library for macOS ARM64. A host creates a runtime instance and guest thread tokens, then uses the tokens to set and read 32-bit last-error values. Native C, C++ and generated ARM64 code share the same [public C ABI](include/forge/runtime.h). The runtime links independently of the Forge compiler, CLI and Wine.
+`forge_runtime` is a native static library for macOS ARM64. A host creates a runtime instance and guest thread tokens, then uses the tokens to set and read 32-bit last-error values. With `forge lift --checked-memory`, synchronous native services can also validate, read and write guest buffers using the active invocation. [Checked guest buffers](../docs/runtime-architecture.md#checked-guest-buffers)
+
+Native C, C++ and generated ARM64 code share the same [public C ABI](include/forge/runtime.h). The runtime links independently of the Forge compiler, CLI and Wine.
 
 ## Build and test
 

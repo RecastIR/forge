@@ -32,5 +32,5 @@ namespace forge::x86 {
     // Emits both selected-entry interfaces and the invocation-scoped initialization.
     llvm::Function *emitEntryAdapter(llvm::Function &body, uint32_t rva, EntryMode mode,
                                      const ContextLayout &layout, const ImagePlan &image,
-                                     RegisterSet modified);
+                                     RegisterSet modified, bool checkedMemory);
 } // namespace forge::x86

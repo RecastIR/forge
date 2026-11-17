@@ -61,6 +61,11 @@ namespace forge::cli {
             ->add_flag("--runtime", options.request.runtime,
                        "Emit a typed entry accepting a runtime instance and guest thread.")
             ->needs(signature);
+        command
+            ->add_flag(
+                "--checked-memory", options.request.checkedMemory,
+                "Emit a runtime entry that publishes checked guest memory (implies --runtime).")
+            ->needs(signature);
         addFormat(*command, "--diagnostics-format", options.jsonDiagnostics,
                   "Execution diagnostic format (default: text).");
         command->final_callback(
