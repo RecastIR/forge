@@ -4,14 +4,34 @@
 #include "llvm/IR/Module.h"
 #include "llvm/Transforms/Utils/ModuleUtils.h"
 
+#include <type_traits>
+
 namespace forge::x86 {
     using namespace llvm;
 
-    ContextLayout::ContextLayout(LLVMContext &context, bool origins, bool stack, bool runtime)
-        : origins(origins), stack(stack), runtime(runtime) {
+    static_assert(std::extent_v<decltype(forge_rt_execution::registers)> == registerCount);
+    static_assert(std::extent_v<decltype(forge_rt_execution::registerMarks)> == registerCount);
+    static_assert(std::extent_v<decltype(forge_rt_execution::flags)> == FlagCount);
+
+    ContextLayout::ContextLayout(LLVMContext &context, bool origins, bool stack, bool runtime,
+                                 bool process)
+        : origins(origins), stack(stack), runtime(runtime), process(process) {
         const auto registers = [&](unsigned count) {
             return ArrayType::get(Type::getInt64Ty(context), count);
         };
+
+        if (process) {
+            // Native forge_rt_execution layout. Guest registers and flags live in this
+            // process's execution record. Stack and image addresses here are host borrows.
+            auto *pointer = PointerType::getUnqual(context);
+            auto *word = Type::getInt64Ty(context);
+            type = StructType::get(pointer, word, pointer, pointer, pointer, word, word,
+                                   processResultType(context), registers(registerCount),
+                                   registers(registerCount),
+                                   ArrayType::get(Type::getInt8Ty(context), FlagCount));
+            return;
+        }
+
         auto *stackType =
             ArrayType::get(Type::getInt8Ty(context), stack ? GuestMemory::capacity : 0);
         auto *flagType = ArrayType::get(Type::getInt1Ty(context), FlagCount);
@@ -25,19 +45,32 @@ namespace forge::x86 {
         type = StructType::get(context, fields);
     }
 
-    ContextView::ContextView(IRBuilder<> &ir, const ContextLayout &layout, Value *context)
-        : registers(ir.CreateStructGEP(layout.type, context, 0, "registers")),
-          marks(layout.origins ? ir.CreateStructGEP(layout.type, context, 1, "register.marks")
-                               : nullptr),
-          flags(ir.CreateStructGEP(layout.type, context, 2, "flags")),
-          instance(layout.runtime ? ir.CreateStructGEP(layout.type, context, 5, "runtime.instance")
-                                  : nullptr),
-          thread(layout.runtime ? ir.CreateStructGEP(layout.type, context, 6, "runtime.thread")
-                                : nullptr),
-          bytes(layout.stack ? ir.CreateStructGEP(layout.type, context, 3, "stack.bytes")
-                             : nullptr),
-          validity(layout.stack ? ir.CreateStructGEP(layout.type, context, 4, "stack.valid")
-                                : nullptr) {}
+    ContextView::ContextView(IRBuilder<> &ir, const ContextLayout &layout, Value *context) {
+        const auto field = [&](unsigned index, const char *name) {
+            return ir.CreateStructGEP(layout.type, context, index, name);
+        };
+
+        if (layout.process) {
+            instance = field(0, "runtime.instance");
+            thread = field(1, "runtime.thread");
+            regions = ir.CreateLoad(ir.getPtrTy(), field(2, "region.table"));
+            bytes = ir.CreateLoad(ir.getPtrTy(), field(3, "stack.bytes"));
+            validity = ir.CreateLoad(ir.getPtrTy(), field(4, "stack.valid"));
+            result = field(7, "process.result");
+            registers = field(8, "registers");
+            marks = layout.origins ? field(9, "register.marks") : nullptr;
+            flags = field(10, "flags");
+            return;
+        }
+
+        registers = field(0, "registers");
+        marks = layout.origins ? field(1, "register.marks") : nullptr;
+        flags = field(2, "flags");
+        instance = layout.runtime ? field(5, "runtime.instance") : nullptr;
+        thread = layout.runtime ? field(6, "runtime.thread") : nullptr;
+        bytes = layout.stack ? field(3, "stack.bytes") : nullptr;
+        validity = layout.stack ? field(4, "stack.valid") : nullptr;
+    }
 
     namespace {
         Value *slot(IRBuilder<> &ir, Value *array, unsigned i) {
@@ -60,14 +93,14 @@ namespace forge::x86 {
         }
 
         void initializeRegisters(IRBuilder<> &ir, const ContextView &context, Value *state,
-                                 Function &adapter) {
+                                 ArrayRef<Value *> arguments) {
             for (unsigned i = 0; i < registerCount; ++i) {
                 Value *value = ir.getInt64(0);
 
                 if (state && i < callerSlots) {
                     value = ir.CreateAlignedLoad(ir.getInt64Ty(), slot(ir, state, i), Align(4));
-                } else if (!state && (i == 1 || i == 2)) {
-                    value = adapter.getArg(i + 1);
+                } else if (!arguments.empty() && (i == 1 || i == 2)) {
+                    value = arguments[i - 1];
                 } else if (i == rspIndex) {
                     value = ir.getInt64(GuestMemory::entryRsp);
                 } else if (context.marks && i > rspIndex) {
@@ -128,23 +161,42 @@ namespace forge::x86 {
                 "forge_rt_enter", ir.getInt32Ty(), pointer, word, pointer, pointer, pointer);
             auto *status =
                 ir.CreateCall(enter, {adapter.getArg(0), adapter.getArg(1), image, stack, handle});
-            memory.guard(ir.CreateIsNull(status));
+            memory.checks.guard(ir.CreateIsNull(status));
             return ir.CreateLoad(word, handle);
+        }
+
+        void checkOuterReturn(IRBuilder<> &ir, GuestMemory &memory, const ContextView &context,
+                              const SavedRegisters &saved, bool checkStack) {
+            if (checkStack) {
+                if (context.marks) {
+                    auto *marks = ir.CreateLoad(ir.getInt64Ty(), slot(ir, context.marks, rspIndex));
+                    memory.checks.guard(ir.CreateICmpEQ(marks, ir.getInt64(UINT64_MAX)));
+                }
+
+                memory.checkReturn(
+                    ir.CreateLoad(ir.getInt64Ty(), slot(ir, context.registers, rspIndex)));
+            }
+
+            checkNonvolatiles(ir, memory, context, saved);
+        }
+
+        void checkResultRegister(IRBuilder<> &ir, GuestMemory &memory, const ContextView &context) {
+            if (context.marks) {
+                auto *marks = ir.CreateLoad(ir.getInt64Ty(), context.marks);
+                memory.checks.guard(ir.CreateICmpEQ(marks, ir.getInt64(UINT64_MAX)));
+            }
         }
 
         void emitRuntimeReturn(IRBuilder<> &ir, Function &adapter, GuestMemory &memory,
                                const ContextView &context, Value *active) {
-            if (context.marks) {
-                auto *marks = ir.CreateLoad(ir.getInt64Ty(), context.marks);
-                memory.guard(ir.CreateICmpEQ(marks, ir.getInt64(UINT64_MAX)));
-            }
+            checkResultRegister(ir, memory, context);
 
             if (active) {
                 auto leave = adapter.getParent()->getOrInsertFunction(
                     "forge_rt_leave", ir.getInt32Ty(), ir.getPtrTy(), ir.getInt64Ty(),
                     ir.getInt64Ty());
                 auto *status = ir.CreateCall(leave, {adapter.getArg(0), adapter.getArg(1), active});
-                memory.guard(ir.CreateIsNull(status));
+                memory.checks.guard(ir.CreateIsNull(status));
             }
 
             ir.CreateRet(ir.CreateLoad(ir.getInt64Ty(), context.registers));
@@ -171,10 +223,39 @@ namespace forge::x86 {
             if (saved[i].bits) {
                 auto *bits = ir.CreateLoad(ir.getInt64Ty(), slot(ir, context.registers, i));
                 auto *marks = ir.CreateLoad(ir.getInt64Ty(), slot(ir, context.marks, i));
-                memory.guard(ir.CreateAnd(ir.CreateICmpEQ(bits, saved[i].bits),
-                                          ir.CreateICmpEQ(marks, saved[i].marks)));
+                memory.checks.guard(ir.CreateAnd(ir.CreateICmpEQ(bits, saved[i].bits),
+                                                 ir.CreateICmpEQ(marks, saved[i].marks)));
             }
         }
+    }
+
+    Function *emitProcessEntry(Function &body, const RecoveredFunctionGroup &group,
+                               const ContextLayout &layout, const ImagePlan &image,
+                               RegisterSet modified) {
+        auto &module = *body.getParent();
+        IRBuilder<> ir(module.getContext());
+        auto *type = FunctionType::get(ir.getVoidTy(), ir.getPtrTy(), false);
+        auto *entry =
+            Function::Create(type, Function::InternalLinkage, "forge_process_entry", module);
+        auto *resolver = image.emitProcess(*entry, group);
+        ir.SetInsertPoint(BasicBlock::Create(ir.getContext(), "entry", entry));
+        auto *execution = entry->getArg(0);
+        const ContextView context(ir, layout, execution);
+        GuestMemory memory(ir);
+        memory.bind(context.bytes, context.validity, resolver, context.regions);
+        memory.checks.bind(context.result);
+        auto *rcx = ir.CreateLoad(ir.getInt64Ty(),
+                                  ir.CreateStructGEP(layout.type, execution, 5, "entry.rcx"));
+        auto *rdx = ir.CreateLoad(ir.getInt64Ty(),
+                                  ir.CreateStructGEP(layout.type, execution, 6, "entry.rdx"));
+        initializeRegisters(ir, context, nullptr, {rcx, rdx});
+
+        const auto saved = captureNonvolatiles(ir, context, modified);
+        memory.checks.propagate(ir.CreateCall(&body, execution));
+        checkOuterReturn(ir, memory, context, saved, true);
+        checkResultRegister(ir, memory, context);
+        memory.checks.complete(ir.CreateLoad(ir.getInt64Ty(), context.registers));
+        return resolver;
     }
 
     Function *emitEntryAdapter(Function &body, uint32_t rva, EntryMode mode,
@@ -200,12 +281,14 @@ namespace forge::x86 {
         ir.SetInsertPoint(BasicBlock::Create(ir.getContext(), "entry", adapter));
         auto *invocation = ir.CreateAlloca(layout.type, nullptr, "invocation");
         const ContextView context(ir, layout, invocation);
+        SmallVector<Value *, 2> arguments;
         if (layout.runtime) {
+            arguments.append({adapter->getArg(2), adapter->getArg(3)});
             ir.CreateStore(adapter->getArg(0), context.instance);
             ir.CreateStore(adapter->getArg(1), context.thread);
         }
 
-        initializeRegisters(ir, context, state, *adapter);
+        initializeRegisters(ir, context, state, arguments);
         GuestMemory memory(ir);
         const auto emitted = image.emit(module, ir, checkedMemory);
 
@@ -224,17 +307,7 @@ namespace forge::x86 {
         const auto saved = captureNonvolatiles(ir, context, typed ? modified : RegisterSet{});
         ir.CreateCall(&body, invocation);
 
-        if (layout.stack || modified[rspIndex]) {
-            if (context.marks) {
-                auto *marks = ir.CreateLoad(ir.getInt64Ty(), slot(ir, context.marks, rspIndex));
-                memory.guard(ir.CreateICmpEQ(marks, ir.getInt64(UINT64_MAX)));
-            }
-
-            memory.checkReturn(
-                ir.CreateLoad(ir.getInt64Ty(), slot(ir, context.registers, rspIndex)));
-        }
-
-        checkNonvolatiles(ir, memory, context, saved);
+        checkOuterReturn(ir, memory, context, saved, layout.stack || modified[rspIndex]);
 
         if (layout.runtime) {
             emitRuntimeReturn(ir, *adapter, memory, context, active);
@@ -244,7 +317,7 @@ namespace forge::x86 {
         for (unsigned i = 0; i < callerSlots; ++i) {
             if (context.marks && (!typed || i == 0)) {
                 auto *marks = ir.CreateLoad(ir.getInt64Ty(), slot(ir, context.marks, i));
-                memory.guard(ir.CreateICmpEQ(marks, ir.getInt64(UINT64_MAX)));
+                memory.checks.guard(ir.CreateICmpEQ(marks, ir.getInt64(UINT64_MAX)));
             }
 
             auto *value = ir.CreateLoad(ir.getInt64Ty(), slot(ir, context.registers, i));

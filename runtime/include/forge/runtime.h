@@ -29,6 +29,7 @@ typedef uint32_t forge_rt_status;
 #define FORGE_RT_BUSY UINT32_C(7)
 #define FORGE_RT_MAPPING_CONFLICT UINT32_C(8)
 #define FORGE_RT_GUEST_FAULT UINT32_C(9)
+#define FORGE_RT_INVALID_STATE UINT32_C(10)
 
 #define FORGE_RT_READ UINT32_C(1)
 #define FORGE_RT_WRITE UINT32_C(2)
@@ -111,6 +112,17 @@ forge_rt_status forge_rt_set_last_error(forge_rt_instance *instance, forge_rt_th
                                         uint32_t value) FORGE_RT_NOEXCEPT;
 forge_rt_status forge_rt_get_last_error(forge_rt_instance *instance, forge_rt_thread_token thread,
                                         uint32_t *outValue) FORGE_RT_NOEXCEPT;
+
+/* Read a guest NUL-terminated byte string in the current synchronous invocation.
+ * A null guest address returns zero after validating the invocation. The initial service
+ * scans at most 1 MiB, including the terminator; exhaustion returns RESOURCE_EXHAUSTED.
+ * This temporary service limit does not restrict checked copies. outLength changes only
+ * on success; fault changes only on GUEST_FAULT (overflow reports the scan's start VA).
+ * Both host outputs must be nonnull, disjoint, and outside guest backing and metadata.
+ * The input bytes and Windows last error are unchanged on every path. */
+forge_rt_status forge_rt_lstrlen_a(forge_rt_instance *instance, forge_rt_thread_token thread,
+                                   uint64_t address, int32_t *outLength,
+                                   forge_rt_memory_fault *fault) FORGE_RT_NOEXCEPT;
 /* A generated descriptor identifies this single-group image while attached. Registration
  * is idempotent while live. Detach drains checked copies in this instance and retires the
  * occurrence on success. An executing image returns BUSY. Writable claims survive retirement.

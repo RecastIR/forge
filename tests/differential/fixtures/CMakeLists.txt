@@ -52,6 +52,12 @@ foreach(i RANGE 0 ${last})
       COMMAND "${Python3_EXECUTABLE}" -B "${suite}/last_error_shape.py" "${CMAKE_OBJDUMP}" "$<TARGET_FILE:fixture_${name}>"
       VERBATIM)
   endif()
+  if(name STREQUAL "lstrlen")
+    target_sources("fixture_${name}" PRIVATE imports/lstrlen.S)
+    add_custom_command(TARGET "fixture_${name}" POST_BUILD
+      COMMAND "${Python3_EXECUTABLE}" -B "${suite}/lstrlen_shape.py" "${CMAKE_OBJDUMP}" "$<TARGET_FILE:fixture_${name}>"
+      VERBATIM)
+  endif()
   if(name STREQUAL "call_recursive")
     target_compile_definitions("fixture_${name}" PRIVATE CALL_PAIR_DRIVER=1)
   endif()

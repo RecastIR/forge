@@ -18,6 +18,7 @@ namespace llvm {
 namespace forge::x86 {
     struct Continuation;
     struct ResolvedCallSite;
+    class RecoveredFunctionGroup;
 
     struct EmittedImage {
         llvm::Function *resolver;
@@ -31,6 +32,10 @@ namespace forge::x86 {
         uint64_t guestBase() const { return loadBase; }
 
         EmittedImage emit(llvm::Module &module, llvm::IRBuilderBase &entryIR, bool checked) const;
+        // Publish the immutable process artifact and return its scalar image resolver, if any.
+        // The entry thunk and resolver borrow process storage only while the process is running.
+        llvm::Function *emitProcess(llvm::Function &entryThunk,
+                                    const RecoveredFunctionGroup &group) const;
 
       private:
         friend class ImageMemory;
@@ -56,6 +61,8 @@ namespace forge::x86 {
 
         void checkStackMapping(const Step &step) const;
         void addressTaken(const Step &step, uint64_t va);
+        void serviceArgument(const Step &step, uint64_t va, bool write,
+                             std::optional<uint64_t> size);
         void fixedAccess(const Step &step, uint64_t va, unsigned width, bool write);
         void tableRead(const Step &step, const RelativeTable &table);
         void computedAccess(const Step &step, std::optional<uint64_t> va, unsigned width,

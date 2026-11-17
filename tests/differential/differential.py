@@ -72,7 +72,10 @@ def case_definitions(catalog, path):
         if (not isinstance(configs, list) or not configs or any(c not in CONFIGS for c in configs)
                 or len(set(configs)) != len(configs)):
             raise ValueError(f"invalid differential configs for {name}")
-        keys = set(case) - {"configs"}
+        keys = set(case) - {"configs", "checked_memory"}
+        if "checked_memory" in case and (type(case["checked_memory"]) is not bool or
+                                          case.get("harness") != "runtime_pairs"):
+            raise ValueError(f"invalid checked-memory contract for {name}")
         if keys == {"fixture_id", "blocked_reason"}:
             if not field(case, "blocked_reason", str).strip():
                 raise ValueError(f"empty blocking reason for {name}")
@@ -252,7 +255,7 @@ def lift(forge, image, case, selected, ir):
     args = [forge, "lift", image, "--rva", hex(selected.start), "--signature", case["signature"],
             "--output", ir, "--diagnostics-format", "json"]
     if case.get("harness") == "runtime_pairs":
-        args.append("--runtime")
+        args.append("--checked-memory" if case.get("checked_memory", False) else "--runtime")
     with stdout.open("wb") as output, log.open("wb") as errors:
         status = native.command_status(args, output, errors)
 

@@ -115,11 +115,7 @@ class ImageTests(ImageScaling, GuestExecution):
         boundary = self.va(".mutable")
 
         def abut(data, layout, headers):
-            literal = headers[".literal"]
-            mutable = headers[".mutable"]
-            # Extend the zero-filled tail to the next section and give both the same permissions.
-            struct.pack_into("<I", data, literal + 8, boundary - self.va(".literal"))
-            struct.pack_into("<I", data, literal + 36, layout.u32(mutable + 36))
+            layout.abut_writable_sections(self.va(".literal") - self.base, boundary - self.base)
 
         image = self.edit("adjacent-sections", abut)
         for exe in self.variants("load32", image=image):
@@ -636,7 +632,8 @@ int main() { printf("%lld %lld\\n", first, forge_lifted(0, 0)); }
     def test_nested_addresses(self):
         def displacements(data, layout, headers):
             literal = self.va(".literal")
-            for helper, pointer in (("joined_stack_va", RSP-48), ("displace_argument", RSP-56+32)):
+            for helper, pointer in (("joined_stack_va", RSP-48), ("reloaded_stack_va", RSP-48),
+                                    ("displace_argument", RSP-56+32)):
                 pos = layout.file_offset(self.exports[helper])
                 pos = data.index(struct.pack("<Q", 0x123456789abcdef0), pos, pos+40)
                 struct.pack_into("<Q", data, pos, literal - pointer)
@@ -645,6 +642,8 @@ int main() { printf("%lld %lld\\n", first, forge_lifted(0, 0)); }
         for exe in self.variants("nested_join", image=image):
             self.expect(exe, 0, 23, 23)
             self.expect(exe, 1, 23, 0x78563412)
+        for exe in self.variants("nested_reload", image=image):
+            self.expect(exe, 0, 0, 0x78563412)
         for exe in self.variants("argument_to_image", image=image):
             self.expect(exe, 0, 27, 0x78563412)
         for exe in self.variants("recursive_argument"):

@@ -2,8 +2,10 @@
 #include "lift/address_fact.h"
 #include "lift/operands.h"
 #include "lift/recovery.h"
+#include "lift/service_location.h"
 
 #include <algorithm>
+#include <bit>
 #include <set>
 #include <utility>
 
@@ -13,11 +15,24 @@ namespace forge::x86 {
             std::array<AddressFact, registerCount> registers;
             StackSpills spills;
 
-            bool merge(const AddressFacts &other) {
-                bool changed = spills.merge(other.spills);
+            AddressFact serviceValue(const win64::ServiceBinding &binding, size_t position,
+                                     const AddressFact &entryRsps) const {
+                const ServiceLocation location{position};
+                const auto width = win64::width(binding.arguments[position].type);
+                if (location.inRegister()) {
+                    const auto &value = registers[location.registerIndex()];
+                    return width == 32 ? value.project(entryRsps).masked(UINT32_MAX) : value;
+                }
+
+                const auto slot = registers[rspIndex].plus(AddressFact(location.callerOffset()));
+                return spills.read(slot, entryRsps, width).reloaded(entryRsps);
+            }
+
+            bool merge(const AddressFacts &other, const AddressFact &entryRsps) {
+                bool changed = spills.merge(other.spills, entryRsps);
 
                 for (size_t i = 0; i < registers.size(); ++i) {
-                    auto joined = registers[i].join(other.registers[i]);
+                    auto joined = registers[i].joinInFrame(other.registers[i], entryRsps);
                     changed |= joined != registers[i];
                     registers[i] = std::move(joined);
                 }
@@ -147,6 +162,8 @@ namespace forge::x86 {
             void traceInteger(const Step &s, const IntegerInstruction &op, AddressFacts &facts,
                               bool collect, const std::optional<RelativeTable> &table);
             AddressFact savedAddress(const AddressFacts &facts, const AddressFact &address) const;
+            void traceServiceArguments(const ResolvedCallSite &site, AddressFacts &facts,
+                                       bool collect) const;
             bool traceCall(const ResolvedCallSite &site, AddressFacts &facts, CallAddresses &calls,
                            bool collect) const;
             size_t traceAddresses(const GuestBlock &block, AddressFacts &facts,
@@ -280,7 +297,7 @@ namespace forge::x86 {
                 return AddressFact::continuation(rva);
             }
 
-            return facts.spills.read(address);
+            return facts.spills.read(address, entryAddresses).reloaded(entryAddresses);
         }
 
         void FunctionAnalyzer::traceStackInstruction(const Step &s, StackOp op,
@@ -336,21 +353,126 @@ namespace forge::x86 {
             } else if (memoryDestination(op.form) && op.op != Op::Cmp) {
                 AddressFact stored;
 
-                if (op.form == Form::Store && op.width == 64) {
+                if (op.form == Form::Store && (op.width == 64 || op.width == 32)) {
                     const auto &src = s.inst.getOperand(s.inst.getNumOperands() - 1);
-                    stored = src.isReg() ? facts.registers[operands.reg(s, src, 64).index]
+                    stored = src.isReg() ? facts.registers[operands.reg(s, src, op.width).index]
                                          : AddressFact(static_cast<uint64_t>(src.getImm()));
+                    if (op.width == 32) {
+                        stored = stored.project(entryAddresses).masked(UINT32_MAX);
+                    }
                 }
 
                 facts.spills.write(address, op.width, stored);
             }
         }
 
+        void invalidateServiceOutput(StackSpills &spills, const AddressFact &address,
+                                     const AddressFact &entryRsps, std::optional<uint64_t> size) {
+            if (const auto offset = address.frameOffset();
+                offset && size && *size <= GuestMemory::capacity) {
+                const auto key = std::bit_cast<int64_t>(*offset);
+                constexpr int64_t capacity = GuestMemory::capacity;
+                if (key > -capacity && key < capacity) {
+                    spills.write(address, static_cast<unsigned>(*size) * 8, {});
+                    return;
+                }
+            }
+
+            const auto starts = address.project(entryRsps);
+            if (!starts.known()) {
+                spills = {};
+                return;
+            }
+
+            bool touchesStack = false;
+            for (const auto va : starts.values()) {
+                if (!va || va >= GuestMemory::base + GuestMemory::capacity) {
+                    continue;
+                }
+
+                // An adapter can write a valid subrange even when the declared
+                // extent would overflow. Compare offsets without forming an end VA.
+                if (va < GuestMemory::base && size && *size <= GuestMemory::base - va) {
+                    continue;
+                }
+
+                if (va < GuestMemory::base || !size || *size > GuestMemory::capacity) {
+                    spills = {};
+                    return;
+                }
+
+                touchesStack = true;
+            }
+
+            if (touchesStack) {
+                // Keep frame-relative coordinates when available, so disjoint saves in the
+                // same activation survive. A concrete write also invalidates symbolic aliases.
+                spills.write(address, static_cast<unsigned>(*size) * 8, {});
+            }
+        }
+
+        void FunctionAnalyzer::traceServiceArguments(const ResolvedCallSite &site,
+                                                     AddressFacts &facts, bool collect) const {
+            const auto &binding = site.external()->binding;
+            // Read all arguments from the incoming state, even when an earlier parameter
+            // can overwrite the stack slot that supplies another parameter or its count.
+            auto outgoing = facts.spills;
+
+            for (size_t i = 0; i < binding.arguments.size(); ++i) {
+                const auto arg = binding.arguments[i];
+                if (arg.access == win64::Access::None || (!collect && !arg.writes())) {
+                    continue;
+                }
+
+                std::optional<uint64_t> size;
+                if (arg.extent == win64::Extent::Fixed) {
+                    size = arg.size;
+                } else if (arg.extent == win64::Extent::CountArgument) {
+                    const auto count = facts.serviceValue(binding, arg.size, entryAddresses)
+                                           .project(entryAddresses);
+                    if (count.known()) {
+                        size = std::ranges::max(count.values());
+                    }
+                }
+
+                if (size == 0) {
+                    continue;
+                }
+
+                const auto address = facts.serviceValue(binding, i, entryAddresses);
+                if (arg.writes()) {
+                    invalidateServiceOutput(outgoing, address, entryAddresses, size);
+                }
+
+                if (!collect || address.stackDerived() ||
+                    (address.frameOffset() && !address.known())) {
+                    continue;
+                }
+
+                const auto &step = *function.instructionContaining(site.instruction);
+                if (!address.known()) {
+                    step.reject(FailureCode::ImageMemory,
+                                "argument " + std::to_string(i + 1) + " to " +
+                                    std::string(binding.name) +
+                                    " requires proven image/stack provenance or bounded address "
+                                    "alternatives");
+                }
+
+                for (const auto va : address.values()) {
+                    imageMemory.serviceArgument(step, va, arg.writes(), size);
+                }
+            }
+
+            facts.spills = std::move(outgoing);
+        }
+
         bool FunctionAnalyzer::traceCall(const ResolvedCallSite &site, AddressFacts &facts,
                                          CallAddresses &calls, bool collect) const {
             if (site.external()) {
+                traceServiceArguments(site, facts, collect);
+
                 std::fill_n(facts.registers.begin(), callerSlots, AddressFact{});
-                // These services take no guest pointers. Only CALL writes guest memory.
+                // CALL itself overwrites the slot below the caller's RSP.
                 const auto slot = facts.registers[rspIndex].plus(AddressFact(uint64_t(0) - 8));
                 facts.spills.write(slot, 64, {});
                 return true;
@@ -424,7 +546,8 @@ namespace forge::x86 {
                     result = dest->width == 64 ? value : value.masked(dest->mask());
                 } else if (s.opcode == "CMOV64rr") {
                     const auto src = operands.reg(s, s.inst.getOperand(2), 64);
-                    result = result.join(facts.registers[src.index]).computed();
+                    result = result.joinInFrame(facts.registers[src.index], entryAddresses)
+                                 .project(entryAddresses);
                 } else {
                     result = {};
                 }
@@ -481,7 +604,7 @@ namespace forge::x86 {
                 for (auto successor : block.successors) {
                     auto [it, inserted] = blockAddresses.try_emplace(successor, cursor.facts);
 
-                    if (inserted || it->second.merge(cursor.facts)) {
+                    if (inserted || it->second.merge(cursor.facts, entryAddresses)) {
                         suspendedBlocks.erase(successor);
                         pending.insert(successor);
                     }
@@ -578,9 +701,16 @@ namespace forge::x86 {
     } // namespace
 
     GroupAnalysis analyzeGroup(const RecoveredFunctionGroup &group, uint64_t guestBase,
-                               EntryMode mode, bool checkedMemory) try {
+                               EntryMode mode, bool checkedMemory, LiftOutput output) try {
         GroupAnalysis result;
-        ImageMemory image(group.image(), guestBase, checkedMemory);
+        ImageMemory image(group.image(), guestBase,
+                          checkedMemory || output == LiftOutput::ProcessArtifact);
+
+        if (output == LiftOutput::ProcessArtifact) {
+            const auto &root = group.function(group.root());
+            image.checkStackMapping(root.graph.at(root.entry).steps.front());
+        }
+
         const InstructionOperands operands(group.registers(), guestBase);
         std::map<uint32_t, FunctionAnalyzer> analyzers;
 

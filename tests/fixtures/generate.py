@@ -14,10 +14,11 @@ def generate(output, mc, link, dlltool, clang):
     definitions = {
         "Physics.DLL": ["Named=entry @1", "ByOrdinal=entry @7 NONAME", "Forward=KERNEL32.Sleep"],
         "Late.dll": ["Later=entry"],
+        "ForgeAbi.dll": ["Pair", "Triple", "Four", "Six", "WriteProbe", "Address", "Handle", "Bad", "TailByte"],
         "Bridge.dll": ["Bridge=entry"],
         "Middle.dll": ["Middle=entry"],
         "MissingLeaf.dll": ["Leaf"],
-        "KERNEL32.dll": ["Sleep", "SetLastError", "GetLastError"],
+        "KERNEL32.dll": ["Sleep", "SetLastError", "GetLastError", "lstrlenA"],
         "vcruntime140.dll": ["Runtime"],
         contract: ["Contract"],
     }
@@ -90,6 +91,16 @@ def generate(output, mc, link, dlltool, clang):
         imports = [("KERNEL32.dll", name) for name in ("SetLastError", "GetLastError", "Sleep")]
         image("last-error.exe", stub + ".globl last_error_set\n" + last_error, imports + [("Physics.DLL", "Named")], exports=["last_error_set"])
         image("last-error-delay.exe", stub + last_error, imports, delays=["KERNEL32.dll"])
+        string_length = (sources.parent / "differential/fixtures/imports/lstrlen.S").read_text()
+        image("lstrlen.exe", stub + string_length,
+              [("KERNEL32.dll", name) for name in ("SetLastError", "GetLastError", "lstrlenA")])
+        abi_imports = [("ForgeAbi.dll", name) for name in definitions["ForgeAbi.dll"]]
+        image("service-abi.exe", (sources / "service-abi.s").read_text(),
+              abi_imports + [("KERNEL32.dll", name) for name in ("SetLastError", "GetLastError", "lstrlenA")],
+              exports=["pair", "triple", "four", "echo_bits", "six", "bad_stack", "bad_sig", "void_result",
+                       "write_call", "write_nested", "disjoint_record", "nested_disjoint", "nested_overlap", "nested_optional",
+                       "unmapped", "stale_spill", "disjoint_spill", "image_output", "readonly_output",
+                       "counted_boundary", "counted_with_load", "fixed_boundary", "counted_gap", "stack_count", "zero_count"])
         image("checked-memory.exe", (sources / "checked-memory.s").read_text(), [("KERNEL32.dll", "GetLastError")],
               exports=["entry", "guard_then_service", "bridge_value,data", "bridge_constant,data"])
         image("import-call.exe", (sources / "import-call.s").read_text(), [("Physics.DLL", "Named")])

@@ -493,9 +493,10 @@ namespace {
                 check(slot && !slot->descriptor.delayed &&
                           slot->descriptor.normalizedName == "kernel32.dll" &&
                           (slot->symbol.name == "GetLastError" ||
-                           slot->symbol.name == "SetLastError") &&
+                           slot->symbol.name == "SetLastError" ||
+                           slot->symbol.name == "lstrlenA") &&
                           !slot->unstableIdentityRva(relocations, init.excluded),
-                      "unproven last-error IAT call");
+                      "unproven supported-service IAT call");
             }
         }
     }

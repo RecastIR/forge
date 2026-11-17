@@ -2,6 +2,8 @@
 
 `forge_runtime` is a native static library for macOS ARM64. A host creates a runtime instance and guest thread tokens, then uses the tokens to set and read 32-bit last-error values. With `forge lift --checked-memory`, synchronous native services can also validate, read and write guest buffers using the active invocation. [Checked guest buffers](../docs/runtime-architecture.md#checked-guest-buffers)
 
+Hosts using compiler-generated process artifacts can register the same artifact in independent processes, invoke its lifted entry once per process, and inspect the tagged return or fault. [Process C ABI](include/forge/process.h) · [Host lifecycle](../docs/runtime-architecture.md#12f--process-lifecycle-integration)
+
 Native C, C++ and generated ARM64 code share the same [public C ABI](include/forge/runtime.h). The runtime links independently of the Forge compiler, CLI and Wine.
 
 ## Build and test
@@ -37,6 +39,8 @@ target_link_libraries(native_host PRIVATE forge_runtime)
 The [runtime architecture](../docs/runtime-architecture.md) covers lifetimes, status codes, guest calling and memory contracts, Wine reuse, and lifted last-error services. The runtime's Forge-authored source uses [Apache-2.0](../LICENSE).
 
 ## Link a lifted Windows function
+
+`KERNEL32.dll!lstrlenA` uses the same typed native entry and runtime archive, with explicit `--checked-memory` instead of plain `--runtime`. It reads proven image/stack buffers through checked guest-VA operations and returns a 32-bit length without changing last error. The initial implementation requires a NUL within the first 1 MiB; faults and limit exhaustion trap at the generated boundary. This temporary service limit does not restrict other checked copies. See the [Windows x64 service ABI](../docs/runtime-architecture.md#12e--windows-x64-abi-bridge) for memory planning and failure behavior.
 
 Build the runtime-only archive above, build the Windows fixtures, and select the exported `last_error` RVA from `forge inspect`. With LLVM 23 selected, run these commands from the repository root.
 

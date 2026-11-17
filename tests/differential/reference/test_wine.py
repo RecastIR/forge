@@ -79,6 +79,10 @@ class WineTests(unittest.TestCase):
             self.assertEqual(observation.stderr, b"")
             self.assertEqual(observation.exit_code, 0)
             self.assertEqual(execute(image, binary, []).exit_code, 0xc0000135)
+            # NULL's documented result is zero. Pinned Wine additionally changes last error;
+            # Forge deliberately preserves it, so this observation is not a native comparison.
+            null_string = execute(image, binary, ["--lstrlen-null"])
+            self.assertEqual((null_string.exit_code, null_string.stdout, null_string.stderr), (0, b"", b""))
             for arg, failure in (("--flood", "output-size limit"), ("--sleep", "execution timeout")):
                 with self.subTest(arg=arg), self.assertRaisesRegex(ValueError, failure):
                     execute(image, binary, [arg])

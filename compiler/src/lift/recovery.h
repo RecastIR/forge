@@ -1,8 +1,10 @@
 #pragma once
 
+#include "forge/service_signature.h"
 #include "lift/cfg.h"
 #include "pe/image.h"
 
+#include <span>
 #include <variant>
 
 namespace llvm {
@@ -42,17 +44,10 @@ namespace forge::x86 {
         uint32_t evidenceRva;
     };
 
-    enum class ServiceSignature { DwordToVoid, VoidToDword };
-
-    struct ServiceBinding {
-        llvm::StringLiteral name, nativeSymbol;
-        ServiceSignature signature;
-    };
-
     struct ExternalCallTarget {
         uint32_t slot;
         const Import &descriptor;
-        const ServiceBinding &binding;
+        const win64::ServiceBinding &binding;
     };
 
     // All RVAs in a recovered group belong to its one immutable source snapshot.
@@ -94,7 +89,10 @@ namespace forge::x86 {
       public:
         RecoveredFunctionGroup(const AnalyzedImage &analysis, uint32_t rva);
         RecoveredFunctionGroup(const AnalyzedImage &&analysis, uint32_t rva) = delete;
-        explicit RecoveredFunctionGroup(const ValidatedEntry &entry);
+        // Catalogue storage and its strings must outlive this group.
+        explicit RecoveredFunctionGroup(
+            const ValidatedEntry &entry,
+            std::span<const win64::ServiceBinding> services = win64::services);
         ~RecoveredFunctionGroup();
         RecoveredFunctionGroup(const RecoveredFunctionGroup &) = delete;
         RecoveredFunctionGroup &operator=(const RecoveredFunctionGroup &) = delete;

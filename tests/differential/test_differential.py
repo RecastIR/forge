@@ -126,6 +126,16 @@ class ArtifactSetup(unittest.TestCase):
 
 
 class ArtifactTests(ArtifactSetup):
+    def test_checked_memory_case_contract(self):
+        path = self.suite / "cases.json"
+        valid = dict(self.case, harness="runtime_pairs", checked_memory=True)
+        diff.write_json(path, [valid])
+        self.assertTrue(diff.case_definitions(self.catalog, path)["unit/enabled", "debug"]["checked_memory"])
+        for changes in ({"checked_memory": "true"}, {"checked_memory": 1}, {"harness": "decimal_pairs"}):
+            diff.write_json(path, [dict(valid, **changes)])
+            with self.assertRaisesRegex(ValueError, "checked-memory contract"):
+                diff.case_definitions(self.catalog, path)
+
     def reference(self):
         return reference(self.references, self.manifest, self.config, self.digest)
 

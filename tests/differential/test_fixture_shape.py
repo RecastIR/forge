@@ -5,6 +5,7 @@ import unittest
 from unittest.mock import patch
 
 from build import check_call_group, check_frame, check_global_leaf, check_image_leaf, check_leaf, check_nested_exits, leaf_instructions, register_call_targets
+from lstrlen_shape import check_listing as check_string_listing
 
 
 # Both loops are laid out after a shared return. Absolute addresses are immaterial.
@@ -23,6 +24,25 @@ NESTED = """
 
 
 class FixtureShapeTests(unittest.TestCase):
+    def test_lstrlen_import_slots_and_helper(self):
+        pe = ("ImageBase 00000000\n 00003000 00003020 00000000 00000000 00003040 00002000\n"
+              " DLL Name: KERNEL32.dll\n vma hint name\n"
+              " 00003050 0 SetLastError\n 00003060 0 lstrlenA\n 00003070 0 GetLastError\n\n")
+        def call(address, target, direct=False):
+            prefix = b"\xe8" if direct else b"\xff\x15"
+            raw = prefix + (target-address-len(prefix)-4).to_bytes(4, "little", signed=True)
+            return f"{address:x}:\t{raw.hex(' ')}\tcall target\n"
+        listing = ("1000 <string_length>:\n" + call(0x1000, 0x2000) + call(0x1006, 0x2008) +
+                   call(0x100c, 0x1100, True) + call(0x1011, 0x2008) + call(0x1017, 0x2010) +
+                   "101d:\tc3\tret\n\n1100 <string_length_helper>:\n" + call(0x1100, 0x2008) +
+                   "1106:\tc3\tret\n\n")
+        check_string_listing(pe, listing)
+        for before, after in ((call(0x1011, 0x2008), call(0x1011, 0x2009)),
+                              (call(0x100c, 0x1100, True), call(0x100c, 0x1101, True)),
+                              (call(0x1006, 0x2008), "")):
+            with self.assertRaises(ValueError):
+                check_string_listing(pe, listing.replace(before, after))
+
     def check(self, listing):
         entry = listing.lstrip().split(":", 1)[0]
         output = f"{entry} <cfg_nested_exits>:\n{listing}"

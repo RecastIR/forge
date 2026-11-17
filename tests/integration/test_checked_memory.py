@@ -32,6 +32,7 @@ class CheckedMemory(unittest.TestCase):
         run(FORGE, "lift", IMAGE, "--signature", "i64(i64,i64)", "--checked-memory",
             "--rva", hex(rva), "--output", ir)
         source = ir.read_text()
+        self.assertNotIn("@forge_lifted_artifact(", source)
         self.assertEqual(source.count("call i32 @forge_rt_enter("), 1)
         self.assertEqual(source.count("call i32 @forge_rt_leave("), 1)
         self.assertNotIn("@forge_rt_read_guest(", source)

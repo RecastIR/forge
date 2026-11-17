@@ -25,6 +25,13 @@ class Layout:
                 return self.section_table + 40 * index
         raise ValueError(f"unmapped fixture RVA {rva:x}")
 
+    def abut_writable_sections(self, left_rva, right_rva):
+        """Extend the first fixture section's zero tail up to its writable neighbor."""
+        left = self.section_header(left_rva)
+        right = self.section_header(right_rva)
+        struct.pack_into("<I", self.data, left + 8, right_rva - left_rva)
+        struct.pack_into("<I", self.data, left + 36, self.u32(right + 36))
+
     def file_offset(self, rva):
         for size, start, raw_size, offset in self.sections:
             if start <= rva < start + min(size, raw_size):

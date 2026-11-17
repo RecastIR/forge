@@ -1,4 +1,5 @@
 #include "lift/lift.h"
+#include "../support/abi_services.h"
 #include "analysis/analysis.h"
 #include "diagnostic.h"
 #include "lift/address_fact.h"
@@ -111,9 +112,30 @@ namespace {
         const auto slot = AddressFact::frameStack(uint64_t{0} - 16);
         const auto ret = AddressFact::continuation(0x2400);
         StackSpills frame;
+        const auto local = AddressFact::frameStack(24);
+        frame.write(slot, 64, local);
+        check(frame.read(slot) == local, "spilled local lost its activation-relative offset");
+        auto nullable = frame;
+        nullable.write(slot, 64, AddressFact(0));
+        const auto entry = AddressFact(x86::GuestMemory::entryRsp);
+        check(nullable.merge(frame, entry) &&
+                  nullable.read(slot) == AddressFact(0).join(local.project(entry)),
+              "mixed null/local spill lost a bounded alternative");
+
         frame.write(slot, 64, ret);
         check(frame.read(slot) == ret && frame.read(slot.plus(AddressFact(1))).hasUnknown(),
               "nested full-width spill lost the return-address source");
+        auto narrow = frame;
+        narrow.write(slot, 32, AddressFact(3));
+        narrow.write(slot.plus(AddressFact(4)), 32, AddressFact(4));
+        check(narrow.read(slot).hasUnknown() &&
+                  narrow.read(slot, entry, 32) == AddressFact(3).computed(),
+              "adjacent DWORD stores must preserve the low count without proving a QWORD save");
+        check(narrow.merge(frame, entry) &&
+                  narrow.read(slot).continuations() == ret.continuations() &&
+                  narrow.read(slot).hasUnknown(),
+              "DWORD alternative erased the other predecessor's QWORD continuation");
+
         auto otherPath = frame;
         otherPath.write(slot.plus(AddressFact(7)), 16, {});
         check(otherPath.read(slot).hasUnknown() && frame.read(slot) == ret,
@@ -606,7 +628,10 @@ namespace {
 
     // The native image suite compiles this output with both LLVM pipelines. Printing
     // after analysis destruction also exercises the returned module's ownership.
-    void emitRebased(const fs::path &path, llvm::StringRef entry, llvm::StringRef base) {
+    void emitRebased(const fs::path &path, llvm::StringRef entry, llvm::StringRef base,
+                     bool checked, bool runtime = false,
+                     std::span<const win64::ServiceBinding> catalogue = win64::services,
+                     LiftOutput output = LiftOutput::Function) {
         uint32_t rva;
         uint64_t guestBase;
         check(!entry.getAsInteger(0, rva) && !base.getAsInteger(0, guestBase),
@@ -617,7 +642,10 @@ namespace {
             AnalyzedImage analysis(
                 std::make_unique<ParsedImage>(InputFile(path), ParsePolicy::FunctionAnalysis),
                 DebugInfo::Omit);
-            module = generateIR(analysis, {rva, EntryMode::WindowsX64I64Pair, guestBase}, context);
+            module = generateIR(
+                analysis,
+                {rva, EntryMode::WindowsX64I64Pair, guestBase, runtime || checked, checked, output},
+                context, catalogue);
         }
 
         check(!llvm::verifyModule(*module), "rebased module lost its backing storage");
@@ -793,8 +821,23 @@ namespace {
 } // namespace
 
 int main(int argc, char **argv) try {
-    if (argc == 5 && std::string_view(argv[1]) == "--emit-rebased") {
-        emitRebased(argv[2], argv[3], argv[4]);
+    if (argc == 5 && std::string_view(argv[1]) == "--emit-process") {
+        emitRebased(argv[2], argv[3], argv[4], false, false, forge::test::abiServices,
+                    forge::LiftOutput::ProcessArtifact);
+        return 0;
+    }
+
+    if (argc == 5 && (std::string_view(argv[1]) == "--emit-abi" ||
+                      std::string_view(argv[1]) == "--emit-abi-checked")) {
+        emitRebased(argv[2], argv[3], argv[4], std::string_view(argv[1]) == "--emit-abi-checked",
+                    true, forge::test::abiServices);
+        return 0;
+    }
+
+    if (argc == 5 && (std::string_view(argv[1]) == "--emit-rebased" ||
+                      std::string_view(argv[1]) == "--emit-rebased-checked")) {
+        emitRebased(argv[2], argv[3], argv[4],
+                    std::string_view(argv[1]) == "--emit-rebased-checked");
         return 0;
     }
 

@@ -11,6 +11,13 @@ int wmain(int argc, wchar_t **argv) {
         ExitProcess(0xc0000135UL);
     }
     HANDLE output = GetStdHandle(STD_OUTPUT_HANDLE);
+    if (wcscmp(argv[1], L"--lstrlen-null") == 0) {
+        // Pin the Wine 8 observation separately from Forge's last-error policy.
+        SetLastError(0xfedcba98UL);
+        int length = lstrlenA(NULL);
+        DWORD error = GetLastError();
+        return length == 0 && error == ERROR_INVALID_PARAMETER ? 0 : 1;
+    }
     if (wcscmp(argv[1], L"--flood") == 0) {
         char block[8192] = {0};
         DWORD count;

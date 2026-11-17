@@ -54,6 +54,10 @@ extern "C" forge_rt_status forge_rt_destroy(forge_rt_instance *instance) noexcep
 
     // Host quiescence prevents new uses between the check and release.
     const auto status = withInstance(instance, [](const auto &process) {
+        if (process.managed) {
+            return FORGE_RT_INVALID_STATE;
+        }
+
         const bool active = std::ranges::any_of(
             process.threads, [](const auto &entry) { return entry.second.invocation != 0; });
         return active ? FORGE_RT_BUSY : FORGE_RT_OK;
@@ -74,6 +78,10 @@ extern "C" forge_rt_status forge_rt_thread_create(forge_rt_instance *instance,
     }
 
     return withInstance(instance, [outThread](auto &process) {
+        if (process.managed) {
+            return FORGE_RT_INVALID_STATE;
+        }
+
         const auto thread = issueToken();
 
         if (thread == 0) {
@@ -89,6 +97,10 @@ extern "C" forge_rt_status forge_rt_thread_create(forge_rt_instance *instance,
 extern "C" forge_rt_status forge_rt_thread_destroy(forge_rt_instance *instance,
                                                    forge_rt_thread_token thread) noexcept {
     return withInstance(instance, [thread](auto &process) {
+        if (process.managed) {
+            return FORGE_RT_INVALID_STATE;
+        }
+
         const auto entry = process.threads.find(thread);
 
         if (entry == process.threads.end()) {
@@ -114,6 +126,11 @@ extern "C" forge_rt_status forge_rt_set_last_error(forge_rt_instance *instance,
             return FORGE_RT_INVALID_THREAD;
         }
 
+        if (process.managed &&
+            (!entry->second.invocation || executingInvocation != entry->second.invocation)) {
+            return FORGE_RT_INVALID_INVOCATION;
+        }
+
         entry->second.lastError = value;
         return FORGE_RT_OK;
     });
@@ -131,6 +148,11 @@ extern "C" forge_rt_status forge_rt_get_last_error(forge_rt_instance *instance,
 
         if (entry == process.threads.end()) {
             return FORGE_RT_INVALID_THREAD;
+        }
+
+        if (process.managed &&
+            (!entry->second.invocation || executingInvocation != entry->second.invocation)) {
+            return FORGE_RT_INVALID_INVOCATION;
         }
 
         *outValue = entry->second.lastError;

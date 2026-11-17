@@ -1,6 +1,7 @@
 #include "instance.h"
 
 #include "forge/guest_range.h"
+#include "forge/process.h"
 
 #include <algorithm>
 #include <cstring>
@@ -102,7 +103,7 @@ namespace {
     }
 
     forge_rt_status checkStack(const Segment &segment, uint64_t address, uint32_t access,
-                               const Thread &active, forge_rt_memory_fault &fault) {
+                               const Thread &active, forge_rt_memory_fault &fault, bool readSaved) {
         // Generated frame code may be modifying another activation's marks without taking
         // the instance mutex. Only its innermost synchronous owner can examine them.
         if (segment.stackOwner != &active || executingInvocation != active.invocation) {
@@ -116,9 +117,11 @@ namespace {
             const auto va = address + i;
             const auto mark = segment.marks[i];
             const bool outer = va >= active.stack.outerReturn && va - active.stack.outerReturn < 8;
+            const bool readable =
+                readSaved ? mark != FORGE_RT_MARK_UNINITIALIZED
+                          : mark == FORGE_RT_MARK_CONCRETE || mark == FORGE_RT_MARK_RETURN;
 
-            if (outer || (write && mark == FORGE_RT_MARK_RETURN) ||
-                (read && mark != FORGE_RT_MARK_CONCRETE && mark != FORGE_RT_MARK_RETURN)) {
+            if (outer || (write && mark == FORGE_RT_MARK_RETURN) || (read && !readable)) {
                 return report(fault, va, access, FORGE_RT_FAULT_STACK);
             }
         }
@@ -127,7 +130,7 @@ namespace {
     }
 
     forge_rt_status preflight(Cursor cursor, const Thread &active, uint64_t start, uint64_t count,
-                              uint32_t access, forge_rt_memory_fault &fault) {
+                              uint32_t access, forge_rt_memory_fault &fault, bool readSaved) {
         uint64_t offset = 0;
 
         while (offset < count) {
@@ -142,8 +145,8 @@ namespace {
                 return report(fault, address, access, FORGE_RT_FAULT_PERMISSION);
             }
 
-            if (segment.stackOwner &&
-                checkStack(segment, address, access, active, fault) == FORGE_RT_GUEST_FAULT) {
+            if (segment.stackOwner && checkStack(segment, address, access, active, fault,
+                                                 readSaved) == FORGE_RT_GUEST_FAULT) {
                 return FORGE_RT_GUEST_FAULT;
             }
 
@@ -184,7 +187,7 @@ namespace {
     forge_rt_status accessGuest(forge_rt_instance *instance, forge_rt_thread_token thread,
                                 forge_rt_invocation_token invocation, uint64_t address,
                                 uint64_t count, uint32_t access, HostBuffers host,
-                                forge_rt_memory_fault *fault) noexcept {
+                                forge_rt_memory_fault *fault, bool readSaved = false) noexcept {
         if (!fault || !access || (access & ~(FORGE_RT_READ | FORGE_RT_WRITE)) != 0) {
             return FORGE_RT_INVALID_ARGUMENT;
         }
@@ -196,7 +199,8 @@ namespace {
                 return FORGE_RT_INVALID_THREAD;
             }
 
-            if (!invocation || entry->second.invocation != invocation) {
+            if (!invocation || entry->second.invocation != invocation ||
+                (process.managed && executingInvocation != invocation)) {
                 return FORGE_RT_INVALID_INVOCATION;
             }
 
@@ -209,7 +213,8 @@ namespace {
             }
 
             const Cursor cursor(process.reservations, address);
-            const auto status = preflight(cursor, entry->second, address, count, access, *fault);
+            const auto status =
+                preflight(cursor, entry->second, address, count, access, *fault, readSaved);
 
             if (status == FORGE_RT_OK && (host.source || host.destination)) {
 #ifdef FORGE_RUNTIME_TEST_TRANSFER
@@ -222,6 +227,47 @@ namespace {
         });
     }
 } // namespace
+
+extern "C" void forge_rt_report_scalar_boundary(forge_rt_execution *execution, uint64_t address,
+                                                uint32_t size, uint32_t access,
+                                                uint32_t stack) noexcept {
+    if (!execution) {
+        return;
+    }
+
+    if (!size || size > sizeof(uint64_t) || stack > 1) {
+        execution->result = {FORGE_RT_RUNTIME_FAILURE, FORGE_RT_INVALID_ARGUMENT, 0, {}, 0};
+        return;
+    }
+
+    const bool readSaved = access == FORGE_RT_SCALAR_READ_SAVED;
+    const auto permissions = readSaved ? FORGE_RT_READ : access;
+    uint64_t count = size;
+
+    if (stack) {
+        // Stay in the stack domain even if another mapping abuts its end.
+        const auto offset = address - FORGE_RT_STACK_BASE;
+        count = offset < FORGE_RT_STACK_SIZE ? std::min(count, FORGE_RT_STACK_SIZE - offset) : 0;
+    }
+
+    forge_rt_memory_fault fault{};
+    auto status = accessGuest(execution->instance, execution->thread, executingInvocation, address,
+                              count, permissions, {}, &fault, readSaved);
+
+    if (status == FORGE_RT_OK && count < size) {
+        status = report(fault, address + count, permissions, FORGE_RT_FAULT_STACK);
+    }
+
+    if (status == FORGE_RT_GUEST_FAULT) {
+        execution->result = {FORGE_RT_EXECUTION_FAULT, status, 0, fault, FORGE_RT_FAULT_MEMORY};
+    } else if (status == FORGE_RT_OK && !stack) {
+        // All bytes were accessible, but one scalar cannot span native rows.
+        execution->result = {FORGE_RT_UNSUPPORTED, FORGE_RT_OK, 0, {}, 0};
+    } else {
+        const auto failure = status == FORGE_RT_OK ? FORGE_RT_INTERNAL_ERROR : status;
+        execution->result = {FORGE_RT_RUNTIME_FAILURE, failure, 0, {}, 0};
+    }
+}
 
 extern "C" forge_rt_status
 forge_rt_validate_guest(forge_rt_instance *instance, forge_rt_thread_token thread,

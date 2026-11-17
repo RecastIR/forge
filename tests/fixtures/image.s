@@ -441,6 +441,13 @@ probe nested_join
     ret
     .seh_endproc
 
+probe nested_reload
+    subq $40, %rsp
+    call reloaded_stack_va
+    addq $40, %rsp
+    ret
+    .seh_endproc
+
 probe caller_local
     subq $56, %rsp
     movq %rdx, 32(%rsp)

@@ -5,6 +5,7 @@
 #include "lift/group_analysis.h"
 #include "lift/operands.h"
 #include "lift/recovery.h"
+#include "lift/service_location.h"
 
 #include "llvm/IR/CFG.h"
 #include "llvm/IR/Module.h"
@@ -75,7 +76,8 @@ namespace forge {
             }
 
             void storeFlags();
-            void lowerService(const Step &s, const x86::ServiceBinding &binding);
+            void lowerService(const Step &s, const win64::ServiceBinding &binding,
+                              Value *calleeRsp);
             void lowerCall(const Step &s, const x86::ResolvedCallSite &call);
             void emitReturn(const Step &s);
             void emitDispatch(const x86::GuestBlock &block, const BlockStates &states);
@@ -123,8 +125,8 @@ namespace forge {
             auto saved = readSaved(s, view, false);
 
             if (saved.marks) {
-                memory.guard(ir.CreateICmpEQ(saved.marks,
-                                             ConstantInt::getAllOnesValue(saved.marks->getType())));
+                memory.checks.guard(ir.CreateICmpEQ(
+                    saved.marks, ConstantInt::getAllOnesValue(saved.marks->getType())));
             }
 
             return saved.bits;
@@ -392,26 +394,49 @@ namespace forge {
             }
         }
 
-        void Translator::lowerService(const Step &s, const x86::ServiceBinding &binding) {
+        void Translator::lowerService(const Step &s, const win64::ServiceBinding &binding,
+                                      Value *calleeRsp) {
             auto *instance = ir.CreateLoad(ir.getPtrTy(), context.instance);
             auto *thread = ir.CreateLoad(ir.getInt64Ty(), context.thread);
-            const bool getter = binding.signature == x86::ServiceSignature::VoidToDword;
-            Value *argument = nullptr;
-            if (getter) {
-                // Allocate once per activation, even when the guest CALL is inside a loop.
-                IRBuilder<> entry(&impl->getEntryBlock(), impl->getEntryBlock().begin());
-                argument = entry.CreateAlloca(ir.getInt32Ty(), nullptr, "last.error.out");
-            } else {
-                argument = read(s, {1, 32});
+            SmallVector<Value *, 5> arguments{instance, thread};
+            for (size_t i = 0; i < binding.arguments.size(); ++i) {
+                const x86::ServiceLocation location{i};
+                const auto width = win64::width(binding.arguments[i].type);
+                if (location.inRegister()) {
+                    arguments.push_back(read(s, {location.registerIndex(), width}));
+                } else {
+                    auto *slot = ir.CreateAdd(calleeRsp, ir.getInt64(location.entryOffset()));
+                    arguments.push_back(memory.load(slot, width, true));
+                }
             }
 
-            auto *type = FunctionType::get(
-                ir.getInt32Ty(), {ir.getPtrTy(), ir.getInt64Ty(), argument->getType()}, false);
+            // Allocate once per activation, even when the guest CALL is inside a loop.
+            IRBuilder<> entry(&impl->getEntryBlock(), impl->getEntryBlock().begin());
+            const auto resultWidth = win64::width(binding.result);
+            Value *output = nullptr;
+            if (resultWidth) {
+                output = entry.CreateAlloca(ir.getIntNTy(resultWidth), nullptr, "service.out");
+                arguments.push_back(output);
+            }
+
+            Value *detail = nullptr;
+            if (binding.checkedMemory()) {
+                detail = entry.CreateAlloca(x86::memoryFaultType(ir.getContext()), nullptr,
+                                            "service.fault");
+                arguments.push_back(detail);
+            }
+
+            SmallVector<Type *, 5> types;
+            for (auto *argument : arguments) {
+                types.push_back(argument->getType());
+            }
+
+            auto *type = FunctionType::get(ir.getInt32Ty(), types, false);
             auto service = impl->getParent()->getOrInsertFunction(binding.nativeSymbol, type);
-            auto *status = ir.CreateCall(service, {instance, thread, argument});
-            memory.guard(ir.CreateIsNull(status));
-            if (getter) {
-                write({0, 32}, ir.CreateLoad(ir.getInt32Ty(), argument));
+            auto *status = ir.CreateCall(service, arguments);
+            memory.checks.service(status, detail);
+            if (output) {
+                write({0, resultWidth}, ir.CreateLoad(ir.getIntNTy(resultWidth), output));
             }
         }
 
@@ -419,7 +444,9 @@ namespace forge {
             const auto guestBase = analysis.image.guestBase();
             if (!call.external() && call.guest().kind == x86::CallKind::RipRelativeRegister) {
                 auto *target = value(s, s.inst.getOperand(0), 64);
-                memory.guard(ir.CreateICmpEQ(target, ir.getInt64(guestBase + call.guest().rva)));
+                memory.checks.guard(
+                    ir.CreateICmpEQ(target, ir.getInt64(guestBase + call.guest().rva)),
+                    FORGE_RT_FAULT_CONTROL);
             }
 
             const uint64_t nextVA = guestBase + call.continuation;
@@ -427,13 +454,13 @@ namespace forge {
             write(stackPointer, calleeRsp);
             x86::SavedRegisters saved{};
             if (const auto *external = call.external()) {
-                lowerService(s, external->binding);
+                lowerService(s, external->binding, calleeRsp);
             } else {
                 const auto target = call.guest().rva;
                 saved =
                     x86::captureNonvolatiles(ir, context, analysis.functions.at(target).modified);
                 storeFlags();
-                ir.CreateCall(bodies.at(target), impl->getArg(0));
+                memory.checks.propagate(ir.CreateCall(bodies.at(target), impl->getArg(0)));
             }
 
             // This continuation is the other half of the guest RET. No caller
@@ -462,7 +489,11 @@ namespace forge {
                 storeFlags();
             }
 
-            ir.CreateRetVoid();
+            if (memory.checks.managed()) {
+                ir.CreateRet(ir.getTrue());
+            } else {
+                ir.CreateRetVoid();
+            }
         }
 
         void Translator::emitDispatch(const x86::GuestBlock &block, const BlockStates &states) {
@@ -473,8 +504,7 @@ namespace forge {
             {
                 IRBuilderBase::InsertPointGuard restore(ir);
                 ir.SetInsertPoint(fault);
-                ir.CreateIntrinsic(Intrinsic::trap, {});
-                ir.CreateUnreachable();
+                memory.checks.fail(FORGE_RT_FAULT_CONTROL);
             }
 
             auto *dispatch = ir.CreateSwitch(target, fault);
@@ -569,7 +599,8 @@ namespace forge {
             auto *entry = BasicBlock::Create(ir.getContext(), "entry", impl);
             ir.SetInsertPoint(entry);
             context = x86::ContextView(ir, layout, impl->getArg(0));
-            memory.bind(context.bytes, context.validity, resolver);
+            memory.bind(context.bytes, context.validity, resolver, context.regions);
+            memory.checks.bind(context.result);
             entryRsp = loadView(slot(x86::rspIndex), stackPointer);
 
             // A shared helper can preserve an incoming flag for one caller while
@@ -629,6 +660,20 @@ namespace forge {
             connectFlags(states);
         }
 
+        // Checked-pointer imports have diagnostic priority over other missing services.
+        const Step *firstImport(const x86::RecoveredFunctionGroup &group, bool checkedOnly) {
+            for (const auto &[address, function] : group.functions()) {
+                for (const auto &[rva, call] : function.calls) {
+                    const auto *external = call.external();
+                    if (external && (!checkedOnly || external->binding.checkedMemory())) {
+                        return function.instructionContaining(rva);
+                    }
+                }
+            }
+
+            return nullptr;
+        }
+
         std::unique_ptr<llvm::Module> emitGroup(const x86::RecoveredFunctionGroup &group,
                                                 const x86::GroupAnalysis &analysis,
                                                 const LiftRequest &request, LLVMContext &context) {
@@ -639,8 +684,9 @@ namespace forge {
             module->setDataLayout(target.computeDataLayout());
 
             GuestBodies bodies;
-            auto *type =
-                FunctionType::get(Type::getVoidTy(context), PointerType::getUnqual(context), false);
+            const bool process = request.output == LiftOutput::ProcessArtifact;
+            auto *returns = process ? Type::getInt1Ty(context) : Type::getVoidTy(context);
+            auto *type = FunctionType::get(returns, PointerType::getUnqual(context), false);
 
             for (const auto &[rva, function] : group.functions()) {
                 auto *body = Function::Create(type, Function::InternalLinkage,
@@ -649,11 +695,14 @@ namespace forge {
                 bodies.emplace(rva, body);
             }
 
-            const x86::ContextLayout layout(context, analysis.origins, analysis.stack,
-                                            request.runtime);
+            const x86::ContextLayout layout(context, analysis.origins, analysis.stack || process,
+                                            request.runtime, process);
+            auto &body = *bodies.at(root);
+            const auto modified = analysis.functions.at(root).modified;
             auto *resolver =
-                x86::emitEntryAdapter(*bodies.at(root), root, request.mode, layout, analysis.image,
-                                      analysis.functions.at(root).modified, request.checkedMemory);
+                process ? x86::emitProcessEntry(body, group, layout, analysis.image, modified)
+                        : x86::emitEntryAdapter(body, root, request.mode, layout, analysis.image,
+                                                modified, request.checkedMemory);
             const x86::InstructionOperands operands{group.registers(), analysis.image.guestBase()};
 
             for (const auto &[rva, function] : group.functions()) {
@@ -681,23 +730,40 @@ namespace forge {
 
     std::unique_ptr<llvm::Module> generateIR(const AnalyzedImage &analysis, LiftRequest request,
                                              llvm::LLVMContext &context) {
+        return generateIR(analysis, request, context, win64::services);
+    }
+
+    std::unique_ptr<llvm::Module> generateIR(const AnalyzedImage &analysis, LiftRequest request,
+                                             llvm::LLVMContext &context,
+                                             std::span<const win64::ServiceBinding> services) {
         const auto entry = x86::validateEntry(analysis, request.startRva);
         const auto guestBase = x86::validateGuestBase(entry, request.guestLoadBase);
-        const x86::RecoveredFunctionGroup group(entry);
+        const x86::RecoveredFunctionGroup group(entry, services);
         auto stage = FailureCode::LiftingInternal;
 
         try {
-            request.runtime = request.runtime || request.checkedMemory;
+            const bool process = request.output == LiftOutput::ProcessArtifact;
+            const bool checked = process || request.checkedMemory;
+            request.runtime = request.runtime || checked;
+
+            if (process && request.mode != EntryMode::WindowsX64I64Pair) {
+                throw InspectionError(
+                    "process artifact requires the Windows x64 integer-pair entry contract",
+                    FailureCode::UnsupportedControlFlow);
+            }
+
+            if (!checked) {
+                if (const auto *site = firstImport(group, true)) {
+                    site->reject(
+                        FailureCode::UnsupportedControlFlow,
+                        "imported service requires --checked-memory --signature 'i64(i64,i64)'");
+                }
+            }
 
             if (!request.runtime) {
-                for (const auto &[address, function] : group.functions()) {
-                    for (const auto &[rva, site] : function.calls) {
-                        if (site.external()) {
-                            function.instructionContaining(rva)->reject(
-                                FailureCode::UnsupportedControlFlow,
-                                "imported service requires --runtime --signature 'i64(i64,i64)'");
-                        }
-                    }
+                if (const auto *site = firstImport(group, false)) {
+                    site->reject(FailureCode::UnsupportedControlFlow,
+                                 "imported service requires --runtime --signature 'i64(i64,i64)'");
                 }
             } else if (request.mode != EntryMode::WindowsX64I64Pair) {
                 const std::string option = request.checkedMemory ? "--checked-memory" : "--runtime";
@@ -705,8 +771,8 @@ namespace forge {
                                       FailureCode::UnsupportedControlFlow);
             }
 
-            const auto prepared =
-                x86::analyzeGroup(group, guestBase, request.mode, request.checkedMemory);
+            const auto prepared = x86::analyzeGroup(group, guestBase, request.mode,
+                                                    request.checkedMemory, request.output);
             auto module = emitGroup(group, prepared, request, context);
             stage = FailureCode::VerificationInternal;
             verifyLiftedIR(*module, analysis.module().path, group.root());
