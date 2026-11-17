@@ -34,11 +34,22 @@ struct forge_rt_instance {
     std::mutex mutex;
     std::unordered_map<forge_rt_thread_token, forge::runtime::Thread> threads;
     std::vector<forge::runtime::Reservation> reservations;
+    // Once published by a managed process, only its owner admits and retires executions.
+    bool managed = false;
 };
 
 namespace forge::runtime {
-    template <typename Operation>
-    forge_rt_status withInstance(forge_rt_instance *instance, Operation operation) noexcept {
+    enum class Admission : uint8_t { Host, Process };
+    forge_rt_status enterInvocation(forge_rt_instance *instance, forge_rt_thread_token thread,
+                                    const forge_rt_image *image, const forge_rt_stack *stack,
+                                    forge_rt_invocation_token *outInvocation,
+                                    Admission admission) noexcept;
+    forge_rt_status leaveInvocation(forge_rt_instance *instance, forge_rt_thread_token thread,
+                                    forge_rt_invocation_token invocation,
+                                    Admission admission) noexcept;
+
+    template <typename Instance, typename Operation>
+    forge_rt_status withInstance(Instance *instance, Operation operation) noexcept {
         if (instance == nullptr) {
             return FORGE_RT_INVALID_ARGUMENT;
         }

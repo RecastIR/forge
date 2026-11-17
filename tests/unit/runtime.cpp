@@ -6,6 +6,7 @@
 #include <thread>
 
 void testRuntimeMemory();
+void testRuntimeProcess();
 
 namespace {
     bool observeRetirement(forge_rt_instance *runtime, forge_rt_thread_token thread,
@@ -81,6 +82,7 @@ namespace {
 
 int main() {
     testRuntimeMemory();
+    testRuntimeProcess();
     forge_rt_instance *runtime = nullptr;
 
     if (forge_rt_create(FORGE_RT_ABI_VERSION, &runtime) != FORGE_RT_OK) {

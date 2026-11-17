@@ -171,8 +171,13 @@ extern "C" forge_rt_status forge_rt_register_image(forge_rt_instance *instance,
         return FORGE_RT_INVALID_ARGUMENT;
     }
 
-    return withInstance(instance,
-                        [&](auto &process) { return publishImage(process, *image, nullptr); });
+    return withInstance(instance, [&](auto &process) {
+        if (process.managed) {
+            return FORGE_RT_INVALID_STATE;
+        }
+
+        return publishImage(process, *image, nullptr);
+    });
 }
 
 extern "C" forge_rt_status forge_rt_detach_image(forge_rt_instance *instance,
@@ -182,6 +187,10 @@ extern "C" forge_rt_status forge_rt_detach_image(forge_rt_instance *instance,
     }
 
     return withInstance(instance, [&](auto &process) {
+        if (process.managed) {
+            return FORGE_RT_INVALID_STATE;
+        }
+
         auto &reservations = process.reservations;
         const auto found = position(reservations, image->base);
 
@@ -201,14 +210,21 @@ extern "C" forge_rt_status forge_rt_detach_image(forge_rt_instance *instance,
     });
 }
 
-extern "C" forge_rt_status forge_rt_enter(forge_rt_instance *instance, forge_rt_thread_token thread,
-                                          const forge_rt_image *image, const forge_rt_stack *stack,
-                                          forge_rt_invocation_token *outInvocation) noexcept {
+forge_rt_status forge::runtime::enterInvocation(forge_rt_instance *instance,
+                                                forge_rt_thread_token thread,
+                                                const forge_rt_image *image,
+                                                const forge_rt_stack *stack,
+                                                forge_rt_invocation_token *outInvocation,
+                                                Admission admission) noexcept {
     if (!image || !outInvocation || (stack && !validStack(*stack))) {
         return FORGE_RT_INVALID_ARGUMENT;
     }
 
     return withInstance(instance, [&](auto &process) {
+        if (process.managed != (admission == Admission::Process)) {
+            return FORGE_RT_INVALID_STATE;
+        }
+
         const auto entry = process.threads.find(thread);
 
         if (entry == process.threads.end()) {
@@ -250,9 +266,15 @@ extern "C" forge_rt_status forge_rt_enter(forge_rt_instance *instance, forge_rt_
     });
 }
 
-extern "C" forge_rt_status forge_rt_leave(forge_rt_instance *instance, forge_rt_thread_token thread,
-                                          forge_rt_invocation_token invocation) noexcept {
+forge_rt_status forge::runtime::leaveInvocation(forge_rt_instance *instance,
+                                                forge_rt_thread_token thread,
+                                                forge_rt_invocation_token invocation,
+                                                Admission admission) noexcept {
     return withInstance(instance, [&](auto &process) {
+        if (process.managed != (admission == Admission::Process)) {
+            return FORGE_RT_INVALID_STATE;
+        }
+
         const auto entry = process.threads.find(thread);
 
         if (entry == process.threads.end()) {
@@ -277,6 +299,17 @@ extern "C" forge_rt_status forge_rt_leave(forge_rt_instance *instance, forge_rt_
         active.image = nullptr;
         return FORGE_RT_OK;
     });
+}
+
+extern "C" forge_rt_status forge_rt_enter(forge_rt_instance *instance, forge_rt_thread_token thread,
+                                          const forge_rt_image *image, const forge_rt_stack *stack,
+                                          forge_rt_invocation_token *outInvocation) noexcept {
+    return enterInvocation(instance, thread, image, stack, outInvocation, Admission::Host);
+}
+
+extern "C" forge_rt_status forge_rt_leave(forge_rt_instance *instance, forge_rt_thread_token thread,
+                                          forge_rt_invocation_token invocation) noexcept {
+    return leaveInvocation(instance, thread, invocation, Admission::Host);
 }
 
 extern "C" forge_rt_status

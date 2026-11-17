@@ -701,9 +701,16 @@ namespace forge::x86 {
     } // namespace
 
     GroupAnalysis analyzeGroup(const RecoveredFunctionGroup &group, uint64_t guestBase,
-                               EntryMode mode, bool checkedMemory) try {
+                               EntryMode mode, bool checkedMemory, LiftOutput output) try {
         GroupAnalysis result;
-        ImageMemory image(group.image(), guestBase, checkedMemory);
+        ImageMemory image(group.image(), guestBase,
+                          checkedMemory || output == LiftOutput::ProcessArtifact);
+
+        if (output == LiftOutput::ProcessArtifact) {
+            const auto &root = group.function(group.root());
+            image.checkStackMapping(root.graph.at(root.entry).steps.front());
+        }
+
         const InstructionOperands operands(group.registers(), guestBase);
         std::map<uint32_t, FunctionAnalyzer> analyzers;
 

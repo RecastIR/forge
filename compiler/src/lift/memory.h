@@ -1,6 +1,6 @@
 #pragma once
 
-#include "llvm/IR/IRBuilder.h"
+#include "lift/execution_checks.h"
 
 #include <cstdint>
 
@@ -12,20 +12,22 @@ namespace forge::x86 {
         llvm::Value *marks = nullptr;
     };
 
-    // Each invocation owns its stack. The image resolver borrows the module's
-    // persistent storage. Guard continuations share the lowering builder.
+    // Stack bytes, marks and image rows are borrowed from the active entry context.
     class GuestMemory {
       public:
-        static constexpr uint64_t base = 0x70000000;
-        static constexpr unsigned capacity = 4096;
-        static constexpr uint64_t entryRsp = base + capacity - 32 - 8;
+        static constexpr uint64_t base = FORGE_RT_STACK_BASE;
+        static constexpr unsigned capacity = FORGE_RT_STACK_SIZE;
+        static constexpr uint64_t entryRsp = FORGE_RT_ENTRY_RSP;
 
-        explicit GuestMemory(llvm::IRBuilder<> &builder) : ir(builder) {}
+        explicit GuestMemory(llvm::IRBuilder<> &builder) : checks(builder), ir(builder) {}
+
+        ExecutionChecks checks;
 
         // Only the entry adapter initializes storage. Each body binds views
         // into the same invocation without clearing bytes or origin marks.
         void initialize(llvm::Value *stackBytes, llvm::Value *stackValidity);
-        void bind(llvm::Value *stackBytes, llvm::Value *stackValidity, llvm::Function *resolver);
+        void bind(llvm::Value *stackBytes, llvm::Value *stackValidity, llvm::Function *resolver,
+                  llvm::Value *regions = nullptr);
         llvm::Value *load(llvm::Value *address, unsigned width, bool stackOnly);
         StoredValue loadSaved(llvm::Value *address, unsigned width, bool stackOnly);
         void store(llvm::Value *address, StoredValue value, bool stackOnly);
@@ -38,13 +40,12 @@ namespace forge::x86 {
                                 uint64_t nextGuestVA);
         llvm::Value *popReturn(llvm::Value *rsp, llvm::Value *expectedEntryRsp,
                                uint64_t nextGuestVA);
-        void guard(llvm::Value *condition);
 
       private:
         llvm::IRBuilder<> &ir;
         llvm::Value *bytes = nullptr;
         llvm::Value *validity = nullptr;
-        llvm::BasicBlock *fault = nullptr;
+        llvm::Value *regions = nullptr;
 
         llvm::Function *imageResolver = nullptr;
 
@@ -58,7 +59,8 @@ namespace forge::x86 {
 
         Location resolve(llvm::Value *address, unsigned width, Access access, bool stackOnly,
                          llvm::Value *storeMarks = nullptr);
-        llvm::Value *checkedOffset(llvm::Value *address, unsigned width);
+        static uint32_t permissions(Access access);
+        llvm::Value *checkedOffset(llvm::Value *address, unsigned width, Access access);
         void installReturn(llvm::Value *offset, uint64_t address);
         void verifyReturn(llvm::Value *offset, uint64_t address);
         Location stackLocation(llvm::Value *offset, unsigned width, Access access,

@@ -8,7 +8,7 @@ if(BUILD_TESTING OR CMAKE_EXPORT_COMPILE_COMMANDS)
     forge_rt_read_guest=forgeTestReadGuest forge_rt_write_guest=forgeTestWriteGuest
     forge_rt_validate_guest=forgeTestValidateGuest)
   configure_forge_cxx(runtime_transfer_probe)
-  add_executable(runtime_contract unit/runtime.cpp unit/runtime_memory.cpp
+  add_executable(runtime_contract unit/runtime.cpp unit/runtime_memory.cpp unit/runtime_process.cpp
     $<TARGET_OBJECTS:runtime_transfer_probe>)
   target_link_libraries(runtime_contract PRIVATE forge_runtime Threads::Threads)
   configure_forge_cxx(runtime_contract)
@@ -115,6 +115,10 @@ if(BUILD_TESTING OR CMAKE_EXPORT_COMPILE_COMMANDS)
     target_link_libraries(string_service_harness PRIVATE forge_runtime)
     configure_forge_cxx(string_service_harness)
     set_target_properties(string_service_harness PROPERTIES OSX_ARCHITECTURES arm64)
+    add_library(process_harness OBJECT support/process.cpp)
+    target_link_libraries(process_harness PRIVATE forge_runtime)
+    configure_forge_cxx(process_harness)
+    set_target_properties(process_harness PROPERTIES OSX_ARCHITECTURES arm64)
   endif()
 endif()
 if(APPLE)
@@ -344,4 +348,9 @@ if(APPLE)
     "${fixtures}/lstrlen.exe" "${opt}" "${llc}" "$<TARGET_OBJECTS:string_service_harness>"
     "$<TARGET_FILE:forge_runtime>" "$<TARGET_FILE:lift_contract>" ${harness_linker})
   set_tests_properties(guest_lstrlen PROPERTIES FIXTURES_REQUIRED pe_images SKIP_RETURN_CODE 77 TIMEOUT 90)
+  add_test(NAME guest_process COMMAND "${Python3_EXECUTABLE}" -B
+    "${CMAKE_CURRENT_SOURCE_DIR}/integration/test_process.py" "$<TARGET_FILE:forge>"
+    "${fixtures}" "${opt}" "${llc}" "$<TARGET_FILE:lift_contract>" "$<TARGET_OBJECTS:process_harness>"
+    "$<TARGET_OBJECTS:abi_service_harness>" "$<TARGET_FILE:forge_runtime>" ${harness_linker})
+  set_tests_properties(guest_process PROPERTIES FIXTURES_REQUIRED pe_images SKIP_RETURN_CODE 77 TIMEOUT 120)
 endif()

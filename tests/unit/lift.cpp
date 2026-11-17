@@ -630,7 +630,8 @@ namespace {
     // after analysis destruction also exercises the returned module's ownership.
     void emitRebased(const fs::path &path, llvm::StringRef entry, llvm::StringRef base,
                      bool checked, bool runtime = false,
-                     std::span<const win64::ServiceBinding> catalogue = win64::services) {
+                     std::span<const win64::ServiceBinding> catalogue = win64::services,
+                     LiftOutput output = LiftOutput::Function) {
         uint32_t rva;
         uint64_t guestBase;
         check(!entry.getAsInteger(0, rva) && !base.getAsInteger(0, guestBase),
@@ -643,7 +644,7 @@ namespace {
                 DebugInfo::Omit);
             module = generateIR(
                 analysis,
-                {rva, EntryMode::WindowsX64I64Pair, guestBase, runtime || checked, checked},
+                {rva, EntryMode::WindowsX64I64Pair, guestBase, runtime || checked, checked, output},
                 context, catalogue);
         }
 
@@ -820,6 +821,12 @@ namespace {
 } // namespace
 
 int main(int argc, char **argv) try {
+    if (argc == 5 && std::string_view(argv[1]) == "--emit-process") {
+        emitRebased(argv[2], argv[3], argv[4], false, false, forge::test::abiServices,
+                    forge::LiftOutput::ProcessArtifact);
+        return 0;
+    }
+
     if (argc == 5 && (std::string_view(argv[1]) == "--emit-abi" ||
                       std::string_view(argv[1]) == "--emit-abi-checked")) {
         emitRebased(argv[2], argv[3], argv[4], std::string_view(argv[1]) == "--emit-abi-checked",

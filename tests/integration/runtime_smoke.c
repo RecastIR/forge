@@ -1,4 +1,4 @@
-#include <forge/runtime.h>
+#include <forge/process.h>
 #include <stdbool.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -38,6 +38,27 @@ static void checkArguments(forge_rt_instance *runtime) {
     REQUIRE(forge_rt_thread_create(runtime, &token) == FORGE_RT_OK);
     REQUIRE(forge_rt_get_last_error(runtime, token, NULL) == FORGE_RT_INVALID_ARGUMENT);
     REQUIRE(forge_rt_thread_destroy(runtime, token) == FORGE_RT_OK);
+}
+
+static void returnInputs(forge_rt_execution *execution) {
+    execution->result.kind = FORGE_RT_RETURNED;
+    execution->result.value = execution->rcx + execution->rdx;
+}
+
+static void checkProcess(void) {
+    const forge_rt_artifact artifact = {
+        .version = FORGE_RT_ARTIFACT_VERSION, .base = 0x4000, .size = 16, .entry = returnInputs};
+    forge_rt_process *process = NULL;
+    REQUIRE(forge_rt_process_create(FORGE_RT_ABI_VERSION, &process) == FORGE_RT_OK);
+    forge_rt_process *output = process;
+    REQUIRE(forge_rt_process_create(FORGE_RT_ABI_VERSION + 1, &output) == FORGE_RT_ABI_MISMATCH);
+    REQUIRE(output == process);
+    REQUIRE(forge_rt_process_register(process, &artifact) == FORGE_RT_OK);
+    forge_rt_process_result result = {0};
+    const forge_rt_entry_inputs inputs = {UINT64_MAX, 2};
+    REQUIRE(forge_rt_process_run(process, &inputs, &result) == FORGE_RT_OK);
+    REQUIRE(result.kind == FORGE_RT_RETURNED && result.value == 1);
+    REQUIRE(forge_rt_process_destroy(process) == FORGE_RT_OK);
 }
 
 static void checkIsolation(forge_rt_instance *first, forge_rt_instance *second) {
@@ -108,6 +129,7 @@ static void checkMemory(forge_rt_instance *runtime) {
 }
 
 int main(void) {
+    checkProcess();
     forge_rt_instance *first = NULL, *second = NULL;
     REQUIRE(forge_rt_create(FORGE_RT_ABI_VERSION, &first) == FORGE_RT_OK);
     REQUIRE(forge_rt_destroy(first) == FORGE_RT_OK);

@@ -20,6 +20,8 @@ namespace forge {
 
     enum class EntryMode { RegisterState, WindowsX64I64Pair };
 
+    enum class LiftOutput { Function, ProcessArtifact };
+
     struct LiftRequest {
         uint32_t startRva;
         EntryMode mode;
@@ -28,6 +30,8 @@ namespace forge {
         bool runtime = false;
         // Publish the selected image and live stack to the runtime at the typed entry.
         bool checkedMemory = false;
+        // Process artifacts are an explicit compiler output with their own checked entry ABI.
+        LiftOutput output = LiftOutput::Function;
     };
 
     // The module is independent of the image after generation. The caller's context

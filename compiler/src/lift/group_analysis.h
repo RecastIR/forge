@@ -25,7 +25,9 @@ namespace forge::x86 {
 
     // The group must outlive its proofs. Use a guest base validated for this image.
     GroupAnalysis analyzeGroup(const RecoveredFunctionGroup &group, uint64_t guestBase,
-                               EntryMode mode, bool checkedMemory = false);
+                               EntryMode mode, bool checkedMemory = false,
+                               LiftOutput output = LiftOutput::Function);
     GroupAnalysis analyzeGroup(const RecoveredFunctionGroup &&, uint64_t, EntryMode,
-                               bool checkedMemory = false) = delete;
+                               bool checkedMemory = false,
+                               LiftOutput output = LiftOutput::Function) = delete;
 } // namespace forge::x86

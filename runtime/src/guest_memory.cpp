@@ -196,7 +196,8 @@ namespace {
                 return FORGE_RT_INVALID_THREAD;
             }
 
-            if (!invocation || entry->second.invocation != invocation) {
+            if (!invocation || entry->second.invocation != invocation ||
+                (process.managed && executingInvocation != invocation)) {
                 return FORGE_RT_INVALID_INVOCATION;
             }
 

@@ -1,7 +1,7 @@
 #include "lift/image_memory.h"
 
 #include "forge/guest_range.h"
-#include "forge/runtime.h"
+#include "forge/process.h"
 #include "lift/address_fact.h"
 #include "lift/memory.h"
 #include "lift/recovery.h"
@@ -207,7 +207,7 @@ namespace forge::x86 {
             ir.CreateCondBr(ir.CreateICmpNE(nextLow, ir.getInt64(0)), candidate, fault);
 
             ir.SetInsertPoint(candidate);
-            return ir.CreateInBoundsGEP(row, table, ir.CreateSub(nextLow, ir.getInt64(1)));
+            return ir.CreateSub(nextLow, ir.getInt64(1));
         }
 
         Function *resolver(llvm::Module &module, GlobalVariable *table, bool checked) {
@@ -222,7 +222,8 @@ namespace forge::x86 {
             auto *row = cast<StructType>(table->getValueType()->getArrayElementType());
 
             ir.SetInsertPoint(entry);
-            auto *record = findInterval(ir, table, row, fault);
+            auto *index = findInterval(ir, table, row, fault);
+            auto *record = ir.CreateInBoundsGEP(row, table, index);
             auto *base = ir.CreateLoad(ir.getInt64Ty(), ir.CreateStructGEP(row, record, 0));
             auto *size = ir.CreateLoad(ir.getInt64Ty(), ir.CreateStructGEP(row, record, 1));
             auto *width = function->getArg(1);
@@ -246,6 +247,172 @@ namespace forge::x86 {
             ir.SetInsertPoint(fault);
             ir.CreateIntrinsic(Intrinsic::trap, {});
             ir.CreateUnreachable();
+            return function;
+        }
+
+        GlobalVariable *artifactConstant(llvm::Module &module, Constant *data, StringRef name) {
+            auto *global = new GlobalVariable(module, data->getType(), true,
+                                              GlobalValue::PrivateLinkage, data, name);
+            global->setUnnamedAddr(GlobalValue::UnnamedAddr::Global);
+            return global;
+        }
+
+        Constant *artifactTable(llvm::Module &module, ArrayRef<Constant *> records,
+                                StringRef name) {
+            if (records.empty()) {
+                return ConstantPointerNull::get(PointerType::getUnqual(module.getContext()));
+            }
+
+            auto *type = ArrayType::get(records.front()->getType(), records.size());
+            return artifactConstant(module, ConstantArray::get(type, records), name);
+        }
+
+        Constant *processBacking(llvm::Module &module, IRBuilder<> &ir, uint64_t size,
+                                 const ImageBytes &bytes, bool writable) {
+            auto *null = ConstantPointerNull::get(ir.getPtrTy());
+
+            if (!writable) {
+                auto *immutable = artifactConstant(
+                    module, immutableBytes(module.getContext(), bytes, size), "image.immutable");
+                return ConstantStruct::getAnon(
+                    {ir.getInt64(size), immutable, null, ir.getInt64(0)});
+            }
+
+            // The runtime zero-fills the virtual extent. Store only the initialized PE
+            // prefix and relocated fragments, including when a large BSS tail is present.
+            SmallVector<Constant *> fragments;
+            auto add = [&](uint64_t offset, StringRef source) {
+                if (llvm::all_of(source, [](char byte) { return byte == 0; })) {
+                    return;
+                }
+
+                auto *data = ConstantDataArray::getString(module.getContext(), source, false);
+                fragments.push_back(ConstantStruct::getAnon(
+                    {ir.getInt64(offset), ir.getInt64(source.size()),
+                     artifactConstant(module, data, "image.fragment.bytes")}));
+            };
+            add(0, bytes.prefix);
+
+            for (const auto &fragment : bytes.tail) {
+                add(fragment.offset, fragment.bytes);
+            }
+
+            return ConstantStruct::getAnon({ir.getInt64(size), null,
+                                            artifactTable(module, fragments, "image.fragments"),
+                                            ir.getInt64(fragments.size())});
+        }
+
+        SmallVector<Constant *> processImports(llvm::Module &module,
+                                               const RecoveredFunctionGroup &group) {
+            std::set<std::pair<std::string_view, std::string_view>> names;
+
+            for (const auto &[rva, function] : group.functions()) {
+                for (const auto &[site, call] : function.calls) {
+                    if (const auto *service = call.external()) {
+                        names.emplace(service->binding.dll, service->binding.name);
+                    }
+                }
+            }
+
+            IRBuilder<> ir(module.getContext());
+            SmallVector<Constant *> imports;
+
+            for (const auto &[dll, name] : names) {
+                imports.push_back(ConstantStruct::getAnon(
+                    {ir.CreateGlobalString(dll, "service.dll", 0, &module),
+                     ir.CreateGlobalString(name, "service.name", 0, &module)}));
+            }
+
+            return imports;
+        }
+
+        // Fold known immutable accesses to a module constant. Writable bytes always come
+        // from the live region table shared by the process and its native services.
+        Value *processRegionBytes(IRBuilder<> &ir, GlobalVariable *backings, Value *backingIndex,
+                                  Value *backingOffset, Value *regions, Value *regionIndex) {
+            auto *backingType = cast<StructType>(backings->getValueType()->getArrayElementType());
+            auto *backing = ir.CreateInBoundsGEP(backingType, backings, backingIndex);
+            auto *immutable =
+                ir.CreateLoad(ir.getPtrTy(), ir.CreateStructGEP(backingType, backing, 1));
+            auto *initialBytes = ir.CreateGEP(ir.getInt8Ty(), immutable, backingOffset);
+
+            auto *materialized = StructType::get(ir.getInt64Ty(), ir.getInt64Ty(), ir.getPtrTy(),
+                                                 ir.getInt32Ty(), ir.getPtrTy());
+            auto *liveRow = ir.CreateInBoundsGEP(materialized, regions, regionIndex);
+            auto *liveBytes =
+                ir.CreateLoad(ir.getPtrTy(), ir.CreateStructGEP(materialized, liveRow, 2));
+            return ir.CreateSelect(ir.CreateIsNull(immutable), liveBytes, initialBytes);
+        }
+
+        Function *processResolver(llvm::Module &module, GlobalVariable *regions,
+                                  GlobalVariable *backings) {
+            IRBuilder<> ir(module.getContext());
+            auto *result = StructType::get(ir.getPtrTy(), ir.getInt32Ty(), ir.getInt64Ty());
+            auto *type = FunctionType::get(
+                result, {ir.getInt64Ty(), ir.getInt64Ty(), ir.getInt1Ty(), ir.getPtrTy()}, false);
+            auto *function =
+                Function::Create(type, GlobalValue::InternalLinkage, "forge_image_address", module);
+            auto block = [&](StringRef name) {
+                return BasicBlock::Create(module.getContext(), name, function);
+            };
+            auto *entry = block("entry");
+            auto *lookup = block("lookup");
+            auto *check = block("permission");
+            auto *extent = block("extent");
+            auto *mapped = block("mapped");
+            auto *overflow = block("overflow");
+            auto *unmapped = block("unmapped");
+            auto *denied = block("denied");
+            auto *boundary = block("boundary");
+            auto *address = function->getArg(0);
+            auto *width = function->getArg(1);
+            auto *row = cast<StructType>(regions->getValueType()->getArrayElementType());
+            ir.SetInsertPoint(entry);
+            auto *remaining = ir.CreateNot(address);
+            ir.CreateCondBr(ir.CreateICmpULE(ir.CreateSub(width, ir.getInt64(1)), remaining),
+                            lookup, overflow);
+
+            ir.SetInsertPoint(lookup);
+            auto *index = findInterval(ir, regions, row, unmapped);
+            auto *record = ir.CreateInBoundsGEP(row, regions, index);
+            auto loadField = [&](unsigned field) {
+                return ir.CreateLoad(row->getElementType(field),
+                                     ir.CreateStructGEP(row, record, field));
+            };
+            auto *offset = ir.CreateSub(address, loadField(0));
+            auto *size = loadField(1);
+            ir.CreateCondBr(ir.CreateICmpULT(offset, size), check, unmapped);
+
+            ir.SetInsertPoint(check);
+            auto *permissions = loadField(4);
+            auto *writable =
+                ir.CreateIsNotNull(ir.CreateAnd(permissions, ir.getInt32(FORGE_RT_WRITE)));
+            ir.CreateCondBr(ir.CreateOr(ir.CreateNot(function->getArg(2)), writable), extent,
+                            denied);
+
+            ir.SetInsertPoint(extent);
+            auto *available = ir.CreateSub(size, offset);
+            ir.CreateCondBr(ir.CreateICmpULE(width, available), mapped, boundary);
+
+            ir.SetInsertPoint(mapped);
+            auto *bytes = processRegionBytes(ir, backings, loadField(2), loadField(3),
+                                             function->getArg(3), index);
+            auto *ptr = ir.CreateInBoundsGEP(ir.getInt8Ty(), bytes, offset);
+            ir.CreateRet(ir.CreateInsertValue(ConstantAggregateZero::get(result), ptr, 0));
+
+            auto fail = [&](uint32_t reason, Value *firstInvalid) {
+                auto *failure = ir.CreateInsertValue(ConstantAggregateZero::get(result),
+                                                     ir.getInt32(reason), 1);
+                ir.CreateRet(ir.CreateInsertValue(failure, firstInvalid, 2));
+            };
+            ir.SetInsertPoint(overflow);
+            fail(FORGE_RT_FAULT_OVERFLOW, address);
+            ir.SetInsertPoint(unmapped);
+            fail(FORGE_RT_FAULT_UNMAPPED, address);
+            ir.SetInsertPoint(denied);
+            fail(FORGE_RT_FAULT_PERMISSION, address);
+            ir.SetInsertPoint(boundary);
+            fail(FORGE_RT_FAULT_UNMAPPED, ir.CreateAdd(address, available));
             return function;
         }
     } // namespace
@@ -679,5 +846,61 @@ namespace forge::x86 {
         }
 
         return result;
+    }
+
+    Function *ImagePlan::emitProcess(Function &entryThunk,
+                                     const RecoveredFunctionGroup &group) const {
+        auto &module = *entryThunk.getParent();
+        IRBuilder<> ir(module.getContext());
+        SmallVector<Constant *> storage;
+        SmallVector<Constant *> intervals;
+
+        for (const auto &backing : backings) {
+            if (backing.intervals.empty()) {
+                continue;
+            }
+
+            auto *index = ir.getInt64(storage.size());
+            const auto size = backing.range.end - backing.range.begin;
+            storage.push_back(processBacking(module, ir, size, backing.bytes, backing.writable));
+            const auto permissions = FORGE_RT_READ | (backing.writable ? FORGE_RT_WRITE : 0U) |
+                                     (backing.executable ? FORGE_RT_EXECUTE : 0U);
+
+            for (auto interval : backing.intervals) {
+                intervals.push_back(ConstantStruct::getAnon(
+                    {ir.getInt64(loadBase + interval.begin),
+                     ir.getInt64(interval.end - interval.begin), index,
+                     ir.getInt64(interval.begin - backing.range.begin), ir.getInt32(permissions)}));
+            }
+        }
+
+        auto *storageTable = artifactTable(module, storage, "image.backings");
+        auto *regionTable = artifactTable(module, intervals, "image.ranges");
+        auto imports = processImports(module, group);
+        auto *descriptor = ConstantStruct::getAnon(
+            {ir.getInt32(FORGE_RT_ARTIFACT_VERSION), ir.getInt64(loadBase),
+             ir.getInt64(sizeOfImage), ir.getInt64(group.root()),
+             ir.getInt64(group.image().module().entryPoint), storageTable,
+             ir.getInt64(storage.size()), regionTable, ir.getInt64(intervals.size()),
+             artifactTable(module, imports, "image.imports"), ir.getInt64(imports.size()),
+             &entryThunk});
+
+        // Descriptor identity distinguishes artifacts during duplicate registration.
+        auto *artifact =
+            new GlobalVariable(module, descriptor->getType(), true, GlobalValue::PrivateLinkage,
+                               descriptor, "image.artifact");
+        auto *type = FunctionType::get(ir.getPtrTy(), false);
+        auto *accessor =
+            Function::Create(type, GlobalValue::ExternalLinkage, "forge_lifted_artifact", module);
+        accessor->setDSOLocal(true);
+        ir.SetInsertPoint(BasicBlock::Create(module.getContext(), "entry", accessor));
+        ir.CreateRet(artifact);
+
+        if (intervals.empty()) {
+            return nullptr;
+        }
+
+        return processResolver(module, cast<GlobalVariable>(regionTable),
+                               cast<GlobalVariable>(storageTable));
     }
 } // namespace forge::x86
