@@ -3,6 +3,7 @@
 #include "lift/cfg.h"
 #include "pe/image.h"
 
+#include <span>
 #include <variant>
 
 namespace llvm {
@@ -42,11 +43,61 @@ namespace forge::x86 {
         uint32_t evidenceRva;
     };
 
-    enum class ServiceSignature { DwordToVoid, VoidToDword };
+    enum class ServiceValue : uint8_t { Void, Dword, Int, GuestAddress };
+    enum class ServiceMemory : uint8_t { None, ReadString };
+    enum class ServiceFailure : uint8_t { Trap };
+    enum class LastErrorEffect : uint8_t { Read, Write, Preserve };
+
+    constexpr unsigned serviceWidth(ServiceValue value) {
+        switch (value) {
+        case ServiceValue::Void:
+            return 0;
+        case ServiceValue::GuestAddress:
+            return 64;
+        case ServiceValue::Dword:
+        case ServiceValue::Int:
+            return 32;
+        }
+
+        return 0;
+    }
+
+    struct ServiceArgument {
+        ServiceValue type;
+        ServiceMemory memory;
+    };
 
     struct ServiceBinding {
         llvm::StringLiteral name, nativeSymbol;
-        ServiceSignature signature;
+        std::span<const ServiceArgument> arguments;
+        ServiceValue result;
+        bool checkedMemory;
+        ServiceFailure failure;
+        LastErrorEffect lastError;
+
+        // Only the three implemented native C call shapes are admitted.
+        bool supported() const {
+            if (failure != ServiceFailure::Trap) {
+                return false;
+            }
+
+            if (arguments.empty()) {
+                return result == ServiceValue::Dword && !checkedMemory &&
+                       lastError == LastErrorEffect::Read;
+            }
+
+            if (arguments.size() != 1) {
+                return false;
+            }
+
+            const auto &argument = arguments.front();
+            return (argument.type == ServiceValue::Dword &&
+                    argument.memory == ServiceMemory::None && result == ServiceValue::Void &&
+                    !checkedMemory && lastError == LastErrorEffect::Write) ||
+                   (argument.type == ServiceValue::GuestAddress &&
+                    argument.memory == ServiceMemory::ReadString && result == ServiceValue::Int &&
+                    checkedMemory && lastError == LastErrorEffect::Preserve);
+        }
     };
 
     struct ExternalCallTarget {

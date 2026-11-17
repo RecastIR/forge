@@ -17,7 +17,7 @@ def generate(output, mc, link, dlltool, clang):
         "Bridge.dll": ["Bridge=entry"],
         "Middle.dll": ["Middle=entry"],
         "MissingLeaf.dll": ["Leaf"],
-        "KERNEL32.dll": ["Sleep", "SetLastError", "GetLastError"],
+        "KERNEL32.dll": ["Sleep", "SetLastError", "GetLastError", "lstrlenA"],
         "vcruntime140.dll": ["Runtime"],
         contract: ["Contract"],
     }
@@ -90,6 +90,9 @@ def generate(output, mc, link, dlltool, clang):
         imports = [("KERNEL32.dll", name) for name in ("SetLastError", "GetLastError", "Sleep")]
         image("last-error.exe", stub + ".globl last_error_set\n" + last_error, imports + [("Physics.DLL", "Named")], exports=["last_error_set"])
         image("last-error-delay.exe", stub + last_error, imports, delays=["KERNEL32.dll"])
+        string_length = (sources.parent / "differential/fixtures/imports/lstrlen.S").read_text()
+        image("lstrlen.exe", stub + string_length,
+              [("KERNEL32.dll", name) for name in ("SetLastError", "GetLastError", "lstrlenA")])
         image("checked-memory.exe", (sources / "checked-memory.s").read_text(), [("KERNEL32.dll", "GetLastError")],
               exports=["entry", "guard_then_service", "bridge_value,data", "bridge_constant,data"])
         image("import-call.exe", (sources / "import-call.s").read_text(), [("Physics.DLL", "Named")])

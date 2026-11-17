@@ -1,0 +1,13 @@
+{
+  "schema_version": 1,
+  "id": "imports/lstrlen",
+  "description": "Checked lstrlenA over import-only literals, mutable image bytes, stack strings, and bounded/nested pointer arguments; preserve last error and continue after calls.",
+  "source": "fixtures/imports/lstrlen.c",
+  "binary": "lstrlen.exe",
+  "args": ["0", "0", "1", "0", "2", "0", "3", "0", "4", "0", "5", "0", "6", "0", "7", "0", "7", "1", "8", "0", "4", "0", "6", "0"],
+  "expected": {
+    "exit_code": 0,
+    "stdout": "1\n1\n6\n701\n4\n6\n23\n1\n6\n6\n4\n23\n",
+    "stderr": ""
+  }
+}

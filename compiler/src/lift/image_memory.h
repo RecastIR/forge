@@ -56,6 +56,7 @@ namespace forge::x86 {
 
         void checkStackMapping(const Step &step) const;
         void addressTaken(const Step &step, uint64_t va);
+        void stringArgument(const Step &step, uint64_t va);
         void fixedAccess(const Step &step, uint64_t va, unsigned width, bool write);
         void tableRead(const Step &step, const RelativeTable &table);
         void computedAccess(const Step &step, std::optional<uint64_t> va, unsigned width,

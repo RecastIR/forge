@@ -83,6 +83,13 @@ static void checkMemory(forge_rt_instance *runtime) {
     REQUIRE(invocation != 0);
     REQUIRE(forge_rt_current_invocation(runtime, thread, &current) == FORGE_RT_OK);
     REQUIRE(current == invocation);
+
+    int32_t length = 17;
+    forge_rt_memory_fault stringFault = {7, 8, 9};
+    REQUIRE(forge_rt_lstrlen_a(runtime, thread, 0, &length, &stringFault) == FORGE_RT_OK);
+    REQUIRE(length == 0 && stringFault.address == 7 && stringFault.access == 8 &&
+            stringFault.reason == 9);
+
     REQUIRE(forge_rt_enter(runtime, thread, &image, NULL, &current) == FORGE_RT_BUSY);
     REQUIRE(current == invocation);
 

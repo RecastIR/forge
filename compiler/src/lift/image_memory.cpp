@@ -307,6 +307,32 @@ namespace forge::x86 {
         }
     }
 
+    void ImageMemory::stringArgument(const Step &step, uint64_t va) {
+        if (va == 0 || va - GuestMemory::base < GuestMemory::capacity) {
+            return;
+        }
+
+        const auto rva = va - loadBase;
+        const auto *section = source.sectionAtRva(rva);
+        if (!section || section->permissions[2] == 'x' ||
+            (!section->immutable() && !section->writableData())) {
+            step.reject(
+                FailureCode::ImageMemory,
+                "string argument at guest VA " + hex(va) +
+                    " requires a readable non-executable PE data section or the guest stack");
+        }
+
+        if (!contents().exclusionsIn({rva, rva + 1}).empty()) {
+            step.reject(FailureCode::ImageMemory,
+                        "string argument at guest VA " + hex(va) +
+                            " overlaps a protected loader-written field or relocation");
+        }
+
+        // The terminator can move after a guest store. Select the proven section,
+        // not a snapshot string length; finish() retains every protected hole.
+        select(step, *section, {section->rva, uint64_t(section->rva) + section->virtualSize});
+    }
+
     void ImageMemory::fixedAccess(const Step &step, uint64_t va, unsigned width, bool write) {
         const unsigned bytes = width / 8;
 

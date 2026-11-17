@@ -603,6 +603,137 @@ namespace {
         REQUIRE(forge_rt_thread_destroy(process, reader.thread) == FORGE_RT_OK);
     }
 
+    void testStringService() {
+        constexpr uint64_t base = 0x1000;
+        std::array<uint8_t, 3> first{'a', 0x80, 'c'};
+        std::array<uint8_t, 3> second{'d', 0, 0};
+        uint64_t claim = 0;
+        const forge_rt_image_region rows[]{
+            {base, first.size(), first.data(), FORGE_RT_READ, nullptr},
+            {base + first.size(), second.size(), second.data(), readWrite, &claim}};
+        const forge_rt_image image{base, 64, rows, std::size(rows)};
+        const auto instance = createInstance();
+        Activation active{instance.get(), createThread(instance.get())};
+        forge_rt_memory_fault fault{17, 18, 19};
+        int32_t length = -99;
+        auto call = [&](uint64_t address) {
+            return forge_rt_lstrlen_a(instance.get(), active.thread, address, &length, &fault);
+        };
+
+        REQUIRE(call(0) == FORGE_RT_INVALID_INVOCATION && length == -99);
+        REQUIRE(active.enter(image) == FORGE_RT_OK);
+        REQUIRE(forge_rt_set_last_error(instance.get(), active.thread, 0xfedcba98) == FORGE_RT_OK);
+        REQUIRE(call(base) == FORGE_RT_OK && length == 4);
+        REQUIRE(first == (std::array<uint8_t, 3>{'a', 0x80, 'c'}));
+        REQUIRE(second == (std::array<uint8_t, 3>{'d', 0, 0}));
+        expectFault(fault, {17, 18, 19});
+        REQUIRE(call(base + 4) == FORGE_RT_OK && length == 0);
+        REQUIRE(call(0) == FORGE_RT_OK && length == 0);
+        second[1] = 'e';
+        REQUIRE(call(base) == FORGE_RT_OK && length == 5);
+        second[2] = 'f';
+        REQUIRE(call(base) == FORGE_RT_GUEST_FAULT && length == 5);
+        expectFault(fault, {base + 6, FORGE_RT_READ, FORGE_RT_FAULT_UNMAPPED});
+        REQUIRE(call(base + 32) == FORGE_RT_GUEST_FAULT && length == 5);
+        REQUIRE(forge_rt_lstrlen_a(instance.get(), active.thread, base, nullptr, &fault) ==
+                FORGE_RT_INVALID_ARGUMENT);
+        REQUIRE(forge_rt_lstrlen_a(instance.get(), active.thread, base, &length, nullptr) ==
+                FORGE_RT_INVALID_ARGUMENT);
+        REQUIRE(forge_rt_lstrlen_a(nullptr, active.thread, base, &length, &fault) ==
+                FORGE_RT_INVALID_ARGUMENT);
+        REQUIRE(forge_rt_lstrlen_a(instance.get(), 0, base, &length, &fault) ==
+                FORGE_RT_INVALID_THREAD);
+        uint32_t last = 0;
+        REQUIRE(forge_rt_get_last_error(instance.get(), active.thread, &last) == FORGE_RT_OK);
+        REQUIRE(last == 0xfedcba98);
+        REQUIRE(active.leave() == FORGE_RT_OK);
+        REQUIRE(call(base) == FORGE_RT_INVALID_INVOCATION && length == 5);
+        REQUIRE(forge_rt_thread_destroy(instance.get(), active.thread) == FORGE_RT_OK);
+        REQUIRE(call(base) == FORGE_RT_INVALID_THREAD && length == 5);
+    }
+
+    void testStringLimitAndOverflow() {
+        constexpr size_t limit = size_t{1024} * 1024;
+        std::vector<uint8_t> bytes(limit + 1, 'x');
+        uint64_t claim = 0;
+        const forge_rt_image_region row{0x1000, bytes.size(), bytes.data(), readWrite, &claim};
+        const forge_rt_image image{row.start, row.size, &row, 1};
+        const auto instance = createInstance();
+        Activation active{instance.get(), createThread(instance.get())};
+        REQUIRE(active.enter(image) == FORGE_RT_OK);
+        int32_t length = -1;
+        forge_rt_memory_fault fault{17, 18, 19};
+        bytes[limit] = 0;
+        REQUIRE(forge_rt_lstrlen_a(instance.get(), active.thread, row.start, &length, &fault) ==
+                FORGE_RT_RESOURCE_EXHAUSTED);
+        REQUIRE(length == -1);
+        expectFault(fault, {17, 18, 19});
+        for (const size_t end : {size_t{255}, size_t{256}, size_t{257}, limit - 1}) {
+            bytes[end] = 0;
+            REQUIRE(forge_rt_lstrlen_a(instance.get(), active.thread, row.start, &length, &fault) ==
+                    FORGE_RT_OK);
+            REQUIRE(length == static_cast<int32_t>(end));
+            bytes[end] = 'x';
+        }
+
+        REQUIRE(active.leave() == FORGE_RT_OK);
+        REQUIRE(forge_rt_detach_image(instance.get(), &image) == FORGE_RT_OK);
+        uint8_t topByte = 0;
+        uint64_t topClaim = 0;
+        const forge_rt_image_region top{UINT64_MAX, 1, &topByte, readWrite, &topClaim};
+        const forge_rt_image topImage{UINT64_MAX, 1, &top, 1};
+        REQUIRE(active.enter(topImage) == FORGE_RT_OK);
+        REQUIRE(forge_rt_lstrlen_a(instance.get(), active.thread, UINT64_MAX, &length, &fault) ==
+                FORGE_RT_OK);
+        REQUIRE(length == 0);
+        topByte = 'x';
+        REQUIRE(forge_rt_lstrlen_a(instance.get(), active.thread, UINT64_MAX, &length, &fault) ==
+                FORGE_RT_GUEST_FAULT);
+        REQUIRE(length == 0);
+        expectFault(fault, {UINT64_MAX, FORGE_RT_READ, FORGE_RT_FAULT_OVERFLOW});
+        REQUIRE(active.leave() == FORGE_RT_OK);
+        REQUIRE(forge_rt_detach_image(instance.get(), &topImage) == FORGE_RT_OK);
+    }
+
+    void testStringStackAndPermissions() {
+        constexpr uint64_t base = 0x70000000;
+        std::array<uint8_t, 64> bytes{}, marks{};
+        const forge_rt_stack stack{base, bytes.size(), bytes.data(), marks.data(), base + 48};
+        uint8_t denied = 0;
+        uint64_t claim = 0;
+        const forge_rt_image_region row{0x1000, 1, &denied, FORGE_RT_WRITE, &claim};
+        const forge_rt_image image{row.start, row.size, &row, 1};
+        const auto instance = createInstance();
+        Activation active{instance.get(), createThread(instance.get())};
+        REQUIRE(active.enter(image, &stack) == FORGE_RT_OK);
+        int32_t length = 42;
+        forge_rt_memory_fault fault{};
+        auto call = [&](uint64_t address) {
+            return forge_rt_lstrlen_a(instance.get(), active.thread, address, &length, &fault);
+        };
+        REQUIRE(call(row.start) == FORGE_RT_GUEST_FAULT && length == 42);
+        expectFault(fault, {row.start, FORGE_RT_READ, FORGE_RT_FAULT_PERMISSION});
+        for (uint8_t mark : {uint8_t{0}, uint8_t{17}}) {
+            marks[0] = mark;
+            REQUIRE(call(base) == FORGE_RT_GUEST_FAULT && length == 42);
+            expectFault(fault, {base, FORGE_RT_READ, FORGE_RT_FAULT_STACK});
+        }
+
+        marks[0] = FORGE_RT_MARK_CONCRETE;
+        REQUIRE(call(base) == FORGE_RT_OK && length == 0);
+        bytes[0] = 'a';
+        REQUIRE(call(base) == FORGE_RT_GUEST_FAULT && length == 0);
+        expectFault(fault, {base + 1, FORGE_RT_READ, FORGE_RT_FAULT_STACK});
+        marks[1] = FORGE_RT_MARK_CONCRETE;
+        REQUIRE(call(base) == FORGE_RT_OK && length == 1);
+        REQUIRE(call(stack.outerReturn) == FORGE_RT_GUEST_FAULT && length == 1);
+        expectFault(fault, {stack.outerReturn, FORGE_RT_READ, FORGE_RT_FAULT_STACK});
+        std::thread foreign(
+            [&] { REQUIRE(call(base) == FORGE_RT_INVALID_INVOCATION && length == 1); });
+        foreign.join();
+        REQUIRE(active.leave() == FORGE_RT_OK);
+    }
+
     void testConcurrentDetach() {
         const forge_rt_image execution{0x1000, 16, nullptr, 0};
         const auto process = createInstance();
@@ -622,6 +753,9 @@ void forgeMemoryTransferProbe() noexcept {
 }
 
 void testRuntimeMemory() {
+    testStringService();
+    testStringLimitAndOverflow();
+    testStringStackAndPermissions();
     testSegments();
     testRangeBoundaries();
     testStack();

@@ -433,5 +433,13 @@
     "export": "last_error",
     "signature": "i64(i64,i64)",
     "harness": "runtime_pairs"
+  },
+  {
+    "fixture_id": "imports/lstrlen",
+    "scope": "function",
+    "export": "string_length",
+    "signature": "i64(i64,i64)",
+    "harness": "runtime_pairs",
+    "checked_memory": true
   }
 ]

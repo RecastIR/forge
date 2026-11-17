@@ -395,23 +395,38 @@ namespace forge {
         void Translator::lowerService(const Step &s, const x86::ServiceBinding &binding) {
             auto *instance = ir.CreateLoad(ir.getPtrTy(), context.instance);
             auto *thread = ir.CreateLoad(ir.getInt64Ty(), context.thread);
-            const bool getter = binding.signature == x86::ServiceSignature::VoidToDword;
-            Value *argument = nullptr;
-            if (getter) {
-                // Allocate once per activation, even when the guest CALL is inside a loop.
-                IRBuilder<> entry(&impl->getEntryBlock(), impl->getEntryBlock().begin());
-                argument = entry.CreateAlloca(ir.getInt32Ty(), nullptr, "last.error.out");
-            } else {
-                argument = read(s, {1, 32});
+            SmallVector<Value *, 5> arguments{instance, thread};
+            for (size_t i = 0; i < binding.arguments.size(); ++i) {
+                arguments.push_back(read(s, {static_cast<unsigned>(i + 1),
+                                             x86::serviceWidth(binding.arguments[i].type)}));
             }
 
-            auto *type = FunctionType::get(
-                ir.getInt32Ty(), {ir.getPtrTy(), ir.getInt64Ty(), argument->getType()}, false);
+            // Allocate once per activation, even when the guest CALL is inside a loop.
+            IRBuilder<> entry(&impl->getEntryBlock(), impl->getEntryBlock().begin());
+            const auto resultWidth = x86::serviceWidth(binding.result);
+            Value *output = nullptr;
+            if (resultWidth) {
+                output = entry.CreateAlloca(ir.getIntNTy(resultWidth), nullptr, "service.out");
+                arguments.push_back(output);
+            }
+
+            if (binding.checkedMemory) {
+                auto *faultType =
+                    StructType::get(ir.getInt64Ty(), ir.getInt32Ty(), ir.getInt32Ty());
+                arguments.push_back(entry.CreateAlloca(faultType, nullptr, "service.fault"));
+            }
+
+            SmallVector<Type *, 5> types;
+            for (auto *argument : arguments) {
+                types.push_back(argument->getType());
+            }
+
+            auto *type = FunctionType::get(ir.getInt32Ty(), types, false);
             auto service = impl->getParent()->getOrInsertFunction(binding.nativeSymbol, type);
-            auto *status = ir.CreateCall(service, {instance, thread, argument});
+            auto *status = ir.CreateCall(service, arguments);
             memory.guard(ir.CreateIsNull(status));
-            if (getter) {
-                write({0, 32}, ir.CreateLoad(ir.getInt32Ty(), argument));
+            if (output) {
+                write({0, resultWidth}, ir.CreateLoad(ir.getIntNTy(resultWidth), output));
             }
         }
 
@@ -688,6 +703,18 @@ namespace forge {
 
         try {
             request.runtime = request.runtime || request.checkedMemory;
+
+            for (const auto &[address, function] : group.functions()) {
+                for (const auto &[rva, site] : function.calls) {
+                    const auto *external = site.external();
+                    if (external && external->binding.checkedMemory && !request.checkedMemory) {
+                        function.instructionContaining(rva)->reject(
+                            FailureCode::UnsupportedControlFlow,
+                            "imported service requires --checked-memory --signature "
+                            "'i64(i64,i64)'");
+                    }
+                }
+            }
 
             if (!request.runtime) {
                 for (const auto &[address, function] : group.functions()) {

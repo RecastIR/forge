@@ -303,9 +303,22 @@ namespace forge::x86 {
                                 "bound IAT has no independent import lookup table");
                 }
 
+                static constexpr ServiceArgument dword[] = {
+                    {ServiceValue::Dword, ServiceMemory::None}};
+                static constexpr ServiceArgument string[] = {
+                    {ServiceValue::GuestAddress, ServiceMemory::ReadString}};
                 static constexpr ServiceBinding services[] = {
-                    {"SetLastError", "forge_rt_set_last_error", ServiceSignature::DwordToVoid},
-                    {"GetLastError", "forge_rt_get_last_error", ServiceSignature::VoidToDword}};
+                    {"SetLastError", "forge_rt_set_last_error", dword, ServiceValue::Void, false,
+                     ServiceFailure::Trap, LastErrorEffect::Write},
+                    {"GetLastError",
+                     "forge_rt_get_last_error",
+                     {},
+                     ServiceValue::Dword,
+                     false,
+                     ServiceFailure::Trap,
+                     LastErrorEffect::Read},
+                    {"lstrlenA", "forge_rt_lstrlen_a", string, ServiceValue::Int, true,
+                     ServiceFailure::Trap, LastErrorEffect::Preserve}};
                 const auto *binding = llvm::find_if(
                     services, [&](const auto &service) { return service.name == symbol.name; });
                 if (descriptor.delayed || descriptor.normalizedName != "kernel32.dll" ||
@@ -317,6 +330,11 @@ namespace forge::x86 {
                 }
 
                 validateCallEvidence(caller, step, slot);
+                if (!binding->supported()) {
+                    step.reject(FailureCode::UnsupportedControlFlow,
+                                "unsupported native service signature for " + descriptor.name +
+                                    "!" + identity);
+                }
                 if (const auto changed =
                         imported->unstableIdentityRva(entry.relocations, loaderWrittenRanges())) {
                     step.reject(

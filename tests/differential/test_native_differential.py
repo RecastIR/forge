@@ -26,6 +26,32 @@ class NativeDifferentialTests(unittest.TestCase):
         self.tmp = diff.BUILD / "tmp"
         self.tmp.mkdir(parents=True, exist_ok=True)
 
+    def test_lstrlen_rebased_reference(self):
+        fixture = "imports/lstrlen"
+        contract = self.forge.resolve().parent / "tests/lift_contract"
+        if not contract.is_file():
+            contract = self.forge.resolve().parent.parent / "tests" / self.forge.parent.name / "lift_contract"
+        manifest = next(m for m in diff.load_catalog(diff.SUITE) if m.case["id"] == fixture)
+        with tempfile.TemporaryDirectory(dir=self.tmp) as tmp:
+            output = Path(tmp)
+            for config in diff.CONFIGS:
+                self.assertEqual(diff.run(config, fixture, output=output, forge=self.forge), 0)
+                case = output / config / fixture
+                module = diff.read_json(case / "inspect.json")["modules"][0]
+                rva = next(e["rva"] for e in module["exports"] if "string_length" in e["names"])
+                base = int(module["image_base_va"], 16) + 0x1000000
+                ir = case / "rebased.ll"
+                ir.write_bytes(subprocess.check_output([contract, "--emit-rebased-checked",
+                                                        case / "lstrlen.exe", rva, hex(base)], timeout=30))
+                # The ordinary run verified the Wine publication before these comparisons.
+                expected = (case / "baseline/stdout.bin").read_bytes()
+                for variant in diff.VARIANTS:
+                    work = case / "rebased" / variant
+                    work.mkdir(parents=True)
+                    exe, _ = diff.native.build(ir, "runtime_pairs", work, config, variant)
+                    result = subprocess.run([exe, *manifest.case["args"]], capture_output=True, timeout=10)
+                    self.assertEqual((result.returncode, result.stdout, result.stderr), (0, expected, b""))
+
     def test_calculate_driver(self):
         fixture = "frames/calculate"
         with tempfile.TemporaryDirectory(dir=self.tmp) as tmp:
@@ -88,7 +114,7 @@ class NativeDifferentialTests(unittest.TestCase):
             struct.pack_into("<i", changed, caller.file_offset + site - caller.start + 2, 0)
             forged = work / "forged.exe"
             forged.write_bytes(changed)
-            with self.assertRaisesRegex(ValueError, "unproven last-error IAT call"):
+            with self.assertRaisesRegex(ValueError, "unproven supported-service IAT call"):
                 diff.verified_call_target(forged, module, caller, guests[0][0], self.forge, require_continuation=True)
 
     def test_bound_iat_and_external_call_frames(self):

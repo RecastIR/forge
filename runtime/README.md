@@ -38,6 +38,8 @@ The [runtime architecture](../docs/runtime-architecture.md) covers lifetimes, st
 
 ## Link a lifted Windows function
 
+`KERNEL32.dll!lstrlenA` uses the same typed native entry and runtime archive, with explicit `--checked-memory` instead of plain `--runtime`. It reads proven image/stack buffers through checked guest-VA operations and returns a 32-bit length without changing last error. The initial implementation requires a NUL within the first 1 MiB; faults and limit exhaustion trap at the generated boundary. This temporary service limit does not restrict other checked copies. See the [12E.1 contract](../docs/runtime-architecture.md#12e--windows-x64-abi-bridge) for memory planning and failure behavior.
+
 Build the runtime-only archive above, build the Windows fixtures, and select the exported `last_error` RVA from `forge inspect`. With LLVM 23 selected, run these commands from the repository root.
 
 ```sh

@@ -107,6 +107,10 @@ if(BUILD_TESTING OR CMAKE_EXPORT_COMPILE_COMMANDS)
     target_link_libraries(checked_memory_harness PRIVATE forge_runtime)
     configure_forge_cxx(checked_memory_harness)
     set_target_properties(checked_memory_harness PROPERTIES OSX_ARCHITECTURES arm64)
+    add_library(string_service_harness OBJECT support/string_service.cpp)
+    target_link_libraries(string_service_harness PRIVATE forge_runtime)
+    configure_forge_cxx(string_service_harness)
+    set_target_properties(string_service_harness PROPERTIES OSX_ARCHITECTURES arm64)
   endif()
 endif()
 if(APPLE)
@@ -325,4 +329,9 @@ if(APPLE)
     "${fixtures}/checked-memory.exe" "${opt}" "${llc}" "$<TARGET_OBJECTS:checked_memory_harness>"
     "$<TARGET_FILE:forge_runtime>" ${harness_linker})
   set_tests_properties(guest_checked_memory PROPERTIES FIXTURES_REQUIRED pe_images SKIP_RETURN_CODE 77 TIMEOUT 90)
+  add_test(NAME guest_lstrlen COMMAND "${Python3_EXECUTABLE}" -B
+    "${CMAKE_CURRENT_SOURCE_DIR}/integration/test_lstrlen.py" "$<TARGET_FILE:forge>"
+    "${fixtures}/lstrlen.exe" "${opt}" "${llc}" "$<TARGET_OBJECTS:string_service_harness>"
+    "$<TARGET_FILE:forge_runtime>" "$<TARGET_FILE:lift_contract>" ${harness_linker})
+  set_tests_properties(guest_lstrlen PROPERTIES FIXTURES_REQUIRED pe_images SKIP_RETURN_CODE 77 TIMEOUT 90)
 endif()

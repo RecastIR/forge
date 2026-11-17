@@ -147,6 +147,8 @@ namespace forge::x86 {
             void traceInteger(const Step &s, const IntegerInstruction &op, AddressFacts &facts,
                               bool collect, const std::optional<RelativeTable> &table);
             AddressFact savedAddress(const AddressFacts &facts, const AddressFact &address) const;
+            void planServiceArguments(const ResolvedCallSite &site,
+                                      const AddressFacts &facts) const;
             bool traceCall(const ResolvedCallSite &site, AddressFacts &facts, CallAddresses &calls,
                            bool collect) const;
             size_t traceAddresses(const GuestBlock &block, AddressFacts &facts,
@@ -346,11 +348,43 @@ namespace forge::x86 {
             }
         }
 
+        void FunctionAnalyzer::planServiceArguments(const ResolvedCallSite &site,
+                                                    const AddressFacts &facts) const {
+            const auto &binding = site.external()->binding;
+            const auto &step = *function.instructionContaining(site.instruction);
+            for (size_t i = 0; i < binding.arguments.size(); ++i) {
+                if (binding.arguments[i].memory != ServiceMemory::ReadString) {
+                    continue;
+                }
+
+                const auto &address = facts.registers[i + 1];
+                if (address.stackDerived()) {
+                    continue;
+                }
+
+                if (!address.known()) {
+                    step.reject(FailureCode::ImageMemory,
+                                "string argument " + std::to_string(i + 1) + " to " + binding.name +
+                                    " requires proven image/stack provenance or bounded address "
+                                    "alternatives; "
+                                    "unresolved pointer origins are not supported");
+                }
+
+                for (const auto va : address.values()) {
+                    imageMemory.stringArgument(step, va);
+                }
+            }
+        }
+
         bool FunctionAnalyzer::traceCall(const ResolvedCallSite &site, AddressFacts &facts,
                                          CallAddresses &calls, bool collect) const {
             if (site.external()) {
+                if (collect) {
+                    planServiceArguments(site, facts);
+                }
+
                 std::fill_n(facts.registers.begin(), callerSlots, AddressFact{});
-                // These services take no guest pointers. Only CALL writes guest memory.
+                // Supported services do not write through guest pointers. Only CALL writes memory.
                 const auto slot = facts.registers[rspIndex].plus(AddressFact(uint64_t(0) - 8));
                 facts.spills.write(slot, 64, {});
                 return true;

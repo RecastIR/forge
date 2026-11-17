@@ -43,6 +43,14 @@ These C11 and C++20 console programs provide Windows x64 inputs for whole-execut
 
 The `runtime_pairs` harness selects `--runtime` and links the generated ARM64 object with `forge_runtime`. The native regression suite separately interleaves two tokens in one runtime and a token in a second runtime and checks isolated failure signals for both services. Wine supplies the Windows observations. Native execution uses only the linked host, generated code and native runtime. [Link and run locally](../../runtime/README.md#link-a-lifted-windows-function)
 
+### Pointer-taking string import
+
+`imports/lstrlen` uses actual RIP-relative IAT calls to `KERNEL32.dll!lstrlenA` in an assembly export and nested helper, with the linked calls checked during both PE builds. Its Windows driver covers null and empty inputs, short and multi-chunk read-only literals, a writable string extended before the call, a stack string, two calls observing changed contents, and bounded pointer alternatives. Non-null cases check last-error preservation; every result executes translated arithmetic after the imported return. Literals are reachable only through service arguments.
+
+The pinned Wine 8 reference returns zero for NULL but changes last error to `ERROR_INVALID_PARAMETER` (87). A separate reference probe records this observation. The differential NULL case compares the documented zero result and continuation only, while native runtime tests require Forge's specified last-error preservation even for NULL. This is an explicit reference-backend difference, not a Windows last-error guarantee or a reason to adopt Wine's side effect.
+
+The case uses `runtime_pairs` with the optional Boolean `checked_memory` setting. This setting is valid only for that runtime harness and defaults to false, preserving existing scalar-service cases. Native comparisons run both baseline and `default<O2>` for Debug and Release PEs. The native regression suite additionally rebases each PE and compares both variants to the validated Wine observations. `guest_lstrlen` covers SDK-free rebasing, provenance/mapping diagnostics, and a terminal stack-read fault before a subsequent service marker; it does not equate a host trap with Windows exception dispatch. Runtime contract tests cover segmented/chunk boundaries, permissions, invalid associations, unchanged outputs and the temporary 1 MiB service limit.
+
 ## Build and inspect
 
 From the repository root, use Docker with Linux amd64 container support. Apple Silicon uses Docker Desktop's amd64 emulation. Explicit image preparation needs access to the Debian image registry and package snapshot. Fixture compilation and inspection run with networking disabled. Rerun image preparation when a pinned image input changes. The native Forge dependency setup is independent.

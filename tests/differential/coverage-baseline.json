@@ -610,6 +610,16 @@
       "id": "imports/last_error",
       "config": "release",
       "target": "macos-arm64"
+    },
+    {
+      "id": "imports/lstrlen",
+      "config": "debug",
+      "target": "macos-arm64"
+    },
+    {
+      "id": "imports/lstrlen",
+      "config": "release",
+      "target": "macos-arm64"
     }
   ]
 }
