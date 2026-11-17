@@ -15,6 +15,19 @@ namespace forge::x86 {
             std::array<AddressFact, registerCount> registers;
             StackSpills spills;
 
+            AddressFact serviceValue(const win64::ServiceBinding &binding, size_t position,
+                                     const AddressFact &entryRsps) const {
+                const ServiceLocation location{position};
+                const auto width = win64::width(binding.arguments[position].type);
+                if (location.inRegister()) {
+                    const auto &value = registers[location.registerIndex()];
+                    return width == 32 ? value.project(entryRsps).masked(UINT32_MAX) : value;
+                }
+
+                const auto slot = registers[rspIndex].plus(AddressFact(location.callerOffset()));
+                return spills.read(slot, entryRsps, width).reloaded(entryRsps);
+            }
+
             bool merge(const AddressFacts &other, const AddressFact &entryRsps) {
                 bool changed = spills.merge(other.spills, entryRsps);
 
@@ -284,7 +297,7 @@ namespace forge::x86 {
                 return AddressFact::continuation(rva);
             }
 
-            return facts.spills.read(address, entryAddresses);
+            return facts.spills.read(address, entryAddresses).reloaded(entryAddresses);
         }
 
         void FunctionAnalyzer::traceStackInstruction(const Step &s, StackOp op,
@@ -401,20 +414,9 @@ namespace forge::x86 {
         void FunctionAnalyzer::traceServiceArguments(const ResolvedCallSite &site,
                                                      AddressFacts &facts, bool collect) const {
             const auto &binding = site.external()->binding;
-            // All argument values precede any writes by the service, including aliased stack slots.
-            const auto incoming = facts.spills;
-            auto argumentValue = [&](size_t position) {
-                const ServiceLocation location{position};
-                const auto width = win64::width(binding.arguments[position].type);
-                if (location.inRegister()) {
-                    const auto &value = facts.registers[location.registerIndex()];
-                    return width == 32 ? value.project(entryAddresses).masked(UINT32_MAX) : value;
-                }
-
-                const auto slot =
-                    facts.registers[rspIndex].plus(AddressFact(location.callerOffset()));
-                return incoming.read(slot, entryAddresses, width);
-            };
+            // Read all arguments from the incoming state, even when an earlier parameter
+            // can overwrite the stack slot that supplies another parameter or its count.
+            auto outgoing = facts.spills;
 
             for (size_t i = 0; i < binding.arguments.size(); ++i) {
                 const auto arg = binding.arguments[i];
@@ -426,7 +428,8 @@ namespace forge::x86 {
                 if (arg.extent == win64::Extent::Fixed) {
                     size = arg.size;
                 } else if (arg.extent == win64::Extent::CountArgument) {
-                    const auto count = argumentValue(arg.size).project(entryAddresses);
+                    const auto count = facts.serviceValue(binding, arg.size, entryAddresses)
+                                           .project(entryAddresses);
                     if (count.known()) {
                         size = std::ranges::max(count.values());
                     }
@@ -436,12 +439,13 @@ namespace forge::x86 {
                     continue;
                 }
 
-                const auto address = argumentValue(i);
+                const auto address = facts.serviceValue(binding, i, entryAddresses);
                 if (arg.writes()) {
-                    invalidateServiceOutput(facts.spills, address, entryAddresses, size);
+                    invalidateServiceOutput(outgoing, address, entryAddresses, size);
                 }
 
-                if (!collect || address.stackDerived()) {
+                if (!collect || address.stackDerived() ||
+                    (address.frameOffset() && !address.known())) {
                     continue;
                 }
 
@@ -458,6 +462,8 @@ namespace forge::x86 {
                     imageMemory.serviceArgument(step, va, arg.writes(), size);
                 }
             }
+
+            facts.spills = std::move(outgoing);
         }
 
         bool FunctionAnalyzer::traceCall(const ResolvedCallSite &site, AddressFacts &facts,

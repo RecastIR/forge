@@ -41,17 +41,20 @@ namespace forge::x86 {
 
         // Widened symbolic alternatives must survive a loop join even though
         // they authorize no new executable bytes.
-        bool tracksSpill() const { return !unknown || !returns.empty() || widenedReturns; }
+        bool tracksSpill() const {
+            return !unknown || displacement || !returns.empty() || widenedReturns;
+        }
 
         static AddressFact frameStack(uint64_t offset = 0);
         static AddressFact continuation(uint32_t callee);
 
-        std::optional<uint64_t> frameOffset() const;
+        std::optional<uint64_t> frameOffset() const { return displacement; }
 
         bool stackDerived() const { return origin == Stack || origin == FrameStack; }
 
         AddressFact computed() const;
         AddressFact project(const AddressFact &entryRsps) const;
+        AddressFact reloaded(const AddressFact &entryRsps) const;
         AddressFact join(const AddressFact &other) const;
         AddressFact joinInFrame(const AddressFact &other, const AddressFact &entryRsps) const;
         AddressFact plus(const AddressFact &other) const;
@@ -61,7 +64,9 @@ namespace forge::x86 {
       private:
         llvm::SmallVector<uint64_t, 1> addresses;
         llvm::SmallVector<Continuation, 1> returns;
-        uint64_t displacement = 0;
+        // A reloaded pointer keeps its frame coordinate for alias analysis while
+        // ordinary dereferences use its computed VAs and the dynamic resolver.
+        std::optional<uint64_t> displacement;
         Origin origin = Computed;
         bool unknown = true;
         // Widening is absorbing at a join, including on a loop backedge.

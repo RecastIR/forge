@@ -29,10 +29,6 @@ namespace forge::x86 {
         return result;
     }
 
-    std::optional<uint64_t> AddressFact::frameOffset() const {
-        return origin == FrameStack ? std::optional(displacement) : std::nullopt;
-    }
-
     AddressFact AddressFact::continuation(uint32_t callee) {
         AddressFact result;
         result.returns.push_back({callee, 0});
@@ -47,15 +43,22 @@ namespace forge::x86 {
 
         auto result = *this;
         result.origin = Computed;
+        result.displacement.reset();
         return result;
     }
 
     AddressFact AddressFact::project(const AddressFact &entryRsps) const {
         if (origin == FrameStack) {
-            return entryRsps.plus(AddressFact(displacement)).computed();
+            return entryRsps.plus(AddressFact(*displacement)).computed();
         }
 
         return computed();
+    }
+
+    AddressFact AddressFact::reloaded(const AddressFact &entryRsps) const {
+        auto result = project(entryRsps);
+        result.displacement = displacement;
+        return result;
     }
 
     void AddressFact::includeAddress(uint64_t va) {
@@ -101,8 +104,12 @@ namespace forge::x86 {
                                          const AddressFact &entryRsps) const {
         // Identical offsets still name the same slot across every caller. Mixed
         // alternatives (such as NULL and a local) need a common coordinate system.
-        if (frameOffset() != other.frameOffset()) {
-            return project(entryRsps).join(other.project(entryRsps));
+        if ((displacement || other.displacement) && *this != other) {
+            auto result = project(entryRsps).join(other.project(entryRsps));
+            if (displacement == other.displacement) {
+                result.displacement = displacement;
+            }
+            return result;
         }
 
         return join(other);
@@ -110,13 +117,19 @@ namespace forge::x86 {
 
     AddressFact AddressFact::addOffsets(const AddressFact &offsets) const {
         if (origin == FrameStack) {
-            return offsets.origin == Constant ? frameStack(displacement + offsets.addresses.front())
-                                              : AddressFact{};
+            return offsets.origin == Constant
+                       ? frameStack(*displacement + offsets.addresses.front())
+                       : AddressFact{};
         }
 
         AddressFact result;
         result.unknown = unknown;
         result.widenedReturns = widenedReturns;
+        if (displacement && offsets.origin == Constant) {
+            result.displacement = *displacement + offsets.addresses.front();
+        } else if (origin == Constant && offsets.displacement) {
+            result.displacement = addresses.front() + *offsets.displacement;
+        }
 
         for (auto offset : offsets.addresses) {
             for (auto va : addresses) {
@@ -320,7 +333,9 @@ namespace forge::x86 {
                                   unsigned width) const {
         if (const auto offset = address.frameOffset()) {
             const auto *saved = lookup(relative, std::bit_cast<int64_t>(*offset));
-            return saved ? saved->read(width, entryRsps) : AddressFact{};
+            if (saved) {
+                return saved->read(width, entryRsps);
+            }
         }
 
         if (!address.known()) {
