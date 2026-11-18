@@ -2,6 +2,7 @@
 #include "lift/lift.h"
 #include "pe/image.h"
 #include "report.h"
+#include "tls_report.h"
 
 #include "llvm/Support/JSON.h"
 
@@ -109,6 +110,72 @@ namespace forge {
                 << '\n';
         }
 
+        llvm::json::Object cSpecificHandlerJson(const CSpecificHandler &handler) {
+            llvm::json::Object fields{{"dll", llvm::json::fixUTF8(handler.dll)},
+                                      {"symbol", "__C_specific_handler"},
+                                      {"iat_slot_rva", hex(handler.iatSlotRva)},
+                                      {"scope_table_rva", hex(handler.tableRva)},
+                                      {"limitation", handler.limitation}};
+            if (handler.count) {
+                fields["scope_count"] = *handler.count;
+            }
+
+            if (handler.scope) {
+                const auto &scope = *handler.scope;
+                fields["scope"] = llvm::json::Object{{"begin_rva", hex(scope.beginRva)},
+                                                     {"end_rva", hex(scope.endRva)},
+                                                     {"filter_rva", hex(scope.filterRva)},
+                                                     {"continuation_rva", hex(scope.jumpRva)}};
+            }
+
+            return fields;
+        }
+
+        void addLoaderFields(llvm::json::Object &fields, const ExecutableReadiness &readiness) {
+            if (readiness.tls) {
+                auto tls = tlsJson(*readiness.tls);
+                tls["limitation"] = "PE TLS initialization and loader callbacks are unsupported";
+                fields["tls"] = std::move(tls);
+            }
+
+            if (readiness.entryHandlerUnwindRva) {
+                llvm::json::Object handler{{"unwind_rva", hex(*readiness.entryHandlerUnwindRva)}};
+                if (readiness.entryHandlerRva) {
+                    handler["handler_rva"] = hex(*readiness.entryHandlerRva);
+                }
+                if (readiness.entryCHandler) {
+                    handler["c_specific_handler"] = cSpecificHandlerJson(*readiness.entryCHandler);
+                } else if (!readiness.entryHandlerError.empty()) {
+                    handler["analysis_error"] = llvm::json::fixUTF8(readiness.entryHandlerError);
+                }
+                fields["entry_unwind_handler"] = std::move(handler);
+            }
+
+            if (!readiness.importInventoryError.empty()) {
+                fields["load_imports_error"] = llvm::json::fixUTF8(readiness.importInventoryError);
+                return;
+            }
+
+            llvm::json::Array directories;
+            for (const auto &directory : readiness.loadImports) {
+                llvm::json::Array slots;
+                for (const auto &slot : directory.slots) {
+                    slots.emplace_back(
+                        llvm::json::Object{{"name", llvm::json::fixUTF8(slot.name)},
+                                           {"iat_slot_rva", hex(slot.iatRva)},
+                                           {"catalogued_service", slot.hasService},
+                                           {"catalogued_data_export", slot.hasDataExport}});
+                }
+                directories.emplace_back(
+                    llvm::json::Object{{"dll", llvm::json::fixUTF8(directory.dll)},
+                                       {"descriptor_rva", hex(directory.descriptorRva)},
+                                       {"delayed", directory.delayed},
+                                       {"bound", directory.bound},
+                                       {"symbols", std::move(slots)}});
+            }
+            fields["load_imports"] = std::move(directories);
+        }
+
         void addReadinessFields(llvm::json::Object &fields, const ExecutableReadiness &readiness) {
             if (!readiness.architecture.empty()) {
                 fields["architecture"] = readiness.architecture;
@@ -116,6 +183,7 @@ namespace forge {
 
             if (readiness.entryRva) {
                 fields["entry_rva"] = hex(*readiness.entryRva);
+                addLoaderFields(fields, readiness);
             }
 
             fields["entry_recovered"] = readiness.entryRecovered;
@@ -149,6 +217,69 @@ namespace forge {
             fields["calls"] = std::move(calls);
             fields["imports"] = std::move(imports);
             fields["unresolved_calls"] = std::move(unresolved);
+        }
+
+        void printEntryHandler(const ExecutableReadiness &readiness, llvm::raw_ostream &out) {
+            if (!readiness.entryHandlerUnwindRva) {
+                return;
+            }
+
+            out << "  entry declares exception or termination handler, unwind RVA "
+                << hex(*readiness.entryHandlerUnwindRva);
+            if (readiness.entryHandlerRva) {
+                out << ", handler RVA " << hex(*readiness.entryHandlerRva);
+            }
+            out << '\n';
+
+            if (!readiness.entryHandlerError.empty()) {
+                out << "    " << readiness.entryHandlerError << '\n';
+            }
+
+            if (readiness.entryCHandler) {
+                const auto &handler = *readiness.entryCHandler;
+                out << "    " << handler.dll << "!__C_specific_handler, IAT slot "
+                    << hex(handler.iatSlotRva) << ", scope table " << hex(handler.tableRva) << '\n';
+                if (handler.scope) {
+                    const auto &scope = *handler.scope;
+                    out << "    protected [" << hex(scope.beginRva) << ", " << hex(scope.endRva)
+                        << "), filter " << hex(scope.filterRva) << ", continuation "
+                        << hex(scope.jumpRva) << '\n';
+                }
+                out << "    " << handler.limitation << '\n';
+            }
+        }
+
+        void printLoaderRequirements(const ExecutableReadiness &readiness, llvm::raw_ostream &out) {
+            if (readiness.tls) {
+                const auto &tls = *readiness.tls;
+                out << "  TLS directory " << hex(tls.rva) << ", index VA " << hex(tls.index)
+                    << ", template " << (tls.end - tls.start) << " bytes + " << tls.zeroFill
+                    << " zero-filled bytes (PE TLS initialization and loader callbacks are "
+                       "unsupported)\n";
+                for (const auto va : tls.callbackVas) {
+                    out << "    callback VA " << hex(va) << '\n';
+                }
+            }
+
+            printEntryHandler(readiness, out);
+
+            if (!readiness.importInventoryError.empty()) {
+                out << "  import inventory unavailable: " << readiness.importInventoryError << '\n';
+            }
+            for (const auto &directory : readiness.loadImports) {
+                out << "  " << (directory.delayed ? "delay" : "eager") << " imports from "
+                    << directory.dll << (directory.bound ? " (bound)" : "") << '\n';
+                for (const auto &slot : directory.slots) {
+                    llvm::StringRef provider = "unavailable";
+                    if (slot.hasService) {
+                        provider = "catalogued service";
+                    } else if (slot.hasDataExport) {
+                        provider = "process-owned data";
+                    }
+                    out << "    " << hex(slot.iatRva) << " " << slot.name << " (" << provider
+                        << ")\n";
+                }
+            }
         }
     } // namespace
 
@@ -189,6 +320,7 @@ namespace forge {
 
         if (failure) {
             printFailure(*failure, input, out);
+            printLoaderRequirements(readiness, out);
         }
 
         if (readiness.entryRva) {

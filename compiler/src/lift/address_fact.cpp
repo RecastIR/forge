@@ -36,6 +36,12 @@ namespace forge::x86 {
         return result;
     }
 
+    AddressFact AddressFact::processStorage() {
+        AddressFact result;
+        result.processPointer = true;
+        return result;
+    }
+
     AddressFact AddressFact::computed() const {
         if (origin == FrameStack) {
             return {};

@@ -7,25 +7,25 @@
 namespace forge::x86 {
     using namespace llvm;
 
-    namespace {
-        // Ineligible records also fence inference. An empty or reversed record claims its start.
-        std::vector<RvaRange> recordedRanges(const AnalyzedImage &analysis) {
-            std::vector<RvaRange> ranges;
+    // Ineligible records also fence inference. An empty or reversed record claims its start.
+    std::vector<RvaRange> recordedFunctionRanges(const AnalyzedImage &analysis) {
+        std::vector<RvaRange> ranges;
 
-            for (const auto &f : analysis.functions()) {
-                const uint64_t begin = f.record.begin;
-                const uint64_t end = std::max<uint64_t>(begin + 1, f.record.end);
+        for (const auto &f : analysis.functions()) {
+            const uint64_t begin = f.record.begin;
+            const uint64_t end = std::max<uint64_t>(begin + 1, f.record.end);
 
-                if (!ranges.empty() && begin <= ranges.back().end) {
-                    ranges.back().end = std::max(ranges.back().end, end);
-                } else {
-                    ranges.push_back({begin, end});
-                }
+            if (!ranges.empty() && begin <= ranges.back().end) {
+                ranges.back().end = std::max(ranges.back().end, end);
+            } else {
+                ranges.push_back({begin, end});
             }
-
-            return ranges;
         }
 
+        return ranges;
+    }
+
+    namespace {
         // Reachable blocks have contiguous instructions. This temporary index stores their
         // exclusive ends and owner RVAs. Gaps between blocks remain available to other candidates.
         struct BlockIndex {
@@ -100,6 +100,7 @@ namespace forge::x86 {
             std::map<uint32_t, RecoveredFunction> &functions;
             const std::map<uint32_t, const ResolvedCallSite *> &deferred;
             ArrayRef<RvaRange> recorded;
+            ArrayRef<RvaRange> thunks;
             ArrayRef<RvaRange> loaderWrites;
             const MCDisassembler &dis;
             const MCInstrInfo &instructions;
@@ -152,6 +153,11 @@ namespace forge::x86 {
         ControlFlowGraph LeafRecovery::decode(uint32_t target, const MappedRange &code) const try {
             bool returned = false;
             auto validate = [&](const Step &step, Flow flow) {
+                if (!rangesIn(thunks, {step.rva, step.next}).empty()) {
+                    step.reject(FailureCode::UnsupportedControlFlow,
+                                "candidate overlaps a proven import thunk");
+                }
+
                 if (const auto *span = occupied.overlap(step.rva, step.next)) {
                     step.reject(FailureCode::UnsupportedControlFlow,
                                 "candidate overlaps decoded function " +
@@ -283,18 +289,14 @@ namespace forge::x86 {
     void recoverLeaves(const ValidatedEntry &entry,
                        std::map<uint32_t, RecoveredFunction> &functions,
                        const std::map<uint32_t, const ResolvedCallSite *> &deferred,
+                       ArrayRef<RvaRange> recorded, ArrayRef<RvaRange> thunks,
                        ArrayRef<RvaRange> loaderWrites, const MCDisassembler &dis,
                        const MCInstrInfo &instructions, const MCRegisterInfo &regs) {
-        const auto ranges = recordedRanges(entry.analysis);
-        LeafRecovery recovery{entry,
-                              functions,
-                              deferred,
-                              ranges,
-                              loaderWrites,
-                              dis,
-                              instructions,
-                              InstructionOperands(regs, entry.analysis.module().imageBase),
-                              {}};
+        LeafRecovery recovery{
+            entry,    functions,    deferred,
+            recorded, thunks,       loaderWrites,
+            dis,      instructions, InstructionOperands(regs, entry.analysis.module().imageBase),
+            {}};
 
         for (const auto &[rva, function] : functions) {
             recovery.occupied.add(function);

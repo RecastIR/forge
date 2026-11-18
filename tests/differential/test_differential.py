@@ -17,6 +17,7 @@ from unittest.mock import patch
 
 import differential as diff
 import lift_diagnostics
+import startup
 from artifacts import TASK3_PUBLISHER, reference
 from comparison import Observation, differences
 from protocol import Capture
@@ -126,6 +127,39 @@ class ArtifactSetup(unittest.TestCase):
 
 
 class ArtifactTests(ArtifactSetup):
+    def test_startup_stops_after_failed_translation_or_missing_executable(self):
+        for translator, failed in (("/usr/bin/false", "translation"), ("/usr/bin/true", "artifact")):
+            with self.subTest(translator=translator), tempfile.TemporaryDirectory(dir=self.root) as work, \
+                    patch.object(startup, "BINARIES", self.binaries), \
+                    patch.object(startup, "REFERENCES", self.references):
+                report = startup.run_case(translator, self.manifest, self.config, Path(work))
+                self.assertEqual(report["status"], "failed")
+                self.assertEqual(report["stages"]["reference"], "passed")
+                self.assertEqual(report["stages"][failed], "failed")
+                self.assertEqual(report["stages"]["comparison"], "not_run")
+                self.assertEqual(report["stages"]["execution"], "not_run")
+
+    def test_startup_compares_real_process_observations(self):
+        for status, payload, matches in ((0, "5", True), (42, "5", False), (0, "wrong", False)):
+            with self.subTest(status=status, payload=payload), tempfile.TemporaryDirectory(dir=self.root) as work:
+                def translation(args, stderr, stdout):
+                    pe = args[2]
+                    self.assertEqual(pe.read_bytes(), self.image.read_bytes())
+                    executable = args[args.index("--output") + 1]
+                    executable.write_text(f"#!/bin/sh\n[ \"$1:$2\" = 2:3 ] || exit 99\n"
+                                          f"echo '{payload}'\nexit {status}\n")
+                    executable.chmod(0o700)
+
+                with patch.object(startup, "BINARIES", self.binaries), \
+                        patch.object(startup, "REFERENCES", self.references), \
+                        patch.object(startup.native, "command", side_effect=translation), \
+                        patch.object(startup, "verify_executable"):
+                    report = startup.run_case(self.forge, self.manifest, self.config, Path(work))
+                self.assertEqual(report["native_exit_code"], status)
+                self.assertEqual(report["stages"]["execution"], "passed")
+                self.assertEqual(report["stages"]["comparison"], "passed" if matches else "failed")
+                self.assertEqual(report["status"], "passed" if matches else "failed")
+
     def test_checked_memory_case_contract(self):
         path = self.suite / "cases.json"
         valid = dict(self.case, harness="runtime_pairs", checked_memory=True)
@@ -849,6 +883,7 @@ with (work / 'lock').open('w') as lock:
     def test_streams_and_execution_failures(self):
         actual = self.python(r'import sys; print(len(sys.stdin.buffer.read())); sys.stderr.buffer.write(b"\xff\0")')
         self.assertEqual(actual, Observation(0, b"0\n", b"\xff\0"))
+        self.assertEqual(self.python("raise SystemExit(42)", require_zero=False), Observation(42, b"", b""))
         for code, message in (("raise SystemExit(7)", "exited 7"), ("import os; os.kill(os.getpid(), 15)", "signal")):
             with self.assertRaisesRegex(ValueError, message):
                 self.python(code)

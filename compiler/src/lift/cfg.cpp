@@ -1,4 +1,5 @@
 #include "lift/cfg.h"
+#include "lift/guarded_call.h"
 #include "lift/integer.h"
 #include "lift/jump_table.h"
 #include "lift/operands.h"
@@ -7,6 +8,7 @@
 #include "llvm/MC/MCContext.h"
 #include "llvm/MC/MCDisassembler/MCDisassembler.h"
 #include "llvm/MC/MCInstrInfo.h"
+#include "llvm/Support/Endian.h"
 
 #include <algorithm>
 #include <set>
@@ -52,7 +54,22 @@ namespace forge::x86 {
         }
 
         void checkPrefix(const Step &s) {
+            if (s.isRepeatedQwordStore()) {
+                return;
+            }
+
             auto encoding = arrayRefFromStringRef(s.bytes);
+            if (s.isLockedCompareExchange()) {
+                encoding = encoding.drop_front();
+            }
+
+            // GS + REX.W MOV r64,[disp32] with no base/index and NT_TIB.Self at +0x30.
+            if (s.opcode == "MOV64rm" && encoding.size() == 9 && encoding[0] == 0x65 &&
+                (encoding[1] & 0xfbU) == 0x48 && encoding[2] == 0x8b &&
+                (encoding[3] & 0xc7U) == 4 && encoding[4] == 0x25 &&
+                llvm::support::endian::read32le(encoding.data() + 5) == 0x30) {
+                encoding = encoding.drop_front();
+            }
             if (encoding.front() == 0x66) {
                 auto instruction = x86::integerInstruction(s.opcode);
 
@@ -91,6 +108,20 @@ namespace forge::x86 {
             }
 
             auto opcode = info.getName(inst.getOpcode());
+            // LLVM MC decodes LOCK as a separate pseudo-instruction. Keep the prefix
+            // and its supported operation in one instruction extent and one CFG step.
+            if (opcode == "LOCK_PREFIX" && size == 1 && tail.size() > 1) {
+                MCInst following;
+                uint64_t extra = 0;
+                if (dis.getInstruction(following, extra, arrayRefFromStringRef(tail.drop_front()),
+                                       uint64_t(rva) + 1, nulls()) == MCDisassembler::Success &&
+                    extra && extra < 15 && info.getName(following.getOpcode()) == "CMPXCHG64rm") {
+                    inst = std::move(following);
+                    opcode = info.getName(inst.getOpcode());
+                    size += extra;
+                }
+            }
+
             return {rva, static_cast<uint32_t>(rva + size), std::move(inst), opcode,
                     tail.take_front(size)};
         }
@@ -170,6 +201,7 @@ namespace forge::x86 {
             unsigned tableEntries = 0;
             void resolve(uint32_t site);
             std::optional<uint32_t> tableBypass(uint32_t site, const RelativeTable &proof) const;
+            std::optional<uint32_t> registerBypass(uint32_t producer, uint32_t call) const;
             void validateGuards() const;
 
             using TableOrigin = std::pair<uint32_t, unsigned>; // Dispatch RVA, entry index.
@@ -291,10 +323,18 @@ namespace forge::x86 {
                 const auto producer =
                     std::find_if(first, stop, [](const auto &row) { return !isNoop(row.second); });
                 const InstructionOperands operands(*dis.getContext().getRegisterInfo(), 0);
-                const auto target =
-                    operands.registerCallRva(s, producer == stop ? nullptr : &producer->second);
-                registerProofs.emplace_back(producer->first, s.rva);
-                s.flow = classify(s, target);
+                if (producer == stop || producer->second.opcode != "LEA64r") {
+                    s.guardedPointerCall = recognizeGuardedPointerCall(decoded, s, operands);
+                    if (s.guardedPointerCall) {
+                        registerProofs.emplace_back(s.guardedPointerCall->producer, s.rva);
+                        s.flow = classify(s, {});
+                        return;
+                    }
+                }
+                const auto proof =
+                    operands.leaCallTarget(s, producer == stop ? nullptr : &producer->second);
+                registerProofs.emplace_back(proof.producer, s.rva);
+                s.flow = classify(s, proof.target);
             } else if (classify && s.isDirectCall()) {
                 s.flow = classify(s, int64_t(s.next) + s.inst.getOperand(0).getImm());
             } else if (classify && s.isMemoryCall()) {
@@ -401,10 +441,22 @@ namespace forge::x86 {
             return alternate == stop ? std::nullopt : std::optional(alternate->first);
         }
 
+        std::optional<uint32_t> Discovery::registerBypass(uint32_t producer, uint32_t call) const {
+            const bool guarded = decoded.at(call).guardedPointerCall.has_value();
+            // The null guard deliberately creates a fallthrough leader. Any explicit
+            // edge into the middle, including one discovered after CALL, bypasses evidence.
+            for (auto it = leaders.upper_bound(producer); it != leaders.end() && it->first <= call;
+                 ++it) {
+                if (!guarded || it->second.explicitEntry) {
+                    return it->first;
+                }
+            }
+            return {};
+        }
+
         bool Discovery::hasBypassedProof() const {
             for (const auto &[producer, call] : registerProofs) {
-                if (auto next = leaders.upper_bound(producer);
-                    next != leaders.end() && next->first <= call) {
+                if (registerBypass(producer, call)) {
                     return true;
                 }
             }
@@ -415,6 +467,16 @@ namespace forge::x86 {
         }
 
         void Discovery::validateGuards() const {
+            for (const auto &[producer, call] : registerProofs) {
+                if (decoded.at(call).guardedPointerCall) {
+                    if (const auto bypass = registerBypass(producer, call)) {
+                        decoded.at(call).reject(FailureCode::UnsupportedControlFlow,
+                                                "edge bypasses indirect call pointer proof at " +
+                                                    hex(*bypass),
+                                                *bypass);
+                    }
+                }
+            }
             for (const auto &[site, edges] : resolved) {
                 if (auto alternate = tableBypass(site, edges.proof)) {
                     decoded.at(site).reject(FailureCode::UnsupportedControlFlow,

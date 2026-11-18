@@ -3,6 +3,7 @@
 #include "forge/guest_range.h"
 #include "forge/process.h"
 #include "lift/address_fact.h"
+#include "lift/executable.h"
 #include "lift/memory.h"
 #include "lift/recovery.h"
 
@@ -350,12 +351,49 @@ namespace forge::x86 {
             return imports;
         }
 
+        std::map<uint32_t, uint32_t> dataImportSlots(const ParsedImage &image) {
+            std::map<uint32_t, uint32_t> slots;
+            RelocationIndex relocations(image.module().relocations);
+
+            for (const auto &descriptor : image.importBindings().entries()) {
+                for (size_t i = 0; i < descriptor.symbols.size(); ++i) {
+                    const auto &symbol = descriptor.symbols[i];
+                    const auto kind = crtDataExport(descriptor, symbol);
+                    if (!kind) {
+                        continue;
+                    }
+
+                    const auto rva =
+                        descriptor.addressTableRva + static_cast<uint32_t>(i * importSlotWidth);
+                    const auto *section = image.sectionAtRva(rva);
+                    const uint64_t end = uint64_t(rva) + importSlotWidth;
+                    if (!section || section->discardable || section->permissions[0] != 'r' ||
+                        section->permissions[2] == 'x' ||
+                        end > uint64_t(section->rva) + section->virtualSize ||
+                        relocations.firstOverlap({rva, end})) {
+                        InspectionError failure("invalid data import slot for " + descriptor.name +
+                                                    "!" + symbol.name + " at RVA " + hex(rva),
+                                                FailureCode::ExecutableStartup);
+                        failure.context.importDll = descriptor.name;
+                        failure.context.importSymbol = symbol.name;
+                        failure.context.importSlot = rva;
+                        throw failure;
+                    }
+
+                    slots.emplace(rva, *kind);
+                }
+            }
+            return slots;
+        }
     } // namespace
 
     ImageMemory::ImageMemory(const ParsedImage &image, uint64_t guestLoadBase, bool checkedMemory,
                              EntryMode mode)
         : source(image), loadBase(guestLoadBase),
           executableHeaders(mode == EntryMode::PeEntry ? image.headerBytes() : StringRef{}) {
+        if (mode == EntryMode::PeEntry) {
+            dataImports = dataImportSlots(image);
+        }
         if (checkedMemory) {
             // The process reserves the entire image, even when no resolver rows are emitted.
             const auto size = image.module().sizeOfImage;
@@ -513,7 +551,18 @@ namespace forge::x86 {
                          false);
     }
 
+    bool ImageMemory::isDataImportPointer(uint64_t va) const {
+        const auto rva = va - loadBase;
+        return rva <= UINT32_MAX && dataImports.contains(static_cast<uint32_t>(rva));
+    }
+
     void ImageMemory::fixedImageAccess(const Step &step, RvaRange access, bool write) {
+        // The loader publishes these validated pointer cells separately from the raw IAT.
+        if (!write && access.end - access.begin == importSlotWidth && access.begin <= UINT32_MAX &&
+            dataImports.contains(static_cast<uint32_t>(access.begin))) {
+            return;
+        }
+
         if (access.begin < executableHeaders.size() && access.end <= executableHeaders.size()) {
             if (write) {
                 step.reject(FailureCode::ImageMemory,
@@ -689,9 +738,16 @@ namespace forge::x86 {
         ImagePlan plan;
         plan.loadBase = loadBase;
         plan.sizeOfImage = source.module().sizeOfImage;
+        plan.dataImports = std::move(dataImports);
         uint64_t embedded = executableHeaders.size();
         uint64_t immutableExtent = executableHeaders.size();
-        uint64_t writableExtent = 0;
+        // The loader needs a private cell for every supported data export, even
+        // when the guest never reads its IAT slot.
+        uint64_t writableExtent = plan.dataImports.size() * importSlotWidth;
+        if (writableExtent > writableLimit) {
+            throw InspectionError("data import slots exceed the writable image limit",
+                                  FailureCode::ImageMemory);
+        }
 
         const auto spans = selectedSpans();
         plan.backings.reserve(spans.size() + !executableHeaders.empty());
@@ -834,42 +890,68 @@ namespace forge::x86 {
         auto &module = *entryThunk.getParent();
         IRBuilder<> ir(module.getContext());
         SmallVector<Constant *> storage;
-        SmallVector<Constant *> intervals;
+        SmallVector<forge_rt_region_template> rows;
 
         for (const auto &backing : backings) {
             if (backing.intervals.empty()) {
                 continue;
             }
 
-            auto *index = ir.getInt64(storage.size());
+            const auto index = storage.size();
             const auto size = backing.range.end - backing.range.begin;
             storage.push_back(processBacking(module, ir, size, backing.bytes, backing.writable));
             const auto permissions = FORGE_RT_READ | (backing.writable ? FORGE_RT_WRITE : 0U) |
                                      (backing.executable ? FORGE_RT_EXECUTE : 0U);
 
             for (auto interval : backing.intervals) {
-                intervals.push_back(ConstantStruct::getAnon(
-                    {ir.getInt64(loadBase + interval.begin),
-                     ir.getInt64(interval.end - interval.begin), index,
-                     ir.getInt64(interval.begin - backing.range.begin), ir.getInt32(permissions)}));
+                rows.push_back({loadBase + interval.begin, interval.end - interval.begin, index,
+                                interval.begin - backing.range.begin, permissions});
             }
+        }
+
+        SmallVector<Constant *> dataSlots;
+        if (!dataImports.empty()) {
+            const auto index = storage.size();
+            storage.push_back(
+                processBacking(module, ir, dataImports.size() * importSlotWidth, {}, true));
+            for (const auto &[rva, kind] : dataImports) {
+                rows.push_back({loadBase + rva, importSlotWidth, index,
+                                dataSlots.size() * importSlotWidth, FORGE_RT_READ});
+                dataSlots.push_back(ConstantStruct::getAnon({ir.getInt32(rva), ir.getInt32(kind)}));
+            }
+            std::ranges::sort(rows, {}, &forge_rt_region_template::start);
+        }
+
+        SmallVector<Constant *> intervals;
+        for (const auto &row : rows) {
+            intervals.push_back(ConstantStruct::getAnon(
+                {ir.getInt64(row.start), ir.getInt64(row.size), ir.getInt64(row.backing),
+                 ir.getInt64(row.offset), ir.getInt32(row.permissions)}));
         }
 
         auto *storageTable = artifactTable(module, storage, "image.backings");
         auto *regionTable = artifactTable(module, intervals, "image.ranges");
         auto imports = processImports(module, group);
         auto *descriptor = ConstantStruct::getAnon(
-            {ir.getInt32(FORGE_RT_ARTIFACT_VERSION), ir.getInt64(loadBase),
-             ir.getInt64(sizeOfImage), ir.getInt64(group.root()),
+            {ir.getInt32(dataSlots.empty() ? FORGE_RT_NAMED_ARTIFACT_VERSION
+                                           : FORGE_RT_CRT_ARTIFACT_VERSION),
+             ir.getInt64(loadBase), ir.getInt64(sizeOfImage), ir.getInt64(group.root()),
              ir.getInt64(group.image().module().entryPoint), storageTable,
              ir.getInt64(storage.size()), regionTable, ir.getInt64(intervals.size()),
              artifactTable(module, imports, "image.imports"), ir.getInt64(imports.size()),
              &entryThunk});
 
+        auto *name = ir.CreateGlobalString(group.image().module().path.filename().string(),
+                                           "image.executable.name", 0, &module);
+        Constant *named = ConstantStruct::getAnon({descriptor, name});
+        if (!dataSlots.empty()) {
+            named = ConstantStruct::getAnon({named,
+                                             artifactTable(module, dataSlots, "image.data.imports"),
+                                             ir.getInt64(dataSlots.size())});
+        }
         // Descriptor identity distinguishes artifacts during duplicate registration.
-        auto *artifact =
-            new GlobalVariable(module, descriptor->getType(), true, GlobalValue::PrivateLinkage,
-                               descriptor, "image.artifact");
+        auto *artifact = new GlobalVariable(module, named->getType(), true,
+                                            GlobalValue::PrivateLinkage, named, "image.artifact");
         auto *type = FunctionType::get(ir.getPtrTy(), false);
         auto *accessor =
             Function::Create(type, GlobalValue::ExternalLinkage, "forge_lifted_artifact", module);

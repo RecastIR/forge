@@ -1,0 +1,13 @@
+{
+  "schema_version": 1,
+  "id": "startup/return",
+  "description": "Return a constant from main through the console CRT.",
+  "source": "fixtures/startup/return.c",
+  "binary": "crt_return.exe",
+  "args": [],
+  "expected": {
+    "exit_code": 42,
+    "stdout": "",
+    "stderr": ""
+  }
+}

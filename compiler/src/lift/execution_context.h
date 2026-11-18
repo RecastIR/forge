@@ -21,6 +21,7 @@ namespace forge::x86 {
         ContextView() = default;
         ContextView(llvm::IRBuilder<> &ir, const ContextLayout &layout, llvm::Value *context);
         llvm::Value *registers = nullptr, *marks = nullptr, *flags = nullptr;
+        llvm::Value *directionFlag = nullptr;
         llvm::Value *instance = nullptr, *thread = nullptr;
         llvm::Value *bytes = nullptr, *validity = nullptr;
         llvm::Value *regions = nullptr, *result = nullptr;

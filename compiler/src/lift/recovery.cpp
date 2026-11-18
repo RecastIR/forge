@@ -3,6 +3,7 @@
 #include "analysis/analysis.h"
 #include "forge/guest_range.h"
 #include "lift/asm_info.h"
+#include "lift/guarded_call.h"
 #include "lift/jump_table.h"
 #include "lift/leaf_recovery.h"
 
@@ -11,6 +12,7 @@
 #include "llvm/MC/MCInstrInfo.h"
 #include "llvm/MC/MCRegisterInfo.h"
 #include "llvm/MC/MCSubtargetInfo.h"
+#include "llvm/Support/Endian.h"
 #include "llvm/Support/TargetSelect.h"
 
 #include <algorithm>
@@ -206,18 +208,25 @@ namespace forge::x86 {
             std::set<uint32_t> ready, leafCandidates;
             const InstructionOperands operands;
             std::optional<std::vector<RvaRange>> loaderWrites;
+            std::optional<std::vector<RvaRange>> recordedRanges;
+            std::optional<ImageInitialization> pointerInitialization;
+            std::set<uint32_t> thunkStarts;
 
             ArrayRef<RvaRange> loaderWrittenRanges();
+            ArrayRef<RvaRange> functionRanges();
+            RegisterCallEvidence pointerTarget(const Step &step, GuardedPointerCall proof);
             std::optional<uint64_t> firstLoaderWrite(uint32_t start, const MappedRange &code);
             void checkCalledExtent(uint32_t target, const MappedRange &code, const Step &step);
             void validateCallEvidence(uint32_t caller, const MappedRange &code, const Step &call,
                                       int64_t target);
             ExternalCallTarget bindImport(uint32_t caller, const MappedRange &code,
-                                          const Step &step);
+                                          const Step &step, uint32_t slot);
+            std::optional<ExternalCallTarget> bindImportThunk(uint32_t caller, const Step &step,
+                                                              uint32_t target);
             std::optional<MappedRange> calleeCode(uint32_t target, const Step &step);
             bool schedule(uint32_t target, const Step &step, const CallResolutions &resolutions);
             void stage(uint32_t rva, MappedRange code);
-            Flow guestCallFlow(uint32_t caller, const Step &step, int64_t target);
+            Flow guestCallFlow(uint32_t caller, const Step &step, std::optional<int64_t> target);
             bool advance(uint32_t rva, FunctionDiscovery &active);
             void resumeCallers(FunctionDiscovery &callee);
             void discoverReturns();
@@ -233,6 +242,13 @@ namespace forge::x86 {
             }
 
             return *loaderWrites;
+        }
+
+        ArrayRef<RvaRange> GroupDiscovery::functionRanges() {
+            if (!recordedRanges) {
+                recordedRanges = recordedFunctionRanges(entry.analysis);
+            }
+            return *recordedRanges;
         }
 
         std::optional<uint64_t> GroupDiscovery::firstLoaderWrite(uint32_t start,
@@ -299,7 +315,26 @@ namespace forge::x86 {
             ready.insert(rva);
         }
 
-        Flow GroupDiscovery::guestCallFlow(uint32_t caller, const Step &step, int64_t target) try {
+        RegisterCallEvidence GroupDiscovery::pointerTarget(const Step &step,
+                                                           GuardedPointerCall proof) {
+            const auto &image = entry.analysis.image();
+            if (!pointerInitialization) {
+                pointerInitialization = image.imageInitialization();
+            }
+            return {guardedCallTarget(step, proof.slot, image, *pointerInitialization),
+                    proof.producer};
+        }
+
+        Flow GroupDiscovery::guestCallFlow(uint32_t caller, const Step &step,
+                                           std::optional<int64_t> immediate) try {
+            int64_t target;
+            if (immediate) {
+                target = *immediate;
+            } else if (step.guardedPointerCall) {
+                target = pointerTarget(step, *step.guardedPointerCall).target;
+            } else {
+                step.reject(FailureCode::LiftingInternal, "guest call lacks target evidence");
+            }
             if (step.isRegisterCall()) {
                 validateCallEvidence(caller, staging.at(caller).code, step, target);
             }
@@ -319,6 +354,15 @@ namespace forge::x86 {
             } else if (!staging.contains(address)) {
                 const auto code = calleeCode(address, step);
                 if (!code) {
+                    if (step.isDirectCall()) {
+                        if (const auto service = bindImportThunk(caller, step, address)) {
+                            staging.at(caller).resolutions.emplace(step.rva, *service);
+                            return service->binding.control == win64::Control::Terminates
+                                       ? Flow::TerminalCall
+                                       : Flow::Fallthrough;
+                        }
+                    }
+
                     // The existing leaf proof requires a reachable normal return.
                     leafCandidates.insert(address);
                     return Flow::Fallthrough;
@@ -341,7 +385,8 @@ namespace forge::x86 {
 
         bool GroupDiscovery::advance(uint32_t rva, FunctionDiscovery &active) try {
             const auto classify = [&](const Step &step, std::optional<int64_t> target) {
-                return target ? guestCallFlow(rva, step, *target) : importFlow(rva, active, step);
+                return step.isMemoryCall() ? importFlow(rva, active, step)
+                                           : guestCallFlow(rva, step, target);
             };
             return active.cfg.advance(classify);
         } catch (const InspectionError &) {
@@ -430,16 +475,47 @@ namespace forge::x86 {
             }
         }
 
-        ExternalCallTarget GroupDiscovery::bindImport(uint32_t caller, const MappedRange &code,
-                                                      const Step &step) {
-            const auto target = operands.ripRva(step, 0);
-            if (!target || *target < 0 || *target > UINT32_MAX) {
-                step.reject(FailureCode::UnsupportedControlFlow,
-                            "expected RIP-relative call through a mapped IAT slot");
+        std::optional<ExternalCallTarget>
+        GroupDiscovery::bindImportThunk(uint32_t caller, const Step &step, uint32_t target) try {
+            const auto code = entry.analysis.image().mapRva(target, amd64ImportThunkSize);
+            const auto slot = code ? amd64ImportThunkSlot(target, code->bytes) : std::nullopt;
+            if (!slot) {
+                return {};
             }
 
-            operands.decodeAddress(step, 0, true);
-            const auto slot = static_cast<uint32_t>(*target);
+            const RvaRange extent{target, uint64_t(target) + amd64ImportThunkSize};
+            if (!code->section.immutable() || !rangesIn(functionRanges(), extent).empty() ||
+                entry.relocations.firstOverlap(extent) ||
+                !rangesIn(loaderWrittenRanges(), extent).empty()) {
+                step.reject(
+                    FailureCode::UnsupportedControlFlow,
+                    "import thunk overlaps mutable, loader-written, relocated or recorded code",
+                    target);
+            }
+
+            const auto next = thunkStarts.lower_bound(target);
+            if ((next != thunkStarts.end() && *next != target && *next < extent.end) ||
+                (next != thunkStarts.begin() &&
+                 uint64_t(*std::prev(next)) + amd64ImportThunkSize > target)) {
+                step.reject(FailureCode::UnsupportedControlFlow, "overlapping import thunks",
+                            target);
+            }
+
+            if (!std::in_range<uint32_t>(*slot)) {
+                step.reject(FailureCode::UnsupportedControlFlow,
+                            "import thunk target outside guest RVA space", target);
+            }
+            const auto binding =
+                bindImport(caller, staging.at(caller).code, step, static_cast<uint32_t>(*slot));
+            thunkStarts.insert(next, target);
+            return binding;
+        } catch (InspectionError &error) {
+            error.context.branchTarget = target;
+            throw;
+        }
+
+        ExternalCallTarget GroupDiscovery::bindImport(uint32_t caller, const MappedRange &code,
+                                                      const Step &step, uint32_t slot) {
             std::string identity;
 
             const auto imported = [&] {
@@ -506,7 +582,14 @@ namespace forge::x86 {
 
         Flow GroupDiscovery::importFlow(uint32_t rva, FunctionDiscovery &caller, const Step &step) {
             try {
-                const auto imported = bindImport(rva, caller.code, step);
+                const auto target = operands.ripRva(step, 0);
+                if (!target || *target < 0 || *target > UINT32_MAX) {
+                    step.reject(FailureCode::UnsupportedControlFlow,
+                                "expected RIP-relative call through a mapped IAT slot");
+                }
+                operands.decodeAddress(step, 0, true);
+                const auto imported =
+                    bindImport(rva, caller.code, step, static_cast<uint32_t>(*target));
                 caller.resolutions.emplace(step.rva, imported);
                 return imported.binding.control == win64::Control::Terminates ? Flow::TerminalCall
                                                                               : Flow::Fallthrough;
@@ -529,8 +612,11 @@ namespace forge::x86 {
                 }
 
                 const auto *producer = std::exchange(previous, &step);
-                if (step.isMemoryCall()) {
-                    const auto &resolution = resolutions.at(step.rva);
+                const auto found = resolutions.find(step.rva);
+                if (found != resolutions.end() &&
+                    (step.isMemoryCall() ||
+                     std::holds_alternative<ExternalCallTarget>(found->second))) {
+                    const auto &resolution = found->second;
 
                     if (const auto *error = std::get_if<std::exception_ptr>(&resolution)) {
                         std::rethrow_exception(*error);
@@ -550,10 +636,13 @@ namespace forge::x86 {
                     target = int64_t(step.next) + step.inst.getOperand(0).getImm();
                     evidence = step.rva;
                 } else if (step.isRegisterCall()) {
-                    target = operands.registerCallRva(step, producer);
+                    const auto proof = step.guardedPointerCall
+                                           ? pointerTarget(step, *step.guardedPointerCall)
+                                           : operands.leaCallTarget(step, producer);
+                    target = proof.target;
+                    evidence = proof.producer;
                     validateCallEvidence(caller.entry, caller.code, step, target);
                     kind = CallKind::RipRelativeRegister;
-                    evidence = producer->rva;
                 } else {
                     continue;
                 }
@@ -622,8 +711,12 @@ namespace forge::x86 {
             }
 
             if (!deferred.empty()) {
-                recoverLeaves(entry, functions, deferred, loaderWrittenRanges(), dis, instructions,
-                              regs);
+                std::vector<RvaRange> thunks;
+                for (const auto start : thunkStarts) {
+                    thunks.push_back({start, uint64_t(start) + amd64ImportThunkSize});
+                }
+                recoverLeaves(entry, functions, deferred, functionRanges(), thunks,
+                              loaderWrittenRanges(), dis, instructions, regs);
             }
 
             // Incoming indices follow source order even when discovery began at a higher RVA.

@@ -19,8 +19,11 @@ def generate(output, mc, link, dlltool, clang):
         "Middle.dll": ["Middle=entry"],
         "MissingLeaf.dll": ["Leaf"],
         "KERNEL32.dll": ["Sleep", "SetLastError", "GetLastError", "lstrlenA",
-                         "GetStdHandle", "WriteFile", "ExitProcess"],
+                         "GetStdHandle", "WriteFile", "ExitProcess", "GetCommandLineA", "GetCommandLineW",
+                         "__C_specific_handler"],
         "vcruntime140.dll": ["Runtime"],
+        "msvcrt.dll": ["__getmainargs", "calloc", "free", "strlen", "__C_specific_handler", "_fmode=entry DATA",
+                       "_commode=entry DATA", "__initenv=entry DATA", "_acmdln=entry DATA"],
         contract: ["Contract"],
     }
     with tempfile.TemporaryDirectory() as folder:
@@ -55,9 +58,14 @@ def generate(output, mc, link, dlltool, clang):
             (output / filename).write_bytes((work / filename).read_bytes())
 
         sources = Path(__file__).resolve().parent
-        for name in ("executable-return", "executable-call", "executable-data", "executable-fault"):
+        for name in ("executable-return", "executable-call", "executable-data", "executable-fault",
+                     "executable-tib", "executable-guarded-call"):
             image(f"{name}.exe", (sources / f"{name}.s").read_text())
         returns = (sources / "executable-return.s").read_text()
+        for dll in ("KERNEL32.dll", "msvcrt.dll"):
+            name = dll.split(".")[0].lower()
+            image(f"executable-seh-{name}.exe", (sources / "executable-seh.s").read_text(),
+                  [(dll, "__C_specific_handler")])
         image("executable-integrity.exe", returns, link_flags=["/integritycheck"])
         image("executable-manifest.exe", returns, link_flags=[
             "/manifest:embed",
@@ -65,10 +73,18 @@ def generate(output, mc, link, dlltool, clang):
         ])
         image("executable-last-error.exe", (sources / "executable-last-error.s").read_text(),
               [("KERNEL32.dll", name) for name in ("SetLastError", "GetLastError")])
+        image("executable-import-thunk.exe", (sources / "executable-import-thunk.s").read_text(),
+              [("KERNEL32.dll", name) for name in ("SetLastError", "GetLastError", "ExitProcess")])
         image("executable-headers.exe", (sources / "executable-headers.s").read_text(),
               [("KERNEL32.dll", "lstrlenA")], link_flags=["/dynamicbase:no", "/fixed:no"])
         console_imports = [("KERNEL32.dll", name) for name in ("GetStdHandle", "WriteFile", "ExitProcess")]
         image("hello.exe", (sources / "hello.s").read_text(), console_imports)
+        image("command-line.exe", (sources / "command-line.s").read_text(),
+              [("KERNEL32.dll", "GetCommandLineA")])
+        image("crt-argument-heap.exe", (sources / "crt-argument-heap.s").read_text(),
+              [("msvcrt.dll", name) for name in ("__getmainargs", "calloc", "free", "strlen",
+                                                 "_fmode", "_commode", "__initenv", "_acmdln")] +
+              [("KERNEL32.dll", "GetCommandLineA")])
         # Retain the compiler's instructions after the call to a non-returning guest helper.
         run(clang, "--target=x86_64-pc-windows-msvc", "-O2", "-fno-stack-protector", "-c",
             sources / "executable-noreturn.c", "-o", "noreturn.obj")

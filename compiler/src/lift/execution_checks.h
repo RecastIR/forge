@@ -19,8 +19,11 @@ namespace forge::x86 {
         bool managed() const { return result != nullptr; }
 
         void guard(llvm::Value *condition, uint32_t fault = FORGE_RT_FAULT_ABI);
+        void requireSupported(llvm::Value *condition);
         void scalarBoundary(llvm::Value *condition, llvm::Value *address, unsigned size,
                             uint32_t access, bool stack);
+        llvm::Value *processScalar(llvm::Value *imageBytes, llvm::Value *address, unsigned size,
+                                   uint32_t access);
         void stackMarks(llvm::Value *allowed, llvm::Value *offset, uint32_t access);
         void service(llvm::Value *status, llvm::Value *detail);
         void propagate(llvm::Value *returned);

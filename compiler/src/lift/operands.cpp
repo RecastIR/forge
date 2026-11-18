@@ -26,6 +26,8 @@ namespace forge::x86 {
         static_assert(std::size(registerNames) == registerCount);
         static_assert(std::string_view(registerNames[rspIndex].wide) == "RSP");
         static_assert(std::string_view(registerNames[framePointer.index].wide) == "RBP");
+        static_assert(std::string_view(registerNames[stringDestination.index].wide) == "RDI");
+        static_assert(std::string_view(registerNames[repeatCount.index].wide) == "RCX");
 
         std::optional<RegisterView> modeledRegister(StringRef name, unsigned width) {
             for (unsigned index = 0; index < std::size(registerNames); ++index) {
@@ -115,6 +117,11 @@ namespace forge::x86 {
         const auto segment = inst.getOperand(first + 4).getReg();
         const bool hasIndex = index.getReg() && StringRef(regs.getName(index.getReg())) != "RIZ";
 
+        if (segment && StringRef(regs.getName(segment)) == "GS" && s.opcode == "MOV64rm" &&
+            access && !base.getReg() && !hasIndex && scale == 1 && displacement == 0x30) {
+            return {{}, {}, 0x30, 1, true};
+        }
+
         if (segment || (scale != 1 && scale != 2 && scale != 4 && scale != 8)) {
             s.reject(FailureCode::UnsupportedInstruction, "unsupported segment or address scale");
         }
@@ -196,12 +203,13 @@ namespace forge::x86 {
         return reg(s, s.inst.getOperand(0), width);
     }
 
-    int64_t InstructionOperands::registerCallRva(const Step &call, const Step *previous) const {
+    RegisterCallEvidence InstructionOperands::leaCallTarget(const Step &call,
+                                                            const Step *previous) const {
         if (!previous || previous->opcode != "LEA64r" ||
             previous->inst.getOperand(0).getReg() != call.inst.getOperand(0).getReg()) {
             call.reject(FailureCode::UnsupportedControlFlow,
                         "unsupported register call: expected a same-block RIP-relative LEA to the "
-                        "target register");
+                        "target register or a guarded read-only pointer chain");
         }
 
         const auto target = ripRva(*previous, 1);
@@ -217,7 +225,7 @@ namespace forge::x86 {
         }
 
         decodeAddress(*previous, 1, false);
-        return *target;
+        return {*target, previous->rva};
     }
 
     bool memoryDestination(Form form) {

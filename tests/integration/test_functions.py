@@ -251,6 +251,50 @@ class Discovery(Case):
 
 
 class Lift(Case):
+    def test_guarded_readonly_callback(self):
+        original = (FIXTURES / "executable-guarded-call.exe").read_bytes()
+        layout = Layout(original)
+        entry = layout.u32(layout.opt + 16)
+        start = layout.file_offset(entry)
+        call = original.index(bytes.fromhex("ff d0"), start)
+        slot = entry + 11 + struct.unpack_from("<i", original, start + 7)[0]
+        base = struct.unpack_from("<Q", original, layout.opt + 24)[0]
+        cell = struct.unpack_from("<Q", original, layout.file_offset(slot))[0] - base
+        target = struct.unpack_from("<Q", original, layout.file_offset(cell))[0] - base
+        image, output = self.dir / "callback.exe", self.dir / "callback.ll"
+        args = ("lift", image, "--rva", hex(entry), "--signature", "i64(i64,i64)", "--output", output)
+        image.write_bytes(original)
+        self.invoke(*args)
+        self.assertIn(f"call void @forge_guest_{target:x}", output.read_text())
+
+        # JE lands immediately after CALL. A backedge discovered after the call
+        # must invalidate the chain even though the first traversal is sound.
+        self.assertEqual(original[call+2:call+7], bytes.fromhex("48 83 c4 28 c3"))
+        edits = [
+            ("alternate predecessor", call + 2, bytes.fromhex("75 fc c3"), "bypasses"),
+            ("argument clobbers eax", call - 2, bytes.fromhex("31 c0"), "register call"),
+            ("setup writes ebx", call - 2, bytes.fromhex("31 db"), "register call"),
+            ("null guard reversed", start + 17, b"\x75", "register call"),
+            ("target outside image", layout.file_offset(cell), struct.pack("<Q", base-1), "outside the image"),
+        ]
+        flags = layout.section_header(slot) + 36
+        edits.append(("writable cells", flags, struct.pack("<I", layout.u32(flags) | 0x80000000),
+                      "stable read-only pointer"))
+        reloc = layout.file_offset(layout.directory(5)[0])
+        page, size = struct.unpack_from("<II", original, reloc)
+        for location in (slot, cell):
+            field = next(i for i in range(reloc + 8, reloc + size, 2)
+                         if struct.unpack_from("<H", original, i)[0] == (0xa000 | (location - page)))
+            edits.append((f"missing DIR64 at {location:x}", field, b"\0\0", "exact DIR64"))
+        edits.append(("overlapping fixups", field, struct.pack("<H", 0xa000 | (slot - page)),
+                      "overlapping base relocations"))
+        for name, off, patch, detail in edits:
+            with self.subTest(name=name):
+                data = bytearray(original)
+                data[off:off+len(patch)] = patch
+                image.write_bytes(data)
+                self.assertIn(detail.encode(), self.invoke(*args, code=1).stderr)
+
     def test_signatureless_state_alignment(self):
         output = self.dir / "state.ll"
         self.invoke("lift", FIXTURES / "arithmetic.exe", "--rva", "0x1000", "--output", output)
@@ -457,6 +501,9 @@ class Lift(Case):
         for code, failure in (
                 ("66 50 c3", "LIFT_UNSUPPORTED_PREFIX"),
                 ("66 c9 c3", "LIFT_UNSUPPORTED_PREFIX"),
+                ("f2 48 ab c3", "LIFT_UNSUPPORTED_PREFIX"),
+                ("67 f3 48 ab c3", "LIFT_UNSUPPORTED_PREFIX"),
+                ("f3 ab c3", "LIFT_UNSUPPORTED_PREFIX"),
                 ("8f 01 c3", "LIFT_UNSUPPORTED_INSTRUCTION"),
                 ("c2 08 00", "LIFT_UNSUPPORTED_CONTROL_FLOW"),
                 ("cb", "LIFT_UNSUPPORTED_CONTROL_FLOW"),
@@ -824,6 +871,8 @@ class Lift(Case):
         self.assertEqual((diagnostic["code"], diagnostic["context"]["opcode"],
                           diagnostic["context"]["branch_target"]),
                          ("LIFT_UNSUPPORTED_CONTROL_FLOW", "CALL64pcrel32", target))
+        self.assertEqual((diagnostic["context"]["import_dll"], diagnostic["context"]["import_symbol"],
+                          int(diagnostic["context"]["iat_slot_rva"], 16)), ("Physics.DLL", "Named", slot))
 
     def test_flag_missing_at_forward_join(self):
         image = FIXTURES / "arithmetic.exe"

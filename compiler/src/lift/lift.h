@@ -1,5 +1,8 @@
 #pragma once
 
+#include "analysis/exception_scope.h"
+#include "pe/image.h"
+
 #include <cstdint>
 #include <filesystem>
 #include <memory>
@@ -49,6 +52,19 @@ namespace forge {
         std::string dll, name;
     };
 
+    struct ExecutableImportSlot {
+        std::string name;
+        uint32_t iatRva;
+        bool hasService, hasDataExport;
+    };
+
+    struct ExecutableImportDirectory {
+        std::string dll;
+        uint32_t descriptorRva;
+        bool delayed, bound;
+        std::vector<ExecutableImportSlot> slots;
+    };
+
     // Owned facts, including progress up to the first failing dependency. Entry recovery
     // identifies an exact function start. Group recovery includes all reachable callees.
     struct ExecutableReadiness {
@@ -58,6 +74,13 @@ namespace forge {
         std::vector<ExecutableCall> calls;
         std::vector<ExecutableImport> imports;
         std::vector<ExecutableUnresolvedCall> unresolvedCalls;
+        // Image declarations are independent of the calls recovered before a failure.
+        std::vector<ExecutableImportDirectory> loadImports;
+        std::string importInventoryError;
+        std::optional<TLS> tls;
+        std::optional<uint32_t> entryHandlerUnwindRva, entryHandlerRva;
+        std::optional<CSpecificHandler> entryCHandler;
+        std::string entryHandlerError;
     };
 
     // Selects the PE header entry and emits a checked process artifact. The entry

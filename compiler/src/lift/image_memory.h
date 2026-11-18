@@ -52,6 +52,7 @@ namespace forge::x86 {
         uint64_t loadBase = 0;
         uint32_t sizeOfImage = 0;
         std::vector<Backing> backings;
+        std::map<uint32_t, uint32_t> dataImports;
     };
 
     // Selection borrows the group's steps for diagnostics and the image for section and
@@ -65,6 +66,7 @@ namespace forge::x86 {
         void addressTaken(const Step &step, uint64_t va);
         void serviceArgument(const Step &step, uint64_t va, bool write,
                              std::optional<uint64_t> size);
+        bool isDataImportPointer(uint64_t va) const;
         void fixedAccess(const Step &step, uint64_t va, unsigned width, bool write);
         void tableRead(const Step &step, const RelativeTable &table);
         void computedAccess(const Step &step, std::optional<uint64_t> va, unsigned width,
@@ -82,6 +84,7 @@ namespace forge::x86 {
         };
 
         const ParsedImage &source;
+        std::map<uint32_t, uint32_t> dataImports;
         uint64_t loadBase;
         llvm::StringRef executableHeaders;
         const Step *indirectRead = nullptr;

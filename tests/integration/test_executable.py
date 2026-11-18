@@ -276,6 +276,94 @@ class StartupAdmission(Workspace):
 
 
 class Readiness(Workspace):
+    def test_owned_c_specific_handler(self):
+        for dll in ("KERNEL32.dll", "msvcrt.dll"):
+            with self.subTest(dll=dll):
+                source = image("seh-" + dll.split(".")[0].lower())
+                data = source.read_bytes()
+                layout = Layout(data)
+                root = entry(data)
+                records = layout.file_offset(layout.directory(3)[0])
+                begin, end, unwind = struct.unpack_from("<III", data, records)
+                self.assertEqual(begin, root)
+                filter_rva = layout.u32(records + 12)
+                # The SDK-free fixture has an empty prologue, then its language trailer.
+                trailer = layout.file_offset(unwind) + 4
+                thunk = layout.u32(trailer)
+                thunk_bytes = layout.file_offset(thunk)
+                self.assertEqual(data[thunk_bytes:thunk_bytes + 2], b"\xff\x25")
+                slot = thunk + 6 + struct.unpack_from("<i", data, thunk_bytes + 2)[0]
+                diagnostic = self.reject(data)
+                self.assertEqual(diagnostic["code"], "EXECUTABLE_UNSUPPORTED_STARTUP")
+                self.assertTrue(diagnostic["context"]["recovery_complete"])
+                handler = diagnostic["context"]["entry_unwind_handler"]
+                self.assertEqual(handler["handler_rva"], hex(thunk))
+                self.assertEqual(handler["unwind_rva"], hex(unwind))
+                proven = handler["c_specific_handler"]
+                self.assertEqual(proven["dll"], dll)
+                self.assertEqual(proven["symbol"], "__C_specific_handler")
+                self.assertEqual(int(proven["iat_slot_rva"], 16), slot)
+                self.assertEqual(int(proven["scope_table_rva"], 16), unwind + 8)
+                self.assertEqual(proven["scope_count"], 1)
+                self.assertEqual(proven["scope"], {
+                    "begin_rva": hex(root), "end_rva": hex(end - 1),
+                    "filter_rva": hex(filter_rva), "continuation_rva": hex(end - 1)})
+                self.assertIn("guest exception dispatch", diagnostic["message"])
+                plain = run(FORGE, "lift", source, "--executable", "--output", self.output)
+                self.assertEqual(plain.returncode, 1)
+                self.assertIn(f"{dll}!__C_specific_handler, IAT slot {hex(slot)}", plain.stderr)
+                self.assertIn(f"filter {hex(filter_rva)}, continuation {hex(end - 1)}", plain.stderr)
+
+    def test_c_specific_scope_bounds_and_provenance(self):
+        data = bytearray(image("seh-kernel32").read_bytes())
+        layout = Layout(data)
+        records = layout.file_offset(layout.directory(3)[0])
+        begin, end, unwind = struct.unpack_from("<III", data, records)
+        table = layout.file_offset(unwind) + 8
+        for offset, value, reason, code in (
+                (0, 0xffffffff, "truncated", "INVALID_PE"),
+                (0, 0, "expected one", "EXECUTABLE_UNSUPPORTED_STARTUP"),
+                (4, end, "protected range", "EXECUTABLE_UNSUPPORTED_STARTUP"),
+                (8, end + 1, "protected range", "EXECUTABLE_UNSUPPORTED_STARTUP"),
+                (12, begin + 1, "eligible function", "EXECUTABLE_UNSUPPORTED_STARTUP"),
+                (16, end, "continuation", "EXECUTABLE_UNSUPPORTED_STARTUP")):
+            with self.subTest(offset=offset, value=value):
+                edited = data.copy()
+                struct.pack_into("<I", edited, table + offset, value)
+                diagnostic = self.reject(edited)
+                self.assertEqual(diagnostic["code"], code)
+                handler = diagnostic["context"]["entry_unwind_handler"]["c_specific_handler"]
+                self.assertNotIn("scope", handler)
+                self.assertIn(reason, handler["limitation"])
+
+        # An arbitrary handler can put any language-specific data in its trailer.
+        other = data.copy()
+        other[other.index(b"KERNEL32.dll")] = ord("X")
+        handler = self.reject(other)["context"]["entry_unwind_handler"]
+        self.assertNotIn("c_specific_handler", handler)
+
+        # An advertised dynamic relocation table has an unknown write footprint.
+        dynamic = data.copy()
+        section = layout.section_header(unwind)
+        raw, size = layout.u32(section + 20), layout.u32(section + 8)
+        config = (size + 7) & ~7
+        self.assertLessEqual(config + 232, layout.u32(section + 16))
+        struct.pack_into("<I", dynamic, section + 8, config + 232)
+        struct.pack_into("<II", dynamic, layout.directories + 10 * 8,
+                         layout.u32(section + 12) + config, 232)
+        struct.pack_into("<I", dynamic, raw + config, 232)
+        struct.pack_into("<I", dynamic, raw + config + 224, 1)
+        handler = self.reject(dynamic)["context"]["entry_unwind_handler"]
+        self.assertNotIn("c_specific_handler", handler)
+
+        # A base relocation into the row prevents its use as stable scope metadata.
+        reloc = layout.file_offset(layout.directory(5)[0])
+        struct.pack_into("<I", data, reloc, (unwind + 12) & ~0xfff)
+        struct.pack_into("<H", data, reloc + 8, (10 << 12) | ((unwind + 12) & 0xfff))
+        handler = self.reject(data)["context"]["entry_unwind_handler"]["c_specific_handler"]
+        self.assertNotIn("scope", handler)
+        self.assertIn("mutable", handler["limitation"])
+
     def test_reachable_callee_unwind_handler(self):
         pe = FIXTURES / "stack.exe"
         module = json.loads(run(FORGE, "inspect", pe, "--format", "json", check=True).stdout)["modules"][0]
@@ -438,9 +526,118 @@ class Readiness(Workspace):
         self.assertIn({"dll": "physics.dll", "name": "Named"},
                       [dict(item, dll=item["dll"].lower()) for item in diagnostic["context"]["imports"]])
 
+    def test_data_import_slot_is_loader_owned(self):
+        data = bytearray((FIXTURES / "crt-argument-heap.exe").read_bytes())
+        layout = Layout(data)
+        root = entry(data)
+        start = layout.file_offset(root)
+        # The first RIP-relative load in the probe reads the _fmode slot.
+        self.assertEqual(data[start + 4:start + 7], bytes.fromhex("48 8b 15"))
+        slot = root + 11 + struct.unpack_from("<i", data, start + 7)[0]
+        # Retarget a DIR64 fixup to the loader-owned slot. A one-byte overlap
+        # with its neighbor also invalidates that binding.
+        block = layout.file_offset(layout.directory(5)[0])
+        for start_rva, symbol in ((slot, "_fmode"), (slot - 1, "_commode")):
+            with self.subTest(start_rva=hex(start_rva)):
+                relocated = data.copy()
+                offset = start_rva - layout.u32(block)
+                self.assertIn(offset, range(0x1000))
+                struct.pack_into("<H", relocated, block + 8, 0xa000 | offset)
+                diagnostic = self.reject(relocated)
+                self.assertEqual(diagnostic["code"], "EXECUTABLE_UNSUPPORTED_STARTUP")
+                self.assertIn(f"invalid data import slot for msvcrt.dll!{symbol}", diagnostic["message"])
+
+        # Store an immediate into that slot, then return a defined value.
+        code = b"\xc7\x05" + struct.pack("<iI", slot - root - 10, 1) + bytes.fromhex("31 c0 c3")
+        data[start:start + len(code)] = code
+        diagnostic = self.reject(data)
+        self.assertEqual(diagnostic["code"], "LIFT_IMAGE_MEMORY", diagnostic)
+        symbols = [s for dll in diagnostic["context"]["load_imports"] for s in dll["symbols"]]
+        self.assertIn({"iat_slot_rva": hex(slot), "name": "_fmode", "catalogued_data_export": True,
+                       "catalogued_service": False}, symbols)
+
+    def test_transformed_service_pointer_loses_provenance(self):
+        data = bytearray((FIXTURES / "crt-argument-heap.exe").read_bytes())
+        layout = Layout(data)
+        start = layout.file_offset(entry(data))
+        # This strlen call accepts a guest pointer returned by GetCommandLineA.
+        # Replacing MOV RCX,RAX with LEA ECX,[RAX+1] changes both its value and width.
+        copy = bytes.fromhex("48 89 c1 ff 15")
+        off = data.index(copy, start)
+        data[off:off + 3] = bytes.fromhex("8d 48 01")
+        diagnostic = self.reject(data)
+        self.assertEqual(diagnostic["code"], "LIFT_IMAGE_MEMORY", diagnostic)
+        self.assertIn("argument 1 to strlen", diagnostic["message"])
+
+    def test_gs_requires_process_and_supported_offset(self):
+        pe = image("tib")
+        data = bytearray(pe.read_bytes())
+        root = entry(data)
+        result = run(FORGE, "lift", pe, "--rva", hex(root), "--signature", "i64(i64,i64)",
+                     "--diagnostics-format", "json", "--output", self.output)
+        self.assertEqual(result.returncode, 1)
+        self.assertIn("requires a managed guest process", json.loads(result.stderr)["message"])
+        offset = Layout(data).file_offset(root)
+        self.assertEqual(data[offset:offset + 9], bytes.fromhex("654c8b142530000000"))
+        data[offset + 5] = 0x60
+        self.assertEqual(self.reject(data)["code"], "LIFT_UNSUPPORTED_PREFIX")
+
+    def test_loader_inventory_survives_early_decode_failure(self):
+        data = bytearray((FIXTURES / "metadata.exe").read_bytes())
+        layout = Layout(data)
+        root = entry(data)
+        start = layout.file_offset(root)
+        data[start:start + 2] = bytes.fromhex("ff e0")  # Unresolved JMP RAX
+        diagnostic = self.reject(data)
+        self.assertEqual(diagnostic["code"], "LIFT_UNSUPPORTED_CONTROL_FLOW")
+        context = diagnostic["context"]
+        self.assertEqual(context["instruction_rva"], hex(root))
+        self.assertFalse(context["recovery_complete"])
+        self.assertEqual(context["imports"], [])
+        base = struct.unpack_from("<Q", data, layout.opt + 24)[0]
+        self.assertEqual(context["tls"]["callback_vas"], [hex(base + root)])
+        self.assertEqual(context["tls"]["zero_fill_size"], 4)
+        self.assertIn("loader callbacks are unsupported", context["tls"]["limitation"])
+
+        expected = {}
+        position = layout.file_offset(layout.directory(1)[0])
+        while layout.u32(position + 12):
+            dll_offset = layout.file_offset(layout.u32(position + 12))
+            dll = data[dll_offset:data.index(0, dll_offset)].decode().lower()
+            iat = layout.u32(position + 16)
+            expected[dll] = iat
+            position += 20
+        slots = {item["dll"].lower(): item["symbols"] for item in context["load_imports"]}
+        self.assertEqual(set(slots), set(expected))
+        self.assertEqual([(s["name"], s["iat_slot_rva"]) for s in slots["physics.dll"]],
+                         [("#7", hex(expected["physics.dll"])), ("Named", hex(expected["physics.dll"] + 8))])
+        self.assertEqual(slots["kernel32.dll"][0]["iat_slot_rva"], hex(expected["kernel32.dll"]))
+        self.assertFalse(any(slot["catalogued_service"] for slot in slots["physics.dll"]))
+
+    def test_entry_handler_evidence_survives_early_decode_failure(self):
+        data = bytearray(image("return").read_bytes())
+        layout = Layout(data)
+        root = entry(data)
+        data[layout.file_offset(root):layout.file_offset(root) + 2] = bytes.fromhex("ff e0")
+        record = layout.file_offset(layout.directory(3)[0])
+        unwind = layout.u32(record + 8)
+        info = layout.file_offset(unwind)
+        data[info] |= 1 << 3  # UNW_FLAG_EHANDLER
+        trailer = info + 4 + ((data[info + 2] + 1) & ~1) * 2
+        # Extend the file-backed virtual extent of .xdata into its existing raw padding.
+        section = layout.section_header(unwind)
+        raw = layout.u32(section + 20)
+        self.assertLessEqual(trailer + 4 - raw, layout.u32(section + 16))
+        struct.pack_into("<I", data, section + 8, max(layout.u32(section + 8), trailer + 4 - raw))
+        struct.pack_into("<I", data, trailer, root)
+        diagnostic = self.reject(data)
+        self.assertEqual(diagnostic["code"], "LIFT_UNSUPPORTED_CONTROL_FLOW")
+        self.assertEqual(diagnostic["context"]["entry_unwind_handler"],
+                         {"unwind_rva": hex(unwind), "handler_rva": hex(root)})
+
 
 class Reference(Workspace):
-    def capture(self, source):
+    def capture(self, source, args=()):
         suite = Path(__file__).resolve().parents[1] / "differential"
         sys.path.insert(0, str(suite))
         sys.path.insert(0, str(suite / "reference"))
@@ -449,14 +646,16 @@ class Reference(Workspace):
 
         pe = self.dir / source.name
         shutil.copyfile(source, pe)
-        result = execute(reference_environment(suite)["container_image_id"], pe, [])
+        result = execute(reference_environment(suite)["container_image_id"], pe, list(args))
         return result.exit_code, result.stdout, result.stderr
 
     def test_executables(self):
         headers = image("headers")
         expected = {
             headers.name: (header_result(headers.read_bytes()), b"", b""),
+            "crt-argument-heap.exe": (41, b"", b""),
             image("noreturn").name: (42, b"", b""),
+            image("tib").name: (42, b"", b""),
             console_image("hello").name: (0, GREETING, b""),
             console_image("binary_stdout").name: (len(BINARY), BINARY, b""),
             console_image("binary_stderr").name: (len(BINARY), b"", BINARY),
@@ -468,6 +667,8 @@ class Reference(Workspace):
         for name in filenames:
             with self.subTest(pe=name):
                 self.assertEqual(self.capture(FIXTURES / name), expected[name])
+        self.assertEqual(self.capture(FIXTURES / "crt-argument-heap.exe", ["*example"]),
+                         (42, b"", b""))
 
 
 class Console(Workspace):
@@ -619,6 +820,66 @@ class Console(Workspace):
 
 
 class Native(Workspace):
+    def test_guarded_call(self):
+        pe = image("guarded-call")
+        diagnostic = self.compile(pe)
+        call, = diagnostic["context"]["calls"]
+        data = pe.read_bytes()
+        layout = Layout(data)
+        call_offset = layout.file_offset(int(call["instruction_rva"], 16))
+        self.assertEqual(data[call_offset:call_offset+2], bytes.fromhex("ff d0"))
+        program = run(self.output)
+        self.assertEqual((program.returncode, program.stdout, program.stderr), (42, "", ""))
+
+        base = struct.unpack_from("<Q", data, layout.opt + 24)[0]
+        run(CONTRACT, "--guest-base", hex(base + 0x30000000), pe, self.output,
+            OPT, LLC, "/usr/bin/xcrun", *LINK, check=True)
+        rebased = run(self.output)
+        self.assertEqual((rebased.returncode, rebased.stdout, rebased.stderr), (42, "", ""))
+
+    def test_crt_arguments_and_heap(self):
+        self.compile(FIXTURES / "crt-argument-heap.exe")
+        for args, expected in (([], 41), (["*example"], 42), (["another value"], ord("a"))):
+            with self.subTest(args=args):
+                result = run(self.output, *args)
+                self.assertEqual((result.returncode, result.stdout, result.stderr), (expected, "", ""))
+
+        pe = FIXTURES / "crt-argument-heap.exe"
+        obj = self.dir / "crt.o"
+        run(CONTRACT, pe, "--object", obj, OPT, LLC, check=True)
+        _, runtime, sdk, *flags = LINK
+        run("/usr/bin/xcrun", "--sdk", sdk, "clang++", "-arch", "arm64", *flags,
+            PROCESS_HARNESS, obj, runtime, "-o", self.output, check=True)
+        result = run(self.output, "run", "0", "0", "0", "0", check=True)
+        self.assertEqual([row for row in result.stdout.splitlines() if row.startswith("return ")],
+                         ["return 41", "return 41"])
+
+    def test_linker_import_thunks(self):
+        result = self.compile(image("import-thunk"))
+        self.assertEqual({item["name"] for item in result["context"]["imports"]},
+                         {"SetLastError", "GetLastError", "ExitProcess"})
+        run_result = run(self.output)
+        self.assertEqual((run_result.returncode, run_result.stdout, run_result.stderr), (42, "", ""))
+
+    def test_primary_tib(self):
+        self.compile(image("tib"))
+        result = run(self.output)
+        self.assertEqual((result.returncode, result.stdout, result.stderr), (42, "", ""))
+
+    def test_process_command_line(self):
+        pe = self.dir / "guest original.exe"
+        shutil.copyfile(FIXTURES / "command-line.exe", pe)
+        self.compile(pe)
+        pe.unlink()
+        for args in ([], [""], ["a b", "forge"], ['a"b', "space slash\\", 'x\\"y']):
+            with self.subTest(args=args):
+                expected = subprocess.list2cmdline([r"C:\guest original.exe", *args])
+                checksum = 0
+                for byte in expected.encode("ascii"):
+                    checksum = (checksum * 33 + byte) & 255
+                result = run(self.output, *args)
+                self.assertEqual((result.returncode, result.stdout, result.stderr), (checksum, "", ""))
+
     def test_header_reads_and_rebase(self):
         pe = image("headers")
         data = pe.read_bytes()

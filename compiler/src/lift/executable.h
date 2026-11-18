@@ -4,6 +4,11 @@
 #include "lift/recovery.h"
 
 namespace forge::x86 {
+    std::optional<uint32_t> crtDataExport(const Import &descriptor, const Symbol &symbol);
+
+    void recordExecutableRequirements(const AnalyzedImage &analysis,
+                                      ExecutableReadiness &readiness);
+
     void recordExecutableRecovery(ExecutableReadiness &readiness,
                                   const RecoveredFunctionGroup &group,
                                   const InspectionError *failure = nullptr);

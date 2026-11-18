@@ -165,6 +165,49 @@ namespace {
     }
 } // namespace
 
+uint64_t forge::runtime::findGuestAllocation(std::span<const Reservation> reservations,
+                                             uint64_t size, uint64_t alignment,
+                                             uint64_t hint) noexcept {
+    constexpr uint64_t maximum = UINT64_C(0x00007fffffffffff);
+    uint64_t base = hint;
+
+    auto next = std::ranges::lower_bound(reservations, base, {}, &Reservation::base);
+
+    if (next != reservations.begin()) {
+        --next;
+    }
+
+    for (; next != reservations.end(); ++next) {
+        const auto &reservation = *next;
+        if (base > maximum || !size || size - 1 > maximum - base) {
+            return 0;
+        }
+
+        const auto last = reservation.base + (reservation.size - 1);
+
+        if (last < base) {
+            continue;
+        }
+
+        if (base + size - 1 < reservation.base) {
+            return base;
+        }
+
+        if (last > maximum - alignment) {
+            return 0;
+        }
+
+        base = (last + alignment) & ~(alignment - 1);
+    }
+
+    return base <= maximum && size && size - 1 <= maximum - base ? base : 0;
+}
+
+forge_rt_status forge::runtime::publishOwnedImage(forge_rt_instance &instance,
+                                                  const forge_rt_image &image) {
+    return publishImage(instance, image, nullptr);
+}
+
 extern "C" forge_rt_status forge_rt_register_image(forge_rt_instance *instance,
                                                    const forge_rt_image *image) noexcept {
     if (!image) {

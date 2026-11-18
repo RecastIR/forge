@@ -185,7 +185,7 @@ def build_targets(tree, target, ir, harness, work, config, variant, timings=None
     return executable, work / OPTIMIZED_IR if variant == "o2" else ir
 
 
-def execute(executable, args, work, *, timeout=EXECUTION_TIMEOUT, limit=STREAM_LIMIT):
+def execute(executable, args, work, *, timeout=EXECUTION_TIMEOUT, limit=STREAM_LIMIT, require_zero=True):
     streams = {"stdout": bytearray(), "stderr": bytearray()}
     try:
         with tempfile.TemporaryDirectory(dir=work) as cwd, supervised(
@@ -217,7 +217,7 @@ def execute(executable, args, work, *, timeout=EXECUTION_TIMEOUT, limit=STREAM_L
                 raise ExecutionFailure("timeout", "native execution timeout") from error
             if status < 0:
                 raise ExecutionFailure("signaled", f"native harness terminated by signal {-status}", status)
-            if status:
+            if require_zero and status:
                 raise ExecutionFailure("harness_error", f"native harness exited {status}", status)
     finally:
         for name, data in streams.items():

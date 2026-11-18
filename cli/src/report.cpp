@@ -1,5 +1,6 @@
 #include "report.h"
 #include "pe/dependencies.h"
+#include "tls_report.h"
 
 #include "llvm/Support/FormatVariadic.h"
 #include "llvm/Support/JSON.h"
@@ -84,16 +85,7 @@ namespace forge {
             o["tls"] = nullptr;
 
             if (m.tls) {
-                const auto &t = *m.tls;
-
-                o["tls"] = Object{{"directory_rva", hex(t.rva)},
-                                  {"raw_data_start_va", hex(t.start)},
-                                  {"raw_data_end_va", hex(t.end)},
-                                  {"index_va", hex(t.index)},
-                                  {"callbacks_va", hex(t.callbacks)},
-                                  {"zero_fill_size", t.zeroFill},
-                                  {"characteristics", t.characteristics},
-                                  {"callback_vas", array(t.callbackVas, hex)}};
+                o["tls"] = tlsJson(*m.tls);
             }
             o["exceptions"] = nullptr;
 

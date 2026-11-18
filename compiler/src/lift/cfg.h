@@ -28,18 +28,31 @@ namespace forge::x86 {
         FallOff
     };
 
+    struct GuardedPointerCall {
+        uint32_t producer, slot;
+    };
+
     struct Step {
         uint32_t rva, next;
         llvm::MCInst inst;
         llvm::StringRef opcode; // Borrows the decoder's instruction-name table.
         llvm::StringRef bytes;  // Borrows the analyzed image.
         Flow flow = Flow::Fallthrough;
+        std::optional<GuardedPointerCall> guardedPointerCall = {};
 
         bool isDirectCall() const { return opcode == "CALL64pcrel32"; }
 
         bool isMemoryCall() const { return opcode == "CALL64m"; }
 
         bool isRegisterCall() const { return opcode == "CALL64r"; }
+
+        bool isRepeatedQwordStore() const { return opcode == "STOSQ" && bytes == "\xf3\x48\xab"; }
+
+        bool isLockedCompareExchange() const {
+            return opcode == "CMPXCHG64rm" && bytes.starts_with("\xf0");
+        }
+
+        bool isAtomicExchange() const { return isLockedCompareExchange() || opcode == "XCHG64rm"; }
 
         [[noreturn]] void reject(FailureCode kind, const llvm::Twine &reason,
                                  std::optional<int64_t> target = {},

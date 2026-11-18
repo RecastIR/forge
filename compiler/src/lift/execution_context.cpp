@@ -12,6 +12,8 @@ namespace forge::x86 {
     static_assert(std::extent_v<decltype(forge_rt_execution::registers)> == registerCount);
     static_assert(std::extent_v<decltype(forge_rt_execution::registerMarks)> == registerCount);
     static_assert(std::extent_v<decltype(forge_rt_execution::flags)> == FlagCount);
+    static_assert(offsetof(forge_rt_execution, directionFlag) ==
+                  offsetof(forge_rt_execution, flags) + FlagCount);
 
     ContextLayout::ContextLayout(LLVMContext &context, bool origins, bool stack, bool runtime,
                                  bool process)
@@ -28,13 +30,14 @@ namespace forge::x86 {
             type = StructType::get(pointer, word, pointer, pointer, pointer, word, word,
                                    processResultType(context), registers(registerCount),
                                    registers(registerCount),
-                                   ArrayType::get(Type::getInt8Ty(context), FlagCount));
+                                   ArrayType::get(Type::getInt8Ty(context), FlagCount + 1));
             return;
         }
 
         auto *stackType =
             ArrayType::get(Type::getInt8Ty(context), stack ? GuestMemory::capacity : 0);
-        auto *flagType = ArrayType::get(Type::getInt1Ty(context), FlagCount);
+        // Keep the following byte-backed guest stack naturally aligned for qword atomics.
+        auto *flagType = ArrayType::get(Type::getInt1Ty(context), alignTo(FlagCount + 1, 8));
         SmallVector<Type *> fields{registers(registerCount), registers(origins ? registerCount : 0),
                                    flagType, stackType, stackType};
         if (runtime) {
@@ -60,12 +63,14 @@ namespace forge::x86 {
             registers = field(8, "registers");
             marks = layout.origins ? field(9, "register.marks") : nullptr;
             flags = field(10, "flags");
+            directionFlag = ir.CreateInBoundsGEP(ir.getInt8Ty(), flags, ir.getInt32(FlagCount));
             return;
         }
 
         registers = field(0, "registers");
         marks = layout.origins ? field(1, "register.marks") : nullptr;
         flags = field(2, "flags");
+        directionFlag = ir.CreateInBoundsGEP(ir.getInt1Ty(), flags, ir.getInt32(FlagCount));
         instance = layout.runtime ? field(5, "runtime.instance") : nullptr;
         thread = layout.runtime ? field(6, "runtime.thread") : nullptr;
         bytes = layout.stack ? field(3, "stack.bytes") : nullptr;
@@ -116,7 +121,8 @@ namespace forge::x86 {
 
             // These backing bits can cross a flag-preserving callee. The data-flow
             // proof independently excludes any guest observation of an undefined bit.
-            auto *flags = ArrayType::get(ir.getInt1Ty(), FlagCount);
+            // The Windows ABI supplies a clear direction flag on external entry.
+            auto *flags = ArrayType::get(ir.getInt1Ty(), FlagCount + 1);
             ir.CreateStore(ConstantAggregateZero::get(flags), context.flags);
         }
 

@@ -12,6 +12,8 @@ extern "C" {
 
 // NOLINTBEGIN(readability-identifier-naming)
 #define FORGE_RT_ARTIFACT_VERSION UINT32_C(1)
+#define FORGE_RT_NAMED_ARTIFACT_VERSION UINT32_C(2)
+#define FORGE_RT_CRT_ARTIFACT_VERSION UINT32_C(3)
 #define FORGE_RT_STACK_BASE UINT64_C(0x70000000)
 #define FORGE_RT_STACK_SIZE UINT32_C(4096)
 #define FORGE_RT_ENTRY_RSP (FORGE_RT_STACK_BASE + FORGE_RT_STACK_SIZE - 32 - 8)
@@ -68,6 +70,7 @@ typedef struct forge_rt_execution {
     uint64_t registers[16];
     uint64_t registerMarks[16];
     uint8_t flags[6];
+    uint8_t directionFlag;
 } forge_rt_execution;
 
 /* Generated entry slow path for a failed scalar image lookup or stack
@@ -131,6 +134,40 @@ typedef struct forge_rt_artifact {
     void (*entry)(forge_rt_execution *);
 } forge_rt_artifact;
 
+/* Version 2 appends the original PE basename. The prefix is the complete v1 descriptor. */
+typedef struct forge_rt_named_artifact {
+    forge_rt_artifact artifact;
+    const char *executableName;
+} forge_rt_named_artifact;
+
+#define FORGE_RT_CRT_ACMDLN UINT32_C(1)
+#define FORGE_RT_CRT_INITENV UINT32_C(2)
+#define FORGE_RT_CRT_FMODE UINT32_C(3)
+#define FORGE_RT_CRT_COMMODE UINT32_C(4)
+
+typedef struct forge_rt_data_import {
+    uint32_t slotRva;
+    uint32_t kind;
+} forge_rt_data_import;
+
+/* Version 3 describes ordered, disjoint 8-byte IAT slots in private image backing. */
+typedef struct forge_rt_crt_artifact {
+    forge_rt_named_artifact named;
+    const forge_rt_data_import *dataImports;
+    uint64_t dataImportCount;
+} forge_rt_crt_artifact;
+
+/* Borrowed during registration. Arguments exclude argv[0]. A null executablePath defaults to
+ * C:\\ plus the original PE basename in a v2 descriptor. Inputs to command-line services are
+ * ASCII and the encoded command line is limited to 32767 UTF-16 units including the NUL. */
+typedef struct forge_rt_process_startup {
+    const char *executablePath;
+    size_t argumentCount;
+    const char *const *arguments;
+    size_t environmentCount;
+    const char *const *environment;
+} forge_rt_process_startup;
+
 /* Exported by a linked compiler-generated process artifact. */
 const forge_rt_artifact *forge_lifted_artifact(void);
 
@@ -140,6 +177,19 @@ forge_rt_status forge_rt_process_create(uint32_t expectedVersion,
  * the identical descriptor succeeds. Failed initial registration leaves CREATED retryable. */
 forge_rt_status forge_rt_process_register(forge_rt_process *process,
                                           const forge_rt_artifact *artifact) FORGE_PROCESS_NOEXCEPT;
+/* One-shot configuration of a CREATED process. Failure leaves registration retryable.
+ * The runtime materializes parameters when the artifact declares a consuming import. */
+forge_rt_status forge_rt_process_register_with_startup(
+    forge_rt_process *process, const forge_rt_artifact *artifact,
+    const forge_rt_process_startup *startup) FORGE_PROCESS_NOEXCEPT;
+
+/* A managed scalar miss may resolve into process-owned memory outside the PE. The returned
+ * native pointer is borrowed by the current guest instruction only. A null result publishes
+ * a terminal diagnostic in the execution view. */
+void *forge_rt_resolve_process_scalar(forge_rt_execution *execution, uint64_t address,
+                                      uint32_t size, uint32_t access) FORGE_PROCESS_NOEXCEPT;
+/* Primary guest thread GS base. A zero result publishes a failure on the supplied view. */
+uint64_t forge_rt_primary_teb(forge_rt_execution *execution) FORGE_PROCESS_NOEXCEPT;
 forge_rt_status forge_rt_process_get_state(forge_rt_process *process,
                                            forge_rt_process_state *outState) FORGE_PROCESS_NOEXCEPT;
 /* For READY processes only. Records the host's assurance of safe output signal handling,

@@ -45,7 +45,13 @@ namespace {
 
             return failureExit;
         case FORGE_RT_UNSUPPORTED:
-            std::fputs("forge: unsupported guest execution\n", stderr);
+            if (result.status == FORGE_RT_UNSUPPORTED_CRT_WILDCARDS) {
+                std::fputs("forge: unsupported MSVCRT __getmainargs wildcard expansion\n", stderr);
+            } else if (result.status == FORGE_RT_UNSUPPORTED_CRT_NEW_MODE) {
+                std::fputs("forge: unsupported MSVCRT __getmainargs new-handler mode\n", stderr);
+            } else {
+                std::fputs("forge: unsupported guest execution\n", stderr);
+            }
             return failureExit;
         case FORGE_RT_RUNTIME_FAILURE:
             return runtimeFailure("execution", result.status);
@@ -55,7 +61,7 @@ namespace {
     }
 } // namespace
 
-int main() {
+int main(int argc, char **argv, char **environment) {
     // This executable owns its host process. A broken pipe or exceeded file-size limit
     // must reach the Windows service as a write error, including after earlier progress.
     struct sigaction action{};
@@ -68,7 +74,9 @@ int main() {
 
     const auto *artifact = forge_lifted_artifact();
 
-    if (!artifact || artifact->version != FORGE_RT_ARTIFACT_VERSION) {
+    if (!artifact || (artifact->version != FORGE_RT_ARTIFACT_VERSION &&
+                      artifact->version != FORGE_RT_NAMED_ARTIFACT_VERSION &&
+                      artifact->version != FORGE_RT_CRT_ARTIFACT_VERSION)) {
         return runtimeFailure("artifact", FORGE_RT_ABI_MISMATCH);
     }
 
@@ -91,7 +99,16 @@ int main() {
 
     forge_rt_process_result result{};
     const char *stage = "register";
-    status = forge_rt_process_register(process, artifact);
+    size_t environmentCount = 0;
+
+    while (environment && environment[environmentCount]) {
+        ++environmentCount;
+    }
+
+    const forge_rt_process_startup startup{nullptr, static_cast<size_t>(argc > 0 ? argc - 1 : 0),
+                                           argc > 0 ? argv + 1 : nullptr, environmentCount,
+                                           environment};
+    status = forge_rt_process_register_with_startup(process, artifact, &startup);
 
     if (status == FORGE_RT_OK) {
         stage = "run";

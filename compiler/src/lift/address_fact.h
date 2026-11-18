@@ -42,11 +42,16 @@ namespace forge::x86 {
         // Widened symbolic alternatives must survive a loop join even though
         // they authorize no new executable bytes.
         bool tracksSpill() const {
-            return !unknown || displacement || !returns.empty() || widenedReturns;
+            return !unknown || displacement || !returns.empty() || widenedReturns || processPointer;
         }
 
         static AddressFact frameStack(uint64_t offset = 0);
         static AddressFact continuation(uint32_t callee);
+        // A full-width copy of a guest pointer to a process allocation. Its actual
+        // address is dynamic and its backing is checked at execution.
+        static AddressFact processStorage();
+
+        bool pointsToProcessStorage() const { return processPointer; }
 
         std::optional<uint64_t> frameOffset() const { return displacement; }
 
@@ -71,6 +76,7 @@ namespace forge::x86 {
         bool unknown = true;
         // Widening is absorbing at a join, including on a loop backedge.
         bool widenedReturns = false;
+        bool processPointer = false;
 
         void includeAddress(uint64_t va);
         void includeReturn(Continuation source);

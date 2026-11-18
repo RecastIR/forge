@@ -1,11 +1,14 @@
 #pragma once
 
 #include "forge/runtime.h"
+#include "process_parameters.h"
 #include "standard_handles.h"
 
+#include <map>
 #include <mutex>
 #include <new>
 #include <optional>
+#include <span>
 #include <stdexcept>
 #include <unordered_map>
 #include <vector>
@@ -28,6 +31,20 @@ namespace forge::runtime {
         const Thread *stackOwner;
     };
 
+    struct HeapBlock {
+        HeapBlock(uint64_t base, size_t size)
+            : bytes(size), region{base, size, bytes.data(), FORGE_RT_READ | FORGE_RT_WRITE, &claim},
+              image{base, size, &region, 1} {}
+
+        std::vector<uint8_t> bytes;
+        uint64_t claim = 0;
+        forge_rt_image_region region;
+        forge_rt_image image;
+    };
+
+    // Select a vacant, aligned range in the ordered reservations. Zero denotes exhaustion.
+    uint64_t findGuestAllocation(std::span<const Reservation> reservations, uint64_t size,
+                                 uint64_t alignment, uint64_t hint = 65536) noexcept;
     uint64_t issueToken() noexcept;
     extern thread_local forge_rt_invocation_token executingInvocation;
 } // namespace forge::runtime
@@ -37,6 +54,10 @@ struct forge_rt_execution;
 struct forge_rt_instance {
     std::mutex mutex;
     std::unordered_map<forge_rt_thread_token, forge::runtime::Thread> threads;
+    std::optional<forge::runtime::ProcessParameters> parameters;
+    std::map<uint64_t, forge::runtime::HeapBlock> heap;
+    size_t heapUsage = 0;
+    uint64_t nextHeapAddress = 65536;
     std::vector<forge::runtime::Reservation> reservations;
     std::optional<forge::runtime::StandardHandles> standardHandles;
     // Borrows the owning process's stable execution record until this instance is destroyed.
@@ -45,6 +66,8 @@ struct forge_rt_instance {
 };
 
 namespace forge::runtime {
+    // Caller holds the process mapping lock and supplies stable, private registered storage.
+    forge_rt_status publishOwnedImage(forge_rt_instance &instance, const forge_rt_image &image);
     enum class Admission : uint8_t { Host, Process };
     forge_rt_status enterInvocation(forge_rt_instance *instance, forge_rt_thread_token thread,
                                     const forge_rt_image *image, const forge_rt_stack *stack,

@@ -660,6 +660,62 @@ namespace {
         REQUIRE(forge_rt_thread_destroy(process, reader.thread) == FORGE_RT_OK);
     }
 
+    void testMsvcrtBytes() {
+        constexpr uint64_t base = 0x1000;
+        const std::array<uint8_t, 4> left{0x80, 2, 3, 0}, right{0x80, 2, 7, 0};
+        std::array<uint8_t, 4> output{1, 2, 3, 4};
+        uint64_t claim = 0;
+        const forge_rt_image_region rows[]{
+            {base, left.size(), left.data(), FORGE_RT_READ, nullptr},
+            {base + 8, right.size(), right.data(), FORGE_RT_READ, nullptr},
+            {base + 16, output.size(), output.data(), readWrite, &claim},
+        };
+        const forge_rt_image image{base, 32, rows, std::size(rows)};
+        auto instance = createInstance();
+        Activation active{instance.get(), createThread(instance.get())};
+        REQUIRE(forge_rt_register_image(instance.get(), &image) == FORGE_RT_OK);
+        REQUIRE(active.enter(image) == FORGE_RT_OK);
+        auto *rt = instance.get();
+        auto thread = active.thread;
+        REQUIRE(forge_rt_set_last_error(rt, thread, 42) == FORGE_RT_OK);
+
+        uint64_t word = 987;
+        int32_t order = 0;
+        forge_rt_memory_fault fault{1, 2, 3};
+        REQUIRE(forge_rt_msvcrt_strlen(rt, thread, base, &word, &fault) == FORGE_RT_OK);
+        REQUIRE(word == 3);
+        REQUIRE(forge_rt_msvcrt_strcmp(rt, thread, base, base + 8, &order, &fault) == FORGE_RT_OK);
+        REQUIRE(order < 0);
+        REQUIRE(forge_rt_msvcrt_strcmp(rt, thread, base, base + 1, &order, &fault) == FORGE_RT_OK);
+        REQUIRE(order > 0);
+        REQUIRE(forge_rt_msvcrt_strncmp(rt, thread, base, base + 8, 2, &order, &fault) ==
+                FORGE_RT_OK);
+        REQUIRE(order == 0);
+        REQUIRE(forge_rt_msvcrt_strncmp(rt, thread, base, base, UINT64_MAX, &order, &fault) ==
+                FORGE_RT_OK);
+        REQUIRE(order == 0);
+        REQUIRE(forge_rt_msvcrt_strncmp(rt, thread, 0, 0, 0, &order, &fault) == FORGE_RT_OK);
+        REQUIRE(forge_rt_msvcrt_memcpy(rt, thread, base + 16, base + 8, 4, &word, &fault) ==
+                FORGE_RT_OK);
+        REQUIRE(word == base + 16 && output == right);
+        expectFault(fault, {1, 2, 3});
+
+        REQUIRE(forge_rt_msvcrt_memcpy(rt, thread, base + 17, base, 4, &word, &fault) ==
+                FORGE_RT_GUEST_FAULT);
+        expectFault(fault, {base + 20, FORGE_RT_WRITE, FORGE_RT_FAULT_UNMAPPED});
+        REQUIRE(word == base + 16 && output == right);
+        REQUIRE(forge_rt_msvcrt_memcpy(rt, thread, base + 16, base + 2, 4, &word, &fault) ==
+                FORGE_RT_GUEST_FAULT);
+        expectFault(fault, {base + 4, FORGE_RT_READ, FORGE_RT_FAULT_UNMAPPED});
+        REQUIRE(word == base + 16 && output == right);
+        REQUIRE(forge_rt_msvcrt_strlen(rt, thread, 0, &word, &fault) == FORGE_RT_GUEST_FAULT);
+        expectFault(fault, {0, FORGE_RT_READ, FORGE_RT_FAULT_UNMAPPED});
+        REQUIRE(word == base + 16);
+        uint32_t lastError = 0;
+        REQUIRE(forge_rt_get_last_error(rt, thread, &lastError) == FORGE_RT_OK && lastError == 42);
+        REQUIRE(active.leave() == FORGE_RT_OK);
+    }
+
     void testStringService() {
         constexpr uint64_t base = 0x1000;
         std::array<uint8_t, 3> first{'a', 0x80, 'c'};
@@ -810,6 +866,7 @@ void forgeMemoryTransferProbe() noexcept {
 }
 
 void testRuntimeMemory() {
+    testMsvcrtBytes();
     testBoundedServiceBuffer();
     testStringService();
     testStringLimitAndOverflow();

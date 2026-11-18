@@ -90,14 +90,7 @@ namespace forge::x86 {
 
     GuestMemory::Location GuestMemory::resolve(Value *address, unsigned width, Access access,
                                                bool stackOnly, Value *storeMarks) {
-        if (stackOnly || !imageResolver) {
-            if (!stackOnly && checks.managed()) {
-                auto *onStack = ir.CreateICmpULT(ir.CreateSub(address, ir.getInt64(base)),
-                                                 ir.getInt64(capacity));
-                checks.scalarBoundary(onStack, address, width / 8, static_cast<uint32_t>(access),
-                                      false);
-            }
-
+        if (stackOnly || (!imageResolver && !checks.managed())) {
             return stackLocation(checkedOffset(address, width, access), width, access, storeMarks);
         }
 
@@ -121,11 +114,14 @@ namespace forge::x86 {
             arguments.push_back(regions);
         }
 
-        auto *ptr = ir.CreateCall(imageResolver, arguments);
+        Value *ptr = ConstantPointerNull::get(ir.getPtrTy());
+
+        if (imageResolver) {
+            ptr = ir.CreateCall(imageResolver, arguments);
+        }
 
         if (checks.managed()) {
-            checks.scalarBoundary(ir.CreateIsNotNull(ptr), address, width / 8,
-                                  static_cast<uint32_t>(access), false);
+            ptr = checks.processScalar(ptr, address, width / 8, static_cast<uint32_t>(access));
         }
 
         if (storeMarks) {
@@ -167,6 +163,25 @@ namespace forge::x86 {
         const unsigned width = value.bits->getType()->getIntegerBitWidth();
         auto location = resolve(address, width, Access::Write, stackOnly, value.marks);
         ir.CreateAlignedStore(value.bits, location.data, Align(1));
+    }
+
+    Value *GuestMemory::atomicExchange(Value *address, Value *replacement, Value *expected,
+                                       bool stackOnly) {
+        const auto location = resolve(address, 64, Access::Modify, stackOnly);
+        // The ARM64 atomics require natural alignment of the native backing. A
+        // guest range can be aligned while an embedding host's backing is not.
+        auto *native = ir.CreatePtrToInt(location.data, ir.getInt64Ty());
+        auto *alignmentBits = ir.CreateAnd(ir.CreateOr(native, address), ir.getInt64(7));
+        checks.requireSupported(ir.CreateIsNull(alignmentBits));
+        constexpr auto order = AtomicOrdering::SequentiallyConsistent;
+
+        if (expected) {
+            auto *operation = ir.CreateAtomicCmpXchg(location.data, expected, replacement, Align(8),
+                                                     order, order);
+            return ir.CreateExtractValue(operation, 0);
+        }
+
+        return ir.CreateAtomicRMW(AtomicRMWInst::Xchg, location.data, replacement, Align(8), order);
     }
 
     void GuestMemory::modify(Value *address, unsigned width, bool stackOnly,

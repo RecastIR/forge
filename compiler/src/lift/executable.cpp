@@ -1,11 +1,16 @@
 #include "lift/executable.h"
 
 #include "analysis/analysis.h"
+#include "forge/process.h"
 
 #include <tuple>
 
 namespace forge::x86 {
     namespace {
+        std::string importName(const Symbol &symbol) {
+            return symbol.ordinal ? "#" + std::to_string(*symbol.ordinal) : symbol.name;
+        }
+
         void recordImport(ExecutableReadiness &readiness, const std::string &dll,
                           const std::string &name) {
             const auto key = std::tie(dll, name);
@@ -55,7 +60,73 @@ namespace forge::x86 {
                 }
             }
         }
+
+        void recordEntryHandler(const AnalyzedImage &analysis, ExecutableReadiness &readiness) {
+            for (const auto &function : analysis.functions()) {
+                if (function.record.begin != analysis.module().entryPoint || !function.eligible() ||
+                    !function.hasUnwindHandler) {
+                    continue;
+                }
+
+                readiness.entryHandlerUnwindRva = function.record.unwind;
+                readiness.entryHandlerRva = function.handlerRva;
+                try {
+                    readiness.entryCHandler = analysis.cSpecificHandler(function);
+                } catch (const InspectionError &error) {
+                    readiness.entryHandlerError = error.what();
+                }
+                return;
+            }
+        }
     } // namespace
+
+    std::optional<uint32_t> crtDataExport(const Import &descriptor, const Symbol &symbol) {
+        if (descriptor.normalizedName != "msvcrt.dll" || symbol.ordinal || descriptor.delayed ||
+            descriptor.bound) {
+            return {};
+        }
+        static constexpr std::pair<std::string_view, uint32_t> cells[] = {
+            {"_acmdln", FORGE_RT_CRT_ACMDLN},
+            {"__initenv", FORGE_RT_CRT_INITENV},
+            {"_fmode", FORGE_RT_CRT_FMODE},
+            {"_commode", FORGE_RT_CRT_COMMODE}};
+        for (const auto &[name, kind] : cells) {
+            if (name == symbol.name) {
+                return kind;
+            }
+        }
+        return {};
+    }
+
+    void recordExecutableRequirements(const AnalyzedImage &analysis,
+                                      ExecutableReadiness &readiness) {
+        readiness.tls = analysis.module().tls;
+        recordEntryHandler(analysis, readiness);
+
+        // Preserve the original failure ordering and call-site provenance if the parsed
+        // image has competing failures. Executable admission still checks every import.
+        try {
+            for (const auto &descriptor : analysis.image().importBindings().entries()) {
+                ExecutableImportDirectory directory{descriptor.name,
+                                                    descriptor.descriptorRva,
+                                                    descriptor.delayed,
+                                                    descriptor.bound,
+                                                    {}};
+                for (size_t i = 0; i < descriptor.symbols.size(); ++i) {
+                    const auto &symbol = descriptor.symbols[i];
+                    const auto slot =
+                        descriptor.addressTableRva + static_cast<uint32_t>(i * importSlotWidth);
+                    directory.slots.push_back(
+                        {importName(symbol), slot,
+                         findService(win64::services, descriptor, symbol) != nullptr,
+                         crtDataExport(descriptor, symbol).has_value()});
+                }
+                readiness.loadImports.push_back(std::move(directory));
+            }
+        } catch (const InspectionError &error) {
+            readiness.importInventoryError = error.what();
+        }
+    }
 
     void recordExecutableRecovery(ExecutableReadiness &readiness,
                                   const RecoveredFunctionGroup &group,
@@ -92,7 +163,7 @@ namespace forge::x86 {
                                  const RelocationIndex &relocations,
                                  llvm::ArrayRef<RvaRange> writes, ExecutableReadiness &readiness) {
             const auto &symbol = descriptor.symbols[index];
-            const auto name = symbol.ordinal ? "#" + std::to_string(*symbol.ordinal) : symbol.name;
+            const auto name = importName(symbol);
             recordImport(readiness, descriptor.normalizedName, name);
 
             // Both table extents were checked while building the descriptor.
@@ -103,7 +174,8 @@ namespace forge::x86 {
             const ImportSlot imported{descriptor, symbol, lookup + offset};
             llvm::StringRef reason = "unsupported eager import ";
 
-            if (findService(win64::services, descriptor, symbol)) {
+            if (findService(win64::services, descriptor, symbol) ||
+                crtDataExport(descriptor, symbol)) {
                 if (!imported.unstableIdentityRva(relocations, writes)) {
                     return;
                 }
@@ -141,6 +213,34 @@ namespace forge::x86 {
                 }
             }
         }
+
+        void validateReachableHandlers(const AnalyzedImage &analysis,
+                                       const RecoveredFunctionGroup &group,
+                                       const ExecutableReadiness &readiness) {
+            for (const auto &function : analysis.functions()) {
+                if (!function.eligible() || !function.hasUnwindHandler ||
+                    !group.functions().contains(function.record.begin)) {
+                    continue;
+                }
+
+                const auto handler = function.record.begin == analysis.module().entryPoint
+                                         ? readiness.entryCHandler
+                                         : analysis.cSpecificHandler(function);
+                auto reason = "reachable function at RVA " + hex(function.record.begin);
+                if (handler) {
+                    reason += " declares " + handler->dll +
+                              "!__C_specific_handler with scope table at " +
+                              hex(handler->tableRva) + ": " + handler->limitation;
+                } else {
+                    reason += " declares an unsupported exception or termination handler";
+                }
+
+                InspectionError error(reason,
+                                      handler ? handler->failure : FailureCode::ExecutableStartup);
+                error.context.functionRva = function.record.begin;
+                throw error;
+            }
+        }
     } // namespace
 
     void validateExecutableStartup(const ValidatedEntry &entry, const RecoveredFunctionGroup &group,
@@ -166,18 +266,7 @@ namespace forge::x86 {
                                   FailureCode::ExecutableStartup);
         }
 
-        for (const auto &function : entry.analysis.functions()) {
-            if (function.eligible() && function.hasUnwindHandler &&
-                group.functions().contains(function.record.begin)) {
-                InspectionError error(
-                    "reachable function at RVA " + hex(function.record.begin) +
-                        " declares an unsupported exception or termination handler",
-                    FailureCode::ExecutableStartup);
-                error.context.functionRva = function.record.begin;
-                throw error;
-            }
-        }
-
+        validateReachableHandlers(entry.analysis, group, readiness);
         validateEagerImports(entry, writes, readiness);
     }
 } // namespace forge::x86

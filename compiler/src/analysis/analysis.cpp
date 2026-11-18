@@ -4,6 +4,7 @@
 
 #include "llvm/DebugInfo/DWARF/DWARFContext.h"
 #include "llvm/Object/ObjectFile.h"
+#include "llvm/Support/Endian.h"
 #include "llvm/Support/JSON.h"
 #include "llvm/Support/MathExtras.h"
 #include "llvm/Support/Win64EH.h"
@@ -19,7 +20,31 @@ namespace forge {
 
     namespace {
         auto key(const RuntimeFunction &r) { return std::tie(r.begin, r.end, r.unwind); }
+
+        void recordHandler(FunctionRange &function, const Win64EH::UnwindInfo &header,
+                           StringRef bytes, size_t codesEnd) {
+            const size_t trailer = alignTo(codesEnd, 4);
+            if (bytes.size() < trailer + sizeof(uint32_t)) {
+                return;
+            }
+
+            function.handlerRva = support::endian::read32le(bytes.data() + trailer);
+            const auto languageData = uint64_t(function.record.unwind) + trailer + sizeof(uint32_t);
+            if (header.getVersion() == 1 && header.getFlags() == Win64EH::UNW_ExceptionHandler &&
+                languageData <= UINT32_MAX) {
+                function.exceptionDataRva = static_cast<uint32_t>(languageData);
+            }
+        }
     } // namespace
+
+    std::optional<int64_t> amd64ImportThunkSlot(uint32_t rva, StringRef bytes) {
+        if (bytes.size() != amd64ImportThunkSize || !bytes.starts_with("\xff\x25")) {
+            return {};
+        }
+
+        const auto displacement = SignExtend64<32>(support::endian::read32le(bytes.data() + 2));
+        return int64_t(rva) + amd64ImportThunkSize + displacement;
+    }
 
     // A connected component reports each record once even for deeply nested intervals.
     void AnalyzedImage::markOverlaps() {
@@ -209,6 +234,8 @@ namespace forge {
                 if (data->bytes.size() < trailer + sizeof(Win64EH::RuntimeFunction)) {
                     invalid("truncated chained runtime function");
                 }
+            } else if (f.hasUnwindHandler) {
+                recordHandler(f, header, data->bytes, codesEnd);
             }
         }
 

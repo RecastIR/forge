@@ -23,18 +23,23 @@ namespace {
         return {table, static_cast<size_t>(count)};
     }
 
-    bool usesStandardHandles(const forge_rt_import &import) {
-        const std::string_view name(import.name);
-
-        if (name != win64::getStdHandle.name && name != win64::writeFile.name) {
-            return false;
-        }
-
+    bool fromDll(const forge_rt_import &import, std::string_view expected) {
         // The service catalogue uses lowercase DLL names; hand-authored descriptors can
         // carry the original PE spelling. Windows export names are case-sensitive.
         const auto asciiLower = [](char c) { return c >= 'A' && c <= 'Z' ? c - 'A' + 'a' : c; };
-        return std::ranges::equal(std::string_view(import.dll), win64::getStdHandle.dll, {},
-                                  asciiLower);
+        return std::ranges::equal(std::string_view(import.dll), expected, {}, asciiLower);
+    }
+
+    bool usesStandardHandles(const forge_rt_import &import) {
+        const std::string_view name(import.name);
+        return (name == win64::getStdHandle.name || name == win64::writeFile.name) &&
+               fromDll(import, win64::getStdHandle.dll);
+    }
+
+    bool usesCommandLine(const forge_rt_import &import) {
+        const std::string_view name(import.name);
+        return (name == win64::getCommandLineA.name || name == win64::getCommandLineW.name) &&
+               fromDll(import, win64::getCommandLineA.dll);
     }
 
     bool validBacking(const forge_rt_backing &backing) {
@@ -59,7 +64,9 @@ namespace {
     }
 
     forge_rt_status checkArtifact(const forge_rt_artifact &artifact) {
-        if (artifact.version != FORGE_RT_ARTIFACT_VERSION) {
+        if (artifact.version != FORGE_RT_ARTIFACT_VERSION &&
+            artifact.version != FORGE_RT_NAMED_ARTIFACT_VERSION &&
+            artifact.version != FORGE_RT_CRT_ARTIFACT_VERSION) {
             return FORGE_RT_ABI_MISMATCH;
         }
 
@@ -78,6 +85,14 @@ namespace {
 
         if (image->overlaps(*stack)) {
             return FORGE_RT_MAPPING_CONFLICT;
+        }
+
+        if (artifact.version == FORGE_RT_CRT_ARTIFACT_VERSION) {
+            const auto &crt = *reinterpret_cast<const forge_rt_crt_artifact *>(&artifact);
+
+            if (!validTable(crt.dataImports, crt.dataImportCount)) {
+                return FORGE_RT_INVALID_ARGUMENT;
+            }
         }
 
         for (const auto &binding : tableRows(artifact.imports, artifact.importCount)) {
@@ -127,7 +142,7 @@ namespace {
     struct ProcessImage {
         explicit ProcessImage(const forge_rt_artifact &artifact) : artifact(artifact) {}
 
-        forge_rt_status initialize();
+        forge_rt_status initialize(const forge_rt_process_startup &startup);
         forge_rt_process_result run() noexcept;
 
         const forge_rt_artifact &artifact;
@@ -140,6 +155,7 @@ namespace {
 
       private:
         forge_rt_status bindRegions();
+        forge_rt_status bindDataImports();
     };
 
     forge_rt_status ProcessImage::bindRegions() {
@@ -191,7 +207,49 @@ namespace {
         return FORGE_RT_OK;
     }
 
-    forge_rt_status ProcessImage::initialize() {
+    forge_rt_status ProcessImage::bindDataImports() {
+        if (artifact.version != FORGE_RT_CRT_ARTIFACT_VERSION) {
+            return FORGE_RT_OK;
+        }
+
+        const auto &descriptor = *reinterpret_cast<const forge_rt_crt_artifact *>(&artifact);
+        uint64_t previousEnd = 0;
+
+        for (const auto &binding : tableRows(descriptor.dataImports, descriptor.dataImportCount)) {
+            const auto end = uint64_t{binding.slotRva} + sizeof(uint64_t);
+            const auto value = instance.parameters->crt->dataAddress(binding.kind);
+
+            if (!value || binding.slotRva < previousEnd || end > artifact.size) {
+                return FORGE_RT_INVALID_ARGUMENT;
+            }
+
+            previousEnd = end;
+            const auto slot = artifact.base + binding.slotRva;
+            const auto after =
+                std::ranges::upper_bound(regions, slot, {}, &forge_rt_image_region::start);
+
+            if (after == regions.begin()) {
+                return FORGE_RT_INVALID_ARGUMENT;
+            }
+
+            const auto &row = *std::prev(after);
+            const auto offset = slot - row.start;
+
+            if (!row.claim || !(row.permissions & FORGE_RT_READ) || offset > row.size ||
+                sizeof(value) > row.size - offset) {
+                return FORGE_RT_INVALID_ARGUMENT;
+            }
+
+            // bindRegions sets a claim only on this process's private writable storage.
+            // Loader initialization precedes publication, including for read-only guest slots.
+            auto *backing = const_cast<uint8_t *>(static_cast<const uint8_t *>(row.bytes));
+            std::memcpy(backing + offset, &value, sizeof(value));
+        }
+
+        return FORGE_RT_OK;
+    }
+
+    forge_rt_status ProcessImage::initialize(const forge_rt_process_startup &startup) {
         const auto imports = tableRows(artifact.imports, artifact.importCount);
 
         if (std::ranges::any_of(imports, usesStandardHandles)) {
@@ -200,6 +258,19 @@ namespace {
             if (captured != FORGE_RT_OK) {
                 return captured;
             }
+        }
+
+        const bool crt = artifact.version == FORGE_RT_CRT_ARTIFACT_VERSION ||
+                         std::ranges::any_of(imports, [](const auto &binding) {
+                             return win64::crtGetMainArgs.name == binding.name &&
+                                    fromDll(binding, win64::crtGetMainArgs.dll);
+                         });
+        const bool commandLine = crt || std::ranges::any_of(imports, usesCommandLine);
+        const auto parameters = instance.parameters.emplace().initialize(
+            instance, artifact, commandLine ? &startup : nullptr, crt);
+
+        if (parameters != FORGE_RT_OK) {
+            return parameters;
         }
 
         const auto bound = bindRegions();
@@ -220,14 +291,20 @@ namespace {
 
         // Registration validates guest ranges, permissions, and claims atomically.
         // All allocations and potentially failing initialization precede publication.
-        instance.reservations.reserve(2); // Image plus the stack published while running.
+        instance.reservations.reserve(instance.reservations.size() + 2);
         const auto registered = forge_rt_register_image(&instance, &image);
 
-        if (registered == FORGE_RT_OK) {
+        if (registered != FORGE_RT_OK) {
+            return registered;
+        }
+
+        const auto boundImports = bindDataImports();
+
+        if (boundImports == FORGE_RT_OK) {
             instance.managedExecution = &execution.view;
         }
 
-        return registered;
+        return boundImports;
     }
 
     forge_rt_process_result runtimeFailure(forge_rt_status status) {
@@ -324,12 +401,22 @@ extern "C" forge_rt_status forge_rt_process_create(uint32_t expectedVersion,
 
 extern "C" forge_rt_status forge_rt_process_register(forge_rt_process *process,
                                                      const forge_rt_artifact *artifact) noexcept {
+    return forge_rt_process_register_with_startup(process, artifact, nullptr);
+}
+
+extern "C" forge_rt_status
+forge_rt_process_register_with_startup(forge_rt_process *process, const forge_rt_artifact *artifact,
+                                       const forge_rt_process_startup *startup) noexcept {
     if (!artifact) {
         return FORGE_RT_INVALID_ARGUMENT;
     }
 
     return withInstance(process, [&](auto &owner) {
         if (owner.state == FORGE_RT_PROCESS_READY) {
+            if (startup) {
+                return FORGE_RT_INVALID_STATE;
+            }
+
             return &owner.image->artifact == artifact ? FORGE_RT_OK : FORGE_RT_MAPPING_CONFLICT;
         }
 
@@ -344,7 +431,7 @@ extern "C" forge_rt_status forge_rt_process_register(forge_rt_process *process,
         }
 
         auto staged = std::make_unique<ProcessImage>(*artifact);
-        const auto status = staged->initialize();
+        const auto status = staged->initialize(startup ? *startup : forge_rt_process_startup{});
 
         if (status == FORGE_RT_OK) {
             owner.image = std::move(staged);

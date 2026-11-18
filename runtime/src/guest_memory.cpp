@@ -228,6 +228,52 @@ namespace {
     }
 } // namespace
 
+extern "C" void *forge_rt_resolve_process_scalar(forge_rt_execution *execution, uint64_t address,
+                                                 uint32_t size, uint32_t access) noexcept {
+    if (!execution) {
+        return nullptr;
+    }
+
+    const auto permissions = access == FORGE_RT_SCALAR_READ_SAVED ? FORGE_RT_READ : access;
+    const uint8_t *bytes = nullptr;
+    const auto status = withInstance(execution->instance, [&](const auto &instance) {
+        if (!size || size > sizeof(uint64_t) || !permissions ||
+            (permissions & ~(FORGE_RT_READ | FORGE_RT_WRITE))) {
+            return FORGE_RT_INVALID_ARGUMENT;
+        }
+
+        if (instance.managedExecution != execution) {
+            return FORGE_RT_INVALID_STATE;
+        }
+
+        const auto active = instance.threads.find(execution->thread);
+
+        if (!executingInvocation || active == instance.threads.end() ||
+            active->second.invocation != executingInvocation) {
+            return FORGE_RT_INVALID_INVOCATION;
+        }
+
+        const auto segment = Cursor(instance.reservations, address).next(address, size);
+
+        if (!segment.stackOwner && segment.size == size &&
+            (segment.permissions & permissions) == permissions) {
+            bytes = segment.bytes;
+        }
+
+        return FORGE_RT_OK;
+    });
+
+    if (status != FORGE_RT_OK) {
+        execution->result = {FORGE_RT_RUNTIME_FAILURE, status, 0, {}, 0};
+    } else if (!bytes) {
+        forge_rt_report_scalar_boundary(execution, address, size, access, 0);
+    }
+
+    // Registration and process admission pin all published backing through the instruction.
+    // A mutable pointer is usable only after the requested write permission was checked.
+    return const_cast<uint8_t *>(bytes);
+}
+
 extern "C" void forge_rt_report_scalar_boundary(forge_rt_execution *execution, uint64_t address,
                                                 uint32_t size, uint32_t access,
                                                 uint32_t stack) noexcept {

@@ -31,6 +31,10 @@ typedef uint32_t forge_rt_status;
 #define FORGE_RT_GUEST_FAULT UINT32_C(9)
 #define FORGE_RT_INVALID_STATE UINT32_C(10)
 #define FORGE_RT_HOST_CONFIGURATION UINT32_C(11)
+/* Service status values in this family propagate as an unsupported guest operation. */
+#define FORGE_RT_UNSUPPORTED_SERVICE_FLAG UINT32_C(0x10000)
+#define FORGE_RT_UNSUPPORTED_CRT_WILDCARDS (FORGE_RT_UNSUPPORTED_SERVICE_FLAG | UINT32_C(1))
+#define FORGE_RT_UNSUPPORTED_CRT_NEW_MODE (FORGE_RT_UNSUPPORTED_SERVICE_FLAG | UINT32_C(2))
 
 #define FORGE_RT_READ UINT32_C(1)
 #define FORGE_RT_WRITE UINT32_C(2)
@@ -113,6 +117,31 @@ forge_rt_status forge_rt_set_last_error(forge_rt_instance *instance, forge_rt_th
                                         uint32_t value) FORGE_RT_NOEXCEPT;
 forge_rt_status forge_rt_get_last_error(forge_rt_instance *instance, forge_rt_thread_token thread,
                                         uint32_t *outValue) FORGE_RT_NOEXCEPT;
+
+/* MSVCRT byte string and memory adapters. All addresses and size_t values are guest
+ * 64-bit values. Result storage is written on success, fault storage on a guest fault. */
+forge_rt_status forge_rt_msvcrt_strlen(forge_rt_instance *, forge_rt_thread_token, uint64_t address,
+                                       uint64_t *result,
+                                       forge_rt_memory_fault *fault) FORGE_RT_NOEXCEPT;
+forge_rt_status forge_rt_msvcrt_strcmp(forge_rt_instance *, forge_rt_thread_token, uint64_t left,
+                                       uint64_t right, int32_t *result,
+                                       forge_rt_memory_fault *fault) FORGE_RT_NOEXCEPT;
+forge_rt_status forge_rt_msvcrt_strncmp(forge_rt_instance *, forge_rt_thread_token, uint64_t left,
+                                        uint64_t right, uint64_t count, int32_t *result,
+                                        forge_rt_memory_fault *fault) FORGE_RT_NOEXCEPT;
+forge_rt_status forge_rt_msvcrt_memcpy(forge_rt_instance *, forge_rt_thread_token,
+                                       uint64_t destination, uint64_t source, uint64_t count,
+                                       uint64_t *result,
+                                       forge_rt_memory_fault *fault) FORGE_RT_NOEXCEPT;
+
+/* Current managed process command line in process-owned, read-only guest storage.
+ * W returns UTF-16LE. A supports the ASCII subset. Both preserve thread last error. */
+forge_rt_status forge_rt_get_command_line_a(forge_rt_instance *instance,
+                                            forge_rt_thread_token thread,
+                                            uint64_t *outAddress) FORGE_RT_NOEXCEPT;
+forge_rt_status forge_rt_get_command_line_w(forge_rt_instance *instance,
+                                            forge_rt_thread_token thread,
+                                            uint64_t *outAddress) FORGE_RT_NOEXCEPT;
 
 /* Console services require the current managed process and a declared console dependency.
  * An active invocation without captured standard handles reports FORGE_RT_INVALID_STATE.

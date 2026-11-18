@@ -1,0 +1,16 @@
+{
+  "schema_version": 1,
+  "id": "startup/argc",
+  "description": "Check argc with two arguments after the executable name.",
+  "source": "fixtures/startup/argc.c",
+  "binary": "crt_argc.exe",
+  "args": [
+    "hello world",
+    "forge"
+  ],
+  "expected": {
+    "exit_code": 42,
+    "stdout": "",
+    "stderr": ""
+  }
+}

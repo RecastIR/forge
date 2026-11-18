@@ -87,6 +87,15 @@ class GuestExecution(unittest.TestCase):
 
 
 class StackTests(GuestExecution):
+    def test_rep_stosq_operands(self):
+        for exe in self.variants("repeat_unconsumed"):
+            self.expect(exe, 0, 123, 42)
+            self.trap(exe, [(1, 123)])
+
+        for exe in self.variants("repeat_to_address"):
+            self.expect(exe, MASK, 0, 0x123456789abcdef0)
+            self.trap(exe, [(RSP, 1)])
+
     def test_recursion_without_a_return(self):
         # The recursive call consumes guest stack until the normal stack guard trips.
         # Its unreachable continuation references a callee with an invalid target.

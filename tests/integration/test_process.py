@@ -26,7 +26,8 @@ def memory(address, access, reason):
 
 
 class ProcessExecution(unittest.TestCase):
-    def exercise(self, image, entry, cases, *, base=None, imports=(), probe=False, fail_get=False):
+    def exercise(self, image, entry, cases, *, base=None, imports=(), probe=False, fail_get=False,
+                 partial_store=False):
         pe = (Path(FIXTURES) / image).with_suffix(".exe")
         module = json.loads(run(FORGE, "inspect", pe, "--format", "json"))["modules"][0]
         pe_entry = int(module["entry_point_rva"], 16)
@@ -40,6 +41,9 @@ class ProcessExecution(unittest.TestCase):
             if probe:
                 self.assertIn("call i32 @forge_rt_get_last_error(", ir)
                 ir = ir.replace("@forge_rt_get_last_error(", "@probe_process_get(")
+            if partial_store:
+                self.assertIn("call void @forge_rt_report_scalar_boundary(", ir)
+                ir = ir.replace("@forge_rt_report_scalar_boundary(", "@probe_stos_fault(")
             source.write_text(ir)
             optimized = source.with_suffix(".o2.ll")
             run(OPT, "-S", "-passes=default<O2>", source, "-o", optimized)
@@ -109,6 +113,18 @@ class ProcessExecution(unittest.TestCase):
             cases.append((boundary - 1, 1, memory(boundary, READ, STACK)))
             cases.append((boundary - 1, 2, memory(boundary - 1, READ, STACK)))
         self.exercise("stack", "scalar_boundary_prefix", cases)
+
+    def test_repeated_store_partial_fault(self):
+        self.exercise("stack", "repeat_to_address",
+                      [(ENTRY_RSP - 8, 3, memory(ENTRY_RSP, WRITE, STACK))], partial_store=True)
+
+    def test_atomic_access_contract(self):
+        pe = Path(FIXTURES) / "stack.exe"
+        module = json.loads(run(FORGE, "inspect", pe, "--format", "json"))["modules"][0]
+        section = next(section for section in module["sections"] if section["name"] == ".rdata")
+        address = int(module["image_base_va"], 16) + int(section["rva"], 16)
+        self.exercise("stack", "atomic_readonly", [(address, 1, memory(address, READ | WRITE, PERMISSION))])
+        self.exercise("stack", "atomic_unaligned", [(1, 2, "unsupported")])
 
     def test_scalar_crosses_image_intervals(self):
         source = Path(FIXTURES) / "image.exe"

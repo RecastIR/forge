@@ -83,6 +83,8 @@ namespace forge {
             void emitReturn(const Step &s);
             void emitDispatch(const x86::GuestBlock &block, const BlockStates &states);
             void lowerStack(const Step &s, StackOp op);
+            void lowerRepeatedStore(const Step &s);
+            void lowerAtomicExchange(const Step &s);
             Value *markSlot(unsigned index);
             Value *loadView(Value *ptr, RegisterView view);
             void storeView(Value *ptr, RegisterView view, Value *value, uint64_t upper);
@@ -193,6 +195,19 @@ namespace forge {
         Value *Translator::effectiveAddress(const Step &s, unsigned first, bool access) {
             const auto operand = operands.decodeAddress(s, first, access);
             Value *address = ir.getInt64(operand.displacement);
+            if (operand.gsRelative) {
+                if (!memory.checks.managed()) {
+                    s.reject(FailureCode::UnsupportedInstruction,
+                             "GS-relative NT_TIB access requires a managed guest process");
+                }
+
+                auto teb = impl->getParent()->getOrInsertFunction("forge_rt_primary_teb",
+                                                                  ir.getInt64Ty(), ir.getPtrTy());
+                auto *base = ir.CreateCall(teb, {impl->getArg(0)});
+                memory.checks.propagate(ir.CreateIsNotNull(base));
+                return ir.CreateAdd(base, address);
+            }
+
             if (operand.base) {
                 address = ir.CreateAdd(address, read(s, *operand.base));
             }
@@ -334,7 +349,83 @@ namespace forge {
             writeSaved(destination, saved);
         }
 
+        void Translator::lowerRepeatedStore(const Step &s) {
+            const auto destination = x86::stringDestination;
+            const auto counter = x86::repeatCount;
+            auto *count = read(s, counter);
+            auto *begin = BasicBlock::Create(ir.getContext(), "stos.begin", impl);
+            auto *done = BasicBlock::Create(ir.getContext(), "stos.done", impl);
+            ir.CreateCondBr(ir.CreateIsNull(count), done, begin);
+            ir.SetInsertPoint(begin);
+
+            // RCX == 0 consumes neither the address nor the stored value. If either
+            // input lacks a definition, only the path which would use it fails.
+            if (defined[0] != UINT64_MAX || defined[destination.index] != UINT64_MAX) {
+                memory.checks.fail(FORGE_RT_FAULT_ABI);
+                ir.SetInsertPoint(done);
+                return;
+            }
+
+            auto stored = readSaved(s, {0, 64}, false);
+            auto *start = read(s, destination);
+            auto *backward = ir.CreateLoad(ir.getInt1Ty(), context.directionFlag);
+            auto *stride = ir.CreateSelect(backward, ir.getInt64(uint64_t{0} - 8), ir.getInt64(8));
+            auto *loop = BasicBlock::Create(ir.getContext(), "stos.qword", impl);
+            auto *first = ir.GetInsertBlock();
+            ir.CreateBr(loop);
+            ir.SetInsertPoint(loop);
+            auto *address = ir.CreatePHI(ir.getInt64Ty(), 2);
+            auto *remaining = ir.CreatePHI(ir.getInt64Ty(), 2);
+            address->addIncoming(start, first);
+            remaining->addIncoming(count, first);
+
+            // Commit progress after the whole qword passes its memory checks. A
+            // subsequent fault leaves earlier stores and the restart registers intact.
+            memory.store(address, stored, plan.stackAccesses.contains(s.rva));
+            auto *next = ir.CreateAdd(address, stride);
+            auto *left = ir.CreateSub(remaining, ir.getInt64(1));
+            write(destination, next);
+            write(counter, left);
+            address->addIncoming(next, ir.GetInsertBlock());
+            remaining->addIncoming(left, ir.GetInsertBlock());
+            ir.CreateCondBr(ir.CreateIsNull(left), done, loop);
+            ir.SetInsertPoint(done);
+        }
+
+        void Translator::lowerAtomicExchange(const Step &s) {
+            const bool compare = s.isLockedCompareExchange();
+            auto *address = effectiveAddress(s, compare ? 0 : 2, true);
+            const auto source = operands.reg(s, s.inst.getOperand(compare ? 5 : 0), 64);
+            auto *replacement = read(s, source);
+            auto *expected = compare ? read(s, {0, 64}) : nullptr;
+            auto *old = memory.atomicExchange(address, replacement, expected,
+                                              plan.stackAccesses.contains(s.rva));
+
+            if (compare) {
+                semantics.arithmetic(x86::Op::Cmp, expected, old);
+                provedFlags.set();
+                write({0, 64}, old);
+            } else {
+                write(source, old);
+            }
+        }
+
         void Translator::lower(const Step &s) {
+            if (s.isAtomicExchange()) {
+                lowerAtomicExchange(s);
+                return;
+            }
+
+            if (s.isRepeatedQwordStore()) {
+                lowerRepeatedStore(s);
+                return;
+            }
+
+            if (s.opcode == "STD" || s.opcode == "CLD") {
+                ir.CreateStore(ir.getInt1(s.opcode == "STD"), context.directionFlag);
+                return;
+            }
+
             if (auto op = x86::stackInstruction(s.opcode)) {
                 lowerStack(s, *op);
                 return;
@@ -397,6 +488,11 @@ namespace forge {
 
         void Translator::lowerService(const Step &s, const win64::ServiceBinding &binding,
                                       Value *calleeRsp) {
+            if (analysis.setsDirection) {
+                memory.checks.guard(
+                    ir.CreateNot(ir.CreateLoad(ir.getInt1Ty(), context.directionFlag)));
+            }
+
             auto *instance = ir.CreateLoad(ir.getPtrTy(), context.instance);
             auto *thread = ir.CreateLoad(ir.getInt64Ty(), context.thread);
             SmallVector<Value *, 5> arguments{instance, thread};
@@ -499,6 +595,11 @@ namespace forge {
         }
 
         void Translator::emitReturn(const Step &s) {
+            if (analysis.setsDirection) {
+                memory.checks.guard(
+                    ir.CreateNot(ir.CreateLoad(ir.getInt1Ty(), context.directionFlag)));
+            }
+
             if (requiresFullReturn && defined[0] != UINT64_MAX) {
                 s.reject(FailureCode::UndefinedRegister, "return with undefined RAX");
             }
@@ -847,6 +948,7 @@ namespace forge {
         readiness.entryRva = rva;
 
         try {
+            x86::recordExecutableRequirements(analysis, readiness);
             if (!rva) {
                 throw InspectionError("PE header has no executable entry point",
                                       FailureCode::InvalidEntry);

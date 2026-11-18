@@ -95,6 +95,44 @@ class Imports(Case):
         self.assertNotIn("@forge_rt_", ir)
         self.assertIn("@forge_lifted_with_runtime(", ir)
 
+    def test_direct_import_thunk_proofs(self):
+        # The section contains file padding after its final recorded function. Expose
+        # 16 bytes before an ordinary six-byte linker thunk for independent leaf tests.
+        text = self.layout.section_header(self.root)
+        end = self.layout.u32(text + 12) + self.layout.u32(text + 8)
+        thunk = end + 16
+        slot = self.slots["GetLastError"]
+
+        def image(*calls):
+            data = self.patch("48 83 ec 28", *(("e8", callee) for callee in calls), "48 83 c4 28 c3")
+            struct.pack_into("<I", data, text + 8, self.layout.u32(text + 8) + 22)
+            offset = Layout(data).file_offset(thunk)
+            data[offset:offset + 6] = b"\xff\x25" + struct.pack("<i", slot - thunk - 6)
+            return data
+
+        ir = self.invoke_lift(image(thunk, thunk))
+        self.assertEqual(ir.count("call i32 @forge_rt_get_last_error"), 2)
+
+        # An existing record ends immediately before the unused bytes. Extending
+        # it one byte into the thunk forbids inference even when that body is uncalled.
+        data = image(thunk)
+        table, size = self.layout.directory(3)
+        final_end = self.layout.file_offset(table + size - 12) + 4
+        self.assertEqual(self.layout.u32(final_end), end)
+        struct.pack_into("<I", data, final_end, thunk + 1)
+        self.invoke_lift(data, reason="recorded", code="LIFT_UNSUPPORTED_CONTROL_FLOW")
+
+        # MOV EAX, imm32 starts outside the thunk but consumes four thunk bytes.
+        for calls in ((thunk - 1, thunk), (thunk, thunk - 1)):
+            data = image(*calls)
+            data[Layout(data).file_offset(thunk - 1)] = 0xb8
+            self.invoke_lift(data, reason="overlaps a proven import thunk",
+                             code="LIFT_UNSUPPORTED_CONTROL_FLOW")
+
+        data = image(thunk)
+        struct.pack_into("<I", data, text + 36, self.layout.u32(text + 36) | 0x80000000)
+        self.invoke_lift(data, reason="mutable", code="LIFT_UNSUPPORTED_CONTROL_FLOW")
+
     def test_process_services_require_managed_entry(self):
         slot = self.slots["GetLastError"]
         hint = self.layout.u32(self.layout.file_offset(self.lookup) + slot - self.iat)

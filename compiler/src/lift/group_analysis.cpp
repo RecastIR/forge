@@ -135,6 +135,7 @@ namespace forge::x86 {
             void collectAddresses(CallAddresses &calls);
             bool accessesMemory = false;
             bool tracksOrigins = false;
+            bool setsDirection = false;
 
           private:
             const RecoveredFunctionGroup &group;
@@ -154,13 +155,14 @@ namespace forge::x86 {
             std::map<uint32_t, AddressCursor> suspendedBlocks;
             void recordWrite(DefinitionEffect &state, RegisterView view);
             void requireMemory(const Step &s);
-            void planMemoryAccess(const Step &s, const IntegerInstruction &op,
+            void planMemoryAccess(const Step &s, unsigned width, bool write,
                                   const AddressOperand &operand, const AddressFact &address);
             void traceStackInstruction(const Step &s, StackOp op, AddressFacts &facts) const;
             AddressFact integerFact(const Step &s, const IntegerInstruction &op, RegisterView dest,
                                     const AddressFacts &facts) const;
             void traceInteger(const Step &s, const IntegerInstruction &op, AddressFacts &facts,
                               bool collect, const std::optional<RelativeTable> &table);
+            void traceRepeatedStore(const Step &s, AddressFacts &facts, bool collect);
             AddressFact savedAddress(const AddressFacts &facts, const AddressFact &address) const;
             void traceServiceArguments(const ResolvedCallSite &site, AddressFacts &facts,
                                        bool collect) const;
@@ -245,13 +247,11 @@ namespace forge::x86 {
             return dest.width == 64 ? sum : sum.masked(dest.mask());
         }
 
-        void FunctionAnalyzer::planMemoryAccess(const Step &s, const IntegerInstruction &op,
+        void FunctionAnalyzer::planMemoryAccess(const Step &s, unsigned width, bool write,
                                                 const AddressOperand &operand,
                                                 const AddressFact &address) {
-            const bool write = memoryDestination(op.form) && op.op != Op::Cmp;
-
             if (!operand.base && !operand.index) {
-                imageMemory.fixedAccess(s, operand.displacement, op.sourceWidth, write);
+                imageMemory.fixedAccess(s, operand.displacement, width, write);
                 return;
             }
 
@@ -262,11 +262,11 @@ namespace forge::x86 {
 
             for (const auto &origin : address.continuations()) {
                 imageMemory.continuationAccess(s, origin, group.function(origin.callee).incoming,
-                                               op.sourceWidth, write);
+                                               width, write);
             }
 
             if (address.hasUnknown()) {
-                imageMemory.computedAccess(s, std::nullopt, op.sourceWidth, write);
+                imageMemory.computedAccess(s, std::nullopt, width, write);
             }
 
             auto onStack = [](uint64_t va) {
@@ -279,7 +279,7 @@ namespace forge::x86 {
             }
 
             for (auto va : address.values()) {
-                imageMemory.computedAccess(s, va, op.sourceWidth, write);
+                imageMemory.computedAccess(s, va, width, write);
             }
         }
 
@@ -337,19 +337,31 @@ namespace forge::x86 {
             }
 
             const auto operand = operands.decodeAddress(s, memoryOperand(s, op), true);
+            if (operand.gsRelative) {
+                // The NT_TIB self pointer is read from process-owned guest memory.
+                auto dest = operands.destination(s, op);
+                facts.registers[dest.index] = {};
+                return;
+            }
             const auto address = addressFact(operand, facts);
 
             if (collect && table && table->loadRva == s.rva) {
                 imageMemory.tableRead(s, *table);
             } else if (collect) {
-                planMemoryAccess(s, op, operand, address);
+                planMemoryAccess(s, op.sourceWidth, memoryDestination(op.form) && op.op != Op::Cmp,
+                                 operand, address);
             }
 
             if (writesRegister(op)) {
                 auto dest = operands.destination(s, op);
-                facts.registers[dest.index] = op.op == Op::Mov && dest.width == 64
-                                                  ? savedAddress(facts, address)
-                                                  : AddressFact{};
+                AddressFact value;
+                if (op.op == Op::Mov && op.sourceWidth == 64 && dest.width == 64) {
+                    value = !operand.base && !operand.index &&
+                                    imageMemory.isDataImportPointer(operand.displacement)
+                                ? AddressFact::processStorage()
+                                : savedAddress(facts, address);
+                }
+                facts.registers[dest.index] = std::move(value);
             } else if (memoryDestination(op.form) && op.op != Op::Cmp) {
                 AddressFact stored;
 
@@ -411,6 +423,47 @@ namespace forge::x86 {
             }
         }
 
+        void FunctionAnalyzer::traceRepeatedStore(const Step &s, AddressFacts &facts,
+                                                  bool collect) {
+            auto &destination = facts.registers[stringDestination.index];
+            auto &count = facts.registers[repeatCount.index];
+            const auto starts = destination.project(entryAddresses);
+            const auto counts = count.project(entryAddresses);
+            const auto largest = counts.known() ? *llvm::max_element(counts.values()) : UINT64_MAX;
+            count = AddressFact(0);
+
+            if (!largest) {
+                return;
+            }
+
+            // A bounded count can touch either side of RDI depending on DF. Preserve
+            // disjoint saved addresses, and select the stack path only when every
+            // qword of both possible traversals is within the guest stack.
+            if (largest <= GuestMemory::capacity / 8) {
+                const uint64_t size = largest * 8;
+                const auto lowest = destination.plus(AddressFact(8 - size));
+                invalidateServiceOutput(facts.spills, lowest, entryAddresses, size);
+                invalidateServiceOutput(facts.spills, destination, entryAddresses, size);
+
+                if (collect && starts.known() && llvm::all_of(starts.values(), [&](uint64_t va) {
+                        const auto offset = va - GuestMemory::base;
+                        return offset >= size - 8 && offset <= GuestMemory::capacity - size;
+                    })) {
+                    plan.stackAccesses.insert(s.rva);
+                }
+            } else {
+                facts.spills = {};
+            }
+
+            if (collect && !plan.stackAccesses.contains(s.rva)) {
+                imageMemory.computedAccess(s, std::nullopt, 64, true);
+            }
+
+            const auto forward = destination.plus(counts.times(8));
+            destination = forward.joinInFrame(destination.plus(counts.times(uint64_t{0} - 8)),
+                                              entryAddresses);
+        }
+
         void FunctionAnalyzer::traceServiceArguments(const ResolvedCallSite &site,
                                                      AddressFacts &facts, bool collect) const {
             const auto &binding = site.external()->binding;
@@ -444,7 +497,7 @@ namespace forge::x86 {
                     invalidateServiceOutput(outgoing, address, entryAddresses, size);
                 }
 
-                if (!collect || address.stackDerived() ||
+                if (!collect || address.stackDerived() || address.pointsToProcessStorage() ||
                     (address.frameOffset() && !address.known())) {
                     continue;
                 }
@@ -454,7 +507,8 @@ namespace forge::x86 {
                     step.reject(FailureCode::ImageMemory,
                                 "argument " + std::to_string(i + 1) + " to " +
                                     std::string(binding.name) +
-                                    " requires proven image/stack provenance or bounded address "
+                                    " requires proven image/stack provenance, process storage or "
+                                    "bounded address "
                                     "alternatives");
                 }
 
@@ -472,6 +526,9 @@ namespace forge::x86 {
                 traceServiceArguments(site, facts, collect);
 
                 std::fill_n(facts.registers.begin(), callerSlots, AddressFact{});
+                if (site.external()->binding.returnsProcessStorage) {
+                    facts.registers[0] = AddressFact::processStorage();
+                }
                 // CALL itself overwrites the slot below the caller's RSP.
                 const auto slot = facts.registers[rspIndex].plus(AddressFact(uint64_t(0) - 8));
                 facts.spills.write(slot, 64, {});
@@ -525,6 +582,27 @@ namespace forge::x86 {
 
                 if (auto stack = stackInstruction(s.opcode)) {
                     traceStackInstruction(s, *stack, facts);
+                    continue;
+                }
+
+                if (s.isRepeatedQwordStore()) {
+                    traceRepeatedStore(s, facts, collect);
+                    continue;
+                }
+
+                if (s.isAtomicExchange()) {
+                    const auto operand =
+                        operands.decodeAddress(s, s.isLockedCompareExchange() ? 0 : 2, true);
+                    const auto address = addressFact(operand, facts);
+                    if (collect) {
+                        planMemoryAccess(s, 64, true, operand, address);
+                    }
+
+                    const auto dest = s.isLockedCompareExchange()
+                                          ? RegisterView{0, 64}
+                                          : operands.reg(s, s.inst.getOperand(0), 64);
+                    facts.registers[dest.index] = {};
+                    facts.spills.write(address, 64, {});
                     continue;
                 }
 
@@ -622,6 +700,32 @@ namespace forge::x86 {
         }
 
         void FunctionAnalyzer::summarize(const Step &s, DefinitionEffect &state) {
+            setsDirection |= s.opcode == "STD";
+
+            if (s.isAtomicExchange()) {
+                requireMemory(s);
+                const auto compare = s.isLockedCompareExchange();
+                const auto dest =
+                    compare ? RegisterView{0, 64} : operands.reg(s, s.inst.getOperand(0), 64);
+                recordWrite(state, dest);
+                if (compare) {
+                    state.flags.generated.set();
+                    state.flags.carried.set();
+                }
+
+                return;
+            }
+
+            if (s.isRepeatedQwordStore()) {
+                requireMemory(s);
+                // A successful nonempty operation consumes RDI before updating it;
+                // a zero count preserves its original bits and origin marks.
+                plan.modified.set(stringDestination.index);
+                tracksOrigins = true;
+                recordWrite(state, repeatCount);
+                return;
+            }
+
             if (auto op = stackInstruction(s.opcode)) {
                 requireMemory(s);
                 tracksOrigins = true;
@@ -722,6 +826,7 @@ namespace forge::x86 {
             analyzer.summarizeFunction(result.flows[address]);
             result.stack |= analyzer.accessesMemory;
             result.origins |= analyzer.tracksOrigins;
+            result.setsDirection |= analyzer.setsDirection;
         }
 
         Definitions initial;

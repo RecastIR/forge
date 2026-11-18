@@ -33,6 +33,8 @@ namespace forge::x86 {
         void store(llvm::Value *address, StoredValue value, bool stackOnly);
         void modify(llvm::Value *address, unsigned width, bool stackOnly,
                     llvm::function_ref<llvm::Value *(llvm::Value *)> operation);
+        llvm::Value *atomicExchange(llvm::Value *address, llvm::Value *replacement,
+                                    llvm::Value *expected, bool stackOnly);
         void checkReturn(llvm::Value *rsp);
         // Keep the pushed entry RSP in the caller's native activation and use
         // that same value for popReturn, even when guest code has changed RSP.

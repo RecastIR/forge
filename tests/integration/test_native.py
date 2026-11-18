@@ -62,6 +62,14 @@ def cases(work):
             ("immediates", lambda a, b: ((a + 8*b - 3 - 0x12345678) & 0xffffffff) - 100000)]:
         yield name, image, exports[name], reference
 
+    stack_image = root / "stack.exe"
+    string_store = next(e for e in report(stack_image)["exports"] if "repeat_qword" in e["names"])
+    yield ("rep stosq", stack_image, int(string_store["rva"], 16),
+           lambda a, b: 3 * b + (24 if a == 0 else -8) + int(b == 0))
+    atomic = next(e for e in report(stack_image)["exports"] if "atomic_lock" in e["names"])
+    yield ("locked compare and exchange", stack_image, int(atomic["rva"], 16),
+           lambda a, b: b + (0x123456789abcdef0 if a == b else b) + 0x42 + int(a < b) + 2 * (a == b))
+
     # Each branch returns distinct constants even when the compared operands are equal.
     original = image.read_bytes()
     layout = Layout(original)

@@ -1,5 +1,6 @@
 #pragma once
 
+#include "forge/msvcrt_process.h"
 #include "forge/runtime.h"
 
 #include <array>
@@ -82,6 +83,7 @@ namespace forge::win64 {
         Convention convention = Convention::WindowsX64;
         Requirement requirement = Requirement::Instance;
         Control control = Control::Returns;
+        bool returnsProcessStorage = false;
 
         constexpr bool checkedMemory() const {
             for (auto arg : arguments) {
@@ -123,6 +125,10 @@ namespace forge::win64 {
         }
 
         constexpr std::string_view error() const {
+            if (returnsProcessStorage &&
+                (result != Value::Address || requirement != Requirement::Process)) {
+                return "process storage requires a managed service returning a guest address";
+            }
             if (control == Control::Terminates &&
                 (result != Value::Void || requirement != Requirement::Process)) {
                 return "a terminal service requires a managed process and void result";
@@ -231,6 +237,14 @@ namespace forge::win64 {
         return binding;
     }
 
+    consteval ServiceBinding processPointer(ServiceBinding binding) {
+        binding.returnsProcessStorage = true;
+        if (!binding.error().empty()) {
+            throw "invalid process pointer result";
+        }
+        return binding;
+    }
+
     // Keep the linker spelling and the declaration used for the prototype check together.
 #define FORGE_SERVICE_ADAPTER(symbol) #symbol, symbol
 
@@ -250,6 +264,22 @@ namespace forge::win64 {
     inline constexpr auto stringLength = bind<Value::I32, nullableString>(
         "kernel32.dll", "lstrlenA", LastError::Preserve, FORGE_SERVICE_ADAPTER(forge_rt_lstrlen_a));
 
+    inline constexpr Argument byteString{Value::Address, Access::Input, Extent::CString};
+    inline constexpr Argument inputBytes{Value::Address, Access::Input, Extent::CountArgument, 2};
+    inline constexpr Argument outputBytes{Value::Address, Access::Output, Extent::CountArgument, 2};
+    inline constexpr auto crtStrlen = bind<Value::U64, byteString>(
+        "msvcrt.dll", "strlen", LastError::Preserve, FORGE_SERVICE_ADAPTER(forge_rt_msvcrt_strlen));
+    inline constexpr auto crtStrcmp = bind<Value::I32, byteString, byteString>(
+        "msvcrt.dll", "strcmp", LastError::Preserve, FORGE_SERVICE_ADAPTER(forge_rt_msvcrt_strcmp));
+    inline constexpr auto crtStrncmp =
+        bind<Value::I32, inputBytes, inputBytes, Argument{Value::U64}>(
+            "msvcrt.dll", "strncmp", LastError::Preserve,
+            FORGE_SERVICE_ADAPTER(forge_rt_msvcrt_strncmp));
+    inline constexpr auto crtMemcpy =
+        bind<Value::Address, outputBytes, inputBytes, Argument{Value::U64}>(
+            "msvcrt.dll", "memcpy", LastError::Preserve,
+            FORGE_SERVICE_ADAPTER(forge_rt_msvcrt_memcpy));
+
     inline constexpr auto setLastError =
         bind<Value::Void, Argument{Value::U32}>("kernel32.dll", "SetLastError", LastError::Write,
                                                 FORGE_SERVICE_ADAPTER(forge_rt_set_last_error));
@@ -261,6 +291,37 @@ namespace forge::win64 {
         "kernel32.dll", "ExitProcess", LastError::Preserve,
         FORGE_SERVICE_ADAPTER(forge_rt_exit_process), Requirement::Process, Control::Terminates);
 
-    inline constexpr ServiceBinding services[] = {setLastError, getLastError, stringLength,
-                                                  getStdHandle, writeFile,    exitProcess};
+    inline constexpr auto getCommandLineA = processPointer(bind<Value::Address>(
+        "kernel32.dll", "GetCommandLineA", LastError::Preserve,
+        FORGE_SERVICE_ADAPTER(forge_rt_get_command_line_a), Requirement::Process));
+    inline constexpr auto getCommandLineW = processPointer(bind<Value::Address>(
+        "kernel32.dll", "GetCommandLineW", LastError::Preserve,
+        FORGE_SERVICE_ADAPTER(forge_rt_get_command_line_w), Requirement::Process));
+
+    inline constexpr auto crtMalloc = processPointer(bind<Value::Address, Argument{Value::U64}>(
+        "msvcrt.dll", "malloc", LastError::Preserve, FORGE_SERVICE_ADAPTER(forge_rt_msvcrt_malloc),
+        Requirement::Process));
+    inline constexpr auto crtCalloc =
+        processPointer(bind<Value::Address, Argument{Value::U64}, Argument{Value::U64}>(
+            "msvcrt.dll", "calloc", LastError::Preserve,
+            FORGE_SERVICE_ADAPTER(forge_rt_msvcrt_calloc), Requirement::Process));
+    inline constexpr auto crtFree = bind<Value::Void, Argument{Value::Address}>(
+        "msvcrt.dll", "free", LastError::Preserve, FORGE_SERVICE_ADAPTER(forge_rt_msvcrt_free),
+        Requirement::Process);
+    inline constexpr auto crtErrno = processPointer(
+        bind<Value::Address>("msvcrt.dll", "_errno", LastError::Preserve,
+                             FORGE_SERVICE_ADAPTER(forge_rt_msvcrt_errno), Requirement::Process));
+
+    inline constexpr auto crtGetMainArgs =
+        bind<Value::I32, Argument{Value::Address, Access::Output, Extent::Fixed, 4},
+             Argument{Value::Address, Access::Output, Extent::Fixed, 8},
+             Argument{Value::Address, Access::Output, Extent::Fixed, 8}, Argument{Value::I32},
+             Argument{Value::Address, Access::Input, Extent::Fixed, 4, true}>(
+            "msvcrt.dll", "__getmainargs", LastError::Preserve,
+            FORGE_SERVICE_ADAPTER(forge_rt_msvcrt_getmainargs), Requirement::Process);
+
+    inline constexpr ServiceBinding services[] = {
+        crtGetMainArgs, crtStrlen, crtStrcmp,   crtStrncmp,      crtMemcpy,      crtMalloc,
+        crtCalloc,      crtFree,   crtErrno,    setLastError,    getLastError,   stringLength,
+        getStdHandle,   writeFile, exitProcess, getCommandLineA, getCommandLineW};
 } // namespace forge::win64

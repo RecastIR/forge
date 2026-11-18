@@ -3,6 +3,7 @@
 
 #include <cstdio>
 #include <cstdlib>
+#include <cstring>
 #include <memory>
 #include <string_view>
 #include <vector>
@@ -66,6 +67,22 @@ extern "C" forge_rt_status probe_process_get(forge_rt_instance *instance,
     std::putchar('G');
     return failGetter ? FORGE_RT_RESOURCE_EXHAUSTED
                       : forge_rt_get_last_error(instance, thread, out);
+}
+
+// NOLINTNEXTLINE(readability-identifier-naming)
+extern "C" void probe_stos_fault(forge_rt_execution *view, uint64_t address, uint32_t size,
+                                 uint32_t access, uint32_t stack) {
+    constexpr size_t boundary = FORGE_RT_ENTRY_RSP - FORGE_RT_STACK_BASE;
+    uint64_t stored = 0, protectedSlot = 0;
+    std::memcpy(&stored, view->stackBytes + boundary - 8, sizeof(stored));
+    std::memcpy(&protectedSlot, view->stackBytes + boundary, sizeof(protectedSlot));
+    require(address == FORGE_RT_ENTRY_RSP && size == 8 && access == FORGE_RT_WRITE && stack,
+            "repeated store faulting qword");
+    require(stored == UINT64_C(0x123456789abcdef0) && protectedSlot == FORGE_RT_RETURN_MARKER,
+            "repeated store commits only preceding qword");
+    require(view->registers[1] == 2 && view->registers[11] == address,
+            "repeated store restart RCX and RDI");
+    forge_rt_report_scalar_boundary(view, address, size, access, stack);
 }
 
 int main(int argc, char **argv) {

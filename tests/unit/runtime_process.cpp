@@ -1,10 +1,13 @@
+#include <forge/msvcrt_process.h>
 #include <forge/process.h>
 
 #include <array>
 #include <cstdio>
 #include <cstdlib>
+#include <cstring>
 #include <latch>
 #include <memory>
+#include <string>
 #include <thread>
 
 namespace {
@@ -194,13 +197,273 @@ namespace {
         rejectRun(process.get(), FORGE_RT_INVALID_STATE);
     }
 
+    constexpr const char *parameterCases[]{R"("C:\Real Guest.exe" "" "two words" a\"b "sp ace\\")",
+                                           R"(Z:\second.exe mutable)"};
+
+    void inspectParameters(forge_rt_execution *execution) {
+        auto *instance = execution->instance;
+        const auto thread = execution->thread;
+        forge_rt_invocation_token token = 0;
+        REQUIRE(forge_rt_current_invocation(instance, thread, &token) == FORGE_RT_OK);
+        const auto teb = forge_rt_primary_teb(execution);
+        REQUIRE(teb != 0 && teb != FORGE_RT_STACK_BASE);
+        // This test's PE occupies the initial parameter base. Inspect its relocated thread anchor.
+        REQUIRE(teb >= UINT64_C(0x20000));
+        forge_rt_memory_fault fault{};
+        uint64_t actual = 0;
+        REQUIRE(forge_rt_read_guest(instance, thread, token, teb + 0x30, 8, &actual, 8, &fault) ==
+                    FORGE_RT_OK &&
+                actual == teb);
+        REQUIRE(forge_rt_read_guest(instance, thread, token, teb + 8, 8, &actual, 8, &fault) ==
+                    FORGE_RT_OK &&
+                actual == FORGE_RT_STACK_BASE + FORGE_RT_STACK_SIZE);
+        const uint64_t tag = 19;
+        REQUIRE(forge_rt_write_guest(instance, thread, token, teb + 0x30, 8, &tag, 8, &fault) ==
+                FORGE_RT_OK);
+        REQUIRE(forge_rt_primary_teb(execution) == teb);
+        REQUIRE(forge_rt_read_guest(instance, thread, token, teb + 0x30, 8, &actual, 8, &fault) ==
+                    FORGE_RT_OK &&
+                actual == tag);
+        REQUIRE(forge_rt_read_guest(instance, thread, token, teb + 0x20, 8, &actual, 8, &fault) ==
+                    FORGE_RT_GUEST_FAULT &&
+                fault.reason == FORGE_RT_FAULT_UNMAPPED);
+
+        uint64_t narrow = 0, wide = 0;
+        REQUIRE(forge_rt_set_last_error(instance, thread, 94) == FORGE_RT_OK);
+        REQUIRE(forge_rt_get_command_line_a(instance, thread, &narrow) == FORGE_RT_OK);
+        REQUIRE(forge_rt_get_command_line_w(instance, thread, &wide) == FORGE_RT_OK);
+        uint32_t lastError = 0;
+        REQUIRE(forge_rt_get_last_error(instance, thread, &lastError) == FORGE_RT_OK &&
+                lastError == 94);
+        const std::string expected(parameterCases[execution->rcx]);
+        std::string bytes(expected.size() + 1, '?');
+        REQUIRE(forge_rt_read_guest(instance, thread, token, narrow, bytes.size(), bytes.data(),
+                                    bytes.size(), &fault) == FORGE_RT_OK);
+        REQUIRE(bytes == expected + '\0');
+        std::u16string chars(bytes.size(), u'?');
+        REQUIRE(forge_rt_read_guest(instance, thread, token, wide, chars.size() * 2, chars.data(),
+                                    chars.size() * 2, &fault) == FORGE_RT_OK);
+        REQUIRE(chars == std::u16string(bytes.begin(), bytes.end()));
+        REQUIRE(forge_rt_write_guest(instance, thread, token, narrow, 1, &tag, 1, &fault) ==
+                    FORGE_RT_GUEST_FAULT &&
+                fault.reason == FORGE_RT_FAULT_PERMISSION);
+        REQUIRE(forge_rt_get_command_line_a(instance, thread, &actual) == FORGE_RT_OK &&
+                actual == narrow);
+        execution->result = {FORGE_RT_RETURNED, FORGE_RT_OK, actual, {}, 0};
+    }
+
+    void checkParameters() {
+        const forge_rt_import bindings[]{{"Kernel32.DLL", "GetCommandLineA"},
+                                         {"KERNEL32.dll", "GetCommandLineW"}};
+        const forge_rt_named_artifact descriptor{{FORGE_RT_NAMED_ARTIFACT_VERSION, 0x10000, 0x1000,
+                                                  16, 16, nullptr, 0, nullptr, 0, bindings, 2,
+                                                  inspectParameters},
+                                                 "Real Guest.exe"};
+        auto first = create(), second = create();
+        const char *args[]{"", "two words", "a\"b", "sp ace\\"};
+        forge_rt_process_startup invalid{nullptr, std::size(args), nullptr, 0, nullptr};
+        REQUIRE(forge_rt_process_register_with_startup(first.get(), &descriptor.artifact,
+                                                       &invalid) == FORGE_RT_INVALID_ARGUMENT);
+        invalid = {"bad\"name.exe", 0, nullptr, 0, nullptr};
+        REQUIRE(forge_rt_process_register_with_startup(first.get(), &descriptor.artifact,
+                                                       &invalid) == FORGE_RT_INVALID_ARGUMENT);
+        expectState(first.get(), FORGE_RT_PROCESS_CREATED);
+        const forge_rt_process_startup startup{nullptr, std::size(args), args, 0, nullptr};
+        REQUIRE(forge_rt_process_register_with_startup(first.get(), &descriptor.artifact,
+                                                       &startup) == FORGE_RT_OK);
+        char owned[] = "mutable";
+        const char *overrideArgs[]{owned};
+        const forge_rt_process_startup other{R"(Z:\second.exe)", 1, overrideArgs, 0, nullptr};
+        REQUIRE(forge_rt_process_register_with_startup(second.get(), &descriptor.artifact,
+                                                       &other) == FORGE_RT_OK);
+        owned[0] = 'X';
+        forge_rt_process_result result{};
+        const forge_rt_entry_inputs tag{1, 0};
+        REQUIRE(forge_rt_process_run(first.get(), nullptr, &result) == FORGE_RT_OK &&
+                result.kind == FORGE_RT_RETURNED);
+        REQUIRE(forge_rt_process_run(second.get(), &tag, &result) == FORGE_RT_OK &&
+                result.kind == FORGE_RT_RETURNED);
+    }
+
+    void inspectHeap(forge_rt_execution *execution) {
+        auto *instance = execution->instance;
+        const auto thread = execution->thread;
+        forge_rt_invocation_token token = 0;
+        REQUIRE(forge_rt_current_invocation(instance, thread, &token) == FORGE_RT_OK);
+        uint64_t block = 0, zero = 0, errnoAddress = 0;
+        REQUIRE(forge_rt_msvcrt_calloc(instance, thread, 2, 4, &block) == FORGE_RT_OK && block &&
+                block % 16 == 0);
+        REQUIRE(forge_rt_msvcrt_malloc(instance, thread, 0, &zero) == FORGE_RT_OK && zero &&
+                zero != block && zero % 16 == 0);
+        REQUIRE(forge_rt_msvcrt_errno(instance, thread, &errnoAddress) == FORGE_RT_OK);
+        uint32_t error = UINT32_MAX;
+        forge_rt_memory_fault fault{};
+        REQUIRE(forge_rt_read_guest(instance, thread, token, errnoAddress, 4, &error, 4, &fault) ==
+                    FORGE_RT_OK &&
+                error == 0);
+        uint64_t bytes = UINT64_MAX;
+        REQUIRE(forge_rt_read_guest(instance, thread, token, block, 8, &bytes, 8, &fault) ==
+                    FORGE_RT_OK &&
+                bytes == 0);
+        auto *native = forge_rt_resolve_process_scalar(execution, block, 8, FORGE_RT_WRITE);
+        REQUIRE(native != nullptr);
+        std::memcpy(native, &zero, 8);
+        REQUIRE(forge_rt_read_guest(instance, thread, token, block, 8, &bytes, 8, &fault) ==
+                    FORGE_RT_OK &&
+                bytes == zero);
+        REQUIRE(forge_rt_msvcrt_free(instance, thread, block + 1) == FORGE_RT_INVALID_ARGUMENT);
+        REQUIRE(forge_rt_msvcrt_free(instance, thread, block) == FORGE_RT_OK);
+        REQUIRE(forge_rt_msvcrt_free(instance, thread, block) == FORGE_RT_INVALID_ARGUMENT);
+        REQUIRE(forge_rt_read_guest(instance, thread, token, block, 1, &bytes, 1, &fault) ==
+                    FORGE_RT_GUEST_FAULT &&
+                fault.reason == FORGE_RT_FAULT_UNMAPPED);
+        REQUIRE(forge_rt_msvcrt_free(instance, thread, 0) == FORGE_RT_OK);
+        REQUIRE(forge_rt_set_last_error(instance, thread, 4) == FORGE_RT_OK);
+        REQUIRE(forge_rt_msvcrt_calloc(instance, thread, UINT64_MAX, 2, &block) == FORGE_RT_OK &&
+                block == 0);
+        REQUIRE(forge_rt_read_guest(instance, thread, token, errnoAddress, 4, &error, 4, &fault) ==
+                    FORGE_RT_OK &&
+                error == 12);
+        REQUIRE(forge_rt_get_last_error(instance, thread, &error) == FORGE_RT_OK && error == 4);
+        REQUIRE(forge_rt_msvcrt_malloc(instance, thread, UINT64_MAX, &block) == FORGE_RT_OK &&
+                block == 0);
+        // Leave the zero-size allocation to process destruction.
+        execution->result = {FORGE_RT_RETURNED, FORGE_RT_OK, 42, {}, 0};
+    }
+
+    void checkHeap() {
+        const auto descriptor = artifactWith(inspectHeap);
+        const auto first = create(), second = create();
+
+        for (const auto *owner : {&first, &second}) {
+            REQUIRE(forge_rt_process_register(owner->get(), &descriptor) == FORGE_RT_OK);
+            forge_rt_process_result result{};
+            REQUIRE(forge_rt_process_run(owner->get(), nullptr, &result) == FORGE_RT_OK &&
+                    result.kind == FORGE_RT_RETURNED && result.value == 42);
+        }
+    }
+
+    void inspectCrtArguments(forge_rt_execution *execution) {
+        const auto thread = execution->thread;
+        auto *instance = execution->instance;
+        forge_rt_invocation_token token = 0;
+        REQUIRE(forge_rt_current_invocation(instance, thread, &token) == FORGE_RT_OK);
+        forge_rt_memory_fault fault{};
+        const auto read = [&](uint64_t address, auto &value) {
+            REQUIRE(forge_rt_read_guest(instance, thread, token, address, sizeof(value), &value,
+                                        sizeof(value), &fault) == FORGE_RT_OK);
+        };
+        const auto pointer = [&](uint64_t address) {
+            uint64_t value = 0;
+            read(address, value);
+            return value;
+        };
+        const auto string = [&](uint64_t address, std::string expected) {
+            expected.push_back('\0');
+            std::string bytes(expected.size(), '?');
+            REQUIRE(forge_rt_read_guest(instance, thread, token, address, bytes.size(),
+                                        bytes.data(), bytes.size(), &fault) == FORGE_RT_OK &&
+                    bytes == expected);
+        };
+        constexpr uint64_t out = FORGE_RT_ENTRY_RSP - 64;
+        int32_t result = 17;
+        const int32_t newMode = 1;
+        REQUIRE(forge_rt_write_guest(instance, thread, token, out + 32, 4, &newMode, 4, &fault) ==
+                FORGE_RT_OK);
+        REQUIRE(forge_rt_msvcrt_getmainargs(instance, thread, out, out + 8, out + 16, 0, out + 32,
+                                            &result, &fault) == FORGE_RT_UNSUPPORTED_CRT_NEW_MODE);
+        REQUIRE(forge_rt_msvcrt_getmainargs(instance, thread, out, out + 8, out + 16, 1, 0, &result,
+                                            &fault) == FORGE_RT_UNSUPPORTED_CRT_WILDCARDS);
+        REQUIRE(forge_rt_msvcrt_getmainargs(instance, thread, out, out + 8, 1, 0, 0, &result,
+                                            &fault) == FORGE_RT_GUEST_FAULT);
+        REQUIRE(result == 17 && fault.address == 1);
+        uint32_t count = 0;
+        REQUIRE(forge_rt_read_guest(instance, thread, token, out, 4, &count, 4, &fault) ==
+                FORGE_RT_GUEST_FAULT);
+        REQUIRE(forge_rt_msvcrt_getmainargs(instance, thread, out, out + 8, out + 16, 0, 0, &result,
+                                            &fault) == FORGE_RT_OK &&
+                result == 0);
+        read(out, count);
+        REQUIRE(count == 5);
+        const uint64_t argv = pointer(out + 8);
+        string(pointer(argv), R"(C:\Real Guest.exe)");
+        string(pointer(argv + 8), "");
+        string(pointer(argv + 16), "two words");
+        string(pointer(argv + 24), "a\"b");
+        string(pointer(argv + 32), "sp ace\\");
+        REQUIRE(pointer(argv + 40) == 0);
+        const uint64_t env = pointer(out + 16);
+        string(pointer(env), "FORGE=a b");
+        REQUIRE(pointer(env + 8) == 0);
+        const auto cmd = pointer(pointer(base));
+        string(cmd, parameterCases[0]);
+        const auto initialEnv = pointer(pointer(base + 8));
+        REQUIRE(initialEnv == env);
+        // The export is writable. The next __getmainargs reads the changed environment
+        // pointer and reconstructs independent argument strings from the initial command.
+        const uint64_t changedEnv = env + 8;
+        REQUIRE(forge_rt_write_guest(instance, thread, token, pointer(base + 8), 8, &changedEnv, 8,
+                                     &fault) == FORGE_RT_OK);
+        const char changed = '!';
+        REQUIRE(forge_rt_write_guest(instance, thread, token, pointer(argv + 16), 1, &changed, 1,
+                                     &fault) == FORGE_RT_OK);
+        REQUIRE(forge_rt_msvcrt_getmainargs(instance, thread, out, out + 8, out + 16, 0, 0, &result,
+                                            &fault) == FORGE_RT_OK &&
+                result == 0);
+        REQUIRE(pointer(out + 16) == changedEnv);
+        const uint64_t otherArgs = pointer(out + 8);
+        REQUIRE(otherArgs != argv && pointer(otherArgs + 16) != pointer(argv + 16));
+        string(pointer(otherArgs + 16), "two words");
+        string(pointer(argv + 16), "!wo words");
+        uint32_t mode = 0;
+        read(pointer(base + 16), mode);
+        REQUIRE(mode == 0x4000);
+        read(pointer(base + 24), mode);
+        REQUIRE(mode == 0);
+        REQUIRE(forge_rt_write_guest(instance, thread, token, base, 4, &mode, 4, &fault) ==
+                    FORGE_RT_GUEST_FAULT &&
+                fault.reason == FORGE_RT_FAULT_PERMISSION);
+        execution->result = {FORGE_RT_RETURNED, FORGE_RT_OK, 42, {}, 0};
+    }
+
+    void checkCrtArguments() {
+        const forge_rt_backing storage{32, nullptr, nullptr, 0};
+        const forge_rt_region_template slots{base, 32, 0, 0, FORGE_RT_READ};
+        const forge_rt_data_import imports[]{{0, FORGE_RT_CRT_ACMDLN},
+                                             {8, FORGE_RT_CRT_INITENV},
+                                             {16, FORGE_RT_CRT_FMODE},
+                                             {24, FORGE_RT_CRT_COMMODE}};
+        forge_rt_crt_artifact descriptor{{{FORGE_RT_CRT_ARTIFACT_VERSION, base, 64, 32, 32,
+                                           &storage, 1, &slots, 1, nullptr, 0, inspectCrtArguments},
+                                          "Real Guest.exe"},
+                                         imports,
+                                         4};
+        const auto process = create();
+        const char *args[]{"", "two words", "a\"b", "sp ace\\"};
+        const char *env[]{"FORGE=a b"};
+        const forge_rt_process_startup startup{nullptr, std::size(args), args, std::size(env), env};
+        const forge_rt_data_import invalid[]{{0, FORGE_RT_CRT_ACMDLN}, {4, FORGE_RT_CRT_COMMODE}};
+        descriptor.dataImports = invalid;
+        descriptor.dataImportCount = 2;
+        REQUIRE(forge_rt_process_register_with_startup(process.get(), &descriptor.named.artifact,
+                                                       &startup) == FORGE_RT_INVALID_ARGUMENT);
+        expectState(process.get(), FORGE_RT_PROCESS_CREATED);
+        descriptor.dataImports = imports;
+        descriptor.dataImportCount = 4;
+        REQUIRE(forge_rt_process_register_with_startup(process.get(), &descriptor.named.artifact,
+                                                       &startup) == FORGE_RT_OK);
+        forge_rt_process_result result{};
+        REQUIRE(forge_rt_process_run(process.get(), nullptr, &result) == FORGE_RT_OK &&
+                result.kind == FORGE_RT_RETURNED);
+    }
+
     void checkRegistration() {
         const auto artifact = artifactWith(runIsolated);
         const auto process = create();
         expectState(process.get(), FORGE_RT_PROCESS_CREATED);
         rejectRun(process.get(), FORGE_RT_INVALID_STATE);
         auto invalid = artifact;
-        ++invalid.version;
+        invalid.version = UINT32_MAX;
         REQUIRE(forge_rt_process_register(process.get(), &invalid) == FORGE_RT_ABI_MISMATCH);
         invalid = artifact;
         invalid.base = FORGE_RT_STACK_BASE;
@@ -298,6 +561,9 @@ namespace {
 
 void testRuntimeProcess() {
     checkRegistration();
+    checkParameters();
+    checkHeap();
+    checkCrtArguments();
     checkIsolation();
     checkExitProcess();
     checkScalarBoundaries();
