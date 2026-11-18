@@ -73,10 +73,11 @@ namespace {
             owner.emplace(std::move(*captured));
         }
 
-        const auto missing = Descriptor::capture(-1, owner);
-        REQUIRE(missing.status == CaptureResult::Status::Unavailable && missing.error == EBADF);
         const int copy = owner->get();
         REQUIRE(copy >= 3 && copy != ends[1]);
+        const auto missing = Descriptor::capture(-1, owner);
+        REQUIRE(missing.status == CaptureResult::Status::Unavailable && missing.error == EBADF);
+        REQUIRE(owner && owner->get() == copy);
         REQUIRE(fcntl(copy, F_GETFD) == FD_CLOEXEC);
         owner.reset();
         REQUIRE(fcntl(copy, F_GETFD) == -1 && errno == EBADF);

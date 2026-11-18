@@ -16,7 +16,9 @@ A managed guest can set, replace, or clear its process-wide top-level exception 
 
 The public C ABI and shared C++ contracts live in `include/forge/`. The `forge_runtime` archive builds the process, thread and memory sources in `src/core/` and the services in `src/compat/win32/` and `src/compat/crt/`. The two service groups share `src/compat/string_scan.h`. The `forge_startup` archive builds only `src/startup.cpp`. [Build definition](CMakeLists.txt)
 
-Each available standard-handle slot pairs a Win32 handle with a process-owned Darwin descriptor. The private I/O component in `src/platform/darwin/` owns the close-on-exec duplicate, checks the host’s output signal policy, and writes a host byte span. Win32 stages checked guest bytes, publishes the committed count, and translates native write errors. The source ownership table also records the native wait in `Sleep` and the compatibility state that core still holds. [Runtime source ownership](../docs/runtime-architecture.md#runtime-source-ownership)
+Each available standard-handle slot pairs a Win32 handle with a process-owned Darwin descriptor. The private I/O component in `src/platform/darwin/` owns the close-on-exec duplicate, checks the host’s output signal policy, and writes a host byte span. Darwin distinguishes a missing source, exhausted descriptor resources and other capture failures. Win32 leaves missing streams unassigned and maps the two failures to `FORGE_RT_RESOURCE_EXHAUSTED` and `FORGE_RT_HOST_CONFIGURATION` respectively. For writes, Win32 stages checked guest bytes, publishes the committed count, and translates native write errors.
+
+Win32 validates `Sleep` and selects a yield, a finite millisecond delay or an indefinite wait. Darwin performs that operation outside the instance lock and retries interrupted sleeps and waits. Win32 maps a native failure to `FORGE_RT_INTERNAL_ERROR` and preserves guest last error. [Runtime source ownership](../docs/runtime-architecture.md#runtime-source-ownership)
 
 ## Build and test
 

@@ -15,6 +15,14 @@ if(BUILD_TESTING OR CMAKE_EXPORT_COMPILE_COMMANDS)
   target_link_libraries(runtime_contract PRIVATE forge_runtime Threads::Threads)
   configure_forge_cxx(runtime_contract)
 
+  set(wait_source ../runtime/src/platform/darwin/wait.cpp)
+  add_executable(runtime_sleep_adapter unit/runtime_sleep_adapter.cpp ${wait_source})
+  # These source properties apply only to the copy built in this directory.
+  set_property(SOURCE ${wait_source} PROPERTY COMPILE_DEFINITIONS
+    sched_yield=forgeTestYield nanosleep=forgeTestNanosleep pause=forgeTestPause)
+  target_link_libraries(runtime_sleep_adapter PRIVATE forge_runtime Threads::Threads)
+  configure_forge_cxx(runtime_sleep_adapter)
+
   add_executable(runtime_c_smoke integration/runtime_smoke.c)
   target_link_libraries(runtime_c_smoke PRIVATE forge_runtime)
   configure_forge_native(runtime_c_smoke C c_std_11)
@@ -31,10 +39,11 @@ if(BUILD_TESTING OR CMAKE_EXPORT_COMPILE_COMMANDS)
 
   if(BUILD_TESTING)
     add_test(NAME runtime_contract COMMAND runtime_contract)
-    set_tests_properties(runtime_contract PROPERTIES TIMEOUT 60)
+    add_test(NAME runtime_sleep_adapter COMMAND runtime_sleep_adapter)
+    set_tests_properties(runtime_contract runtime_sleep_adapter PROPERTIES TIMEOUT 60)
     add_test(NAME runtime_c_smoke COMMAND runtime_c_smoke)
   else()
-    set_target_properties(runtime_contract runtime_c_smoke PROPERTIES EXCLUDE_FROM_ALL ON)
+    set_target_properties(runtime_contract runtime_sleep_adapter runtime_c_smoke PROPERTIES EXCLUDE_FROM_ALL ON)
   endif()
 
   # Core-only and standalone runtime builds can use a reduced LLVM tool package.

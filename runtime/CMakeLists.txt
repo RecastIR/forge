@@ -9,8 +9,11 @@ add_library(forge_runtime STATIC
   src/compat/win32/console.cpp
   src/compat/win32/standard_handles.cpp
   src/platform/darwin/io.cpp
+  src/platform/darwin/wait.cpp
   src/core/process.cpp
   src/compat/win32/process_parameters.cpp)
+# The sleep adapter test links its own copy of wait.cpp with controlled host calls.
+set_source_files_properties(src/platform/darwin/wait.cpp PROPERTIES SKIP_UNITY_BUILD_INCLUSION ON)
 target_include_directories(forge_runtime PUBLIC include)
 find_package(Threads REQUIRED)
 target_link_libraries(forge_runtime PRIVATE Threads::Threads)

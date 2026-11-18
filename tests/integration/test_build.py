@@ -53,12 +53,14 @@ class BuildCase(unittest.TestCase):
 
 class BuildConfig(BuildCase):
     @unittest.skipUnless(sys.platform == "darwin" and platform.machine() == "arm64", "requires native Apple Silicon")
-    def test_runtime_benchmark_preserves_external_calls(self):
-        build = self.tmp / "benchmark"
+    def test_runtime_benchmark_and_sleep_adapter_with_unity_and_ipo(self):
+        build = self.tmp / "unity"
         self.invoke(CMAKE, "-S", SOURCE, "-B", build, "-DFORGE_RUNTIME_ONLY=ON",
                     "-DCMAKE_BUILD_TYPE=Release", "-DCMAKE_OSX_ARCHITECTURES=arm64",
                     "-DCMAKE_UNITY_BUILD=ON", "-DCMAKE_INTERPROCEDURAL_OPTIMIZATION_RELEASE=ON")
-        self.invoke(CMAKE, "--build", build, "--target", "runtime_benchmark")
+        self.invoke(CMAKE, "--build", build, "--target", "runtime_benchmark", "runtime_sleep_adapter")
+        self.invoke(CMAKE.parent / "ctest", "--test-dir", build, "--output-on-failure", "--no-tests=error",
+                    "-R", "^runtime_sleep_adapter$")
         benchmark = build / "tests/runtime_benchmark"
         self.invoke(benchmark)
         disassembly = self.invoke("xcrun", "otool", "-tvV", benchmark)
@@ -84,9 +86,12 @@ class BuildConfig(BuildCase):
         ctest = CMAKE.parent / "ctest"
         self.invoke(CMAKE, "--build", build, "--parallel", "4", env=env)
         self.assertTrue((build / "libforge_runtime.a").is_file())
-        native_tests = {"runtime_contract", "runtime_c_smoke"}
+        native_tests = {"runtime_contract", "runtime_sleep_adapter", "runtime_c_smoke"}
         self.assertEqual(self.configured_tests(build, env), native_tests)
         self.invoke(ctest, "--test-dir", build, "--output-on-failure", "--no-tests=error", env=env)
+
+        if sys.platform == "darwin":
+            self.invoke("/bin/sh", "-c", 'exec "$1" 0<&-', "sh", build / "tests/runtime_contract", env=env)
 
         if sys.platform == "darwin" and platform.machine() == "arm64":
             # Supply just the two optional tools while LLVM package discovery remains disabled.

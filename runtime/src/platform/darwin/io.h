@@ -10,7 +10,7 @@ namespace forge::runtime::darwin {
     enum class StreamKind : uint8_t { RegularFile, TerminalOrNull, Pipe, Socket, OtherDevice };
 
     struct CaptureResult {
-        enum class Status : uint8_t { Captured, Unavailable, Exhausted, HostConfiguration };
+        enum class Status : uint8_t { Captured, Unavailable, ResourceExhausted, NativeFailure };
         Status status;
         int error;
     };

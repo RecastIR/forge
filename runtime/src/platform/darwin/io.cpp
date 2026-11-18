@@ -22,7 +22,7 @@ namespace forge::runtime::darwin {
             }
 
             if (error == EMFILE || error == ENFILE || error == ENOMEM) {
-                return {Status::Exhausted, error};
+                return {Status::ResourceExhausted, error};
             }
 
             // F_DUPFD_CLOEXEC also rejects a minimum outside the soft descriptor limit.
@@ -30,10 +30,10 @@ namespace forge::runtime::darwin {
 
             if (error == EINVAL && ::getrlimit(RLIMIT_NOFILE, &limit) == 0 &&
                 limit.rlim_cur <= firstPrivateDescriptor) {
-                return {Status::Exhausted, error};
+                return {Status::ResourceExhausted, error};
             }
 
-            return {Status::HostConfiguration, error};
+            return {Status::NativeFailure, error};
         }
 
         StreamKind classify(int descriptor, const struct stat &info) {
@@ -98,7 +98,7 @@ namespace forge::runtime::darwin {
         } while (result < 0 && errno == EINTR);
 
         if (result < 0) {
-            return {Status::HostConfiguration, errno};
+            return {Status::NativeFailure, errno};
         }
 
         int flags;
@@ -108,7 +108,7 @@ namespace forge::runtime::darwin {
         } while (flags < 0 && errno == EINTR);
 
         if (flags < 0) {
-            return {Status::HostConfiguration, errno};
+            return {Status::NativeFailure, errno};
         }
 
         descriptor.mode = static_cast<unsigned>(flags) & static_cast<unsigned>(O_ACCMODE);

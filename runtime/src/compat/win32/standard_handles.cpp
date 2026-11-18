@@ -21,9 +21,9 @@ namespace forge::runtime {
                 break;
             case Status::Unavailable:
                 continue;
-            case Status::Exhausted:
+            case Status::ResourceExhausted:
                 return FORGE_RT_RESOURCE_EXHAUSTED;
-            case Status::HostConfiguration:
+            case Status::NativeFailure:
                 return FORGE_RT_HOST_CONFIGURATION;
             }
 

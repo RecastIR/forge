@@ -1,3 +1,4 @@
+#include "../../runtime/src/platform/darwin/io.h"
 #include <forge/process.h>
 
 #include <cerrno>
@@ -7,7 +8,11 @@
 #include <fcntl.h>
 #include <iterator>
 #include <memory>
+#include <optional>
 #include <pthread.h>
+#ifdef __APPLE__
+#include <semaphore.h>
+#endif
 #include <sys/resource.h>
 #include <sys/socket.h>
 #include <unistd.h>
@@ -245,11 +250,20 @@ namespace {
         execution->result = {FORGE_RT_RETURNED, FORGE_RT_OK, 17, {}, 0};
     }
 
+    void expectCaptureExhaustion(int error) {
+        using namespace forge::runtime::darwin;
+        std::optional<Descriptor> owner;
+        const auto result = Descriptor::capture(STDOUT_FILENO, owner);
+        REQUIRE(result.status == CaptureResult::Status::ResourceExhausted && result.error == error);
+        REQUIRE(!owner);
+    }
+
     void checkNoDescriptorBudget() {
         struct rlimit previous{};
         REQUIRE(getrlimit(RLIMIT_NOFILE, &previous) == 0);
         const struct rlimit none{3, previous.rlim_max};
         REQUIRE(setrlimit(RLIMIT_NOFILE, &none) == 0);
+        expectCaptureExhaustion(EINVAL);
         constexpr forge_rt_import unrelated[]{{"kernel32.dll", "ExitProcess"},
                                               {"kernel32.dll", "GetLastError"},
                                               {"other.dll", "GetStdHandle"},
@@ -305,6 +319,10 @@ namespace {
         REQUIRE(getrlimit(RLIMIT_NOFILE, &previous) == 0);
         const struct rlimit one{static_cast<rlim_t>(first + 1), previous.rlim_max};
         REQUIRE(setrlimit(RLIMIT_NOFILE, &one) == 0);
+        const int last = fcntl(STDOUT_FILENO, F_DUPFD_CLOEXEC, 3);
+        REQUIRE(last == first);
+        expectCaptureExhaustion(EMFILE);
+        REQUIRE(close(last) == 0);
         const auto artifact = consoleArtifact(finishCapture);
         forge_rt_process *raw = nullptr;
         REQUIRE(forge_rt_process_create(FORGE_RT_ABI_VERSION, &raw) == FORGE_RT_OK);
@@ -315,6 +333,50 @@ namespace {
         REQUIRE(forge_rt_process_register(raw, &artifact) == FORGE_RT_OK);
         REQUIRE(run(process).kind == FORGE_RT_RETURNED);
     }
+
+#ifdef __APPLE__
+    void checkNativeCaptureFailure() {
+        using namespace forge::runtime::darwin;
+        // Darwin opens a descriptor for a named semaphore. It can be duplicated, but
+        // fstat on that duplicate fails with EBADF even though the source is available.
+        const bool missingInput = fcntl(STDIN_FILENO, F_GETFD) == -1;
+
+        if (missingInput) {
+            // Reserve fd 0 so sem_open takes the stdout slot even in a headless host.
+            REQUIRE(errno == EBADF && dup2(STDERR_FILENO, STDIN_FILENO) == STDIN_FILENO);
+        }
+
+        const int saved = fcntl(STDOUT_FILENO, F_DUPFD_CLOEXEC, 3);
+        REQUIRE(saved >= 3 && close(STDOUT_FILENO) == 0);
+        char name[32];
+        std::snprintf(name, sizeof(name), "/forge-capture-%d", getpid());
+        auto *semaphore = sem_open(name, O_CREAT | O_EXCL, 0600, 0);
+        REQUIRE(semaphore != SEM_FAILED && sem_unlink(name) == 0);
+
+        const int first = fcntl(STDOUT_FILENO, F_DUPFD_CLOEXEC, 3);
+        REQUIRE(first >= 3 && close(first) == 0);
+        std::optional<Descriptor> owner;
+        const auto captured = Descriptor::capture(STDOUT_FILENO, owner);
+        REQUIRE(captured.status == CaptureResult::Status::NativeFailure && captured.error == EBADF);
+        REQUIRE(!owner);
+        REQUIRE(fcntl(STDOUT_FILENO, F_DUPFD_CLOEXEC, 3) == first && close(first) == 0);
+
+        const auto artifact = consoleArtifact(finishCapture);
+        forge_rt_process *raw = nullptr;
+        REQUIRE(forge_rt_process_create(FORGE_RT_ABI_VERSION, &raw) == FORGE_RT_OK);
+        Process process(raw, forge_rt_process_destroy);
+        REQUIRE(forge_rt_process_register(raw, &artifact) == FORGE_RT_HOST_CONFIGURATION);
+        REQUIRE(sem_close(semaphore) == 0);
+        REQUIRE(dup2(saved, STDOUT_FILENO) == STDOUT_FILENO && close(saved) == 0);
+
+        if (missingInput) {
+            REQUIRE(close(STDIN_FILENO) == 0);
+        }
+
+        REQUIRE(forge_rt_process_register(raw, &artifact) == FORGE_RT_OK);
+        REQUIRE(run(process).kind == FORGE_RT_RETURNED);
+    }
+#endif
 
     void checkSignalPolicy(int descriptor, int signal, void (*handler)(int), bool assure,
                            uint32_t expectedError) {
@@ -406,6 +468,9 @@ void testRuntimeConsoleProcess() {
 
     checkNoDescriptorBudget();
     checkCaptureExhaustion();
+#ifdef __APPLE__
+    checkNativeCaptureFailure();
+#endif
     checkReadOnlyPipe();
     checkClosedSocket();
     checkPipePolicy(SIG_DFL, false, false);

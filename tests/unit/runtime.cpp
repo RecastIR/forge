@@ -17,7 +17,50 @@ void testRuntimeConsoleProcess();
 void testRuntimeWrite();
 
 namespace {
-    bool waitsIndefinitely(forge_rt_instance *runtime, forge_rt_thread_token thread) {
+    volatile std::sig_atomic_t caughtAlarm = 0;
+
+    void catchAlarm(int) { caughtAlarm = 1; }
+
+    [[noreturn]] void exerciseInterruptedWaits(forge_rt_instance *runtime,
+                                               forge_rt_thread_token thread) {
+        using namespace std::chrono;
+        struct sigaction action{};
+        action.sa_handler = catchAlarm;
+        sigset_t signals;
+        const itimerval periodic{{0, 10000}, {0, 10000}};
+
+        if (sigemptyset(&action.sa_mask) != 0 || sigaction(SIGALRM, &action, nullptr) != 0 ||
+            sigemptyset(&signals) != 0 || sigaddset(&signals, SIGALRM) != 0 ||
+            sigprocmask(SIG_UNBLOCK, &signals, nullptr) != 0 ||
+            setitimer(ITIMER_REAL, &periodic, nullptr) != 0) {
+            _exit(2);
+        }
+
+        const auto start = steady_clock::now();
+        const auto status = forge_rt_sleep(runtime, thread, 80);
+        uint32_t error = 0;
+
+        if (status != FORGE_RT_OK || steady_clock::now() - start < milliseconds(80) ||
+            !caughtAlarm || forge_rt_get_last_error(runtime, thread, &error) != FORGE_RT_OK ||
+            error != 42) {
+            _exit(1);
+        }
+
+        // Catch one alarm and let the next end the child. The adapter test counts pause retries.
+        const itimerval twice{{0, 50000}, {0, 50000}};
+        action.sa_flags = SA_RESETHAND;
+
+        if (setitimer(ITIMER_REAL, &twice, nullptr) != 0 ||
+            sigaction(SIGALRM, &action, nullptr) != 0) {
+            _exit(2);
+        }
+
+        forge_rt_sleep(runtime, thread, UINT32_MAX);
+        _exit(1);
+    }
+
+    bool waitsAcrossSignals(forge_rt_instance *runtime, forge_rt_thread_token thread) {
+        using namespace std::chrono;
         const auto child = fork();
 
         if (child < 0) {
@@ -25,50 +68,54 @@ namespace {
         }
 
         if (child == 0) {
-            sigset_t signals;
-            sigemptyset(&signals);
-            sigaddset(&signals, SIGALRM);
-            const itimerval timer{{0, 0}, {0, 50000}};
-
-            if (signal(SIGALRM, SIG_DFL) == SIG_ERR ||
-                sigprocmask(SIG_UNBLOCK, &signals, nullptr) != 0 ||
-                setitimer(ITIMER_REAL, &timer, nullptr) != 0) {
-                _exit(2);
-            }
-
-            forge_rt_sleep(runtime, thread, UINT32_MAX);
-            _exit(1);
+            exerciseInterruptedWaits(runtime, thread);
         }
 
+        const auto deadline = steady_clock::now() + seconds(5);
         int status;
-        pid_t waited;
 
-        do {
-            waited = waitpid(child, &status, 0);
-        } while (waited < 0 && errno == EINTR);
+        while (steady_clock::now() < deadline) {
+            const auto waited = waitpid(child, &status, WNOHANG);
 
-        return waited == child && WIFSIGNALED(status) && WTERMSIG(status) == SIGALRM;
+            if (waited == child) {
+                return WIFSIGNALED(status) && WTERMSIG(status) == SIGALRM;
+            }
+
+            if (waited < 0 && errno != EINTR) {
+                return false;
+            }
+
+            std::this_thread::sleep_for(milliseconds(10));
+        }
+
+        kill(child, SIGKILL);
+
+        while (waitpid(child, &status, 0) < 0 && errno == EINTR) {
+        }
+
+        return false;
     }
 
     bool sleepContract(forge_rt_instance *runtime) {
         using namespace std::chrono;
         forge_rt_thread_token thread = 0;
+        uint32_t error = 0;
 
         if (forge_rt_sleep(nullptr, 0, UINT32_MAX) != FORGE_RT_INVALID_ARGUMENT ||
             forge_rt_sleep(runtime, 0, UINT32_MAX) != FORGE_RT_INVALID_THREAD ||
             forge_rt_thread_create(runtime, &thread) != FORGE_RT_OK ||
             forge_rt_set_last_error(runtime, thread, 42) != FORGE_RT_OK ||
-            forge_rt_sleep(runtime, thread, 0) != FORGE_RT_OK) {
+            forge_rt_sleep(runtime, thread, 0) != FORGE_RT_OK ||
+            forge_rt_get_last_error(runtime, thread, &error) != FORGE_RT_OK || error != 42) {
             return false;
         }
 
         const auto start = steady_clock::now();
         const auto status = forge_rt_sleep(runtime, thread, 10);
         const auto elapsed = steady_clock::now() - start;
-        uint32_t error = 0;
         return status == FORGE_RT_OK && elapsed >= milliseconds(10) &&
                forge_rt_get_last_error(runtime, thread, &error) == FORGE_RT_OK && error == 42 &&
-               waitsIndefinitely(runtime, thread) &&
+               waitsAcrossSignals(runtime, thread) &&
                forge_rt_thread_destroy(runtime, thread) == FORGE_RT_OK &&
                forge_rt_sleep(runtime, thread, 0) == FORGE_RT_INVALID_THREAD;
     }
@@ -151,7 +198,7 @@ int main() {
         return 1;
     }
 
-    // The infinite-wait probe forks while the test process is still single-threaded.
+    // The wait probes install timers and signal policy only in a single-threaded child.
     bool passed = sleepContract(runtime);
     testRuntimeMemory();
     testRuntimeProcess();

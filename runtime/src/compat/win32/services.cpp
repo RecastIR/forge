@@ -1,9 +1,5 @@
+#include "../../platform/darwin/wait.h"
 #include "../string_scan.h"
-
-#include <cerrno>
-#include <sched.h>
-#include <time.h>
-#include <unistd.h>
 
 extern "C" forge_rt_status forge_rt_sleep(forge_rt_instance *instance, forge_rt_thread_token thread,
                                           uint32_t milliseconds) noexcept {
@@ -16,26 +12,18 @@ extern "C" forge_rt_status forge_rt_sleep(forge_rt_instance *instance, forge_rt_
         return status;
     }
 
+    namespace darwin = forge::runtime::darwin;
+    int error;
+
     if (milliseconds == 0) {
-        return sched_yield() == 0 ? FORGE_RT_OK : FORGE_RT_INTERNAL_ERROR;
+        error = darwin::yieldThread();
+    } else if (milliseconds == UINT32_MAX) {
+        error = darwin::waitIndefinitely();
+    } else {
+        error = darwin::waitForMilliseconds(milliseconds);
     }
 
-    if (milliseconds == UINT32_MAX) {
-        for (;;) {
-            pause();
-        }
-    }
-
-    timespec remaining{static_cast<time_t>(milliseconds / 1000),
-                       static_cast<long>(milliseconds % 1000) * 1000000L};
-
-    while (nanosleep(&remaining, &remaining) != 0) {
-        if (errno != EINTR) {
-            return FORGE_RT_INTERNAL_ERROR;
-        }
-    }
-
-    return FORGE_RT_OK;
+    return error == 0 ? FORGE_RT_OK : FORGE_RT_INTERNAL_ERROR;
 }
 
 extern "C" forge_rt_status forge_rt_lstrlen_a(forge_rt_instance *instance,
