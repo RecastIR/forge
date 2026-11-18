@@ -1,6 +1,7 @@
 #pragma once
 
 #include "lift/cfg.h"
+#include "lift/lift.h"
 #include "pe/image.h"
 
 #include "llvm/ADT/SmallVector.h"
@@ -57,7 +58,8 @@ namespace forge::x86 {
     // relocation data. Finishing resolves the borrows into an independently owned plan.
     class ImageMemory {
       public:
-        ImageMemory(const ParsedImage &image, uint64_t guestLoadBase, bool checkedMemory);
+        ImageMemory(const ParsedImage &image, uint64_t guestLoadBase, bool checkedMemory,
+                    EntryMode mode);
 
         void checkStackMapping(const Step &step) const;
         void addressTaken(const Step &step, uint64_t va);
@@ -81,6 +83,7 @@ namespace forge::x86 {
 
         const ParsedImage &source;
         uint64_t loadBase;
+        llvm::StringRef executableHeaders;
         const Step *indirectRead = nullptr;
         const Step *indirectWrite = nullptr;
         bool overlapsStack;
@@ -93,6 +96,7 @@ namespace forge::x86 {
 
         const ImageInitialization &contents();
         void fixedImageAccess(const Step &step, RvaRange access, bool write);
+        void selectServiceSections(const Step &step, uint64_t rva, uint64_t size, bool write);
         void selectComputed(const Step &step, uint64_t va, unsigned width, bool write,
                             ExecutableSelection executableSelection);
         void select(const Step &step, const Section &section, RvaRange access);

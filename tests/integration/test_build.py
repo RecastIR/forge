@@ -11,7 +11,7 @@ import unittest
 
 MODE = sys.argv[1]
 SOURCE, CMAKE, LLVM_DIR, LLVM_BIN, TMP_ROOT = map(Path, sys.argv[2:7])
-WITH_CLI, TOOLCHAIN, CONFIG, GENERATOR, WITH_RUNTIME_IR = sys.argv[7:]
+WITH_CLI, TOOLCHAIN, CONFIG, GENERATOR, WITH_RUNTIME_IR, fixture_dir = sys.argv[7:]
 
 
 def read_cache(build):
@@ -94,7 +94,7 @@ class BuildConfig(BuildCase):
             bin_dir.mkdir()
             (bin_dir / "opt").symlink_to(LLVM_BIN / "opt")
             partial = self.invoke(CMAKE, "-S", SOURCE, "-B", build, f"-DFORGE_RUNTIME_IR_TOOLS_DIR={bin_dir}", env=env)
-            self.assertIn("Omitting runtime_ir_smoke", partial)
+            self.assertIn("Omitting optional ARM64 tests", partial)
             self.assertEqual(self.configured_tests(build, env), native_tests)
 
             expected = native_tests
@@ -154,14 +154,18 @@ class BuildConfig(BuildCase):
         targets = self.invoke(CMAKE, "--build", build, "--target", "help").split()
         self.assertNotIn("forge", targets)
         self.assertIn("forge_core", targets)
-        self.invoke(CMAKE, "--build", build, "--target", "forge_native_harness", "lift_command", "--parallel", "4")
+        self.invoke(CMAKE, "--build", build, "--target", "forge_native_harness", "lift_command",
+                    "executable_contract", "--parallel", "4")
         self.assertFalse((build / "libforge_runtime.a").exists())
-        self.invoke(CMAKE.parent / "ctest", "--test-dir", build, "-R", "^lift_command$", "--output-on-failure",
-                    "--no-tests=error")
+        self.invoke(CMAKE.parent / "ctest", "--test-dir", build, "-R", "^(lift_command|executable_contract|executable_object)$",
+                    "--output-on-failure", "--no-tests=error")
         names = self.configured_tests(build)
         self.assertTrue({"fixtures", "input_lifetime", "recovery_contract", "lift_contract",
-                         "lift_command", "build_config"} <= names)
-        self.assertFalse({"cli", "codegen", "native", "differential", "build_provisioning"} & names)
+                         "lift_command", "build_config", "executable_contract"} <= names)
+        if WITH_CLI == "1":
+            self.assertIn("executable_object", names)
+        self.assertFalse({"cli", "codegen", "native", "differential", "build_provisioning",
+                          "executable_readiness", "native_executable"} & names)
 
     @unittest.skipUnless(WITH_CLI == "1", "requires a CLI-enabled parent toolchain")
     def test_cli_selection_follows_the_toolchain(self):
@@ -243,8 +247,8 @@ class BuildConfig(BuildCase):
                      "-DFORGE_BUILD_CLI=OFF", "-DBUILD_TESTING=ON")
         self.invoke(*configure, env=env)
         partial = self.configured_tests(build, env)
-        self.assertTrue({"lift_contract", "runtime_contract", "runtime_c_smoke"} <= partial)
-        self.assertNotIn("runtime_ir_smoke", partial)
+        self.assertTrue({"lift_contract", "runtime_contract", "runtime_c_smoke", "executable_contract"} <= partial)
+        self.assertFalse({"runtime_ir_smoke", "executable_object", "executable_readiness", "native_executable"} & partial)
 
         if WITH_RUNTIME_IR == "1":
             for name in ("opt", "llc"):
@@ -258,9 +262,16 @@ class BuildConfig(BuildCase):
     def check_custom_output_locations(self, build):
         suffix = CONFIG if GENERATOR == "Xcode" else ""
         config = CONFIG.upper()
-        archives = self.tmp / "custom archives"
+        archives = self.tmp / 'custom "archives"'
+        archive_setting = str(archives)
+        core_archives = archives
+        if GENERATOR == "Xcode":
+            # Xcode removes literal quotes from CMake's linker argument for libforge_core.
+            # Exercise the quoted runtime archives that Forge itself consumes.
+            core_archives = self.tmp / "core archives"
+            archive_setting = f"$<IF:$<STREQUAL:$<TARGET_PROPERTY:NAME>,forge_core>,{core_archives},{archives}>/$<CONFIG>"
         cases = [
-            (["-DCMAKE_RUNTIME_OUTPUT_DIRECTORY=bin", f"-DCMAKE_ARCHIVE_OUTPUT_DIRECTORY={archives}"],
+            (["-DCMAKE_RUNTIME_OUTPUT_DIRECTORY=bin", f"-DCMAKE_ARCHIVE_OUTPUT_DIRECTORY={archive_setting}"],
              build / "bin" / suffix, archives / suffix),
             ([f"-DCMAKE_RUNTIME_OUTPUT_DIRECTORY_{config}=config-bin",
               f"-DCMAKE_ARCHIVE_OUTPUT_DIRECTORY_{config}=config-lib"],
@@ -276,8 +287,21 @@ class BuildConfig(BuildCase):
             with self.subTest(output_options=options):
                 self.invoke(CMAKE, "-S", SOURCE, "-B", build, *options)
                 self.invoke(CMAKE, "--build", build, "--config", CONFIG, "--target", "forge", "--parallel", "4")
-                for product in (bin_dir / "forge", lib_dir / "libforge_core.a"):
+                core_dir = core_archives / suffix if lib_dir == archives / suffix else lib_dir
+                for product in (bin_dir / "forge", core_dir / "libforge_core.a",
+                                lib_dir / "libforge_startup.a", lib_dir / "libforge_runtime.a"):
                     self.assertTrue(product.is_file(), product)
+                if sys.platform == "darwin" and platform.machine() == "arm64":
+                    program = self.tmp / "translated"
+                    compile_guest = (bin_dir / "forge", "lift", Path(fixture_dir) / "executable-return.exe",
+                                     "--executable", "--output", program)
+                    self.invoke(*compile_guest)
+                    result = subprocess.run([program], capture_output=True)
+                    self.assertEqual((result.returncode, result.stdout, result.stderr), (42, b"", b""))
+                    # A stale CLI could have linked the archive from a previous configuration.
+                    for archive in (lib_dir / "libforge_runtime.a", lib_dir / "libforge_startup.a"):
+                        archive.unlink()
+                        self.assertIn(str(archive), self.invoke(*compile_guest, success=False))
 
     @unittest.skipUnless(WITH_CLI == "1", "requires a provisioned CLI")
     def test_fresh_cli_and_external_database(self):

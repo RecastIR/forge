@@ -12,9 +12,15 @@ import unittest
 
 from pe_layout import Layout
 
-MODE, FORGE, fixture_dir, CONTRACT, OPT, LLC, READOBJ, *LINK = sys.argv[1:]
-if MODE == "native":
-    INVALID_ARTIFACT, PROCESS_HARNESS, *LINK = LINK
+MODE, fixture_dir, *tools = sys.argv[1:]
+if MODE == "compiler":
+    CONTRACT, = tools
+elif MODE == "object":
+    CONTRACT, OPT, LLC, READOBJ = tools
+elif MODE == "readiness":
+    FORGE, = tools
+elif MODE == "native":
+    FORGE, CONTRACT, OPT, LLC, READOBJ, INVALID_ARTIFACT, PROCESS_HARNESS, *LINK = tools
 FIXTURES = Path(fixture_dir)
 NAMES = ("return", "call", "data", "fault", "last-error")
 
@@ -30,6 +36,14 @@ def image(name):
 def entry(data):
     layout = Layout(data)
     return layout.u32(layout.opt + 16)
+
+
+def header_result(data):
+    # The PE entry combines its DOS string length, DOS/NT signatures, preferred
+    # ImageBase and first section name. Read the expected DWORD from the source file.
+    layout = Layout(data)
+    dos_and_nt = data.index(0) + layout.u32(0) + layout.u32(layout.pe)
+    return ((dos_and_nt ^ layout.u32(layout.opt + 24)) + layout.u32(layout.section_table)) & 0xffffffff
 
 
 def direct_call(data):
@@ -56,6 +70,203 @@ class Workspace(unittest.TestCase):
         self.assertEqual(result.stdout, "")
         self.assertEqual(result.returncode, 0 if success else 1, result.stderr)
         return json.loads(result.stderr)
+
+
+class Portable(Workspace):
+    def test_artifact_ir(self):
+        for name in (*NAMES, "headers"):
+            with self.subTest(name=name):
+                pe = image(name)
+                compiled = run(CONTRACT, pe, check=True).stdout
+                self.assertIn("define dso_local ptr @forge_lifted_artifact(", compiled)
+                if name == "call":
+                    call = direct_call(pe.read_bytes())
+                    target = int(call["target_rva"], 16)
+                    self.assertLess(target, int(call["caller_rva"], 16))
+                    self.assertIn(f"call i1 @forge_guest_{target:x}(", compiled)
+
+    def test_fixture_sections(self):
+        data = image("data").read_bytes()
+        layout = Layout(data)
+        self.assertEqual(layout.directory(0), (0, 0))  # unexported PE entry
+        root = entry(data)
+        offset = layout.file_offset(root)
+        self.assertEqual(data[offset + 7:offset + 9], b"\x83\x05")
+        zero_rva = root + 14 + struct.unpack_from("<i", data, offset + 9)[0]
+        header = layout.section_header(zero_rva)
+        self.assertGreaterEqual(zero_rva - layout.u32(header + 12), layout.u32(header + 16))
+
+
+class Object(Workspace):
+    def test_arm64_object(self):
+        for name in (*NAMES, "headers"):
+            with self.subTest(name=name):
+                pe = image(name)
+                obj = self.dir / "artifact.o"
+                run(CONTRACT, pe, "--object", obj, OPT, LLC, check=True)
+                headers = run(READOBJ, "--file-headers", obj, check=True).stdout
+                self.assertIn("Format: Mach-O arm64", headers)
+                self.assertIn("FileType: Relocatable", headers)
+
+    def test_object_failure_preserves_destination(self):
+        self.output.write_bytes(b"previous object")
+        for opt, llc, name in ((self.dir / "absent", LLC, "NATIVE_TOOL_UNAVAILABLE"),
+                               ("/usr/bin/false", LLC, "NATIVE_OPTIMIZATION_FAILED"),
+                               (OPT, "/usr/bin/false", "NATIVE_CODEGEN_FAILED")):
+            with self.subTest(opt=opt, llc=llc):
+                result = run(CONTRACT, image("return"), "--object", self.output, opt, llc)
+                self.assertEqual(result.returncode, 1)
+                self.assertIn(name, result.stderr)
+                self.assertEqual(self.output.read_bytes(), b"previous object")
+                self.assertEqual(list(self.dir.iterdir()), [self.output])
+
+
+class StartupAdmission(Workspace):
+    def test_fixed_header_access(self):
+        data = bytearray(image("headers").read_bytes())
+        layout = Layout(data)
+        start = layout.file_offset(entry(data))
+        length = layout.u32(layout.opt + 60)
+        # Read a DWORD at the last byte, or store AL at RVA zero.
+        for opcode, rva, message in ((b"\x8b\x05", length - 1, "image access"),
+                                     (b"\x88\x05", 0, "immutable")):
+            with self.subTest(rva=rva):
+                code = b"\x31\xc0" + opcode + struct.pack("<i", rva - (entry(data) + 8)) + b"\xc3"
+                data[start:start + len(code)] = code
+                self.reject(data, "LIFT_IMAGE_MEMORY", message)
+
+    def test_header_counts_toward_image_budget(self):
+        data = bytearray(image("fault").read_bytes())
+        layout = Layout(data)
+        _, rva, _, _ = layout.sections[-1]
+        section = layout.section_header(rva)
+        self.assertTrue(data.startswith(b".pdata\0", section))
+        # The unknown load selects the large zero tail. Its extent alone fits the
+        # immutable image budget, but the header backing puts the image over it.
+        length = (32 << 20) - 8
+        struct.pack_into("<I", data, section + 8, length)
+        struct.pack_into("<I", data, layout.opt + 56, (rva + length + 4095) & ~4095)
+        self.reject(data, "LIFT_IMAGE_MEMORY", "module limit for immutable extent")
+
+    def test_conflicting_or_malformed_headers(self):
+        original = image("headers").read_bytes()
+        layout = Layout(original)
+        reloc = layout.file_offset(layout.directory(5)[0])
+        for offset, patch, code, message in (
+            (layout.opt + 60, struct.pack("<I", len(original) + 512), "INVALID_PE", "SizeOfHeaders"),
+            (layout.section_table + 12, struct.pack("<I", 8), "INVALID_PE", "overlaps image headers"),
+            (reloc, struct.pack("<IIH", 0, layout.u32(reloc + 4), 0xa040),
+             "EXECUTABLE_UNSUPPORTED_STARTUP", "relocation in PE headers at RVA 0x40"),
+            (layout.directories + 12 * 8, struct.pack("<II", 0x48, 8),
+             "EXECUTABLE_UNSUPPORTED_STARTUP", "loader write in PE headers at RVA 0x48"),
+        ):
+            with self.subTest(reason=message):
+                data = bytearray(original)
+                data[offset:offset + len(patch)] = patch
+                self.reject(data, code, message)
+
+    def reject(self, data, code, reason, *, guest_base=None):
+        source = self.dir / "candidate.exe"
+        source.write_bytes(data)
+        self.output.write_bytes(b"previous object")
+        selection = [] if guest_base is None else ["--guest-base", hex(guest_base)]
+        result = run(CONTRACT, *selection, source, "--object", self.output, self.dir / "unused-opt",
+                     self.dir / "unused-llc")
+        self.assertEqual(result.returncode, 1)
+        self.assertIn(code, result.stderr)
+        self.assertIn(reason, result.stderr)
+        self.assertEqual(self.output.read_bytes(), b"previous object")
+
+    def test_zero_selected_base(self):
+        data = bytearray(image("headers").read_bytes())
+        self.reject(data, "EXECUTABLE_UNSUPPORTED_STARTUP", "null guest address", guest_base=0)
+        struct.pack_into("<Q", data, Layout(data).opt + 24, 0)
+        self.reject(data, "EXECUTABLE_UNSUPPORTED_STARTUP", "null guest address")
+
+    def test_loader_requirements(self):
+        for name, reason in (("manifest", "manifest"), ("integrity", "signature verification")):
+            with self.subTest(name=name):
+                self.reject(image(name).read_bytes(), "EXECUTABLE_UNSUPPORTED_STARTUP", reason)
+
+    def test_resource_directory(self):
+        data = bytearray(image("manifest").read_bytes())
+        layout = Layout(data)
+        rva, size = layout.directory(2)
+        root = layout.file_offset(rva)
+        self.assertEqual(struct.unpack_from("<HHI", data, root + 12), (0, 1, 24))
+        # Resource data directories are addressed by RVA even with a custom section name.
+        section = layout.section_header(rva)
+        data[section:section + 8] = b".assets\0"
+        self.reject(data, "EXECUTABLE_UNSUPPORTED_STARTUP", "manifest")
+
+        # FindResourceW resolves this numeric type as RT_MANIFEST on the Wine reference.
+        struct.pack_into("<I", data, root + 16, 0x10018)
+        self.reject(data, "EXECUTABLE_UNSUPPORTED_STARTUP", "manifest")
+
+        # Keep the same well-formed tree and payload under the opaque RCDATA type.
+        struct.pack_into("<I", data, root + 16, 10)
+        source = self.dir / "ordinary-resource.exe"
+        source.write_bytes(data)
+        run(CONTRACT, source, check=True)
+
+        named = data.copy()
+        name_offset = (size - 4) & ~1
+        struct.pack_into("<HHI", named, root + 12, 1, 0, 0x80000000 | name_offset)
+        struct.pack_into("<HH", named, root + name_offset, 1, ord("T"))
+        source.write_bytes(named)
+        run(CONTRACT, source, check=True)
+
+        for field, value in ((0, 0), (4, 0), (4, 15), (4, 20), (4, size + len(data))):
+            with self.subTest(field=field, value=value):
+                malformed = data.copy()
+                struct.pack_into("<I", malformed, layout.directories + 2 * 8 + field, value)
+                self.reject(malformed, "INVALID_PE", "resource directory")
+
+        for field, value in ((16, 10), (16, 0x80000000 | size), (20, 24), (20, 0x80000000 | size)):
+            with self.subTest(root_field=field, value=value):
+                malformed = named.copy()
+                struct.pack_into("<I", malformed, root + field, value)
+                self.reject(malformed, "INVALID_PE", "resource directory")
+
+    def test_section_order_and_gap(self):
+        data = bytearray(image("return").read_bytes())
+        layout = Layout(data)
+        left = layout.section_table + 40
+        right = left + 40
+        data[left:right], data[right:right + 40] = data[right:right + 40], data[left:right]
+        self.reject(data, "EXECUTABLE_UNSUPPORTED_STARTUP", "expected adjacent section")
+
+        data = bytearray(image("data").read_bytes())
+        layout = Layout(data)
+        # Shorten the multi-page zero tail, leaving the following .pdata RVA intact.
+        header = next(layout.section_header(start) for size, start, raw, _ in layout.sections
+                      if size > raw)
+        struct.pack_into("<I", data, header + 8, layout.u32(header + 16))
+        self.reject(data, "EXECUTABLE_UNSUPPORTED_STARTUP", "expected adjacent section")
+
+    def test_raw_data_with_zero_virtual_size(self):
+        data = bytearray(image("fault").read_bytes())
+        layout = Layout(data)
+        count = len(layout.sections)
+        header = layout.section_table + 40 * count
+        self.assertLessEqual(header + 40, layout.u32(layout.opt + 60))
+        start = layout.u32(layout.opt + 56)
+        file_alignment = layout.u32(layout.opt + 36)
+        self.assertEqual(len(data) % file_alignment, 0)
+        struct.pack_into("<H", data, layout.pe + 6, count + 1)
+        struct.pack_into("<8sIIIIIIHHI", data, header, b".extra", 0, start, file_alignment,
+                         len(data), 0, 0, 0, 0, 0x40000040)
+        data.extend(bytes(file_alignment))
+        data[-file_alignment] = 42
+
+        root = entry(data)
+        instruction = layout.file_offset(root)
+        self.assertTrue(data.startswith(bytes.fromhex("488b0d"), instruction))
+        pointer = root + 7 + struct.unpack_from("<i", data, instruction + 3)[0]
+        base = struct.unpack_from("<Q", data, layout.opt + 24)[0]
+        struct.pack_into("<Q", data, layout.file_offset(pointer), base + start)
+        struct.pack_into("<I", data, layout.opt + 56, start + layout.u32(layout.opt + 32))
+        self.reject(data, "EXECUTABLE_UNSUPPORTED_STARTUP", ".extra has raw data with zero virtual size")
 
 
 class Readiness(Workspace):
@@ -85,33 +296,13 @@ class Readiness(Workspace):
                 self.assertEqual(diagnostic["code"], "EXECUTABLE_UNSUPPORTED_STARTUP")
                 self.assertIn("alignment", diagnostic["message"])
 
-    def test_portable_codegen(self):
-        for name in NAMES:
-            with self.subTest(name=name):
-                pe = image(name)
-                compiled = run(CONTRACT, pe, check=True).stdout
-                self.assertIn("define dso_local ptr @forge_lifted_artifact(", compiled)
-                if name == "call":
-                    call = direct_call(pe.read_bytes())
-                    target = int(call["target_rva"], 16)
-                    self.assertLess(target, int(call["caller_rva"], 16))
-                    self.assertIn(f"call i1 @forge_guest_{target:x}(", compiled)
-                obj = self.dir / "artifact.o"
-                run(CONTRACT, pe, "--object", obj, OPT, LLC, check=True)
-                headers = run(READOBJ, "--file-headers", obj, check=True).stdout
-                self.assertIn("Format: Mach-O arm64", headers)
-                self.assertIn("FileType: Relocatable", headers)
-
-    def test_fixture_sections(self):
-        data = image("data").read_bytes()
-        layout = Layout(data)
-        self.assertEqual(layout.directory(0), (0, 0))  # unexported PE entry
-        root = entry(data)
-        offset = layout.file_offset(root)
-        self.assertEqual(data[offset + 7:offset + 9], b"\x83\x05")
-        zero_rva = root + 14 + struct.unpack_from("<i", data, offset + 9)[0]
-        header = layout.section_header(zero_rva)
-        self.assertGreaterEqual(zero_rva - layout.u32(header + 12), layout.u32(header + 16))
+    def test_manifest_and_integrity_diagnostics(self):
+        for requirement in ("manifest", "integrity"):
+            with self.subTest(requirement=requirement):
+                diagnostic = self.reject(image(requirement).read_bytes())
+                self.assertEqual(diagnostic["code"], "EXECUTABLE_UNSUPPORTED_STARTUP")
+                context = diagnostic["context"]
+                self.assertTrue(context["entry_recovered"] and context["recovery_complete"])
 
     def test_shared_writable_data(self):
         data = bytearray(image("data").read_bytes())
@@ -124,18 +315,6 @@ class Readiness(Workspace):
         diagnostic = self.reject(data)
         self.assertEqual(diagnostic["code"], "EXECUTABLE_UNSUPPORTED_STARTUP")
         self.assertIn("shared writable section .data", diagnostic["message"])
-
-    def test_object_failure_preserves_destination(self):
-        self.output.write_bytes(b"previous object")
-        for opt, llc, name in ((self.dir / "absent", LLC, "NATIVE_TOOL_UNAVAILABLE"),
-                               ("/usr/bin/false", LLC, "NATIVE_OPTIMIZATION_FAILED"),
-                               (OPT, "/usr/bin/false", "NATIVE_CODEGEN_FAILED")):
-            with self.subTest(opt=opt, llc=llc):
-                result = run(CONTRACT, image("return"), "--object", self.output, opt, llc)
-                self.assertEqual(result.returncode, 1)
-                self.assertIn(name, result.stderr)
-                self.assertEqual(self.output.read_bytes(), b"previous object")
-                self.assertEqual(list(self.dir.iterdir()), [self.output])
 
     def reject(self, data):
         source = self.dir / "bad.exe"
@@ -225,7 +404,78 @@ class Readiness(Workspace):
                       [dict(item, dll=item["dll"].lower()) for item in diagnostic["context"]["imports"]])
 
 
+class Reference(Workspace):
+    def test_header_result(self):
+        suite = Path(__file__).resolve().parents[1] / "differential"
+        sys.path.insert(0, str(suite))
+        sys.path.insert(0, str(suite / "reference"))
+        from docker_wine import execute
+        from fixture_images import reference_environment
+
+        pe = self.dir / "headers.exe"
+        shutil.copyfile(image("headers"), pe)
+        capture = execute(reference_environment(suite)["container_image_id"], pe, [])
+        self.assertEqual((capture.exit_code, capture.stdout, capture.stderr),
+                         (header_result(pe.read_bytes()), b"", b""))
+
+
 class Native(Workspace):
+    def test_header_reads_and_rebase(self):
+        pe = image("headers")
+        data = pe.read_bytes()
+        expected = header_result(data)
+        base = struct.unpack_from("<Q", data, Layout(data).opt + 24)[0]
+        _, runtime, sdk, *flags = LINK
+        for chosen in (base, base + 0x50000000):
+            with self.subTest(guest_base=hex(chosen)):
+                args = [CONTRACT, "--guest-base", hex(chosen), pe]
+                obj = self.dir / "headers.o"
+                run(*args, "--object", obj, OPT, LLC, check=True)
+                run("/usr/bin/xcrun", "--sdk", sdk, "clang++", "-arch", "arm64", *flags,
+                    PROCESS_HARNESS, obj, runtime, "-o", self.output, check=True)
+                process = run(self.output, "run", "0", "0", check=True)
+                self.assertEqual(process.stdout.splitlines()[-1], f"return {expected}")
+                self.assertEqual(process.stderr, "")
+                run(*args, self.output, OPT, LLC, "/usr/bin/xcrun", *LINK, check=True)
+                program = run(self.output)
+                self.assertEqual((program.returncode, program.stdout, program.stderr),
+                                 (expected & 255, "", ""))
+        self.compile(pe)
+        program = run(self.output)
+        self.assertEqual((program.returncode, program.stdout, program.stderr), (expected & 255, "", ""))
+
+    def test_header_permissions_and_bounds(self):
+        pe = self.dir / "bounds.exe"
+        data = bytearray(image("headers").read_bytes())
+        layout = Layout(data)
+        root = entry(data)
+        start = layout.file_offset(root)
+        base = struct.unpack_from("<Q", data, layout.opt + 24)[0]
+        length = layout.u32(layout.opt + 60)
+        pointer = next(rva for _, rva, _, _ in layout.sections
+                       if data.startswith(b".data\0", layout.section_header(rva)))
+        pointer_offset = layout.file_offset(pointer)
+        self.assertEqual(struct.unpack_from("<Q", data, pointer_offset)[0], base)
+        data[length - 1] = 87
+        # mov rcx,[rip+pointer]; xor eax,eax; execute the checked load/store; ret
+        load_pointer = bytes.fromhex("488b0d") + struct.pack("<i", pointer - root - 7) + bytes.fromhex("31c0")
+        for offset, operation, status, detail in (
+            (length - 1, "0fb601", 87, ""),
+            (length - 1, "8b01", 125, f"address={hex(base + length)} access=1 reason=2"),
+            (0, "8901", 125, f"address={hex(base)} access=2 reason=3"),
+            (0, "0101", 125, f"address={hex(base)} access=3 reason=3"),
+        ):
+            with self.subTest(offset=offset, operation=operation):
+                code = load_pointer + bytes.fromhex(operation) + b"\xc3"
+                data[start:start + len(code)] = code
+                struct.pack_into("<Q", data, pointer_offset, base + offset)
+                pe.write_bytes(data)
+                self.compile(pe)
+                result = run(self.output)
+                expected_error = f"forge: guest memory fault {detail}\n" if detail else ""
+                self.assertEqual((result.returncode, result.stdout, result.stderr),
+                                 (status, "", expected_error))
+
     def test_full_process_result_and_isolation(self):
         # A shell status cannot expose the full DWORD, and separate host launches
         # cannot reveal accidentally shared mutable globals. Use the existing
@@ -338,4 +588,6 @@ class Native(Workspace):
 if __name__ == "__main__":
     if MODE == "native" and (platform.system(), platform.machine()) != ("Darwin", "arm64"):
         sys.exit(77)
-    unittest.main(argv=[__file__, "Native" if MODE == "native" else "Readiness"], verbosity=2)
+    suites = {"compiler": ("Portable", "StartupAdmission"), "object": ("Object",),
+              "readiness": ("Readiness",), "native": ("Native",), "reference": ("Reference",)}
+    unittest.main(argv=[__file__, *suites[MODE]], verbosity=2)

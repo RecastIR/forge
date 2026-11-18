@@ -122,15 +122,9 @@ namespace forge::x86 {
 
         // The Windows loader must resolve eager imports even if the recovered group never
         // calls them. Only the production catalogue can satisfy them in a standalone image.
-        void validateEagerImports(const ValidatedEntry &entry, ExecutableReadiness &readiness) {
-            const auto &image = entry.analysis.image();
-            const auto &bindings = image.importBindings();
-
-            if (bindings.entries().empty()) {
-                return;
-            }
-
-            const auto writes = image.loaderWrittenRanges();
+        void validateEagerImports(const ValidatedEntry &entry, llvm::ArrayRef<RvaRange> writes,
+                                  ExecutableReadiness &readiness) {
+            const auto &bindings = entry.analysis.image().importBindings();
 
             for (const auto &descriptor : bindings.entries()) {
                 if (descriptor.delayed || descriptor.bound || descriptor.symbols.empty()) {
@@ -151,7 +145,26 @@ namespace forge::x86 {
 
     void validateExecutableStartup(const ValidatedEntry &entry, const RecoveredFunctionGroup &group,
                                    uint64_t guestBase, ExecutableReadiness &readiness) {
-        entry.analysis.image().validateExecutableLayout(guestBase);
+        const auto &image = entry.analysis.image();
+        image.validateExecutableLayout(guestBase);
+
+        // A standalone artifact publishes the original header bytes even at a relocated base.
+        const RvaRange headers{0, image.headerBytes().size()};
+
+        if (const auto *relocation = entry.relocations.firstOverlap(headers)) {
+            throw InspectionError("unsupported relocation in PE headers at RVA " +
+                                      hex(relocation->rva),
+                                  FailureCode::ExecutableStartup);
+        }
+
+        const auto writes = image.loaderWrittenRanges();
+        const auto headerWrites = rangesIn(writes, headers);
+
+        if (!headerWrites.empty()) {
+            throw InspectionError("unsupported loader write in PE headers at RVA " +
+                                      hex(headerWrites.front().begin),
+                                  FailureCode::ExecutableStartup);
+        }
 
         for (const auto &function : entry.analysis.functions()) {
             if (function.eligible() && function.hasUnwindHandler &&
@@ -165,6 +178,6 @@ namespace forge::x86 {
             }
         }
 
-        validateEagerImports(entry, readiness);
+        validateEagerImports(entry, writes, readiness);
     }
 } // namespace forge::x86

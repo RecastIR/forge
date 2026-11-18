@@ -8,30 +8,6 @@
 
 namespace forge::cli {
     namespace {
-        ExecutableToolchain executableTools() {
-            const std::filesystem::path llvmTools(FORGE_LLVM_TOOLS);
-            ExecutableToolchain tools;
-            tools.opt = llvmTools / "opt";
-            tools.llc = llvmTools / "llc";
-            tools.xcrun = "/usr/bin/xcrun";
-            tools.startup = FORGE_STARTUP_ARCHIVE;
-            tools.runtime = FORGE_RUNTIME_ARCHIVE;
-
-            if constexpr (!std::string_view(FORGE_MACOS_SDK).empty()) {
-                tools.sdk = FORGE_MACOS_SDK;
-            }
-
-            if constexpr (!std::string_view(FORGE_MACOS_DEPLOYMENT_TARGET).empty()) {
-                tools.linkFlags.emplace_back("-mmacosx-version-min=" FORGE_MACOS_DEPLOYMENT_TARGET);
-            }
-
-            if constexpr (FORGE_SANITIZED_RUNTIME) {
-                tools.linkFlags.emplace_back("-fsanitize=address,undefined");
-            }
-
-            return tools;
-        }
-
         uint32_t parseRva(std::string_view value) {
             int base = 10;
 

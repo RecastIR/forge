@@ -704,7 +704,7 @@ namespace forge::x86 {
                                EntryMode mode, bool checkedMemory, LiftOutput output) try {
         GroupAnalysis result;
         ImageMemory image(group.image(), guestBase,
-                          checkedMemory || output == LiftOutput::ProcessArtifact);
+                          checkedMemory || output == LiftOutput::ProcessArtifact, mode);
 
         if (output == LiftOutput::ProcessArtifact) {
             const auto &root = group.function(group.root());

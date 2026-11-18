@@ -8,6 +8,18 @@
 #include <string_view>
 
 int main(int argc, char **argv) try {
+    std::optional<uint64_t> guestBase;
+    if (argc >= 4 && std::string_view(argv[1]) == "--guest-base") {
+        uint64_t value;
+        if (llvm::StringRef(argv[2]).getAsInteger(0, value)) {
+            throw std::invalid_argument("invalid guest base");
+        }
+
+        guestBase = value;
+        argc -= 2;
+        argv += 2;
+    }
+
     const bool object = argc == 6 && std::string_view(argv[2]) == "--object";
 
     if (argc != 2 && !object && argc < 9) {
@@ -21,7 +33,7 @@ int main(int argc, char **argv) try {
         forge::DebugInfo::Omit);
     llvm::LLVMContext context;
     forge::ExecutableReadiness readiness;
-    const auto module = forge::generateExecutableIR(analysis, std::nullopt, context, readiness);
+    const auto module = forge::generateExecutableIR(analysis, guestBase, context, readiness);
 
     if (argc == 2) {
         module->print(llvm::outs(), nullptr);

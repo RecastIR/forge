@@ -20,6 +20,7 @@ namespace forge::cli {
         ExecutableToolchain toolchain;
     };
 
+    ExecutableToolchain executableTools();
     void registerLift(CLI::App &app, LiftOptions &options, int &status);
     int executeLift(const LiftOptions &options, llvm::raw_ostream &err);
 } // namespace forge::cli

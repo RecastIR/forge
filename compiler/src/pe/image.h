@@ -196,6 +196,10 @@ namespace forge {
 
         const Module &module() const { return metadata; }
 
+        // Borrow exactly the validated SizeOfHeaders bytes from the input snapshot.
+        llvm::StringRef headerBytes() const &;
+        llvm::StringRef headerBytes() const && = delete;
+
         // Both the section and bytes in a returned range borrow this image.
         // Omitting size maps to the end of the file-backed extent.
         std::optional<MappedRange> mapRva(uint64_t rva,

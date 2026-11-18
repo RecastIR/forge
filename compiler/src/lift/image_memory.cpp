@@ -352,8 +352,10 @@ namespace forge::x86 {
 
     } // namespace
 
-    ImageMemory::ImageMemory(const ParsedImage &image, uint64_t guestLoadBase, bool checkedMemory)
-        : source(image), loadBase(guestLoadBase) {
+    ImageMemory::ImageMemory(const ParsedImage &image, uint64_t guestLoadBase, bool checkedMemory,
+                             EntryMode mode)
+        : source(image), loadBase(guestLoadBase),
+          executableHeaders(mode == EntryMode::PeEntry ? image.headerBytes() : StringRef{}) {
         if (checkedMemory) {
             // The process reserves the entire image, even when no resolver rows are emitted.
             const auto size = image.module().sizeOfImage;
@@ -416,7 +418,23 @@ namespace forge::x86 {
         }
 
         const auto rva = va - loadBase;
+
+        if (rva < executableHeaders.size()) {
+            if (write) {
+                step.reject(FailureCode::ImageMemory,
+                            "output argument at guest VA " + hex(va) +
+                                " requires writable PE data or the guest stack");
+            }
+
+            if (size && *size > executableHeaders.size() - rva) {
+                selectServiceSections(step, rva, *size, false);
+            }
+
+            return;
+        }
+
         const auto *section = source.sectionAtRva(rva);
+
         if (!section || section->permissions[2] == 'x' ||
             (!section->immutable() && !section->writableData())) {
             step.reject(
@@ -438,6 +456,7 @@ namespace forge::x86 {
         }
 
         const uint64_t end = uint64_t(section->rva) + section->virtualSize;
+
         if (!size) {
             // Unbounded counts and mutable terminators can reach anywhere in this section.
             select(step, *section, {section->rva, end});
@@ -449,8 +468,13 @@ namespace forge::x86 {
             return;
         }
 
-        // Each backing belongs to one PE section. A bounded transfer may touch several,
-        // including a valid subrange after a gap. finish() preserves protected holes.
+        selectServiceSections(step, rva, *size, write);
+    }
+
+    // A bounded transfer may touch several sections, including a valid subrange after a gap.
+    // finish() preserves protected holes in each selected backing.
+    void ImageMemory::selectServiceSections(const Step &step, uint64_t rva, uint64_t size,
+                                            bool write) {
         for (const auto &part : source.module().sections) {
             if (!part.writableData() &&
                 (write || !part.immutable() || part.permissions[2] == 'x')) {
@@ -460,8 +484,9 @@ namespace forge::x86 {
             const uint64_t first = std::max<uint64_t>(rva, part.rva);
             const uint64_t limit = uint64_t(part.rva) + part.virtualSize;
             const uint64_t skip = first - rva;
-            if (first < limit && skip < *size) {
-                select(step, part, {first, first + std::min(limit - first, *size - skip)});
+
+            if (first < limit && skip < size) {
+                select(step, part, {first, first + std::min(limit - first, size - skip)});
             }
         }
     }
@@ -489,6 +514,15 @@ namespace forge::x86 {
     }
 
     void ImageMemory::fixedImageAccess(const Step &step, RvaRange access, bool write) {
+        if (access.begin < executableHeaders.size() && access.end <= executableHeaders.size()) {
+            if (write) {
+                step.reject(FailureCode::ImageMemory,
+                            "write to immutable PE headers at VA " + hex(loadBase + access.begin));
+            }
+
+            return;
+        }
+
         const auto *section = source.sectionAtRva(access.begin);
 
         if (!section || (!section->immutable() && !section->writableData()) ||
@@ -655,12 +689,24 @@ namespace forge::x86 {
         ImagePlan plan;
         plan.loadBase = loadBase;
         plan.sizeOfImage = source.module().sizeOfImage;
-        uint64_t embedded = 0;
-        uint64_t immutableExtent = 0;
+        uint64_t embedded = executableHeaders.size();
+        uint64_t immutableExtent = executableHeaders.size();
         uint64_t writableExtent = 0;
 
         const auto spans = selectedSpans();
-        plan.backings.reserve(spans.size());
+        plan.backings.reserve(spans.size() + !executableHeaders.empty());
+
+        if (!executableHeaders.empty()) {
+            if (immutableExtent > moduleLimit) {
+                throw InspectionError("PE header extent " + hex(immutableExtent) +
+                                          " exceeds module limit " + hex(moduleLimit),
+                                      FailureCode::ImageMemory);
+            }
+
+            const RvaRange headers{0, immutableExtent};
+            plan.backings.push_back(
+                {headers, false, false, {executableHeaders.str(), {}}, {headers}});
+        }
 
         for (const auto &span : spans) {
             const bool writable = span.section->writableData();

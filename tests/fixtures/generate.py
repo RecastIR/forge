@@ -56,8 +56,16 @@ def generate(output, mc, link, dlltool, clang):
         sources = Path(__file__).resolve().parent
         for name in ("executable-return", "executable-call", "executable-data", "executable-fault"):
             image(f"{name}.exe", (sources / f"{name}.s").read_text())
+        returns = (sources / "executable-return.s").read_text()
+        image("executable-integrity.exe", returns, link_flags=["/integritycheck"])
+        image("executable-manifest.exe", returns, link_flags=[
+            "/manifest:embed",
+            "/manifestdependency:type='win32' name='Forge.Missing' version='1.0.0.0' processorArchitecture='amd64'",
+        ])
         image("executable-last-error.exe", (sources / "executable-last-error.s").read_text(),
               [("KERNEL32.dll", name) for name in ("SetLastError", "GetLastError")])
+        image("executable-headers.exe", (sources / "executable-headers.s").read_text(),
+              [("KERNEL32.dll", "lstrlenA")], link_flags=["/dynamicbase:no", "/fixed:no"])
         # Remap debug paths so builds in different source directories produce identical PEs.
         for name in ("add", "inlined"):
             run(clang, "--target=x86_64-windows-msvc", "-O2", "-fwrapv", "-gdwarf-4", "-g",
