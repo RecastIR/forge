@@ -2,6 +2,8 @@ add_library(forge_runtime STATIC
   src/core/runtime.cpp
   src/core/registration.cpp
   src/core/guest_memory.cpp
+  src/core/heap.cpp
+  src/compat/process_state.cpp
   src/compat/crt/msvcrt.cpp
   src/compat/crt/process_heap.cpp
   src/compat/crt/crt_parameters.cpp
@@ -10,6 +12,7 @@ add_library(forge_runtime STATIC
   src/compat/win32/standard_handles.cpp
   src/platform/darwin/io.cpp
   src/platform/darwin/wait.cpp
+  src/managed_process.cpp
   src/core/process.cpp
   src/compat/win32/process_parameters.cpp)
 # The sleep adapter test links its own copy of wait.cpp with controlled host calls.

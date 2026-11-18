@@ -1,4 +1,5 @@
 #include "../../core/instance.h"
+#include "../process_state.h"
 #include "forge/msvcrt_process.h"
 
 #include <algorithm>
@@ -11,78 +12,42 @@ namespace {
     constexpr size_t allocationCharge = 256;
     constexpr int32_t windowsEnomem = 12;
 
-    forge_rt_status activeHeap(const forge_rt_instance &instance, forge_rt_thread_token thread) {
-        if (!instance.managedExecution || !instance.parameters) {
-            return FORGE_RT_INVALID_STATE;
-        }
-
-        const auto found = instance.threads.find(thread);
-
-        if (found == instance.threads.end()) {
-            return FORGE_RT_INVALID_THREAD;
-        }
-
-        if (!executingInvocation || found->second.invocation != executingInvocation ||
-            instance.managedExecution->thread != thread) {
-            return FORGE_RT_INVALID_INVOCATION;
-        }
-
-        return FORGE_RT_OK;
-    }
-
-    forge_rt_status exhausted(forge_rt_instance &instance, uint64_t &address) {
-        instance.parameters->crtErrno = windowsEnomem;
+    forge_rt_status exhausted(WindowsProcessState &windows, uint64_t &address) {
+        windows.crtErrno = windowsEnomem;
         address = 0;
         return FORGE_RT_OK;
     }
 
-    forge_rt_status allocate(forge_rt_instance &instance, uint64_t size, uint64_t &address) {
+    forge_rt_status allocate(forge_rt_instance &instance, uint64_t size, uint64_t &address,
+                             std::span<uint8_t> *bytes = nullptr) {
+        auto &windows = *instance.windows;
         size = std::max<uint64_t>(size, 1);
 
         if (size > heapBudget - allocationCharge ||
-            size + allocationCharge > heapBudget - instance.heapUsage) {
-            return exhausted(instance, address);
+            size + allocationCharge > heapBudget - windows.heapUsage) {
+            return exhausted(windows, address);
         }
 
-        auto base = findGuestAllocation(instance.reservations, size, 16, instance.nextHeapAddress);
-
-        if (!base) {
-            base = findGuestAllocation(instance.reservations, size, 16);
-        }
-
-        if (!base) {
-            return exhausted(instance, address);
-        }
-
+        HeapBlock *block = nullptr;
         try {
-            // Make both potentially allocating publications transactional. publishOwnedImage
-            // requires one reservation and cannot throw after claiming the backing.
-            auto &ranges = instance.reservations;
-
-            if (ranges.capacity() == ranges.size()) {
-                ranges.reserve(std::max(ranges.size() + 1, 2 * ranges.size()));
-            }
-
-            const auto [entry, inserted] =
-                instance.heap.try_emplace(base, base, static_cast<size_t>(size));
-
-            if (!inserted) {
-                return FORGE_RT_INTERNAL_ERROR;
-            }
-
-            const auto status = publishOwnedImage(instance, entry->second.image);
-
+            const auto status = allocateHeapBlock(instance, static_cast<size_t>(size), block);
             if (status != FORGE_RT_OK) {
-                instance.heap.erase(entry);
                 return status;
             }
         } catch (const std::bad_alloc &) {
-            return exhausted(instance, address);
+            return exhausted(windows, address);
         }
 
-        instance.heapUsage += static_cast<size_t>(size) + allocationCharge;
-        instance.nextHeapAddress = (base + size + 15) & ~uint64_t{15};
-        address = base;
+        if (!block) {
+            return exhausted(windows, address);
+        }
+
+        windows.heapUsage += static_cast<size_t>(size) + allocationCharge;
+        address = block->image.base;
+        if (bytes) {
+            *bytes = block->bytes;
+        }
+
         return FORGE_RT_OK;
     }
 } // namespace
@@ -97,13 +62,12 @@ forge_rt_status CrtParameters::copyArguments(forge_rt_instance &owner, uint64_t 
         size += argument.size() + 1;
     }
 
-    const auto status = allocate(owner, size, address);
+    std::span<uint8_t> buffer;
+    const auto status = allocate(owner, size, address, &buffer);
 
     if (status != FORGE_RT_OK || !address) {
         return status;
     }
-
-    auto &buffer = owner.heap.at(address).bytes;
 
     for (size_t i = 0; i < arguments.size(); ++i) {
         const auto pointer = address + cursor;
@@ -124,14 +88,14 @@ extern "C" forge_rt_status forge_rt_msvcrt_calloc(forge_rt_instance *instance,
     }
 
     return withInstance(instance, [&](auto &owner) {
-        const auto status = activeHeap(owner, thread);
+        const auto status = checkManagedInvocation(owner, thread);
 
         if (status != FORGE_RT_OK) {
             return status;
         }
 
         if (count && size > UINT64_MAX / count) {
-            return exhausted(owner, *outAddress);
+            return exhausted(*owner.windows, *outAddress);
         }
 
         return allocate(owner, count * size, *outAddress);
@@ -148,30 +112,19 @@ extern "C" forge_rt_status forge_rt_msvcrt_free(forge_rt_instance *instance,
                                                 forge_rt_thread_token thread,
                                                 uint64_t address) noexcept {
     return withInstance(instance, [&](auto &owner) {
-        const auto status = activeHeap(owner, thread);
+        const auto status = checkManagedInvocation(owner, thread);
 
         if (status != FORGE_RT_OK || !address) {
             return status;
         }
 
-        const auto block = owner.heap.find(address);
-
-        if (block == owner.heap.end()) {
-            return FORGE_RT_INVALID_ARGUMENT;
+        size_t releasedSize = 0;
+        const auto released = freeHeapBlock(owner, address, releasedSize);
+        if (released == FORGE_RT_OK) {
+            owner.windows->heapUsage -= releasedSize + allocationCharge;
         }
 
-        auto &ranges = owner.reservations;
-        const auto range = std::ranges::lower_bound(ranges, address, {}, &Reservation::base);
-
-        if (range == ranges.end() || range->image != &block->second.image) {
-            return FORGE_RT_INTERNAL_ERROR;
-        }
-
-        ranges.erase(range);
-        owner.heapUsage -= block->second.bytes.size() + allocationCharge;
-        owner.nextHeapAddress = std::min(owner.nextHeapAddress, address);
-        owner.heap.erase(block);
-        return FORGE_RT_OK;
+        return released;
     });
 }
 
@@ -183,10 +136,10 @@ extern "C" forge_rt_status forge_rt_msvcrt_errno(forge_rt_instance *instance,
     }
 
     return withInstance(instance, [&](const auto &owner) {
-        const auto status = activeHeap(owner, thread);
+        const auto status = checkManagedInvocation(owner, thread);
 
         if (status == FORGE_RT_OK) {
-            *outAddress = owner.parameters->rows[2].start;
+            *outAddress = owner.windows->rows[WindowsProcessState::errnoRow].start;
         }
 
         return status;

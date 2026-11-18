@@ -86,7 +86,7 @@ class BuildConfig(BuildCase):
         ctest = CMAKE.parent / "ctest"
         self.invoke(CMAKE, "--build", build, "--parallel", "4", env=env)
         self.assertTrue((build / "libforge_runtime.a").is_file())
-        native_tests = {"runtime_contract", "runtime_sleep_adapter", "runtime_c_smoke"}
+        native_tests = {"runtime_contract", "runtime_process_admission", "runtime_sleep_adapter", "runtime_c_smoke"}
         self.assertEqual(self.configured_tests(build, env), native_tests)
         self.invoke(ctest, "--test-dir", build, "--output-on-failure", "--no-tests=error", env=env)
 

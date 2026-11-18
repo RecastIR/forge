@@ -1,3 +1,5 @@
+#include "standard_handles.h"
+
 #include "../../core/instance.h"
 
 namespace forge::runtime {

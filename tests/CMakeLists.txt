@@ -15,6 +15,11 @@ if(BUILD_TESTING OR CMAKE_EXPORT_COMPILE_COMMANDS)
   target_link_libraries(runtime_contract PRIVATE forge_runtime Threads::Threads)
   configure_forge_cxx(runtime_contract)
 
+  # Keep the replacement allocation functions local to the managed admission test.
+  add_executable(runtime_process_admission unit/runtime_process_admission.cpp)
+  target_link_libraries(runtime_process_admission PRIVATE forge_runtime)
+  configure_forge_cxx(runtime_process_admission)
+
   set(wait_source ../runtime/src/platform/darwin/wait.cpp)
   add_executable(runtime_sleep_adapter unit/runtime_sleep_adapter.cpp ${wait_source})
   # These source properties apply only to the copy built in this directory.
@@ -39,11 +44,13 @@ if(BUILD_TESTING OR CMAKE_EXPORT_COMPILE_COMMANDS)
 
   if(BUILD_TESTING)
     add_test(NAME runtime_contract COMMAND runtime_contract)
+    add_test(NAME runtime_process_admission COMMAND runtime_process_admission)
     add_test(NAME runtime_sleep_adapter COMMAND runtime_sleep_adapter)
-    set_tests_properties(runtime_contract runtime_sleep_adapter PROPERTIES TIMEOUT 60)
+    set_tests_properties(runtime_contract runtime_process_admission runtime_sleep_adapter PROPERTIES TIMEOUT 60)
     add_test(NAME runtime_c_smoke COMMAND runtime_c_smoke)
   else()
-    set_target_properties(runtime_contract runtime_sleep_adapter runtime_c_smoke PROPERTIES EXCLUDE_FROM_ALL ON)
+    set_target_properties(runtime_contract runtime_process_admission runtime_sleep_adapter runtime_c_smoke
+      PROPERTIES EXCLUDE_FROM_ALL ON)
   endif()
 
   # Core-only and standalone runtime builds can use a reduced LLVM tool package.

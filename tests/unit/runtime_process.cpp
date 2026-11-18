@@ -397,6 +397,49 @@ namespace {
         }
     }
 
+    void checkHeapBudgetRefund() {
+        const auto artifact = artifactWith([](forge_rt_execution *execution) {
+            auto *instance = execution->instance;
+            const auto thread = execution->thread;
+            const auto allocate = [&](uint64_t size) {
+                uint64_t address = UINT64_MAX;
+                REQUIRE(forge_rt_msvcrt_malloc(instance, thread, size, &address) == FORGE_RT_OK);
+                return address;
+            };
+            constexpr auto budget = uint64_t{64} * 1024 * 1024;
+            constexpr uint64_t charge = 256;
+            constexpr uint64_t anchorSize = 1;
+            constexpr uint64_t remainingPayload = budget - (anchorSize + charge) - charge;
+            const auto anchor = allocate(anchorSize);
+            const auto probe = allocate(17);
+            REQUIRE(anchor && probe && anchor != probe);
+
+            // The live anchor keeps both boundary requests below the per-allocation maximum.
+            REQUIRE(forge_rt_msvcrt_free(instance, thread, probe) == FORGE_RT_OK);
+            REQUIRE(allocate(remainingPayload + 1) == 0);
+            uint64_t errnoAddress = 0;
+            forge_rt_invocation_token token = 0;
+            forge_rt_memory_fault fault{};
+            int32_t error = 0;
+            REQUIRE(forge_rt_msvcrt_errno(instance, thread, &errnoAddress) == FORGE_RT_OK);
+            REQUIRE(forge_rt_current_invocation(instance, thread, &token) == FORGE_RT_OK);
+            REQUIRE(forge_rt_read_guest(instance, thread, token, errnoAddress, sizeof(error),
+                                        &error, sizeof(error), &fault) == FORGE_RT_OK &&
+                    error == 12);
+
+            const auto block = allocate(remainingPayload);
+            REQUIRE(block != 0);
+            REQUIRE(forge_rt_msvcrt_free(instance, thread, block) == FORGE_RT_OK);
+            REQUIRE(forge_rt_msvcrt_free(instance, thread, anchor) == FORGE_RT_OK);
+            execution->result = {FORGE_RT_RETURNED, FORGE_RT_OK, 0, {}, 0};
+        });
+        const auto process = create();
+        REQUIRE(forge_rt_process_register(process.get(), &artifact) == FORGE_RT_OK);
+        forge_rt_process_result result{};
+        REQUIRE(forge_rt_process_run(process.get(), nullptr, &result) == FORGE_RT_OK &&
+                result.kind == FORGE_RT_RETURNED);
+    }
+
     void inspectCrtArguments(forge_rt_execution *execution) {
         const auto thread = execution->thread;
         auto *instance = execution->instance;
@@ -721,6 +764,29 @@ namespace {
         REQUIRE(forge_rt_process_register(process.get(), &artifact) == FORGE_RT_INVALID_STATE);
     }
 
+    void checkCloseCreated() {
+        const auto process = create();
+        REQUIRE(forge_rt_process_close(process.get()) == FORGE_RT_OK);
+        expectState(process.get(), FORGE_RT_PROCESS_CLOSED);
+        REQUIRE(forge_rt_process_close(process.get()) == FORGE_RT_OK);
+        REQUIRE(forge_rt_process_allow_host_output_signals(process.get()) ==
+                FORGE_RT_INVALID_STATE);
+        rejectRun(process.get(), FORGE_RT_INVALID_STATE);
+    }
+
+    void checkInvalidExitCode() {
+        const auto artifact = artifactWith([](forge_rt_execution *execution) {
+            execution->result = {FORGE_RT_EXIT_PROCESS, FORGE_RT_OK, UINT64_C(0x100000000), {}, 0};
+        });
+        const auto process = create();
+        REQUIRE(forge_rt_process_register(process.get(), &artifact) == FORGE_RT_OK);
+        forge_rt_process_result result{};
+        REQUIRE(forge_rt_process_run(process.get(), nullptr, &result) == FORGE_RT_OK);
+        REQUIRE(result.kind == FORGE_RT_RUNTIME_FAILURE &&
+                result.status == FORGE_RT_INTERNAL_ERROR);
+        expectState(process.get(), FORGE_RT_PROCESS_FAULTED);
+    }
+
     void checkScalarBoundaries() {
         const auto artifact = artifactWith([](forge_rt_execution *execution) {
             constexpr auto address = FORGE_RT_ENTRY_RSP - 1;
@@ -791,15 +857,18 @@ namespace {
 } // namespace
 
 void testRuntimeProcess() {
+    checkCloseCreated();
     checkRegistration();
     checkParameters();
     checkHeap();
+    checkHeapBudgetRefund();
     checkCrtArguments();
     checkFunctionImports();
     checkCrtInputConsumers();
     checkIsolation();
     checkUnmanagedExceptionFilter();
     checkExitProcess();
+    checkInvalidExitCode();
     checkScalarBoundaries();
     checkFaultCleanup();
 }

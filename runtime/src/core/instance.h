@@ -1,20 +1,20 @@
 #pragma once
 
-#include "../compat/win32/process_parameters.h"
-#include "../compat/win32/standard_handles.h"
 #include "forge/runtime.h"
 
 #include <map>
 #include <mutex>
 #include <new>
-#include <optional>
 #include <span>
 #include <stdexcept>
 #include <unordered_map>
 #include <vector>
 
 namespace forge::runtime {
+    struct WindowsProcessState;
+
     struct Thread {
+        // This cell follows the guest thread in both standalone and managed execution.
         uint32_t lastError = 0;
         forge_rt_invocation_token invocation = 0;
         forge_rt_invocation_token parent = 0;
@@ -36,6 +36,9 @@ namespace forge::runtime {
             : bytes(size), region{base, size, bytes.data(), FORGE_RT_READ | FORGE_RT_WRITE, &claim},
               image{base, size, &region, 1} {}
 
+        HeapBlock(const HeapBlock &) = delete;
+        HeapBlock &operator=(const HeapBlock &) = delete;
+
         std::vector<uint8_t> bytes;
         uint64_t claim = 0;
         forge_rt_image_region region;
@@ -50,25 +53,38 @@ namespace forge::runtime {
 } // namespace forge::runtime
 
 struct forge_rt_execution;
+struct forge_rt_process_result;
 
 struct forge_rt_instance {
     std::mutex mutex;
     std::unordered_map<forge_rt_thread_token, forge::runtime::Thread> threads;
-    std::optional<forge::runtime::ProcessParameters> parameters;
     std::map<uint64_t, forge::runtime::HeapBlock> heap;
-    size_t heapUsage = 0;
     uint64_t nextHeapAddress = 65536;
     std::vector<forge::runtime::Reservation> reservations;
-    std::optional<forge::runtime::StandardHandles> standardHandles;
-    uint64_t topLevelExceptionFilter = 0;
-    // Borrows the owning process's stable execution record until this instance is destroyed.
-    // Only the owner admits and retires executions. Only the active guest thread can publish exit.
+    // Both borrows are installed together on the unpublished occurrence after registration.
+    forge::runtime::WindowsProcessState *windows = nullptr;
     forge_rt_execution *managedExecution = nullptr;
 };
 
 namespace forge::runtime {
     // Caller holds the process mapping lock and supplies stable, private registered storage.
     forge_rt_status publishOwnedImage(forge_rt_instance &instance, const forge_rt_image &image);
+    // Caller holds the same lock. A vacant address may be unavailable (OK with a null
+    // block). A published block stays stable until free or process retirement.
+    forge_rt_status allocateHeapBlock(forge_rt_instance &instance, size_t size,
+                                      HeapBlock *&outBlock);
+    forge_rt_status freeHeapBlock(forge_rt_instance &instance, uint64_t address,
+                                  size_t &releasedSize);
+
+    // The caller holds the instance lock. Terminal actions also require an empty result.
+    forge_rt_status checkManagedInvocation(const forge_rt_instance &owner,
+                                           forge_rt_thread_token thread) noexcept;
+    forge_rt_status checkPendingExecution(const forge_rt_instance &owner,
+                                          forge_rt_thread_token thread) noexcept;
+    // Validate the active execution and publish its tagged result under one lock.
+    forge_rt_status publishTerminalResult(forge_rt_instance *instance, forge_rt_thread_token thread,
+                                          const forge_rt_process_result &result) noexcept;
+
     enum class Admission : uint8_t { Host, Process };
     forge_rt_status enterInvocation(forge_rt_instance *instance, forge_rt_thread_token thread,
                                     const forge_rt_image *image, const forge_rt_stack *stack,

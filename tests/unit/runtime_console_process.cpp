@@ -5,6 +5,7 @@
 #include <csignal>
 #include <cstdio>
 #include <cstdlib>
+#include <cstring>
 #include <fcntl.h>
 #include <iterator>
 #include <memory>
@@ -195,6 +196,17 @@ namespace {
         }
     }
 
+    // The caller owns the read end. Once stdout is restored only a captured duplicate can write.
+    int captureRegistrationOutput(auto registerProcess) {
+        int ends[2];
+        REQUIRE(pipe(ends) == 0 && fcntl(ends[0], F_SETFL, O_NONBLOCK) == 0);
+        const int saved = fcntl(STDOUT_FILENO, F_DUPFD_CLOEXEC, 3);
+        REQUIRE(saved >= 0 && dup2(ends[1], STDOUT_FILENO) == STDOUT_FILENO && close(ends[1]) == 0);
+        registerProcess();
+        REQUIRE(dup2(saved, STDOUT_FILENO) == STDOUT_FILENO && close(saved) == 0);
+        return ends[0];
+    }
+
     void checkCaptureCleanup(bool reject, size_t completion = std::size(completions)) {
         auto testRegion = region;
 
@@ -206,17 +218,14 @@ namespace {
         forge_rt_process *raw = nullptr;
         REQUIRE(forge_rt_process_create(FORGE_RT_ABI_VERSION, &raw) == FORGE_RT_OK);
         Process process(raw, forge_rt_process_destroy);
-        int ends[2];
-        REQUIRE(pipe(ends) == 0 && fcntl(ends[0], F_SETFL, O_NONBLOCK) == 0);
-        const int saved = fcntl(STDOUT_FILENO, F_DUPFD_CLOEXEC, 3);
-        REQUIRE(saved >= 0 && dup2(ends[1], STDOUT_FILENO) == STDOUT_FILENO && close(ends[1]) == 0);
-        const auto status = forge_rt_process_register(process.get(), &artifact);
-        REQUIRE(status == (reject ? FORGE_RT_INVALID_ARGUMENT : FORGE_RT_OK));
-        REQUIRE(dup2(saved, STDOUT_FILENO) == STDOUT_FILENO && close(saved) == 0);
+        const int reader = captureRegistrationOutput([&] {
+            const auto status = forge_rt_process_register(process.get(), &artifact);
+            REQUIRE(status == (reject ? FORGE_RT_INVALID_ARGUMENT : FORGE_RT_OK));
+        });
         char byte;
 
         if (!reject) {
-            REQUIRE(read(ends[0], &byte, 1) == -1 && errno == EAGAIN);
+            REQUIRE(read(reader, &byte, 1) == -1 && errno == EAGAIN);
 
             if (completion < std::size(completions)) {
                 const auto result = run(process, completion);
@@ -227,7 +236,100 @@ namespace {
         }
 
         // EOF proves even the staged duplicate expired, while the process handle is still live.
-        REQUIRE(read(ends[0], &byte, 1) == 0 && close(ends[0]) == 0);
+        REQUIRE(read(reader, &byte, 1) == 0 && close(reader) == 0);
+    }
+
+    void writeRegisteredEnvironment(forge_rt_execution *execution) {
+        auto *instance = execution->instance;
+        const auto thread = execution->thread;
+        forge_rt_invocation_token token = 0;
+        REQUIRE(forge_rt_current_invocation(instance, thread, &token) == FORGE_RT_OK);
+        forge_rt_memory_fault fault{};
+        const auto readPointer = [&](uint64_t address) {
+            uint64_t value = 0;
+            REQUIRE(forge_rt_read_guest(instance, thread, token, address, sizeof(value), &value,
+                                        sizeof(value), &fault) == FORGE_RT_OK);
+            return value;
+        };
+        const auto environmentCell = readPointer(source);
+        const auto environment = readPointer(environmentCell);
+        const auto variable = readPointer(environment);
+        const auto function = readPointer(source + sizeof(uint64_t));
+        REQUIRE(function != 0);
+        REQUIRE(forge_rt_validate_guest(instance, thread, token, function, 1, FORGE_RT_READ,
+                                        &fault) == FORGE_RT_GUEST_FAULT);
+        REQUIRE(fault.address == function && fault.reason == FORGE_RT_FAULT_UNMAPPED);
+
+        const auto output = handle(*execution, stdOutput);
+        int32_t success = 0;
+        REQUIRE(forge_rt_write_file(instance, thread, output, variable, sizeof("FORGE=retry"),
+                                    countSlot, 0, &success, &fault) == FORGE_RT_OK &&
+                success == 1);
+        execution->result = {FORGE_RT_RETURNED, FORGE_RT_OK, 42, {}, 0};
+    }
+
+    void checkRegistrationRetry() {
+        const forge_rt_backing storage{16, nullptr, nullptr, 0};
+        const forge_rt_region_template slot{source, 16, 0, 0, FORGE_RT_READ};
+        const forge_rt_import calls[]{{"kernel32.dll", "GetStdHandle"},
+                                      {"kernel32.dll", "WriteFile"},
+                                      {"msvcrt.dll", "__getmainargs"}};
+        const forge_rt_data_import data{0, FORGE_RT_CRT_INITENV};
+        forge_rt_function_import function{8, calls[0]};
+        const forge_rt_function_import_artifact descriptor{
+            {{{FORGE_RT_FUNCTION_IMPORT_ARTIFACT_VERSION, source, 32, 16, 16, &storage, 1, &slot, 1,
+               calls, std::size(calls), writeRegisteredEnvironment},
+              "retry.exe"},
+             &data,
+             1},
+            &function,
+            1};
+        const char *environment[]{"malformed"};
+        const forge_rt_process_startup startup{nullptr, 0, nullptr, 1, environment};
+        forge_rt_process *raw = nullptr;
+        REQUIRE(forge_rt_process_create(FORGE_RT_ABI_VERSION, &raw) == FORGE_RT_OK);
+        Process process(raw, forge_rt_process_destroy);
+        const auto registerProcess = [&] {
+            return forge_rt_process_register_with_startup(process.get(),
+                                                          &descriptor.crt.named.artifact, &startup);
+        };
+        const auto reject = [&] {
+            const int reader = captureRegistrationOutput(
+                [&] { REQUIRE(registerProcess() == FORGE_RT_INVALID_ARGUMENT); });
+            char byte;
+            REQUIRE(read(reader, &byte, 1) == 0 && close(reader) == 0);
+            forge_rt_process_state state = 0;
+            REQUIRE(forge_rt_process_get_state(raw, &state) == FORGE_RT_OK &&
+                    state == FORGE_RT_PROCESS_CREATED);
+            forge_rt_process_result result{FORGE_RT_RETURNED, FORGE_RT_OK, 17, {}, 0};
+            REQUIRE(forge_rt_process_run(raw, nullptr, &result) == FORGE_RT_INVALID_STATE &&
+                    result.kind == FORGE_RT_RETURNED && result.value == 17);
+        };
+
+        // An invalid environment fails CRT initialization after standard handles are captured.
+        reject();
+
+        // An overlapping IAT slot fails after the PE and function addresses have been registered.
+        environment[0] = "FORGE=staged";
+        function.slotRva = 4;
+        reject();
+
+        char variable[] = "FORGE=retry";
+        environment[0] = variable;
+        function.slotRva = 8;
+        const int reader =
+            captureRegistrationOutput([&] { REQUIRE(registerProcess() == FORGE_RT_OK); });
+        variable[0] = 'X'; // The registered environment owns the copied string.
+        REQUIRE(registerProcess() == FORGE_RT_INVALID_STATE);
+        REQUIRE(forge_rt_process_register(raw, &descriptor.crt.named.artifact) == FORGE_RT_OK);
+        REQUIRE(forge_rt_process_allow_host_output_signals(raw) == FORGE_RT_OK);
+        const auto result = run(process);
+        REQUIRE(result.kind == FORGE_RT_RETURNED && result.status == FORGE_RT_OK &&
+                result.value == 42);
+        char bytes[sizeof(variable)];
+        REQUIRE(read(reader, bytes, sizeof(bytes)) == sizeof(bytes));
+        REQUIRE(std::memcmp(bytes, "FORGE=retry", sizeof(bytes)) == 0);
+        REQUIRE(read(reader, bytes, 1) == 0 && close(reader) == 0);
     }
 
     void expectMissingConsole(forge_rt_instance *instance, forge_rt_thread_token thread) {
@@ -250,6 +352,43 @@ namespace {
         execution->result = {FORGE_RT_RETURNED, FORGE_RT_OK, 17, {}, 0};
     }
 
+    void checkAddressOnlyConsoleImports() {
+        const auto checkSlots = [](forge_rt_execution *execution) {
+            forge_rt_invocation_token token = 0;
+            REQUIRE(forge_rt_current_invocation(execution->instance, execution->thread, &token) ==
+                    FORGE_RT_OK);
+            uint64_t addresses[2]{};
+            forge_rt_memory_fault fault{};
+            REQUIRE(forge_rt_read_guest(execution->instance, execution->thread, token, source,
+                                        sizeof(addresses), addresses, sizeof(addresses),
+                                        &fault) == FORGE_RT_OK);
+            REQUIRE(addresses[0] && addresses[1] && addresses[0] != addresses[1]);
+
+            for (const auto address : addresses) {
+                REQUIRE(forge_rt_validate_guest(execution->instance, execution->thread, token,
+                                                address, 1, FORGE_RT_READ,
+                                                &fault) == FORGE_RT_GUEST_FAULT);
+                REQUIRE(fault.address == address && fault.reason == FORGE_RT_FAULT_UNMAPPED);
+            }
+
+            runWithoutConsole(execution);
+        };
+        const forge_rt_backing storage{16, nullptr, nullptr, 0};
+        const forge_rt_region_template slots{source, 16, 0, 0, FORGE_RT_READ};
+        const forge_rt_function_import functions[]{{0, imports[0]}, {8, imports[1]}};
+        const forge_rt_function_import_artifact descriptor{
+            {{{FORGE_RT_FUNCTION_IMPORT_ARTIFACT_VERSION, source, 32, 16, 16, &storage, 1, &slots,
+               1, nullptr, 0, checkSlots},
+              "console.exe"},
+             nullptr,
+             0},
+            functions,
+            std::size(functions)};
+        const auto process = registered(descriptor.crt.named.artifact);
+        const auto result = run(process);
+        REQUIRE(result.kind == FORGE_RT_RETURNED && result.value == 17);
+    }
+
     void expectCaptureExhaustion(int error) {
         using namespace forge::runtime::darwin;
         std::optional<Descriptor> owner;
@@ -264,6 +403,7 @@ namespace {
         const struct rlimit none{3, previous.rlim_max};
         REQUIRE(setrlimit(RLIMIT_NOFILE, &none) == 0);
         expectCaptureExhaustion(EINVAL);
+        checkAddressOnlyConsoleImports();
         constexpr forge_rt_import unrelated[]{{"kernel32.dll", "ExitProcess"},
                                               {"kernel32.dll", "GetLastError"},
                                               {"other.dll", "GetStdHandle"},
@@ -459,6 +599,7 @@ namespace {
 
 void testRuntimeConsoleProcess() {
     checkRedirection();
+    checkRegistrationRetry();
     checkCaptureCleanup(false);
     checkCaptureCleanup(true);
 

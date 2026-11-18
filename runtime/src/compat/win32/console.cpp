@@ -1,4 +1,5 @@
 #include "../../core/instance.h"
+#include "../process_state.h"
 #include "forge/service_memory.h"
 
 #include <algorithm>
@@ -106,13 +107,14 @@ extern "C" forge_rt_status forge_rt_get_std_handle(forge_rt_instance *instance,
         return status;
     }
 
-    if (!instance->standardHandles) {
+    const auto *windows = instance->windows;
+    if (!windows || !windows->standardHandles) {
         return FORGE_RT_INVALID_STATE;
     }
 
     // DWORD(-10), DWORD(-11), DWORD(-12) select stdin, stdout and stderr in that order.
     const uint32_t index = UINT32_C(0xfffffff6) - selector;
-    const auto &streams = instance->standardHandles->streams;
+    const auto &streams = windows->standardHandles->streams;
 
     if (index >= streams.size()) {
         return win32Failure(instance, thread, errorInvalidHandle, outHandle, UINT64_MAX);
@@ -138,7 +140,8 @@ extern "C" forge_rt_status forge_rt_write_file(forge_rt_instance *instance,
         return live;
     }
 
-    if (!instance->standardHandles) {
+    const auto *windows = instance->windows;
+    if (!windows || !windows->standardHandles) {
         return FORGE_RT_INVALID_STATE;
     }
 
@@ -174,7 +177,7 @@ extern "C" forge_rt_status forge_rt_write_file(forge_rt_instance *instance,
         return initialized;
     }
 
-    const auto &handles = *instance->standardHandles;
+    const auto &handles = *windows->standardHandles;
     const auto &streams = handles.streams;
     const auto output = std::ranges::find(streams, handle, &StandardStream::handle);
 

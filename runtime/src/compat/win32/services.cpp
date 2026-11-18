@@ -1,5 +1,75 @@
+#include "../../core/instance.h"
 #include "../../platform/darwin/wait.h"
+#include "../process_state.h"
 #include "../string_scan.h"
+
+#include <utility>
+
+using namespace forge::runtime;
+
+namespace {
+    // Standalone callers can access any live guest thread. The managed primary thread
+    // may access its cell only from its current synchronous invocation.
+    forge_rt_status withLastError(forge_rt_instance *instance, forge_rt_thread_token thread,
+                                  auto access) noexcept {
+        return withInstance(instance, [&](auto &owner) {
+            const auto entry = owner.threads.find(thread);
+            if (entry == owner.threads.end()) {
+                return FORGE_RT_INVALID_THREAD;
+            }
+
+            const auto invocation = entry->second.invocation;
+            if (owner.managedExecution && (!invocation || executingInvocation != invocation)) {
+                return FORGE_RT_INVALID_INVOCATION;
+            }
+
+            access(entry->second.lastError);
+            return FORGE_RT_OK;
+        });
+    }
+} // namespace
+
+extern "C" forge_rt_status forge_rt_set_last_error(forge_rt_instance *instance,
+                                                   forge_rt_thread_token thread,
+                                                   uint32_t value) noexcept {
+    return withLastError(instance, thread, [value](uint32_t &cell) { cell = value; });
+}
+
+extern "C" forge_rt_status forge_rt_get_last_error(forge_rt_instance *instance,
+                                                   forge_rt_thread_token thread,
+                                                   uint32_t *outValue) noexcept {
+    if (!outValue) {
+        return FORGE_RT_INVALID_ARGUMENT;
+    }
+
+    return withLastError(instance, thread, [outValue](uint32_t cell) { *outValue = cell; });
+}
+
+extern "C" forge_rt_status forge_rt_exit_process(forge_rt_instance *instance,
+                                                 forge_rt_thread_token thread,
+                                                 uint32_t exitCode) noexcept {
+    return publishTerminalResult(instance, thread,
+                                 {FORGE_RT_EXIT_PROCESS, FORGE_RT_OK, exitCode, {}, 0});
+}
+
+extern "C" forge_rt_status forge_rt_set_unhandled_exception_filter(forge_rt_instance *instance,
+                                                                   forge_rt_thread_token thread,
+                                                                   uint64_t guestFilter,
+                                                                   uint64_t *outPrevious) noexcept {
+    if (!outPrevious) {
+        return FORGE_RT_INVALID_ARGUMENT;
+    }
+
+    return withInstance(instance, [&](auto &owner) {
+        const auto status = checkPendingExecution(owner, thread);
+
+        if (status == FORGE_RT_OK) {
+            *outPrevious = std::exchange(owner.windows->topLevelExceptionFilter, guestFilter);
+        }
+
+        return status;
+    });
+}
 
 extern "C" forge_rt_status forge_rt_sleep(forge_rt_instance *instance, forge_rt_thread_token thread,
                                           uint32_t milliseconds) noexcept {

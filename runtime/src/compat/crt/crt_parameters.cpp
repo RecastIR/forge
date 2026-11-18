@@ -1,6 +1,7 @@
 #include "crt_parameters.h"
 
 #include "../../core/instance.h"
+#include "../process_state.h"
 #include "forge/msvcrt_process.h"
 
 #include <algorithm>
@@ -200,8 +201,8 @@ extern "C" forge_rt_status forge_rt_msvcrt_getmainargs(forge_rt_instance *instan
     }
 
     // A prepared argument vector always includes argv[0].
-    if (!instance->managedExecution || !instance->parameters || !instance->parameters->crt ||
-        instance->parameters->crt->count() == 0) {
+    const auto *windows = instance->windows;
+    if (!windows || !windows->crt || windows->crt->count() == 0) {
         return FORGE_RT_INVALID_STATE;
     }
 
@@ -229,7 +230,7 @@ extern "C" forge_rt_status forge_rt_msvcrt_getmainargs(forge_rt_instance *instan
         const void *bytes;
     };
 
-    const auto &crt = *instance->parameters->crt;
+    const auto &crt = *windows->crt;
     const int32_t count = crt.count();
     uint64_t argumentVector = 0, environmentVector = 0;
     const std::array<Output, 3> outputs{

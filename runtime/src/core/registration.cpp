@@ -4,6 +4,7 @@
 
 #include <algorithm>
 #include <cassert>
+#include <optional>
 #include <span>
 
 using namespace forge;

@@ -1,10 +1,9 @@
 #include "process_parameters.h"
 
 #include "../../core/instance.h"
-#include "forge/guest_range.h"
+#include "../process_state.h"
 
 #include <algorithm>
-#include <bit>
 #include <cstring>
 #include <span>
 #include <string_view>
@@ -75,12 +74,12 @@ namespace forge::runtime {
             }
 
             // A live invocation pins the process parameters until synchronous return.
-            if (!instance->managedExecution || !instance->parameters ||
-                instance->parameters->wide.empty()) {
+            const auto *windows = instance->windows;
+            if (!windows || windows->parameters.wide.empty()) {
                 return FORGE_RT_INVALID_STATE;
             }
 
-            *address = instance->parameters->rows[index].start;
+            *address = windows->rows[index].start;
             return FORGE_RT_OK;
         }
     } // namespace
@@ -130,89 +129,20 @@ namespace forge::runtime {
         return FORGE_RT_OK;
     }
 
-    forge_rt_status ProcessParameters::initialize(forge_rt_instance &instance,
-                                                  const forge_rt_artifact &artifact,
-                                                  const forge_rt_process_startup &startup,
-                                                  bool osCommandLine, CrtImports imports) {
-        if (osCommandLine || imports.mainArgs || imports.hasData(FORGE_RT_CRT_ACMDLN)) {
-            const auto result = buildCommandLine(artifact, startup);
-
-            if (result != FORGE_RT_OK) {
-                return result;
-            }
-        }
-
-        if (osCommandLine) {
-            static_assert(std::endian::native == std::endian::little && sizeof(char16_t) == 2);
-            wide.assign(narrow.begin(), narrow.end());
-        }
-
-        if (imports.mainArgs || !imports.data.empty()) {
-            const auto status = crt.emplace().initialize(imports, narrow, startup);
-
-            if (status != FORGE_RT_OK) {
-                return status;
-            }
-        }
-
-        // Keep all unimplemented TEB fields in a reserved hole. The CRT data and
-        // strings live beyond the TEB, not at unimplemented Windows structure offsets.
-        constexpr uint64_t parameterOffset = 65536;
-        constexpr uint64_t stringOffset = parameterOffset + sizeof(crtErrno);
-        const auto narrowSize = narrow.size() + 1;
-        const auto wideSize = (wide.size() + 1) * sizeof(char16_t);
-        const auto wideOffset = (narrowSize + 1) & ~size_t{1};
-        const auto stringEnd = stringOffset + (osCommandLine ? wideOffset + wideSize : 0);
-        const auto crtOffset = (stringEnd + 7) & ~uint64_t{7};
-        const auto size = crt ? crtOffset + crt->bytes.size() : stringEnd;
-        std::array<Reservation, 2> occupied{
-            {{artifact.base, artifact.size, nullptr, nullptr},
-             {FORGE_RT_STACK_BASE, FORGE_RT_STACK_SIZE, nullptr, nullptr}}};
-        std::ranges::sort(occupied, {}, &Reservation::base);
-        const auto base = findGuestAllocation(occupied, size, parameterOffset);
-
-        if (!base) {
-            return FORGE_RT_MAPPING_CONFLICT;
-        }
-
-        // Only implemented NT_TIB fields occupy rows. A guest may write its own TIB.
-        constexpr auto permissions = FORGE_RT_READ | FORGE_RT_WRITE;
-        self = base;
-        rows[0] = {base + 8, sizeof(stackBounds), stackBounds.data(), permissions, &tibClaim};
-        rows[1] = {base + 0x30, sizeof(self), &self, permissions, &tibClaim};
-
-        rows[2] = {base + parameterOffset, sizeof(crtErrno), &crtErrno, permissions, &tibClaim};
-
-        if (osCommandLine) {
-            const auto stringBase = base + stringOffset;
-            rows[3] = {stringBase, narrowSize, narrow.c_str(), FORGE_RT_READ, nullptr};
-            rows[4] = {stringBase + wideOffset, wideSize, wide.c_str(), FORGE_RT_READ, nullptr};
-        }
-
-        size_t rowCount = osCommandLine ? 5 : 3;
-
-        if (crt) {
-            const auto crtBase = base + crtOffset;
-            crt->relocate(crtBase);
-            rows[rowCount++] = {crtBase, crt->bytes.size(), crt->bytes.data(), permissions,
-                                &crt->claim};
-        }
-
-        mapping = {base, size, rows.data(), rowCount};
-        return forge_rt_register_image(&instance, &mapping);
-    }
 } // namespace forge::runtime
 
 extern "C" forge_rt_status forge_rt_get_command_line_a(forge_rt_instance *instance,
                                                        forge_rt_thread_token thread,
                                                        uint64_t *outAddress) noexcept {
-    return forge::runtime::commandAddress(instance, thread, outAddress, 3);
+    return forge::runtime::commandAddress(instance, thread, outAddress,
+                                          forge::runtime::WindowsProcessState::narrowCommandRow);
 }
 
 extern "C" forge_rt_status forge_rt_get_command_line_w(forge_rt_instance *instance,
                                                        forge_rt_thread_token thread,
                                                        uint64_t *outAddress) noexcept {
-    return forge::runtime::commandAddress(instance, thread, outAddress, 4);
+    return forge::runtime::commandAddress(instance, thread, outAddress,
+                                          forge::runtime::WindowsProcessState::wideCommandRow);
 }
 
 extern "C" uint64_t forge_rt_primary_teb(forge_rt_execution *execution) noexcept {
@@ -226,8 +156,8 @@ extern "C" uint64_t forge_rt_primary_teb(forge_rt_execution *execution) noexcept
     if (status == FORGE_RT_OK) {
         const auto *instance = execution->instance;
 
-        if (instance->managedExecution == execution && instance->parameters) {
-            return instance->parameters->mapping.base;
+        if (instance->managedExecution == execution && instance->windows) {
+            return instance->windows->mapping.base;
         }
 
         status = FORGE_RT_INVALID_STATE;
