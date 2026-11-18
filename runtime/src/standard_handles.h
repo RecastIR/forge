@@ -13,6 +13,7 @@ namespace forge::runtime {
         uint64_t handle = 0;
         int descriptor = -1;
         StreamKind kind = StreamKind::OtherDevice;
+        bool writable = false;
     };
 
     class StandardHandles {

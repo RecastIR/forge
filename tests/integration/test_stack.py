@@ -87,6 +87,12 @@ class GuestExecution(unittest.TestCase):
 
 
 class StackTests(GuestExecution):
+    def test_recursion_without_a_return(self):
+        # The recursive call consumes guest stack until the normal stack guard trips.
+        # Its unreachable continuation references a callee with an invalid target.
+        for exe in self.variants("recovery_no_base"):
+            self.trap(exe, [(0, 0)])
+
     def test_boundaries(self):
         value = 0x876543210fedcba9
         for width, suffix in ((1, "b"), (2, "w"), (4, "l"), (8, "q")):

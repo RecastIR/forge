@@ -21,6 +21,7 @@ JOB_STAGES = {
     "macos-sanitize": ("sanitize", "sanitize_oracles"),
     "macos-presets": ("formatting", "lint", "release", "xcode_debug", "xcode_release_build", "xcode_release_ctest", "layout"),
     "windows-fixtures": ("build", "capture", "wine_tests"),
+    "windows-executable-reference": ("executable_reference",),
     "differential": ("debug", "release", "negative_tests"),
 }
 FORGE_PRODUCERS = {"debug": "macos-sanitize", "release": "macos-dev"}
@@ -310,6 +311,13 @@ def hosted_report(raw_needs, current_run, revision, **paths):
             digest = ""
         digests[config] = digest
 
+    producer_inputs = outputs["macos-dev"].get("executable_inputs_sha256")
+    wine_inputs = outputs["windows-executable-reference"].get("executable_inputs_sha256")
+    matching_inputs = (isinstance(producer_inputs, str) and re.fullmatch("[0-9a-f]{64}", producer_inputs)
+                       and producer_inputs == wine_inputs)
+    if not matching_inputs:
+        errors.append("standalone PE input checksums missing or different across macOS and Wine jobs")
+
     # A gate-only rerun can consume the successful differential job's original attempt.
     # Bind its reports to that job output, the current workflow run, and the checked-out revision.
     run_id = outputs["differential"].get("evidence_run_id")
@@ -323,6 +331,8 @@ def hosted_report(raw_needs, current_run, revision, **paths):
 
     report = aggregate(run_id, revision, jobs, forge_digests=digests, prerequisite_errors=errors, **paths)
     report["job_stages"] = stages
+    if matching_inputs:
+        report["executable_inputs_sha256"] = producer_inputs
     return report
 
 

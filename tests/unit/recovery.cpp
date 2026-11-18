@@ -248,8 +248,8 @@ namespace {
         const auto &first = mutual.function(a);
         const auto &second = mutual.function(b);
         const auto *toSecond = first.callAt(a + 4);
-        const auto *toFirst = second.callAt(b + 4);
-        const auto *self = second.callAt(b + 9);
+        const auto *toFirst = second.callAt(b + 8);
+        const auto *self = second.callAt(b + 13);
         check(mutual.root() == b && mutual.functions().size() == 2 && first.incoming.size() == 1 &&
                   second.incoming.size() == 2 && toSecond && toFirst && self &&
                   first.incoming.front() == toFirst && second.incoming[0] == toSecond &&
@@ -257,6 +257,15 @@ namespace {
                   toSecond->caller == a && toSecond->guest().rva == b && toFirst->caller == b &&
                   toFirst->guest().rva == a,
               "mutual recursion lost a function or a cycle edge");
+
+        const auto loop = exportedRva(analysis, "recovery_no_base");
+        const RecoveredFunctionGroup cycle(analysis, loop);
+        const auto &only = cycle.function(loop);
+        const auto *recurse = only.callAt(loop + 4);
+        check(cycle.functions().size() == 1 && only.calls.size() == 1 && recurse &&
+                  recurse->guest().rva == loop &&
+                  !only.instructionContaining(recurse->continuation),
+              "recursion without a base case reached a dead call");
     }
 
     void checkParallelEdges(const AnalyzedImage &analysis) {
@@ -458,6 +467,23 @@ namespace {
               "the recovered groups do not share the image-owned descriptor");
     }
 
+    void checkTerminalGuestCall(const fs::path &path) {
+        const AnalyzedImage analysis(
+            std::make_unique<ParsedImage>(InputFile(path), ParsePolicy::Inspection),
+            DebugInfo::Omit);
+        const RecoveredFunctionGroup group(analysis, analysis.module().entryPoint);
+        const auto &root = group.function(group.root());
+        check(root.calls.size() == 1, "expected one call from the entry to its exit helper");
+        const auto &site = root.calls.begin()->second;
+        const auto *step = root.instructionContaining(site.instruction);
+        check(!site.external() && step && step->next == site.continuation &&
+                  !root.instructionContaining(site.continuation),
+              "terminal guest call must retain its return address and exclude dead instructions");
+        const auto &helper = group.function(site.guest().rva);
+        check(helper.incoming.size() == 1 && helper.incoming.front() == &site,
+              "terminal callee lost its incoming call site");
+    }
+
     // Check PE stability for the differential runner's independently disassembled caller.
     // The first interval is code. Each following interval is a relative table.
     void checkDispatchSpans(const fs::path &path, llvm::ArrayRef<char *> bounds) {
@@ -508,9 +534,10 @@ int main(int argc, char **argv) try {
         return 0;
     }
 
-    check(argc == 6, "expected stack.exe, leaves.exe, jump.exe, indirect.exe and last-error.exe");
+    check(argc == 7, "expected stack, leaves, jump, indirect, last-error and noreturn fixtures");
     checkGuestRanges();
     checkImportSnapshot(argv[5]);
+    checkTerminalGuestCall(argv[6]);
     const AnalyzedImage analysis(
         std::make_unique<ParsedImage>(InputFile(argv[1]), ParsePolicy::Inspection),
         DebugInfo::Omit);

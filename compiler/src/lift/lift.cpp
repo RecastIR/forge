@@ -456,19 +456,29 @@ namespace forge {
             x86::SavedRegisters saved{};
             if (const auto *external = call.external()) {
                 lowerService(s, external->binding, calleeRsp);
-
-                if (external->binding.control == win64::Control::Terminates) {
-                    // The adapter published the terminal result. Skip the guest RET frame
-                    // checks and propagate it through every caller of this managed body.
-                    ir.CreateRet(ir.getFalse());
-                    return;
-                }
             } else {
                 const auto target = call.guest().rva;
-                saved =
-                    x86::captureNonvolatiles(ir, context, analysis.functions.at(target).modified);
+                if (s.flow != x86::Flow::TerminalCall) {
+                    saved = x86::captureNonvolatiles(ir, context,
+                                                     analysis.functions.at(target).modified);
+                }
+
                 storeFlags();
-                memory.checks.propagate(ir.CreateCall(bodies.at(target), impl->getArg(0)));
+                auto *returned = ir.CreateCall(bodies.at(target), impl->getArg(0));
+                if (s.flow != x86::Flow::TerminalCall) {
+                    memory.checks.propagate(returned);
+                }
+            }
+
+            if (s.flow == x86::Flow::TerminalCall) {
+                // A managed callee can physically return to propagate a fault or ExitProcess.
+                // Neither outcome executes the architectural RET half of this call.
+                if (memory.checks.managed()) {
+                    ir.CreateRet(ir.getFalse());
+                } else {
+                    ir.CreateUnreachable();
+                }
+                return;
             }
 
             // This continuation is the other half of the guest RET. No caller

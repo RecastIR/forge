@@ -1,12 +1,15 @@
 #include "forge/process.h"
 
 #include "forge/guest_range.h"
+#include "forge/service_signature.h"
 #include "instance.h"
 
+#include <algorithm>
 #include <array>
 #include <cstring>
 #include <memory>
 #include <span>
+#include <string_view>
 
 using namespace forge;
 using namespace forge::runtime;
@@ -18,6 +21,20 @@ namespace {
 
     template <typename T> std::span<const T> tableRows(const T *table, uint64_t count) {
         return {table, static_cast<size_t>(count)};
+    }
+
+    bool usesStandardHandles(const forge_rt_import &import) {
+        const std::string_view name(import.name);
+
+        if (name != win64::getStdHandle.name && name != win64::writeFile.name) {
+            return false;
+        }
+
+        // The service catalogue uses lowercase DLL names; hand-authored descriptors can
+        // carry the original PE spelling. Windows export names are case-sensitive.
+        const auto asciiLower = [](char c) { return c >= 'A' && c <= 'Z' ? c - 'A' + 'a' : c; };
+        return std::ranges::equal(std::string_view(import.dll), win64::getStdHandle.dll, {},
+                                  asciiLower);
     }
 
     bool validBacking(const forge_rt_backing &backing) {
@@ -175,10 +192,14 @@ namespace {
     }
 
     forge_rt_status ProcessImage::initialize() {
-        const auto captured = instance.standardHandles.capture();
+        const auto imports = tableRows(artifact.imports, artifact.importCount);
 
-        if (captured != FORGE_RT_OK) {
-            return captured;
+        if (std::ranges::any_of(imports, usesStandardHandles)) {
+            const auto captured = instance.standardHandles.emplace().capture();
+
+            if (captured != FORGE_RT_OK) {
+                return captured;
+            }
         }
 
         const auto bound = bindRegions();
@@ -353,7 +374,10 @@ forge_rt_process_allow_host_output_signals(forge_rt_process *process) noexcept {
             return owner.state == FORGE_RT_PROCESS_RUNNING ? FORGE_RT_BUSY : FORGE_RT_INVALID_STATE;
         }
 
-        owner.image->instance.standardHandles.hostHandlesOutputSignals = true;
+        if (auto &handles = owner.image->instance.standardHandles) {
+            handles->hostHandlesOutputSignals = true;
+        }
+
         return FORGE_RT_OK;
     });
 }
@@ -388,6 +412,10 @@ extern "C" forge_rt_status forge_rt_process_run(forge_rt_process *process,
 
     // RUNNING pins the occurrence. No lifecycle or address-space lock spans the guest call.
     const auto result = active->run();
+    // Retire the process's descriptors before publishing completion, including on a fault.
+    // A host retaining the process to inspect its result can already observe pipe EOF.
+    active->instance.standardHandles.reset();
+
     return withInstance(process, [&](auto &owner) {
         const bool exited =
             result.kind == FORGE_RT_RETURNED || result.kind == FORGE_RT_EXIT_PROCESS;

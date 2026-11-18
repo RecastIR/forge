@@ -95,8 +95,7 @@ namespace forge::x86 {
                     tail.take_front(size)};
         }
 
-        Flow control(const Step &s, const MCInstrInfo &info, bool recordedExtent,
-                     ImportFlow importFlow) {
+        Flow control(const Step &s, const MCInstrInfo &info, bool recordedExtent) {
             if (s.opcode == "RET64") {
                 return Flow::Return;
             }
@@ -114,8 +113,7 @@ namespace forge::x86 {
             }
 
             if (recordedExtent && s.isMemoryCall()) {
-                // Only a validated terminal import ends the path before the next byte.
-                return importFlow(s);
+                return Flow::Fallthrough;
             }
 
             const auto &desc = info.get(s.inst.getOpcode());
@@ -139,13 +137,17 @@ namespace forge::x86 {
         class Discovery {
           public:
             Discovery(StringRef bytes, uint32_t begin, const MCDisassembler &dis,
-                      const MCInstrInfo &info, LeafStepCheck validateLeaf, JumpTableReader *tables,
-                      ImportFlow importFlow)
+                      const MCInstrInfo &info, LeafStepCheck validateLeaf, JumpTableReader *tables)
                 : bytes(bytes), begin(begin), end(begin + static_cast<uint32_t>(bytes.size())),
-                  dis(dis), info(info), validateLeaf(validateLeaf), tables(tables),
-                  importFlow(importFlow) {}
+                  dis(dis), info(info), validateLeaf(validateLeaf), tables(tables) {
+                leaders.emplace(begin, Leader{begin, true, {}});
+                pending.push_back(begin);
+            }
 
-            ControlFlowGraph run();
+            bool advance(CallFlow classify);
+            void resume(uint32_t instruction);
+            bool hasBypassedProof() const;
+            ControlFlowGraph finish();
 
           private:
             StringRef bytes;
@@ -154,7 +156,7 @@ namespace forge::x86 {
             const MCInstrInfo &info;
             LeafStepCheck validateLeaf;
             JumpTableReader *tables;
-            ImportFlow importFlow;
+            bool returned = false;
             std::map<uint32_t, Step> decoded;
 
             struct TableEdges {
@@ -163,9 +165,11 @@ namespace forge::x86 {
             };
 
             std::map<uint32_t, TableEdges> resolved;
+            std::vector<std::pair<uint32_t, uint32_t>> registerProofs;
             std::set<uint32_t> unresolved;
             unsigned tableEntries = 0;
             void resolve(uint32_t site);
+            std::optional<uint32_t> tableBypass(uint32_t site, const RelativeTable &proof) const;
             void validateGuards() const;
 
             using TableOrigin = std::pair<uint32_t, unsigned>; // Dispatch RVA, entry index.
@@ -180,13 +184,14 @@ namespace forge::x86 {
             std::vector<uint32_t> pending;
             void schedule(const Step &s, int64_t address, bool explicitEntry,
                           std::optional<unsigned> index = {});
-            void recordEdges(const Step &s, Flow flow);
-            void trace(uint32_t start);
+            void recordEdges(Step &s, CallFlow classify);
+            void trace(uint32_t start, CallFlow classify);
             [[noreturn]] void rejectTableTarget(TableOrigin origin, const Twine &reason) const;
             std::optional<TableOrigin> overlapOrigin(std::optional<TableOrigin> origin,
                                                      uint32_t instruction) const;
             [[noreturn]] void overlap(uint32_t target, uint32_t instruction) const;
             ControlFlowGraph partition();
+            void annotate(InspectionError &error) const;
         };
 
         void Discovery::schedule(const Step &s, int64_t address, bool explicitEntry,
@@ -275,7 +280,7 @@ namespace forge::x86 {
                           reason, target);
         }
 
-        void Discovery::recordEdges(const Step &s, Flow flow) {
+        void Discovery::recordEdges(Step &s, CallFlow classify) {
             if (s.isRegisterCall()) {
                 // Trace has decoded the entire interval from this leader to CALL. An
                 // impossible prefix must fail before we attempt to decode its continuation.
@@ -286,19 +291,28 @@ namespace forge::x86 {
                 const auto producer =
                     std::find_if(first, stop, [](const auto &row) { return !isNoop(row.second); });
                 const InstructionOperands operands(*dis.getContext().getRegisterInfo(), 0);
-                operands.registerCallRva(s, producer == stop ? nullptr : &producer->second);
-            } else if (flow == Flow::Indirect) {
+                const auto target =
+                    operands.registerCallRva(s, producer == stop ? nullptr : &producer->second);
+                registerProofs.emplace_back(producer->first, s.rva);
+                s.flow = classify(s, target);
+            } else if (classify && s.isDirectCall()) {
+                s.flow = classify(s, int64_t(s.next) + s.inst.getOperand(0).getImm());
+            } else if (classify && s.isMemoryCall()) {
+                s.flow = classify(s, {});
+            } else if (s.flow == Flow::Return) {
+                returned = true;
+            } else if (s.flow == Flow::Indirect) {
                 unresolved.insert(s.rva);
-            } else if (flow == Flow::Conditional || flow == Flow::Jump) {
+            } else if (s.flow == Flow::Conditional || s.flow == Flow::Jump) {
                 schedule(s, int64_t(s.next) + s.inst.getOperand(0).getImm(), true);
 
-                if (flow == Flow::Conditional) {
+                if (s.flow == Flow::Conditional) {
                     schedule(s, s.next, false);
                 }
             }
         }
 
-        void Discovery::trace(uint32_t start) try {
+        void Discovery::trace(uint32_t start, CallFlow classify) try {
             for (auto rva = start; rva < end;) {
                 auto after = decoded.lower_bound(rva);
                 if (after != decoded.end() && after->first == rva) {
@@ -325,14 +339,14 @@ namespace forge::x86 {
                 }
 
                 checkPrefix(s);
-                s.flow = control(s, info, tables != nullptr, importFlow);
+                s.flow = control(s, info, tables != nullptr);
 
                 if (validateLeaf) {
                     validateLeaf(s, s.flow);
                 }
 
                 auto &step = decoded.emplace_hint(after, rva, std::move(s))->second;
-                recordEdges(step, step.flow);
+                recordEdges(step, classify);
 
                 if (step.flow != Flow::Fallthrough) {
                     return;
@@ -376,21 +390,38 @@ namespace forge::x86 {
             }
         }
 
-        void Discovery::validateGuards() const {
+        std::optional<uint32_t> Discovery::tableBypass(uint32_t site,
+                                                       const RelativeTable &proof) const {
             // Only sequential execution from CMP may reach its JA and the dispatch prefix.
             // Include edges discovered through other tables and case/loop backedges.
-            for (const auto &[site, edges] : resolved) {
-                const auto stop = leaders.upper_bound(site);
-                const auto alternate =
-                    std::find_if(leaders.upper_bound(edges.proof.compareRva), stop,
-                                 [](const auto &leader) { return leader.second.explicitEntry; });
+            const auto stop = leaders.upper_bound(site);
+            const auto alternate =
+                std::find_if(leaders.upper_bound(proof.compareRva), stop,
+                             [](const auto &leader) { return leader.second.explicitEntry; });
+            return alternate == stop ? std::nullopt : std::optional(alternate->first);
+        }
 
-                if (alternate != stop) {
+        bool Discovery::hasBypassedProof() const {
+            for (const auto &[producer, call] : registerProofs) {
+                if (auto next = leaders.upper_bound(producer);
+                    next != leaders.end() && next->first <= call) {
+                    return true;
+                }
+            }
+
+            return llvm::any_of(resolved, [&](const auto &table) {
+                return tableBypass(table.first, table.second.proof).has_value();
+            });
+        }
+
+        void Discovery::validateGuards() const {
+            for (const auto &[site, edges] : resolved) {
+                if (auto alternate = tableBypass(site, edges.proof)) {
                     decoded.at(site).reject(FailureCode::UnsupportedControlFlow,
                                             edges.proof.describe() +
                                                 ": unproven bounds: edge bypasses proof at " +
-                                                hex(alternate->first),
-                                            alternate->first);
+                                                hex(*alternate),
+                                            *alternate);
                 }
             }
         }
@@ -440,15 +471,12 @@ namespace forge::x86 {
             return graph;
         }
 
-        ControlFlowGraph Discovery::run() try {
+        bool Discovery::advance(CallFlow classify) try {
             if (bytes.size() > maxFunctionBytes) {
                 throw InspectionError(hex(begin) +
                                           ": experimental lift limit is 64 KiB per function",
                                       FailureCode::FunctionSize);
             }
-
-            leaders.emplace(begin, Leader{begin, true, {}});
-            pending.push_back(begin);
 
             while (!pending.empty() || !unresolved.empty()) {
                 if (pending.empty()) {
@@ -458,29 +486,63 @@ namespace forge::x86 {
 
                 const auto start = pending.back();
                 pending.pop_back();
-                trace(start);
+                trace(start, classify);
             }
 
+            return returned;
+        } catch (InspectionError &error) {
+            annotate(error);
+            throw;
+        }
+
+        void Discovery::annotate(InspectionError &error) const {
+            if (error.context.instructionRva) {
+                const auto leader = std::prev(leaders.upper_bound(*error.context.instructionRva));
+                error.context.blockRva = leader->first;
+            }
+        }
+
+        void Discovery::resume(uint32_t instruction) {
+            auto &call = decoded.at(instruction);
+            call.flow = Flow::Fallthrough;
+
+            if (call.next < end && !decoded.contains(call.next)) {
+                pending.push_back(call.next);
+            }
+        }
+
+        ControlFlowGraph Discovery::finish() try {
             validateGuards();
             return partition();
         } catch (InspectionError &error) {
-            if (error.context.instructionRva) {
-                auto leader = std::prev(leaders.upper_bound(*error.context.instructionRva));
-                error.context.blockRva = leader->first;
-            }
-
+            annotate(error);
             throw;
         }
+
     } // namespace
+
+    struct RecordedCFG::State : Discovery {
+        using Discovery::Discovery;
+    };
+
+    RecordedCFG::RecordedCFG(StringRef bytes, uint32_t begin, const MCDisassembler &dis,
+                             const MCInstrInfo &info, JumpTableReader &tables)
+        : state(std::make_unique<State>(bytes, begin, dis, info, nullptr, &tables)) {}
+
+    RecordedCFG::~RecordedCFG() = default;
+
+    bool RecordedCFG::advance(CallFlow classify) { return state->advance(classify); }
+
+    void RecordedCFG::resume(uint32_t instruction) { state->resume(instruction); }
+
+    bool RecordedCFG::hasBypassedProof() const { return state->hasBypassedProof(); }
+
+    ControlFlowGraph RecordedCFG::finish() { return state->finish(); }
 
     ControlFlowGraph discoverCFG(StringRef bytes, uint32_t begin, const MCDisassembler &dis,
                                  const MCInstrInfo &info, LeafStepCheck validateLeaf) {
-        return Discovery(bytes, begin, dis, info, validateLeaf, nullptr, {}).run();
-    }
-
-    ControlFlowGraph discoverCFG(StringRef bytes, uint32_t begin, const MCDisassembler &dis,
-                                 const MCInstrInfo &info, JumpTableReader &tables,
-                                 ImportFlow importFlow) {
-        return Discovery(bytes, begin, dis, info, {}, &tables, importFlow).run();
+        Discovery discovery(bytes, begin, dis, info, validateLeaf, nullptr);
+        discovery.advance({});
+        return discovery.finish();
     }
 } // namespace forge::x86

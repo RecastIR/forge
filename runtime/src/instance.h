@@ -5,6 +5,7 @@
 
 #include <mutex>
 #include <new>
+#include <optional>
 #include <stdexcept>
 #include <unordered_map>
 #include <vector>
@@ -37,7 +38,7 @@ struct forge_rt_instance {
     std::mutex mutex;
     std::unordered_map<forge_rt_thread_token, forge::runtime::Thread> threads;
     std::vector<forge::runtime::Reservation> reservations;
-    forge::runtime::StandardHandles standardHandles;
+    std::optional<forge::runtime::StandardHandles> standardHandles;
     // Borrows the owning process's stable execution record until this instance is destroyed.
     // Only the owner admits and retires executions. Only the active guest thread can publish exit.
     forge_rt_execution *managedExecution = nullptr;

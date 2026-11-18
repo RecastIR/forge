@@ -169,14 +169,33 @@ namespace {
 
     void handleOutputSignal(int) {}
 
-    void checkCaptureCleanup(bool reject) {
+    constexpr forge_rt_process_result completions[] = {
+        {FORGE_RT_RETURNED, FORGE_RT_OK, 17, {}, 0},
+        {FORGE_RT_EXIT_PROCESS, FORGE_RT_OK, 42, {}, 0},
+        {FORGE_RT_EXECUTION_FAULT, FORGE_RT_GUEST_FAULT, 0, {}, FORGE_RT_FAULT_CONTROL},
+        {FORGE_RT_UNSUPPORTED, FORGE_RT_OK, 0, {}, 0},
+        {FORGE_RT_RUNTIME_FAILURE, FORGE_RT_INTERNAL_ERROR, 0, {}, 0}};
+
+    void finishCapture(forge_rt_execution *execution) {
+        REQUIRE(execution->rcx < std::size(completions));
+        const auto &completion = completions[execution->rcx];
+
+        if (completion.kind == FORGE_RT_EXIT_PROCESS) {
+            REQUIRE(forge_rt_exit_process(execution->instance, execution->thread, 42) ==
+                    FORGE_RT_OK);
+        } else {
+            execution->result = completion;
+        }
+    }
+
+    void checkCaptureCleanup(bool reject, size_t completion = std::size(completions)) {
         auto testRegion = region;
 
         if (reject) {
             testRegion.backing = 1; // Reject during staged image binding, after capture.
         }
 
-        const auto artifact = consoleArtifact(attemptFailedWrite, testRegion);
+        const auto artifact = consoleArtifact(finishCapture, testRegion);
         forge_rt_process *raw = nullptr;
         REQUIRE(forge_rt_process_create(FORGE_RT_ABI_VERSION, &raw) == FORGE_RT_OK);
         Process process(raw, forge_rt_process_destroy);
@@ -191,11 +210,108 @@ namespace {
 
         if (!reject) {
             REQUIRE(read(ends[0], &byte, 1) == -1 && errno == EAGAIN);
-            REQUIRE(forge_rt_process_close(process.get()) == FORGE_RT_OK);
+
+            if (completion < std::size(completions)) {
+                const auto result = run(process, completion);
+                REQUIRE(result.kind == completions[completion].kind);
+            } else {
+                REQUIRE(forge_rt_process_close(process.get()) == FORGE_RT_OK);
+            }
         }
 
         // EOF proves even the staged duplicate expired, while the process handle is still live.
         REQUIRE(read(ends[0], &byte, 1) == 0 && close(ends[0]) == 0);
+    }
+
+    void expectMissingConsole(forge_rt_instance *instance, forge_rt_thread_token thread) {
+        uint64_t bits = 0xabcd;
+        REQUIRE(forge_rt_get_std_handle(instance, thread, stdOutput, &bits) ==
+                FORGE_RT_INVALID_STATE);
+        REQUIRE(bits == 0xabcd);
+        int32_t success = -1;
+        forge_rt_memory_fault fault{23, 24, 25};
+        REQUIRE(forge_rt_write_file(instance, thread, 0, 1, 1, 2, 0, &success, &fault) ==
+                FORGE_RT_INVALID_STATE);
+        REQUIRE(success == -1 && fault.address == 23 && fault.access == 24 && fault.reason == 25);
+    }
+
+    void runWithoutConsole(forge_rt_execution *execution) {
+        REQUIRE(forge_rt_set_last_error(execution->instance, execution->thread, initialError) ==
+                FORGE_RT_OK);
+        expectMissingConsole(execution->instance, execution->thread);
+        REQUIRE(lastError(*execution) == initialError);
+        execution->result = {FORGE_RT_RETURNED, FORGE_RT_OK, 17, {}, 0};
+    }
+
+    void checkNoDescriptorBudget() {
+        struct rlimit previous{};
+        REQUIRE(getrlimit(RLIMIT_NOFILE, &previous) == 0);
+        const struct rlimit none{3, previous.rlim_max};
+        REQUIRE(setrlimit(RLIMIT_NOFILE, &none) == 0);
+        constexpr forge_rt_import unrelated[]{{"kernel32.dll", "ExitProcess"},
+                                              {"kernel32.dll", "GetLastError"},
+                                              {"other.dll", "GetStdHandle"},
+                                              {"kernel32.dll", "writefile"}};
+        auto artifact = consoleArtifact(runWithoutConsole);
+        artifact.imports = nullptr;
+        artifact.importCount = 0;
+        auto empty = registered(artifact);
+        REQUIRE(forge_rt_process_allow_host_output_signals(empty.get()) == FORGE_RT_OK);
+        REQUIRE(run(empty).value == 17);
+        empty.reset();
+
+        artifact.imports = unrelated;
+        artifact.importCount = std::size(unrelated);
+        auto plain = registered(artifact);
+        REQUIRE(run(plain).value == 17);
+        plain.reset();
+
+        forge_rt_instance *instance = nullptr;
+        forge_rt_thread_token thread = 0;
+        forge_rt_invocation_token invocation = 0;
+        const forge_rt_image image{source, 16, nullptr, 0};
+        REQUIRE(forge_rt_create(FORGE_RT_ABI_VERSION, &instance) == FORGE_RT_OK);
+        REQUIRE(forge_rt_thread_create(instance, &thread) == FORGE_RT_OK);
+        REQUIRE(forge_rt_enter(instance, thread, &image, nullptr, &invocation) == FORGE_RT_OK);
+        expectMissingConsole(instance, thread);
+        REQUIRE(forge_rt_leave(instance, thread, invocation) == FORGE_RT_OK);
+        REQUIRE(forge_rt_destroy(instance) == FORGE_RT_OK);
+
+        constexpr forge_rt_import console[]{{"KeRneL32.DLL", "WriteFile"},
+                                            {"KERNEL32.dll", "GetStdHandle"}};
+        artifact = consoleArtifact(finishCapture);
+        artifact.importCount = 1;
+        forge_rt_process *raw = nullptr;
+        REQUIRE(forge_rt_process_create(FORGE_RT_ABI_VERSION, &raw) == FORGE_RT_OK);
+        Process retry(raw, forge_rt_process_destroy);
+
+        for (const auto &dependency : console) {
+            artifact.imports = &dependency;
+            REQUIRE(forge_rt_process_register(raw, &artifact) == FORGE_RT_RESOURCE_EXHAUSTED);
+        }
+
+        REQUIRE(setrlimit(RLIMIT_NOFILE, &previous) == 0);
+        REQUIRE(forge_rt_process_register(raw, &artifact) == FORGE_RT_OK);
+        REQUIRE(run(retry).kind == FORGE_RT_RETURNED);
+    }
+
+    void checkCaptureExhaustion() {
+        // Leave exactly one new descriptor available. A subsequent duplicate must fail.
+        const int first = fcntl(STDOUT_FILENO, F_DUPFD_CLOEXEC, 3);
+        REQUIRE(first >= 3 && close(first) == 0);
+        struct rlimit previous{};
+        REQUIRE(getrlimit(RLIMIT_NOFILE, &previous) == 0);
+        const struct rlimit one{static_cast<rlim_t>(first + 1), previous.rlim_max};
+        REQUIRE(setrlimit(RLIMIT_NOFILE, &one) == 0);
+        const auto artifact = consoleArtifact(finishCapture);
+        forge_rt_process *raw = nullptr;
+        REQUIRE(forge_rt_process_create(FORGE_RT_ABI_VERSION, &raw) == FORGE_RT_OK);
+        Process process(raw, forge_rt_process_destroy);
+        REQUIRE(forge_rt_process_register(raw, &artifact) == FORGE_RT_RESOURCE_EXHAUSTED);
+        REQUIRE(fcntl(STDOUT_FILENO, F_DUPFD_CLOEXEC, 3) == first && close(first) == 0);
+        REQUIRE(setrlimit(RLIMIT_NOFILE, &previous) == 0);
+        REQUIRE(forge_rt_process_register(raw, &artifact) == FORGE_RT_OK);
+        REQUIRE(run(process).kind == FORGE_RT_RETURNED);
     }
 
     void checkSignalPolicy(int descriptor, int signal, void (*handler)(int), bool assure,
@@ -242,6 +358,14 @@ namespace {
         REQUIRE(close(ends[1]) == 0);
     }
 
+    void checkReadOnlyPipe() {
+        int ends[2];
+        REQUIRE(pipe(ends) == 0);
+        // Handle access fails before the runtime needs a safe host signal policy.
+        checkSignalPolicy(ends[0], SIGPIPE, SIG_DFL, false, 5);
+        REQUIRE(close(ends[0]) == 0 && close(ends[1]) == 0);
+    }
+
     void checkFileSizePolicy() {
         std::unique_ptr<FILE, decltype(&std::fclose)> file(std::tmpfile(), std::fclose);
         REQUIRE(file != nullptr);
@@ -260,6 +384,14 @@ void testRuntimeConsoleProcess() {
     checkRedirection();
     checkCaptureCleanup(false);
     checkCaptureCleanup(true);
+
+    for (size_t i = 0; i < std::size(completions); ++i) {
+        checkCaptureCleanup(false, i);
+    }
+
+    checkNoDescriptorBudget();
+    checkCaptureExhaustion();
+    checkReadOnlyPipe();
     checkPipePolicy(SIG_DFL, false, false);
     checkPipePolicy(SIG_IGN, false, false);
     checkPipePolicy(handleOutputSignal, false, true);

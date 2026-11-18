@@ -69,12 +69,20 @@ def generate(output, mc, link, dlltool, clang):
               [("KERNEL32.dll", "lstrlenA")], link_flags=["/dynamicbase:no", "/fixed:no"])
         console_imports = [("KERNEL32.dll", name) for name in ("GetStdHandle", "WriteFile", "ExitProcess")]
         image("hello.exe", (sources / "hello.s").read_text(), console_imports)
+        # Retain the compiler's instructions after the call to a non-returning guest helper.
+        run(clang, "--target=x86_64-pc-windows-msvc", "-O2", "-fno-stack-protector", "-c",
+            sources / "executable-noreturn.c", "-o", "noreturn.obj")
+        run(link, "/nodefaultlib", "/timestamp:0", "/entry:entry", "/subsystem:console",
+            "noreturn.obj", "KERNEL32.dll.lib", "/out:executable-noreturn.exe")
+        (output / "executable-noreturn.exe").write_bytes((work / "executable-noreturn.exe").read_bytes())
         console_cases = (sources / "console-cases.s").read_text()
         console_imports += [("KERNEL32.dll", name) for name in ("GetLastError", "SetLastError")]
         for entry in ("binary_stdout", "binary_stderr", "bad_handle", "stdin_write", "bad_selector",
                       "stdin_handle", "bad_buffer", "bad_count", "null_count", "overlapped",
                       "zero_length", "host_failure", "direct_exit", "nested_exit", "alternate_edge",
-                      "isolation", "large_output", "limited_file"):
+                      "isolation", "large_output", "limited_file", "stderr_failure",
+                      "zero_stdout_failure", "zero_stderr_failure", "call_at_end", "branch_past_call",
+                      "recursive_return", "recursive_exit"):
             image(f"console-{entry}.exe", console_cases, console_imports, entry=entry)
         # Remap debug paths so builds in different source directories produce identical PEs.
         for name in ("add", "inlined"):

@@ -379,6 +379,35 @@ class Readiness(Workspace):
         self.assertEqual(context["calls"], [])
         self.assertEqual(context["unresolved_calls"], [dict(call, target_rva=hex(invalid))])
 
+    def test_invalid_callee_keeps_caller_import_evidence(self):
+        original = bytearray(console_image("nested_exit").read_bytes())
+        layout = Layout(original)
+        root = entry(original)
+        start = layout.file_offset(root)
+        self.assertTrue(original.startswith(bytes.fromhex("4883ec38 b901000000 e8"), start))
+        helper = root + 14 + struct.unpack_from("<i", original, start + 10)[0]
+        pos = layout.file_offset(helper)
+        # Make ExitProcess the helper's only reachable call and loop immediately after it.
+        self.assertTrue(original.startswith(bytes.fromhex("4883ec38 85c9 740b b92a00feca ff15"), pos))
+        original[pos + 7] = 0
+        original[pos + 19:pos + 21] = bytes.fromhex("ebfe")
+        site = helper + 13
+        for kind, code in (("guest", "LIFT_INVALID_CALL_TARGET"), ("import", "LIFT_UNSUPPORTED_CONTROL_FLOW")):
+            with self.subTest(kind=kind):
+                data = original.copy()
+                if kind == "guest":
+                    data[pos + 13:pos + 19] = b"\xe8" + struct.pack("<i", 0x400000 - site - 5) + b"\x90"
+                else:
+                    data = data.replace(b"ExitProcess\0", b"BadFunction\0")
+                diagnostic = self.reject(data)
+                self.assertEqual(diagnostic["code"], code)
+                ctx = diagnostic["context"]
+                self.assertEqual(ctx["instruction_rva"], hex(site))
+                self.assertFalse(ctx["recovery_complete"])
+                imports = {(item["dll"].lower(), item["name"]) for item in ctx["imports"]}
+                self.assertTrue({("kernel32.dll", "GetStdHandle"), ("kernel32.dll", "WriteFile")} <= imports,
+                                imports)
+
     def test_unsupported_image_startup(self):
         data = bytearray(image("return").read_bytes())
         layout = Layout(data)
@@ -423,16 +452,22 @@ class Reference(Workspace):
         result = execute(reference_environment(suite)["container_image_id"], pe, [])
         return result.exit_code, result.stdout, result.stderr
 
-    def test_header_result(self):
-        pe = image("headers")
-        self.assertEqual(self.capture(pe), (header_result(pe.read_bytes()), b"", b""))
-
-    def test_console_results(self):
-        for name, expected in (("hello", (0, GREETING, b"")), ("binary_stdout", (4, BINARY, b"")),
-                               ("binary_stderr", (4, b"", BINARY)),
-                               ("nested_exit", (0xcafe002a, b"", b""))):
-            with self.subTest(name=name):
-                self.assertEqual(self.capture(console_image(name)), expected)
+    def test_executables(self):
+        headers = image("headers")
+        expected = {
+            headers.name: (header_result(headers.read_bytes()), b"", b""),
+            image("noreturn").name: (42, b"", b""),
+            console_image("hello").name: (0, GREETING, b""),
+            console_image("binary_stdout").name: (len(BINARY), BINARY, b""),
+            console_image("binary_stderr").name: (len(BINARY), b"", BINARY),
+            console_image("nested_exit").name: (0xcafe002a, b"", b""),
+        }
+        inputs = Path(__file__).resolve().parents[1] / "differential/reference/executable-inputs.txt"
+        filenames = inputs.read_text().splitlines()
+        self.assertCountEqual(filenames, expected.keys())
+        for name in filenames:
+            with self.subTest(pe=name):
+                self.assertEqual(self.capture(FIXTURES / name), expected[name])
 
 
 class Console(Workspace):
@@ -511,9 +546,19 @@ class Console(Workspace):
         with os.fdopen(writer, "wb") as broken:
             result = self.program(stdout=broken)
         self.assertEqual((result.returncode, result.stderr), (109, b""))
-        with console_image("host_failure").open("rb") as read_only:
-            result = self.program(stdout=read_only)
-        self.assertEqual((result.returncode, result.stderr), (6, b""))
+
+    def test_read_only_output(self):
+        path = self.dir / "read-only output"
+        path.touch()
+        for name, stream in (("host_failure", "stdout"), ("stderr_failure", "stderr"),
+                             ("zero_stdout_failure", "stdout"), ("zero_stderr_failure", "stderr")):
+            with self.subTest(name=name):
+                self.compile(console_image(name))
+                with path.open("rb") as read_only:
+                    result = self.program(**{stream: read_only})
+                other = result.stderr if stream == "stdout" else result.stdout
+                # Each entry checks FALSE and a zero count before returning GetLastError().
+                self.assertEqual((result.returncode, other, path.read_bytes()), (5, b"", b""))
 
     def test_file_size_limit(self):
         import resource
@@ -532,11 +577,32 @@ class Console(Workspace):
 
     def test_termination(self):
         for name, status, stderr in (("direct_exit", 42, b""), ("nested_exit", 42, b""),
-                                     ("alternate_edge", 9, BINARY)):
+                                     ("alternate_edge", 9, BINARY), ("call_at_end", 42, b""),
+                                     ("branch_past_call", 23, b""), ("recursive_return", 13, b""),
+                                     ("recursive_exit", 42, b"")):
             with self.subTest(name=name):
                 self.compile(console_image(name))
                 result = self.program()
                 self.assertEqual((result.returncode, result.stdout, result.stderr), (status, b"", stderr))
+
+    def test_compiled_noreturn_helper(self):
+        pe = image("noreturn")
+        diagnostic = self.compile(pe)
+        result = self.program()
+        self.assertEqual((result.returncode, result.stdout, result.stderr), (42, b"", b""))
+
+        # Clang emits INT3 in the caller after CALL rel32. Even an incomplete instruction
+        # here must be irrelevant to recovery when no other edge reaches this byte.
+        call, = diagnostic["context"]["calls"]
+        data = bytearray(pe.read_bytes())
+        offset = Layout(data).file_offset(int(call["instruction_rva"], 16))
+        self.assertEqual((data[offset], data[offset + 5]), (0xe8, 0xcc))
+        data[offset + 5] = 0x0f
+        truncated = self.dir / "unreachable-byte.exe"
+        truncated.write_bytes(data)
+        self.compile(truncated)
+        result = self.program()
+        self.assertEqual((result.returncode, result.stdout, result.stderr), (42, b"", b""))
 
     def test_same_artifact_in_two_processes(self):
         _, runtime, sdk, *flags = LINK

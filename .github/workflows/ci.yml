@@ -24,6 +24,7 @@ jobs:
     outputs:
       stages: ${{ steps.native.outputs.stages }}
       release_forge: ${{ steps.native.outputs.sha256 }}
+      executable_inputs_sha256: ${{ steps.executables.outputs.sha256 }}
     steps:
       - uses: actions/checkout@v6
         with:
@@ -32,6 +33,23 @@ jobs:
         uses: ./.github/actions/native-test
         with:
           preset: dev
+      - name: Package the PE files exercised by the native executable tests
+        id: executables
+        working-directory: build/dev/fixtures/Debug
+        run: |
+          list="$GITHUB_WORKSPACE/tests/differential/reference/executable-inputs.txt"
+          dest="$RUNNER_TEMP/executable-inputs"
+          mkdir "$dest"
+          while IFS= read -r pe; do cp "$pe" "$dest/"; done < "$list"
+          xargs shasum -a 256 < "$list" > "$dest/SHA256SUMS"
+          echo "sha256=$(shasum -a 256 "$dest/SHA256SUMS" | cut -d' ' -f1)" >> "$GITHUB_OUTPUT"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: executable-reference-inputs
+          path: ${{ runner.temp }}/executable-inputs
+          if-no-files-found: error
+          retention-days: 7
+          overwrite: true
 
   macos-sanitize:
     runs-on: macos-26
@@ -117,6 +135,37 @@ jobs:
           retention-days: 7
           overwrite: true
 
+  windows-executable-reference:
+    needs: macos-dev
+    runs-on: ubuntu-24.04
+    outputs:
+      stages: ${{ toJSON(steps.verify.outputs) }}
+      executable_inputs_sha256: ${{ steps.inputs.outputs.sha256 }}
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/download-artifact@v4
+        with:
+          name: executable-reference-inputs
+          path: build/dev/fixtures/Debug
+      - name: Verify the native-tested PE set and checksums
+        id: inputs
+        working-directory: build/dev/fixtures/Debug
+        env:
+          EXPECTED_SHA256: ${{ needs.macos-dev.outputs.executable_inputs_sha256 }}
+        run: |
+          list="$GITHUB_WORKSPACE/tests/differential/reference/executable-inputs.txt"
+          find . -mindepth 1 -maxdepth 1 ! -name SHA256SUMS -printf '%f\n' | LC_ALL=C sort | diff -u "$list" -
+          xargs sha256sum < "$list" | cmp - SHA256SUMS
+          echo "$EXPECTED_SHA256  SHA256SUMS" | sha256sum --strict --check -
+          echo "sha256=$(sha256sum SHA256SUMS | cut -d' ' -f1)" >> "$GITHUB_OUTPUT"
+      - name: Prepare the pinned Wine image
+        run: make provision-fixtures
+      - name: Capture standalone PE behavior on Linux amd64
+        id: verify
+        run: |
+          test "$(uname -m)" = x86_64
+          ./tools/test-forge.sh --executable-reference
+
   differential:
     outputs:
       evidence_run_id: ${{ github.run_id }}-${{ github.run_attempt }}-${{ github.sha }}
@@ -182,7 +231,7 @@ jobs:
 
   regression-gate:
     if: ${{ always() }}
-    needs: [macos-dev, macos-sanitize, macos-presets, windows-fixtures, differential]
+    needs: [macos-dev, macos-sanitize, macos-presets, windows-fixtures, windows-executable-reference, differential]
     runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v6

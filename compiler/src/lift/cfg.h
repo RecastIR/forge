@@ -7,6 +7,7 @@
 #include "llvm/MC/MCInst.h"
 
 #include <map>
+#include <memory>
 #include <vector>
 
 namespace llvm {
@@ -70,12 +71,26 @@ namespace forge::x86 {
     inline constexpr unsigned maxFunctionBytes = 64 * 1024;
 
     using LeafStepCheck = llvm::function_ref<void(const Step &, Flow)>;
-    using ImportFlow = llvm::function_ref<Flow(const Step &)>;
+    // A recorded call may initially have no proven return. Recovery resumes its next PC
+    // when the target acquires a reachable RET. The callback lives only during advance().
+    using CallFlow = llvm::function_ref<Flow(const Step &, std::optional<int64_t> guestTarget)>;
 
     ControlFlowGraph discoverCFG(llvm::StringRef bytes, uint32_t begin,
                                  const llvm::MCDisassembler &dis, const llvm::MCInstrInfo &info,
                                  LeafStepCheck validateLeaf);
-    ControlFlowGraph discoverCFG(llvm::StringRef bytes, uint32_t begin,
-                                 const llvm::MCDisassembler &dis, const llvm::MCInstrInfo &info,
-                                 JumpTableReader &tables, ImportFlow importFlow);
+
+    class RecordedCFG {
+      public:
+        RecordedCFG(llvm::StringRef bytes, uint32_t begin, const llvm::MCDisassembler &dis,
+                    const llvm::MCInstrInfo &info, JumpTableReader &tables);
+        ~RecordedCFG();
+        bool advance(CallFlow classify);
+        void resume(uint32_t instruction);
+        bool hasBypassedProof() const;
+        ControlFlowGraph finish();
+
+      private:
+        struct State;
+        std::unique_ptr<State> state;
+    };
 } // namespace forge::x86

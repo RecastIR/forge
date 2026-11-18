@@ -114,9 +114,11 @@ forge_rt_status forge_rt_set_last_error(forge_rt_instance *instance, forge_rt_th
 forge_rt_status forge_rt_get_last_error(forge_rt_instance *instance, forge_rt_thread_token thread,
                                         uint32_t *outValue) FORGE_RT_NOEXCEPT;
 
-/* Console services require the currently executing managed process. Guest handles and addresses
- * are integer bits. Only the native out parameters are host pointers. A Win32 failure delivers
- * the guest failure value with status OK and sets the selected guest thread's last error. */
+/* Console services require the current managed process and a declared console dependency.
+ * An active invocation without captured standard handles reports FORGE_RT_INVALID_STATE.
+ * Guest handles and addresses are integer bits. Only the native outs are host pointers. A Win32
+ * failure delivers the guest failure value with status OK and sets the guest thread's last error.
+ */
 forge_rt_status forge_rt_get_std_handle(forge_rt_instance *instance, forge_rt_thread_token thread,
                                         uint32_t selector, uint64_t *outHandle) FORGE_RT_NOEXCEPT;
 forge_rt_status forge_rt_write_file(forge_rt_instance *instance, forge_rt_thread_token thread,

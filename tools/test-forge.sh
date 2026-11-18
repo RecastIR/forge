@@ -4,7 +4,7 @@ set -eu
 repo=$(CDPATH='' cd -- "$(dirname -- "$0")/.." && pwd)
 cd "$repo"
 usage() {
-    echo "usage: $0 --all | --native | --native-dev | --native-sanitize | --native-presets | --references | --differential" >&2
+    echo "usage: $0 --all | --native | --native-dev | --native-sanitize | --native-presets | --references | --executable-reference | --differential" >&2
     exit 2
 }
 test "$#" = 1 || usage
@@ -103,6 +103,9 @@ case "$1" in
     stage build ./tools/build-windows-fixtures.sh --all
     stage capture ./tools/run-windows-references.sh --all
     stage wine_tests python3 -B "$suite/reference/test_wine.py" ;;
+--executable-reference)
+    stage executable_reference python3 -B "$repo/tests/integration/test_executable.py" reference \
+        "$BUILD_ROOT/dev/fixtures/Debug" ;;
 --differential)
     status=0
     run_differential || status=1
@@ -120,8 +123,7 @@ case "$1" in
     "$repo/tools/test-forge.sh" --native || native=failure
     "$repo/tools/test-forge.sh" --references || references=failure
     if test "$native/$references" = success/success; then
-        stage executable_reference python3 -B "$repo/tests/integration/test_executable.py" reference \
-            "$BUILD_ROOT/dev/fixtures/Debug" || references=failure
+        "$repo/tools/test-forge.sh" --executable-reference || references=failure
     fi
     if test "$native/$references" = success/success; then
         compare=success

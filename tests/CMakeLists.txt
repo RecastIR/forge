@@ -296,7 +296,8 @@ add_test(NAME fixtures COMMAND "${Python3_EXECUTABLE}" -B
 set_tests_properties(fixtures PROPERTIES FIXTURES_SETUP pe_images)
 set_tests_properties(build_config PROPERTIES FIXTURES_REQUIRED pe_images)
 add_test(NAME input_lifetime COMMAND input_lifetime "${fixtures}/minimal.exe")
-add_test(NAME recovery_contract COMMAND recovery_contract "${fixtures}/stack.exe" "${fixtures}/leaves.exe" "${fixtures}/jump.exe" "${fixtures}/indirect.exe" "${fixtures}/last-error.exe")
+add_test(NAME recovery_contract COMMAND recovery_contract "${fixtures}/stack.exe" "${fixtures}/leaves.exe"
+  "${fixtures}/jump.exe" "${fixtures}/indirect.exe" "${fixtures}/last-error.exe" "${fixtures}/executable-noreturn.exe")
 add_test(NAME lift_contract COMMAND lift_contract "${fixtures}/add.exe" "${fixtures}/cfg.exe"
   "${fixtures}/image.exe" "${fixtures}/stack.exe")
 add_test(NAME lift_command COMMAND lift_command "${fixtures}/add.exe")

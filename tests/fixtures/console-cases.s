@@ -166,12 +166,19 @@ begin zero_length
 .Lzero_done:
 finish
 
-begin host_failure
-    handle -11
-    write_args
+.macro failed_write name, selector, count
+begin \name
+    handle \selector
+    write_args payload, \count
     write
     report_error
 finish
+.endm
+
+failed_write host_failure, -11, 4
+failed_write stderr_failure, -12, 4
+failed_write zero_stdout_failure, -11, 0
+failed_write zero_stderr_failure, -12, 0
 
 begin limited_file
     handle -11
@@ -212,6 +219,65 @@ begin alternate_edge
     call exit_or_write
     movl $9, %eax
 finish
+
+# A guest call can also be the last instruction of its unwind-backed extent.
+begin call_at_end
+    call exit_42
+.seh_endproc
+
+begin exit_42
+    movl $42, %ecx
+    call *__imp_ExitProcess(%rip)
+.seh_endproc
+
+# The post-call PC has an independent branch entry.
+begin branch_past_call
+    xorl %eax, %eax
+    testl %eax, %eax
+    jz .Lafter_exit
+    call call_at_end
+.Lafter_exit:
+    movl $23, %eax
+finish
+
+begin recursive_return
+    movl $3, %ecx
+    call count_returns
+    addl $10, %eax
+finish
+
+begin count_returns
+    testl %ecx, %ecx
+    jz .Lbase
+    subl $1, %ecx
+    call count_returns
+    addl $1, %eax
+    jmp .Lreturn
+.Lbase:
+    xorl %eax, %eax
+.Lreturn:
+finish
+
+# The mutually recursive helpers can exit the process but neither can return to its caller.
+begin recursive_exit
+    movl $2, %ecx
+    call count_to_exit
+    int3
+.seh_endproc
+
+begin count_to_exit
+    testl %ecx, %ecx
+    jz .Lexit_now
+    call next_count
+    int3
+.Lexit_now:
+    call exit_42
+.seh_endproc
+
+begin next_count
+    subl $1, %ecx
+    call count_to_exit
+.seh_endproc
 
 begin isolation
     call *__imp_GetLastError(%rip)

@@ -113,7 +113,9 @@ typedef struct forge_rt_import {
  * entryRva can differ from the PE header's peEntryRva. The trusted native entry and its
  * layout tables must come from the same translation. All descriptor tables, immutable
  * bytes, names, and native code have stable addresses and outlive every registered use.
- * Imports describe services resolved by the native linker. The runtime does no DLL lookup. */
+ * Imports describe services resolved by the native linker. Include the console imports used by
+ * hand-authored entries and their native adapters: registration captures standard streams when
+ * the table declares KERNEL32.dll GetStdHandle or WriteFile. DLL names are case-insensitive. */
 typedef struct forge_rt_artifact {
     uint32_t version;
     uint64_t base;
@@ -140,15 +142,17 @@ forge_rt_status forge_rt_process_register(forge_rt_process *process,
                                           const forge_rt_artifact *artifact) FORGE_PROCESS_NOEXCEPT;
 forge_rt_status forge_rt_process_get_state(forge_rt_process *process,
                                            forge_rt_process_state *outState) FORGE_PROCESS_NOEXCEPT;
-/* For READY processes only. The host guarantees its output signal policy throughout the run,
- * including SIGPIPE on inherited pipes/devices and SIGXFSZ under a finite file-size limit.
- * Without this assurance, those writes require an ignored signal (or Darwin F_SETNOSIGPIPE
- * on a pipe/device). The runtime library never changes the host's signal disposition. */
+/* For READY processes only. Records the host's assurance of safe output signal handling,
+ * including SIGPIPE on pipes/devices and SIGXFSZ under a finite file-size limit. Otherwise
+ * writes rely on an ignored signal or Darwin F_SETNOSIGPIPE on a pipe/device. Under either
+ * policy the host keeps applicable dispositions, descriptor flags and file-size limits safe
+ * throughout execution, including across descriptor aliases and blocked writes. */
 forge_rt_status
 forge_rt_process_allow_host_output_signals(forge_rt_process *process) FORGE_PROCESS_NOEXCEPT;
 /* Run enters the selected guest root exactly once. A null inputs pointer sets RCX and
  * RDX to zero. Otherwise run copies the caller's register seeds on admission. OK delivers
- * a tagged result even for execution failure. Admission errors preserve outResult. The
+ * a tagged result even for execution failure. Captured descriptor duplicates are released
+ * before any terminal state becomes visible. Admission errors preserve outResult. The
  * caller supplies live native input/output storage disjoint from each other and guest data. */
 forge_rt_status forge_rt_process_run(forge_rt_process *process, const forge_rt_entry_inputs *inputs,
                                      forge_rt_process_result *outResult) FORGE_PROCESS_NOEXCEPT;

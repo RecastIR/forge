@@ -1,11 +1,30 @@
 #include "instance.h"
 
 #include <fcntl.h>
+#include <sys/resource.h>
 #include <sys/stat.h>
 #include <unistd.h>
 
 namespace forge::runtime {
     namespace {
+        constexpr int firstPrivateDescriptor = 3;
+
+        forge_rt_status duplicationFailure(int error) {
+            if (error == EMFILE || error == ENFILE || error == ENOMEM) {
+                return FORGE_RT_RESOURCE_EXHAUSTED;
+            }
+
+            // F_DUPFD_CLOEXEC also rejects a minimum outside the soft descriptor limit.
+            struct rlimit limit{};
+
+            if (error == EINVAL && ::getrlimit(RLIMIT_NOFILE, &limit) == 0 &&
+                limit.rlim_cur <= firstPrivateDescriptor) {
+                return FORGE_RT_RESOURCE_EXHAUSTED;
+            }
+
+            return FORGE_RT_HOST_CONFIGURATION;
+        }
+
         StreamKind streamKind(int descriptor, const struct stat &info) {
             if (S_ISFIFO(info.st_mode)) {
                 return StreamKind::Pipe;
@@ -48,7 +67,8 @@ namespace forge::runtime {
 
             // Never occupy a missing standard slot while capturing a different one.
             do {
-                stream.descriptor = ::fcntl(static_cast<int>(index), F_DUPFD_CLOEXEC, 3);
+                stream.descriptor =
+                    ::fcntl(static_cast<int>(index), F_DUPFD_CLOEXEC, firstPrivateDescriptor);
             } while (stream.descriptor < 0 && errno == EINTR);
 
             if (stream.descriptor < 0) {
@@ -56,9 +76,7 @@ namespace forge::runtime {
                     continue;
                 }
 
-                return errno == EMFILE || errno == ENFILE || errno == ENOMEM
-                           ? FORGE_RT_RESOURCE_EXHAUSTED
-                           : FORGE_RT_HOST_CONFIGURATION;
+                return duplicationFailure(errno);
             }
 
             struct stat info{};
@@ -72,6 +90,18 @@ namespace forge::runtime {
                 return FORGE_RT_HOST_CONFIGURATION;
             }
 
+            int flags;
+
+            do {
+                flags = ::fcntl(stream.descriptor, F_GETFL);
+            } while (flags < 0 && errno == EINTR);
+
+            if (flags < 0) {
+                return FORGE_RT_HOST_CONFIGURATION;
+            }
+
+            const int access = flags & O_ACCMODE;
+            stream.writable = index != STDIN_FILENO && (access == O_WRONLY || access == O_RDWR);
             stream.kind = streamKind(stream.descriptor, info);
 
             // Guest handles occupy a separate namespace from small POSIX descriptors.

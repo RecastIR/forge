@@ -653,10 +653,19 @@ probe call_redirect
 direct_caller recovery_mutual_a, recovery_mutual_b
 probe recovery_mutual_b
     subq $40, %rsp
+    testl %ecx, %ecx
+    jz .Lmutual_return
     callq recovery_mutual_a
     callq recovery_mutual_b
+.Lmutual_return:
     addq $40, %rsp
     ret
+    .seh_endproc
+
+probe recovery_no_base
+    subq $40, %rsp
+    callq recovery_no_base
+    callq recovery_invalid_callee
     .seh_endproc
 
 direct_caller recovery_invalid_entry, recovery_invalid_callee
