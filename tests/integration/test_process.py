@@ -156,6 +156,11 @@ class ProcessExecution(unittest.TestCase):
             for entry, access in (("write32", WRITE), ("update", READ | WRITE)):
                 self.exercise(image, entry, [(boundary - 2, 7, memory(boundary, access, PERMISSION))])
 
+    def test_repeated_store_after_void_service(self):
+        self.exercise("service-abi", "repeat_after_void",
+                      [(0, 0, "return 17"), (0, 1, "guard 3")],
+                      imports=[("kernel32.dll", "SetLastError")])
+
     def test_stack_guard_and_service_failures(self):
         getter = [("kernel32.dll", "GetLastError")]
         self.exercise("checked-memory", "guard_then_service",

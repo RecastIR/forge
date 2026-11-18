@@ -36,18 +36,23 @@ namespace {
         for (uint64_t i = 0; i < count; ++i) {
             uint8_t a, b;
             auto status = left.readScalar(i, a);
+
             if (status != FORGE_RT_OK) {
                 return status;
             }
+
             status = right.readScalar(i, b);
+
             if (status != FORGE_RT_OK) {
                 return status;
             }
+
             if (!a || a != b) {
-                result = int32_t{a} - int32_t{b};
+                result = (a > b) - (a < b);
                 return FORGE_RT_OK;
             }
         }
+
         result = 0;
         return FORGE_RT_OK;
     }

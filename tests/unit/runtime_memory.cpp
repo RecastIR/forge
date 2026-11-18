@@ -685,21 +685,36 @@ namespace {
         REQUIRE(forge_rt_msvcrt_strlen(rt, thread, base, &word, &fault) == FORGE_RT_OK);
         REQUIRE(word == 3);
         REQUIRE(forge_rt_msvcrt_strcmp(rt, thread, base, base + 8, &order, &fault) == FORGE_RT_OK);
-        REQUIRE(order < 0);
+        REQUIRE(order == -1);
         REQUIRE(forge_rt_msvcrt_strcmp(rt, thread, base, base + 1, &order, &fault) == FORGE_RT_OK);
-        REQUIRE(order > 0);
+        REQUIRE(order == 1);
+        REQUIRE(forge_rt_msvcrt_strcmp(rt, thread, base, base, &order, &fault) == FORGE_RT_OK);
+        REQUIRE(order == 0);
+        REQUIRE(forge_rt_msvcrt_strncmp(rt, thread, base, base + 8, 3, &order, &fault) ==
+                FORGE_RT_OK);
+        REQUIRE(order == -1);
+        REQUIRE(forge_rt_msvcrt_strncmp(rt, thread, base + 8, base, 3, &order, &fault) ==
+                FORGE_RT_OK);
+        REQUIRE(order == 1);
         REQUIRE(forge_rt_msvcrt_strncmp(rt, thread, base, base + 8, 2, &order, &fault) ==
                 FORGE_RT_OK);
         REQUIRE(order == 0);
         REQUIRE(forge_rt_msvcrt_strncmp(rt, thread, base, base, UINT64_MAX, &order, &fault) ==
                 FORGE_RT_OK);
         REQUIRE(order == 0);
+        order = 987;
         REQUIRE(forge_rt_msvcrt_strncmp(rt, thread, 0, 0, 0, &order, &fault) == FORGE_RT_OK);
+        REQUIRE(order == 0);
         REQUIRE(forge_rt_msvcrt_memcpy(rt, thread, base + 16, base + 8, 4, &word, &fault) ==
                 FORGE_RT_OK);
         REQUIRE(word == base + 16 && output == right);
         expectFault(fault, {1, 2, 3});
 
+        order = 987;
+        REQUIRE(forge_rt_msvcrt_strcmp(rt, thread, base + 4, 0, &order, &fault) ==
+                FORGE_RT_GUEST_FAULT);
+        expectFault(fault, {base + 4, FORGE_RT_READ, FORGE_RT_FAULT_UNMAPPED});
+        REQUIRE(order == 987);
         REQUIRE(forge_rt_msvcrt_memcpy(rt, thread, base + 17, base, 4, &word, &fault) ==
                 FORGE_RT_GUEST_FAULT);
         expectFault(fault, {base + 20, FORGE_RT_WRITE, FORGE_RT_FAULT_UNMAPPED});

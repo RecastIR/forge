@@ -150,7 +150,9 @@ typedef struct forge_rt_data_import {
     uint32_t kind;
 } forge_rt_data_import;
 
-/* Version 3 describes ordered, disjoint 8-byte IAT slots in private image backing. */
+/* Version 3 describes ordered, disjoint 8-byte IAT slots in private image backing.
+ * Their backing bytes must also be disjoint and guest write-protected through every
+ * mapping. Registration publishes the writable CRT cell's guest VA in each slot. */
 typedef struct forge_rt_crt_artifact {
     forge_rt_named_artifact named;
     const forge_rt_data_import *dataImports;

@@ -127,14 +127,58 @@ class ArtifactSetup(unittest.TestCase):
 
 
 class ArtifactTests(ArtifactSetup):
-    def test_startup_stops_after_failed_translation_or_missing_executable(self):
-        for translator, failed in (("/usr/bin/false", "translation"), ("/usr/bin/true", "artifact")):
-            with self.subTest(translator=translator), tempfile.TemporaryDirectory(dir=self.root) as work, \
+    @staticmethod
+    def emit_compiler_record(stderr, args, stage, category, code):
+        context = dict(input=str(args[2]), output=str(args[args.index("--output") + 1]))
+        if code == "EXECUTABLE_READY":
+            context.update(entry_recovered=True, recovery_complete=True, unresolved_calls=[])
+        record = dict(schema_version=1, stage=stage, category=category, code=code, message="fixture",
+                      context=context)
+        stderr.write((json.dumps(record) + "\n").encode())
+
+    def test_startup_requires_recovered_entry_and_standalone_file(self):
+        executable = self.root / "translated"
+        executable.symlink_to(sys.executable)
+        with self.assertRaisesRegex(ValueError, "regular executable"):
+            startup.verify_executable(executable)
+        context = dict(input=str(self.image), output=str(executable), entry_recovered=True,
+                       recovery_complete=True, unresolved_calls=[])
+        for missing in ("entry_recovered", "recovery_complete", "unresolved_calls"):
+            with self.subTest(missing=missing):
+                incomplete = context.copy()
+                del incomplete[missing]
+                record = dict(schema_version=1, stage="publication", category="success", code="EXECUTABLE_READY",
+                              message="fixture", context=incomplete)
+                with self.assertRaisesRegex(ValueError, "complete entry recovery"):
+                    startup.compiler_diagnostic((json.dumps(record) + "\n").encode(), 0, self.image, executable)
+
+    def test_startup_classifies_compiler_outcomes(self):
+        cases = ((("lifting", "unsupported", "LIFT_IMAGE_MEMORY"), 1, "translation", "failed"),
+                 (("linking", "tool", "NATIVE_LINK_FAILED"), 1, "native_build", "passed"),
+                 (("publication", "invalid_input", "OUTPUT_ALIAS"), 1, "publication", "unknown"),
+                 (("publication", "success", "EXECUTABLE_READY"), 0, "artifact", "passed"),
+                 (b"", 1, "compiler", "unknown"), (b"not JSON\n", 1, "compiler", "unknown"),
+                 (("lifting", "unsupported", "LIFT_IMAGE_MEMORY"), -9, "compiler", "unknown"))
+        for record, status, failed, translated in cases:
+            def invoke(args, stdout, stderr):
+                if isinstance(record, bytes):
+                    stderr.write(record)
+                else:
+                    self.emit_compiler_record(stderr, args, *record)
+                return status
+
+            with self.subTest(record=record, status=status), tempfile.TemporaryDirectory(dir=self.root) as work, \
                     patch.object(startup, "BINARIES", self.binaries), \
-                    patch.object(startup, "REFERENCES", self.references):
-                report = startup.run_case(translator, self.manifest, self.config, Path(work))
-                self.assertEqual(report["status"], "failed")
+                    patch.object(startup, "REFERENCES", self.references), \
+                    patch.object(startup.native, "command_status", side_effect=invoke):
+                report = startup.run_case(self.forge, self.manifest, self.config, Path(work))
+                self.assertEqual((report["status"], report["failure_stage"]), ("failed", failed))
+                if failed != "compiler":
+                    detail = report["compiler_diagnostic"]
+                    self.assertEqual((detail["stage"], detail["category"], detail["code"]), record)
+                    self.assertEqual(detail["context"]["output"], str(Path(work) / "translated"))
                 self.assertEqual(report["stages"]["reference"], "passed")
+                self.assertEqual(report["stages"]["translation"], translated)
                 self.assertEqual(report["stages"][failed], "failed")
                 self.assertEqual(report["stages"]["comparison"], "not_run")
                 self.assertEqual(report["stages"]["execution"], "not_run")
@@ -142,17 +186,19 @@ class ArtifactTests(ArtifactSetup):
     def test_startup_compares_real_process_observations(self):
         for status, payload, matches in ((0, "5", True), (42, "5", False), (0, "wrong", False)):
             with self.subTest(status=status, payload=payload), tempfile.TemporaryDirectory(dir=self.root) as work:
-                def translation(args, stderr, stdout):
+                def translation(args, stdout, stderr):
                     pe = args[2]
                     self.assertEqual(pe.read_bytes(), self.image.read_bytes())
                     executable = args[args.index("--output") + 1]
                     executable.write_text(f"#!/bin/sh\n[ \"$1:$2\" = 2:3 ] || exit 99\n"
                                           f"echo '{payload}'\nexit {status}\n")
                     executable.chmod(0o700)
+                    self.emit_compiler_record(stderr, args, "publication", "success", "EXECUTABLE_READY")
+                    return 0
 
                 with patch.object(startup, "BINARIES", self.binaries), \
                         patch.object(startup, "REFERENCES", self.references), \
-                        patch.object(startup.native, "command", side_effect=translation), \
+                        patch.object(startup.native, "command_status", side_effect=translation), \
                         patch.object(startup, "verify_executable"):
                     report = startup.run_case(self.forge, self.manifest, self.config, Path(work))
                 self.assertEqual(report["native_exit_code"], status)
@@ -730,16 +776,12 @@ class LiftDiagnosticTests(unittest.TestCase):
                   for code in codes}
         # The differential runner requests function IR. It must reject a diagnostic
         # produced by another command or output mode, even when the code is genuine.
-        other = {
-            ("pe", "invalid_input", "NOT_DLL"),
-            ("publication", "invalid_input", "OUTPUT_ALIAS"),
+        native_codes = {row for row in expected if row[0] in ("optimization", "codegen", "linking")}
+        self.assertEqual(startup.EXECUTABLE_FAILURES, native_codes | {
             ("entry", "unsupported", "EXECUTABLE_UNSUPPORTED_STARTUP"),
-            ("optimization", "tool", "NATIVE_OPTIMIZATION_FAILED"),
-            ("codegen", "tool", "NATIVE_CODEGEN_FAILED"),
-            ("linking", "io", "NATIVE_TOOL_UNAVAILABLE"),
-            ("linking", "unsupported", "NATIVE_HOST_UNSUPPORTED"),
-            ("linking", "tool", "NATIVE_LINK_FAILED"),
-        }
+            ("publication", "invalid_input", "OUTPUT_ALIAS"),
+        })
+        other = startup.EXECUTABLE_FAILURES | {("pe", "invalid_input", "NOT_DLL")}
         self.assertTrue(actual.isdisjoint(other))
         self.assertEqual(actual | other, expected)
 

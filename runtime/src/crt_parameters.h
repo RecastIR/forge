@@ -8,8 +8,15 @@
 #include <vector>
 
 namespace forge::runtime {
+    struct CrtImports {
+        std::span<const forge_rt_data_import> data;
+        bool mainArgs;
+
+        bool hasData(uint32_t kind) const;
+    };
+
     struct CrtParameters {
-        forge_rt_status initialize(std::string_view command,
+        forge_rt_status initialize(CrtImports imports, std::string_view command,
                                    const forge_rt_process_startup &startup);
         void relocate(uint64_t base);
         uint64_t dataAddress(uint32_t kind) const;

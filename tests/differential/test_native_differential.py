@@ -12,6 +12,7 @@ import unittest
 from unittest.mock import patch
 
 import differential as diff
+import startup
 from calculate_driver_cases import CASES as CALCULATE_INPUTS
 
 CASE = "arithmetic/add_i64"
@@ -25,6 +26,54 @@ class NativeDifferentialTests(unittest.TestCase):
     def setUp(self):
         self.tmp = diff.BUILD / "tmp"
         self.tmp.mkdir(parents=True, exist_ok=True)
+
+    def test_conventional_startup_readiness(self):
+        manifest = next(m for m in diff.load_catalog() if m.case["id"] == "startup/argc")
+        # Independent llvm-readobj import/header and llvm-objdump .CRT/disassembly
+        # observations for these two reproducible PEs. TLS callback order matters.
+        inputs = {
+            "debug": ("e2192c63caae30f8dfe5697c3bec3888abcb7831cd7fe33a0f07c09309b0bfb6",
+                      ["0x140001690", "0x140001660"]),
+            "release": ("d21038a0b109685d0946014d2a1982a7464bcec35565996f42db000449233aaa",
+                        ["0x140001660", "0x140001630"]),
+        }
+        imports = {
+            "kernel32.dll": "DeleteCriticalSection EnterCriticalSection GetLastError GetStartupInfoA "
+                            "InitializeCriticalSection LeaveCriticalSection SetUnhandledExceptionFilter Sleep "
+                            "TlsGetValue VirtualProtect VirtualQuery __C_specific_handler",
+            "msvcrt.dll": "__getmainargs __initenv __iob_func __set_app_type __setusermatherr _acmdln "
+                          "_amsg_exit _cexit _commode _fmode _initterm _onexit abort calloc exit fprintf "
+                          "free fwrite malloc memcpy signal strlen strncmp vfprintf",
+        }
+        for config, (digest, callbacks) in inputs.items():
+            with self.subTest(config=config), tempfile.TemporaryDirectory(dir=self.tmp) as tmp:
+                work = Path(tmp)
+                report = startup.run_case(self.forge, manifest, config, work)
+                self.assertEqual(report.get("failure_stage"), "translation", report.get("diagnostic"))
+                self.assertEqual(report["binary_sha256"], digest)
+                self.assertEqual(report["stages"]["reference"], "passed")
+                self.assertEqual(report["stages"]["execution"], "not_run")
+                self.assertFalse(os.path.lexists(work / "translated"))
+                record = report["compiler_diagnostic"]
+                self.assertEqual((record["stage"], record["category"], record["code"]),
+                                 ("lifting", "unsupported", "LIFT_UNSUPPORTED_CONTROL_FLOW"))
+                context = record["context"]
+                self.assertIs(context["entry_recovered"], True)
+                self.assertIs(context["recovery_complete"], False)
+                self.assertEqual((context["entry_rva"], context["function_rva"], context["instruction_rva"],
+                                  context["opcode"], context["bytes"]),
+                                 ("0x14d0", "0x1180", "0x11e6", "CALL64r", "41ffd4"))
+                tls = context["tls"]
+                self.assertEqual((tls["raw_data_start_va"], tls["raw_data_end_va"], tls["index_va"]),
+                                 ("0x14000a000", "0x14000a008", "0x14000708c"))
+                self.assertEqual(tls["callback_vas"], callbacks)
+                self.assertIn("unsupported", tls["limitation"])
+                directories = context["load_imports"]
+                self.assertCountEqual([d["dll"].lower() for d in directories], imports)
+                for directory in directories:
+                    self.assertIs(directory["delayed"], False)
+                    self.assertCountEqual([s["name"] for s in directory["symbols"]],
+                                          imports[directory["dll"].lower()].split())
 
     def test_lstrlen_rebased_reference(self):
         fixture = "imports/lstrlen"

@@ -23,6 +23,8 @@ namespace forge::x86 {
         ImagePlan image;
     };
 
+    Defined entryRegisterDefinitions(EntryMode mode);
+
     // The group must outlive its proofs. Use a guest base validated for this image.
     GroupAnalysis analyzeGroup(const RecoveredFunctionGroup &group, uint64_t guestBase,
                                EntryMode mode, bool checkedMemory = false,

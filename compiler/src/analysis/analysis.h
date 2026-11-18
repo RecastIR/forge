@@ -16,6 +16,8 @@ namespace forge {
         std::optional<RecordDefect> defect;
         bool chainedFragment = false;
         bool hasUnwindHandler = false;
+        // File-backed header, codes and any mandatory aligned trailer.
+        uint32_t unwindInfoSize = 0;
         std::optional<uint32_t> handlerRva;
         std::optional<uint32_t> exceptionDataRva;
         std::optional<unsigned> unsupportedUnwindVersion;

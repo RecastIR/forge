@@ -21,9 +21,10 @@ namespace forge {
                        rangesIn(writes, range).empty();
             }
 
-            bool ownsRecord(const FunctionRange &function) const {
+            bool containsUnwindRecord(const FunctionRange &function) const {
                 const auto &directory = image.module().exceptions;
-                if (!directory || function.indices.empty()) {
+                if (!directory || function.indices.empty() ||
+                    !contains(function.record.unwind, function.unwindInfoSize)) {
                     return false;
                 }
 
@@ -93,8 +94,13 @@ namespace forge {
                 llvm::lower_bound(analysis.functions(), scope.filterRva,
                                   [](const auto &f, uint32_t rva) { return f.record.begin < rva; });
             if (filter == analysis.functions().end() || filter->record.begin != scope.filterRva ||
-                !filter->eligible() || !stable.ownsRecord(*filter)) {
+                !filter->eligible()) {
                 handler.limitation = "C-specific filter has no eligible function record";
+                return;
+            }
+
+            if (!stable.containsUnwindRecord(*filter)) {
+                handler.limitation = "mutable C-specific filter unwind metadata";
                 return;
             }
 
@@ -130,9 +136,7 @@ namespace forge {
 
         const StableMetadata stable{*source, RelocationIndex(module().relocations),
                                     source->loaderWrittenRanges()};
-        if (!stable.ownsRecord(function) ||
-            !stable.contains(function.record.unwind,
-                             *function.exceptionDataRva - function.record.unwind) ||
+        if (!stable.containsUnwindRecord(function) ||
             !stable.contains(*function.handlerRva, amd64ImportThunkSize) ||
             imported->unstableIdentityRva(stable.relocations, stable.writes)) {
             return {};

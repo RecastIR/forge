@@ -10,6 +10,7 @@ import sys
 import tempfile
 
 from comparison import describe, differences
+from lift_diagnostics import FAILURE_KINDS, decode_diagnostic
 from manifests import SUITE, load_catalog
 
 sys.path.insert(0, str(SUITE / "reference"))
@@ -18,9 +19,38 @@ from run import BINARIES, BUILD, REFERENCES, snapshot
 import native
 
 
+# These failure codes supplement the common function-lifting diagnostics.
+EXECUTABLE_FAILURES = {
+    ("entry", "unsupported", "EXECUTABLE_UNSUPPORTED_STARTUP"),
+    ("optimization", "tool", "NATIVE_OPTIMIZATION_FAILED"),
+    ("codegen", "tool", "NATIVE_CODEGEN_FAILED"),
+    ("linking", "io", "NATIVE_TOOL_UNAVAILABLE"),
+    ("linking", "unsupported", "NATIVE_HOST_UNSUPPORTED"),
+    ("linking", "tool", "NATIVE_LINK_FAILED"),
+    ("publication", "invalid_input", "OUTPUT_ALIAS"),
+}
+
+
+def compiler_diagnostic(raw, status, pe, output):
+    record = decode_diagnostic(raw)
+    stage, category, code = record["stage"], record["category"], record["code"]
+    context = record["context"]
+    if context.get("input") != str(pe) or context.get("output") != str(output):
+        raise ValueError("compiler diagnostic disagrees with the input or output path")
+    if status == 0 and (stage, category, code) == ("publication", "success", "EXECUTABLE_READY"):
+        if (context.get("entry_recovered") is not True or context.get("recovery_complete") is not True
+                or context.get("unresolved_calls") != []):
+            raise ValueError("published executable lacks a complete entry recovery")
+        return record
+    if status == 1 and ((stage, category, code) in EXECUTABLE_FAILURES
+                        or code in FAILURE_KINDS.get((stage, category), ())):
+        return record
+    raise ValueError(f"unexpected compiler diagnostic for exit {status}: {stage}/{category}/{code}")
+
+
 def verify_executable(path):
-    if not path.is_file() or not os.access(path, os.X_OK):
-        raise ValueError("Forge did not publish an executable")
+    if path.is_symlink() or not path.is_file() or not os.access(path, os.X_OK):
+        raise ValueError("Forge did not publish a regular executable file")
     archs = subprocess.check_output(["/usr/bin/lipo", "-archs", path], text=True).strip()
     header = subprocess.check_output(["/usr/bin/otool", "-hv", path], text=True)
     if archs != "arm64" or not re.search(r"^MH_MAGIC_64\s+ARM64\s+[^\n]*\bEXECUTE\b", header, re.MULTILINE):
@@ -32,7 +62,8 @@ def verify_executable(path):
 
 def run_case(forge, manifest, config, work):
     case = manifest.case
-    stages = dict.fromkeys(("reference", "translation", "artifact", "execution", "comparison"), "not_run")
+    stages = dict.fromkeys(("reference", "translation", "native_build", "publication",
+                            "artifact", "execution", "comparison"), "not_run")
     report = dict(fixture_id=case["id"], config=config, args=case["args"], stages=stages)
     stage = "reference"
     try:
@@ -42,11 +73,32 @@ def run_case(forge, manifest, config, work):
             report.update(binary_sha256=digest, reference=provenance)
             stages[stage] = "passed"
 
-            stage = "translation"
+            stage = "compiler"
             executable = work / "translated"
-            native.command([forge, "lift", pe, "--executable", "--output", executable,
-                            "--diagnostics-format", "json"], work / "compiler.stderr", work / "compiler.stdout")
-            stages[stage] = "passed"
+            if os.path.lexists(executable):
+                raise ValueError("expected a fresh executable output path")
+            log = work / "compiler.stderr"
+            stages.update(translation="unknown", native_build="unknown", publication="unknown")
+            with (work / "compiler.stdout").open("wb") as stdout, log.open("wb") as stderr:
+                status = native.command_status([forge, "lift", pe, "--executable", "--output", executable,
+                                                "--diagnostics-format", "json"], stdout, stderr)
+            report["compiler_exit_code"] = status
+            diagnostic = compiler_diagnostic(log.read_bytes(), status, pe, executable)
+            report["compiler_diagnostic"] = diagnostic
+            if status:
+                phase = diagnostic["stage"]
+                if phase in ("optimization", "codegen", "linking"):
+                    stage = "native_build"
+                    stages.update(translation="passed", publication="not_run")
+                elif phase == "publication":
+                    # Publication also preflights the path before lifting. This code
+                    # alone cannot establish whether a module or object was built.
+                    stage = "publication"
+                else:
+                    stage = "translation"
+                    stages.update(native_build="not_run", publication="not_run")
+                raise ValueError(f"{diagnostic['code']}: {diagnostic['message']}")
+            stages.update(translation="passed", native_build="passed", publication="passed")
 
         stage = "artifact"
         verify_executable(executable)
@@ -65,15 +117,7 @@ def run_case(forge, manifest, config, work):
         report["status"] = "passed"
     except (OSError, ValueError, subprocess.SubprocessError) as error:
         stages[stage] = "failed"
-        report.update(status="failed", diagnostic=str(error))
-        if stage == "translation":
-            # The CLI writes its complete structured report separately. Keep the
-            # summary readable even for binaries carrying several dozen imports.
-            try:
-                details = json.loads((work / "compiler.stderr").read_bytes())
-                report["diagnostic"] = f"{details['code']}: {details['message']}"
-            except (OSError, ValueError, TypeError, KeyError):
-                pass
+        report.update(status="failed", failure_stage=stage, diagnostic=str(error))
     (work / "result.json").write_text(json.dumps(report, indent=2) + "\n", encoding="utf-8")
     return report
 

@@ -760,6 +760,50 @@ probe repeat_unconsumed
     ret
     .seh_endproc
 
+probe repeat_opaque_destination
+    movq %rdi, %r11
+    movl $17, %eax
+    rep stosq
+    movq %r11, %rdi
+    ret
+    .seh_endproc
+
+# The zero-count predecessor defines neither RDI nor RAX.
+probe repeat_join
+    pushq %rdi
+    subq $8, %rsp
+    movq $17, (%rsp)
+    testq %rcx, %rcx
+    je 1f
+    movq %rsp, %rdi
+    movq %rdx, %rax
+    movl $1, %ecx
+1:
+    rep stosq
+    movq (%rsp), %rax
+    addq $8, %rsp
+    popq %rdi
+    ret
+    .seh_endproc
+
+# Saving an opaque nonvolatile through RAX requires preserving its byte origins.
+probe repeat_join_opaque
+    pushq %rdi
+    pushq %rbx
+    testq %rcx, %rcx
+    je 1f
+    movq %rbx, %rax
+    movq $0, (%rsp)
+    movq %rsp, %rdi
+    movl $19, %ebx
+1:
+    rep stosq
+    popq %rbx
+    popq %rdi
+    movl $42, %eax
+    ret
+    .seh_endproc
+
 probe repeat_to_address
     movq %rdi, %r11
     movq %rcx, %rdi

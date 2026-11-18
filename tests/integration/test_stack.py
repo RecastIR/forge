@@ -92,6 +92,15 @@ class StackTests(GuestExecution):
             self.expect(exe, 0, 123, 42)
             self.trap(exe, [(1, 123)])
 
+        # An opaque incoming RDI can have bits equal to a writable stack address.
+        for exe in self.variants("repeat_opaque_destination", incoming_bits=RSP - 8):
+            self.expect(exe, 0, 0, 17)
+            self.trap(exe, [(1, 0)])
+
+        for exe in self.variants("repeat_join_opaque"):
+            self.expect(exe, 0, 0, 42)
+            self.expect(exe, 1, 0, 42)
+
         for exe in self.variants("repeat_to_address"):
             self.expect(exe, MASK, 0, 0x123456789abcdef0)
             self.trap(exe, [(RSP, 1)])

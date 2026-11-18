@@ -128,6 +128,37 @@ class Discovery(Case):
                     self.assertIn(b"unsupported unwind version 7", p.stderr)
                 self.invoke("inspect", image, "--strict")
 
+    def test_truncated_unwind_handler_rva(self):
+        original = (FIXTURES / "executable-return.exe").read_bytes()
+        layout = Layout(original)
+        record = layout.file_offset(layout.directory(3)[0])
+        entry, _, unwind = struct.unpack_from("<III", original, record)
+        header = layout.file_offset(unwind)
+        section = layout.section_header(unwind)
+        image = self.dir / "truncated-handler.exe"
+        output = self.dir / "output"
+
+        # One code slot ends at byte six. The handler RVA begins at byte eight.
+        for flags, extent in ((1, 8), (2, 11)):
+            with self.subTest(flags=flags, extent=extent):
+                data = bytearray(original)
+                data[header:header + 4] = bytes((1 | (flags << 3), 1, 1, 0))
+                data[header + 4:header + 6] = bytes((1, 0x30))  # UWOP_PUSH_NONVOL RBX
+                struct.pack_into("<I", data, section + 8, unwind - layout.u32(section + 12) + extent)
+                image.write_bytes(data)
+
+                result = self.analyze(image, "--strict", code=3)
+                function, = result["functions"]
+                self.assertEqual((function["status"], function["liftable"]), ("invalid", False))
+                finding, = result["diagnostics"]
+                self.assertEqual(finding["code"], "INVALID_FUNCTION_RECORD")
+                self.assertIn("truncated unwind handler RVA", finding["message"])
+                for selection in (("--rva", hex(entry)), ("--executable",)):
+                    failure = self.invoke("lift", image, *selection, "--output", output,
+                                          "--diagnostics-format", "json", code=1)
+                    self.assertEqual(json.loads(failure.stderr)["code"], "ENTRY_INVALID_START")
+                    self.assertFalse(output.exists())
+
     def test_recover_readable_conflicts(self):
         data = bytearray((FIXTURES / "arithmetic.exe").read_bytes())
         info = Layout(data)

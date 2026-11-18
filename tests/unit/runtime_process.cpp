@@ -427,34 +427,123 @@ namespace {
     }
 
     void checkCrtArguments() {
-        const forge_rt_backing storage{32, nullptr, nullptr, 0};
-        const forge_rt_region_template slots{base, 32, 0, 0, FORGE_RT_READ};
+        const forge_rt_backing storage{36, nullptr, nullptr, 0};
+        forge_rt_region_template rows[]{{base, 16, 0, 0, FORGE_RT_READ},
+                                        {base + 16, 16, 0, 16, FORGE_RT_READ},
+                                        {base + 40, 1, 0, 31, FORGE_RT_READ},
+                                        {base + 48, 4, 0, 32, FORGE_RT_READ | FORGE_RT_WRITE}};
+        const forge_rt_import getMainArgs{"msvcrt.dll", "__getmainargs"};
         const forge_rt_data_import imports[]{{0, FORGE_RT_CRT_ACMDLN},
                                              {8, FORGE_RT_CRT_INITENV},
                                              {16, FORGE_RT_CRT_FMODE},
                                              {24, FORGE_RT_CRT_COMMODE}};
-        forge_rt_crt_artifact descriptor{{{FORGE_RT_CRT_ARTIFACT_VERSION, base, 64, 32, 32,
-                                           &storage, 1, &slots, 1, nullptr, 0, inspectCrtArguments},
-                                          "Real Guest.exe"},
-                                         imports,
-                                         4};
+        forge_rt_crt_artifact descriptor{
+            {{FORGE_RT_CRT_ARTIFACT_VERSION, base, 64, 32, 32, &storage, 1, rows, std::size(rows),
+              &getMainArgs, 1, inspectCrtArguments},
+             "Real Guest.exe"},
+            imports,
+            4};
         const auto process = create();
         const char *args[]{"", "two words", "a\"b", "sp ace\\"};
         const char *env[]{"FORGE=a b"};
         const forge_rt_process_startup startup{nullptr, std::size(args), args, std::size(env), env};
+        const auto reject = [&] {
+            REQUIRE(forge_rt_process_register_with_startup(process.get(),
+                                                           &descriptor.named.artifact,
+                                                           &startup) == FORGE_RT_INVALID_ARGUMENT);
+            expectState(process.get(), FORGE_RT_PROCESS_CREATED);
+        };
         const forge_rt_data_import invalid[]{{0, FORGE_RT_CRT_ACMDLN}, {4, FORGE_RT_CRT_COMMODE}};
         descriptor.dataImports = invalid;
         descriptor.dataImportCount = 2;
-        REQUIRE(forge_rt_process_register_with_startup(process.get(), &descriptor.named.artifact,
-                                                       &startup) == FORGE_RT_INVALID_ARGUMENT);
-        expectState(process.get(), FORGE_RT_PROCESS_CREATED);
+        reject();
         descriptor.dataImports = imports;
         descriptor.dataImportCount = 4;
+        rows[1].offset = 0;
+        reject();
+        rows[1].offset = 12;
+        reject();
+        rows[1].offset = 16;
+        rows[1].permissions |= FORGE_RT_WRITE;
+        reject();
+        rows[1].permissions = FORGE_RT_READ;
+        rows[2].permissions |= FORGE_RT_WRITE;
+        reject();
+        rows[2].permissions = FORGE_RT_READ;
         REQUIRE(forge_rt_process_register_with_startup(process.get(), &descriptor.named.artifact,
                                                        &startup) == FORGE_RT_OK);
         forge_rt_process_result result{};
         REQUIRE(forge_rt_process_run(process.get(), nullptr, &result) == FORGE_RT_OK &&
                 result.kind == FORGE_RT_RETURNED);
+    }
+
+    void checkCrtInputConsumers() {
+        const forge_rt_backing storage{8, nullptr, nullptr, 0};
+        const forge_rt_region_template slot{base, 8, 0, 0, FORGE_RT_READ};
+        forge_rt_data_import binding{0, FORGE_RT_CRT_FMODE};
+        const auto dataOnlyEntry = [](forge_rt_execution *execution) {
+            int32_t result = 17;
+            forge_rt_memory_fault fault{};
+            REQUIRE(forge_rt_msvcrt_getmainargs(execution->instance, execution->thread, 0, 0, 0, 0,
+                                                0, &result, &fault) == FORGE_RT_INVALID_STATE);
+            REQUIRE(result == 17);
+            execution->result = {FORGE_RT_RETURNED, FORGE_RT_OK, 42, {}, 0};
+        };
+        forge_rt_crt_artifact descriptor{{{FORGE_RT_CRT_ARTIFACT_VERSION, base, 16, 8, 8, &storage,
+                                           1, &slot, 1, nullptr, 0, dataOnlyEntry},
+                                          "input.exe"},
+                                         &binding,
+                                         1};
+        const char *unicodeArg[]{"café"};
+        const char *unicodeEnv[]{"LANG_VALUE=café"};
+        forge_rt_process_startup startup{nullptr, 1, unicodeArg, 1, unicodeEnv};
+        const auto check = [&](forge_rt_status expected) {
+            const auto process = create();
+            REQUIRE(forge_rt_process_register_with_startup(
+                        process.get(), &descriptor.named.artifact, &startup) == expected);
+            expectState(process.get(), expected == FORGE_RT_OK ? FORGE_RT_PROCESS_READY
+                                                               : FORGE_RT_PROCESS_CREATED);
+
+            if (expected == FORGE_RT_OK && !descriptor.named.artifact.importCount) {
+                forge_rt_process_result result{};
+                REQUIRE(forge_rt_process_run(process.get(), nullptr, &result) == FORGE_RT_OK &&
+                        result.kind == FORGE_RT_RETURNED && result.value == 42);
+            }
+        };
+
+        check(FORGE_RT_OK);
+        binding.kind = FORGE_RT_CRT_COMMODE;
+        check(FORGE_RT_OK);
+        binding.kind = FORGE_RT_CRT_ACMDLN;
+        check(FORGE_RT_INVALID_ARGUMENT);
+        startup.argumentCount = 0;
+        check(FORGE_RT_OK);
+        binding.kind = FORGE_RT_CRT_INITENV;
+        check(FORGE_RT_INVALID_ARGUMENT);
+        startup.argumentCount = 1;
+        startup.environmentCount = 0;
+        check(FORGE_RT_OK);
+        descriptor.dataImportCount = 0;
+        startup.environmentCount = 1;
+        check(FORGE_RT_OK);
+
+        const forge_rt_import getCommand{"Kernel32.DLL", "GetCommandLineA"};
+        descriptor.named.artifact.imports = &getCommand;
+        descriptor.named.artifact.importCount = 1;
+        check(FORGE_RT_INVALID_ARGUMENT);
+        startup.argumentCount = 0;
+        check(FORGE_RT_OK);
+
+        const forge_rt_import getMainArgs{"MSVCRT.DLL", "__getmainargs"};
+        descriptor.named.artifact.imports = &getMainArgs;
+        startup.argumentCount = 1;
+        startup.environmentCount = 0;
+        check(FORGE_RT_INVALID_ARGUMENT);
+        startup.argumentCount = 0;
+        startup.environmentCount = 1;
+        check(FORGE_RT_INVALID_ARGUMENT);
+        startup.environmentCount = 0;
+        check(FORGE_RT_OK);
     }
 
     void checkRegistration() {
@@ -564,6 +653,7 @@ void testRuntimeProcess() {
     checkParameters();
     checkHeap();
     checkCrtArguments();
+    checkCrtInputConsumers();
     checkIsolation();
     checkExitProcess();
     checkScalarBoundaries();

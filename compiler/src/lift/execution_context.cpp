@@ -1,5 +1,5 @@
 #include "lift/execution_context.h"
-#include "lift/image_memory.h"
+#include "lift/group_analysis.h"
 
 #include "llvm/IR/Module.h"
 #include "llvm/Transforms/Utils/ModuleUtils.h"
@@ -82,9 +82,9 @@ namespace forge::x86 {
             return ir.CreateInBoundsGEP(ir.getInt64Ty(), array, ir.getInt32(i));
         }
 
-        uint64_t entryMarks(unsigned index) {
+        uint64_t entryMarks(unsigned index, const Defined &definitions) {
             if (index <= rspIndex) {
-                return UINT64_MAX;
+                return definitions[index];
             }
 
             uint64_t marks = 0;
@@ -98,7 +98,9 @@ namespace forge::x86 {
         }
 
         void initializeRegisters(IRBuilder<> &ir, const ContextView &context, Value *state,
-                                 ArrayRef<Value *> arguments) {
+                                 ArrayRef<Value *> arguments, EntryMode mode) {
+            const auto definitions = entryRegisterDefinitions(mode);
+
             for (unsigned i = 0; i < registerCount; ++i) {
                 Value *value = ir.getInt64(0);
 
@@ -115,7 +117,8 @@ namespace forge::x86 {
                 ir.CreateStore(value, slot(ir, context.registers, i));
 
                 if (context.marks) {
-                    ir.CreateStore(ir.getInt64(entryMarks(i)), slot(ir, context.marks, i));
+                    ir.CreateStore(ir.getInt64(entryMarks(i, definitions)),
+                                   slot(ir, context.marks, i));
                 }
             }
 
@@ -237,7 +240,7 @@ namespace forge::x86 {
 
     Function *emitProcessEntry(Function &body, const RecoveredFunctionGroup &group,
                                const ContextLayout &layout, const ImagePlan &image,
-                               RegisterSet modified) {
+                               RegisterSet modified, EntryMode mode) {
         auto &module = *body.getParent();
         IRBuilder<> ir(module.getContext());
         auto *type = FunctionType::get(ir.getVoidTy(), ir.getPtrTy(), false);
@@ -254,7 +257,7 @@ namespace forge::x86 {
                                   ir.CreateStructGEP(layout.type, execution, 5, "entry.rcx"));
         auto *rdx = ir.CreateLoad(ir.getInt64Ty(),
                                   ir.CreateStructGEP(layout.type, execution, 6, "entry.rdx"));
-        initializeRegisters(ir, context, nullptr, {rcx, rdx});
+        initializeRegisters(ir, context, nullptr, {rcx, rdx}, mode);
 
         const auto saved = captureNonvolatiles(ir, context, modified);
         memory.checks.propagate(ir.CreateCall(&body, execution));
@@ -294,7 +297,7 @@ namespace forge::x86 {
             ir.CreateStore(adapter->getArg(1), context.thread);
         }
 
-        initializeRegisters(ir, context, state, arguments);
+        initializeRegisters(ir, context, state, arguments, mode);
         GuestMemory memory(ir);
         const auto emitted = image.emit(module, ir, checkedMemory);
 

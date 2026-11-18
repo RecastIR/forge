@@ -2,6 +2,7 @@
 
 #include "diagnostic.h"
 
+#include "llvm/ADT/STLFunctionalExtras.h"
 #include "llvm/DebugInfo/DWARF/DWARFContext.h"
 #include "llvm/Object/ObjectFile.h"
 #include "llvm/Support/Endian.h"
@@ -21,19 +22,68 @@ namespace forge {
     namespace {
         auto key(const RuntimeFunction &r) { return std::tie(r.begin, r.end, r.unwind); }
 
-        void recordHandler(FunctionRange &function, const Win64EH::UnwindInfo &header,
-                           StringRef bytes, size_t codesEnd) {
-            const size_t trailer = alignTo(codesEnd, 4);
-            if (bytes.size() < trailer + sizeof(uint32_t)) {
+        void inspectUnwindRecord(const ParsedImage &image, FunctionRange &function,
+                                 function_ref<void(StringRef)> invalid) {
+            const auto unwind = function.record.unwind;
+            constexpr size_t headerSize = offsetof(Win64EH::UnwindInfo, UnwindCodes);
+            const auto data = image.mapRva(unwind);
+
+            if (!unwind || unwind % 4 || !data || data->bytes.size() < headerSize) {
+                invalid("unwind RVA must point to a file-backed, aligned AMD64 unwind header");
                 return;
             }
 
-            function.handlerRva = support::endian::read32le(bytes.data() + trailer);
-            const auto languageData = uint64_t(function.record.unwind) + trailer + sizeof(uint32_t);
-            if (header.getVersion() == 1 && header.getFlags() == Win64EH::UNW_ExceptionHandler &&
-                languageData <= UINT32_MAX) {
-                function.exceptionDataRva = static_cast<uint32_t>(languageData);
+            Win64EH::UnwindInfo header{};
+            std::memcpy(&header, data->bytes.data(), headerSize);
+
+            if (header.getVersion() != 1 && header.getVersion() != 2) {
+                function.unsupportedUnwindVersion = header.getVersion();
+                return;
             }
+
+            function.chainedFragment = header.getFlags() & Win64EH::UNW_ChainInfo;
+            function.hasUnwindHandler =
+                header.getFlags() & (Win64EH::UNW_ExceptionHandler | Win64EH::UNW_TerminateHandler);
+            const size_t codesEnd = headerSize + header.NumCodes * sizeof(Win64EH::UnwindCode);
+
+            if (data->bytes.size() < codesEnd) {
+                invalid("truncated unwind code array");
+                return;
+            }
+
+            const size_t trailer = alignTo(codesEnd, 4);
+            size_t extent = codesEnd;
+
+            if (function.chainedFragment) {
+                if (function.hasUnwindHandler) {
+                    invalid("chained unwind info also declares a handler");
+                }
+
+                extent = trailer + sizeof(Win64EH::RuntimeFunction);
+
+                if (data->bytes.size() < extent) {
+                    invalid("truncated chained runtime function");
+                    return;
+                }
+            } else if (function.hasUnwindHandler) {
+                extent = trailer + sizeof(uint32_t);
+
+                if (data->bytes.size() < extent) {
+                    invalid("truncated unwind handler RVA");
+                    return;
+                }
+
+                function.handlerRva = support::endian::read32le(data->bytes.data() + trailer);
+                const auto languageData = uint64_t(unwind) + extent;
+
+                if (header.getVersion() == 1 &&
+                    header.getFlags() == Win64EH::UNW_ExceptionHandler &&
+                    languageData <= UINT32_MAX) {
+                    function.exceptionDataRva = static_cast<uint32_t>(languageData);
+                }
+            }
+
+            function.unwindInfoSize = static_cast<uint32_t>(extent);
         }
     } // namespace
 
@@ -173,7 +223,7 @@ namespace forge {
         }
 
         for (auto &f : ranges) {
-            auto [begin, end, unwind] = f.record;
+            const auto begin = f.record.begin, end = f.record.end;
             auto invalid = [&](StringRef reason,
                                RecordDefect defect = RecordDefect::InvalidRecord) {
                 // Report every finding, retaining the first defect for entry selection.
@@ -201,42 +251,7 @@ namespace forge {
                 f.callback = cb != callbacks.end() && *cb < end;
             }
 
-            constexpr size_t headerSize = offsetof(Win64EH::UnwindInfo, UnwindCodes);
-            auto data = source->mapRva(unwind);
-
-            if (!unwind || unwind % 4 || !data || data->bytes.size() < headerSize) {
-                invalid("unwind RVA must point to a file-backed, aligned AMD64 unwind header");
-                continue;
-            }
-
-            Win64EH::UnwindInfo header{};
-            std::memcpy(&header, data->bytes.data(), headerSize);
-
-            if (header.getVersion() != 1 && header.getVersion() != 2) {
-                f.unsupportedUnwindVersion = header.getVersion();
-                continue;
-            }
-
-            f.chainedFragment = header.getFlags() & Win64EH::UNW_ChainInfo;
-            f.hasUnwindHandler =
-                header.getFlags() & (Win64EH::UNW_ExceptionHandler | Win64EH::UNW_TerminateHandler);
-            const size_t codesEnd = headerSize + header.NumCodes * sizeof(Win64EH::UnwindCode);
-
-            if (data->bytes.size() < codesEnd) {
-                invalid("truncated unwind code array");
-            } else if (f.chainedFragment) {
-                if (f.hasUnwindHandler) {
-                    invalid("chained unwind info also declares a handler");
-                }
-
-                const size_t trailer = alignTo(codesEnd, 4);
-
-                if (data->bytes.size() < trailer + sizeof(Win64EH::RuntimeFunction)) {
-                    invalid("truncated chained runtime function");
-                }
-            } else if (f.hasUnwindHandler) {
-                recordHandler(f, header, data->bytes, codesEnd);
-            }
+            inspectUnwindRecord(*source, f, invalid);
         }
 
         markOverlaps();

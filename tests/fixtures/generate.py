@@ -81,6 +81,8 @@ def generate(output, mc, link, dlltool, clang):
         image("hello.exe", (sources / "hello.s").read_text(), console_imports)
         image("command-line.exe", (sources / "command-line.s").read_text(),
               [("KERNEL32.dll", "GetCommandLineA")])
+        image("crt-argv-strlen.exe", (sources / "crt-argv-strlen.s").read_text(),
+              [("msvcrt.dll", name) for name in ("__getmainargs", "strlen")])
         image("crt-argument-heap.exe", (sources / "crt-argument-heap.s").read_text(),
               [("msvcrt.dll", name) for name in ("__getmainargs", "calloc", "free", "strlen",
                                                  "_fmode", "_commode", "__initenv", "_acmdln")] +
@@ -143,7 +145,7 @@ def generate(output, mc, link, dlltool, clang):
         abi_imports = [("ForgeAbi.dll", name) for name in definitions["ForgeAbi.dll"]]
         image("service-abi.exe", (sources / "service-abi.s").read_text(),
               abi_imports + [("KERNEL32.dll", name) for name in ("SetLastError", "GetLastError", "lstrlenA")],
-              exports=["pair", "triple", "four", "echo_bits", "six", "bad_stack", "bad_sig", "void_result",
+              exports=["pair", "triple", "four", "echo_bits", "six", "bad_stack", "bad_sig", "void_result", "repeat_after_void",
                        "write_call", "write_nested", "disjoint_record", "nested_disjoint", "nested_overlap", "nested_optional",
                        "unmapped", "stale_spill", "disjoint_spill", "image_output", "readonly_output",
                        "counted_boundary", "counted_with_load", "fixed_boundary", "counted_gap", "stack_count", "zero_count"])

@@ -32,6 +32,8 @@ python3 -B tests/differential/startup.py
 
 Select one comparison with `python3 -B tests/differential/startup.py --fixture startup/argv --config debug`. The runner verifies the exported binary and Wine publication, passes the PE to `forge lift --executable`, checks the output’s Mach-O architecture, file type and linked dependencies, and executes it with the manifest argument vector. The source PE snapshot expires before execution. Each run has its own directory under `build/differential/startup/`. Its per-case `result.json` records stage outcomes. A failed translation exits the comparison with status 1 and leaves native execution and byte comparison pending. Compiler output and available stream files sit next to the report. [Source files](.) · [Reference invocations](../../manifests/startup)
 
+The report retains the compiler's structured diagnostic, including the original stage, code and readiness context. For a native link failure it records successful translation and a failed native build. A publication error can also come from the output-path preflight, so earlier stages show `unknown` when the diagnostic cannot establish their outcome. A missing or malformed diagnostic fails the compiler invocation.
+
 ## Startup inventory
 
 The following RVAs describe the canonical Debug `crt_argc.exe` (SHA-256 `e2192c63caae30f8dfe5697c3bec3888abcb7831cd7fe33a0f07c09309b0bfb6`). They are inspection evidence for this build. Compiler recovery must derive targets from the input image.
@@ -55,11 +57,15 @@ The Debug `startup/argc` comparison currently stops at `call *%r12` at `0x11e6`.
 
 The process loader currently publishes guest pointers for supported **data** exports. An ordinary function import supports validated direct service calls through its IAT slot or a linker thunk. Consuming that slot as a scalar requires a stable guest-visible identity for the imported function. Recovering the later register call also requires proving the same binding across loop predecessors. These are prerequisites for extending this path to `Sleep`. The Wine observations above cover application behavior. A native result requires reaching and executing the whole translated process. [Process image bindings](../../../../runtime/src/process.cpp) · [Imported call recovery](../../../../docs/program-architecture.md#imported-call-recovery)
 
+The regular differential gate exercises both canonical `startup/argc` PEs. It checks the Wine reference, original entry, bytes of the register call, ordered TLS callbacks and complete load-time import list. A change to the first blocker requires reviewing the new evidence. A passing standalone comparison requires an executed Mach-O with the expected exit status and output. [Readiness regression](../../test_native_differential.py)
+
+Argument duplication exposes a later boundary. The compiler accepts `strlen` on a proved heap allocation. For `strlen(argv[1])` after `__getmainargs`, both the output slot and vector element are writable guest memory. The compiler currently lacks the pointer provenance required at that service call and reports `LIFT_IMAGE_MEMORY`. A separate fixture isolates this dependency from the earlier startup lock. [Fixture](../../../fixtures/crt-argv-strlen.s)
+
 ## Compatibility boundary
 
 For the primary PE, Forge recognizes 12 of 36 load-time symbols. These are KERNEL32 `GetLastError`, the seven MSVCRT functions `__getmainargs`, `calloc`, `free`, `malloc`, `memcpy`, `strlen` and `strncmp`, and the four MSVCRT data exports. Eleven KERNEL32 symbols and thirteen MSVCRT symbols still lack bindings. The argument fixture’s additional `strcmp` import has a binding.
 
-All eight Debug and eight Release PEs matched the pinned Wine expectations. On the ARM64 Mac, all 16 passed reference validation and then failed Forge compilation at the register call at RVA `0x11e6`. No Mach-O was published for these cases. The native comparison has no stdout, stderr or exit status for the ordinary C application.
+All eight Debug and eight Release cases matched the pinned Wine expectations. On ARM64 macOS, all 16 standalone comparison reports recorded `reference=passed`, followed by a lifting-stage `LIFT_UNSUPPORTED_CONTROL_FLOW` at the register call at RVA `0x11e6`. Native build, publication and execution remained `not_run` in every case. There is no native exit status or output for these ordinary C applications yet.
 
 | Responsibility | Current result for the selected configuration |
 | --- | --- |

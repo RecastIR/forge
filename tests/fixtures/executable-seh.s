@@ -16,7 +16,10 @@ protected_end:
 
 .seh_proc filter
 filter:
+    pushq %rbx
+    .seh_pushreg %rbx
     .seh_endprologue
     movl $1, %eax
+    popq %rbx
     ret
 .seh_endproc

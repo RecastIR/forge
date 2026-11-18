@@ -21,7 +21,8 @@ namespace forge::runtime {
         forge_rt_image mapping{};
 
         forge_rt_status initialize(forge_rt_instance &instance, const forge_rt_artifact &artifact,
-                                   const forge_rt_process_startup *startup, bool crtStartup);
+                                   const forge_rt_process_startup &startup, bool osCommandLine,
+                                   CrtImports imports);
 
       private:
         forge_rt_status buildCommandLine(const forge_rt_artifact &artifact,

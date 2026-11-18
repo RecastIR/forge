@@ -36,7 +36,7 @@ namespace forge::x86 {
     // Uses the process-owned execution view and emits its immutable artifact descriptor.
     llvm::Function *emitProcessEntry(llvm::Function &body, const RecoveredFunctionGroup &group,
                                      const ContextLayout &layout, const ImagePlan &image,
-                                     RegisterSet modified);
+                                     RegisterSet modified, EntryMode mode);
 
     // Emits both selected-entry interfaces and the invocation-scoped initialization.
     llvm::Function *emitEntryAdapter(llvm::Function &body, uint32_t rva, EntryMode mode,

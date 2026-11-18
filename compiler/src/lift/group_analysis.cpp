@@ -804,6 +804,19 @@ namespace forge::x86 {
         }
     } // namespace
 
+    Defined entryRegisterDefinitions(EntryMode mode) {
+        Defined registers{};
+        registers[rspIndex] = UINT64_MAX;
+
+        if (mode == EntryMode::RegisterState) {
+            std::fill_n(registers.begin(), callerSlots, UINT64_MAX);
+        } else if (mode == EntryMode::WindowsX64I64Pair) {
+            registers[1] = registers[2] = UINT64_MAX;
+        }
+
+        return registers;
+    }
+
     GroupAnalysis analyzeGroup(const RecoveredFunctionGroup &group, uint64_t guestBase,
                                EntryMode mode, bool checkedMemory, LiftOutput output) try {
         GroupAnalysis result;
@@ -829,16 +842,7 @@ namespace forge::x86 {
             result.setsDirection |= analyzer.setsDirection;
         }
 
-        Definitions initial;
-        initial.registers[rspIndex] = UINT64_MAX;
-
-        if (mode == EntryMode::RegisterState) {
-            std::fill_n(initial.registers.begin(), callerSlots, UINT64_MAX);
-        } else if (mode == EntryMode::WindowsX64I64Pair) {
-            initial.registers[1] = initial.registers[2] = UINT64_MAX;
-        }
-
-        proveCallFlow(group, result.flows, initial);
+        proveCallFlow(group, result.flows, {entryRegisterDefinitions(mode), {}});
         CallAddresses calls;
         calls.enter(group.root(), {AddressFact(GuestMemory::entryRsp), {}});
 

@@ -76,7 +76,7 @@ namespace forge::runtime {
 
             // A live invocation pins the process parameters until synchronous return.
             if (!instance->managedExecution || !instance->parameters ||
-                instance->parameters->narrow.empty()) {
+                instance->parameters->wide.empty()) {
                 return FORGE_RT_INVALID_STATE;
             }
 
@@ -127,25 +127,28 @@ namespace forge::runtime {
             }
         }
 
-        static_assert(std::endian::native == std::endian::little && sizeof(char16_t) == 2);
-        wide.assign(narrow.begin(), narrow.end());
         return FORGE_RT_OK;
     }
 
     forge_rt_status ProcessParameters::initialize(forge_rt_instance &instance,
                                                   const forge_rt_artifact &artifact,
-                                                  const forge_rt_process_startup *startup,
-                                                  bool crtStartup) {
-        if (startup) {
-            const auto result = buildCommandLine(artifact, *startup);
+                                                  const forge_rt_process_startup &startup,
+                                                  bool osCommandLine, CrtImports imports) {
+        if (osCommandLine || imports.mainArgs || imports.hasData(FORGE_RT_CRT_ACMDLN)) {
+            const auto result = buildCommandLine(artifact, startup);
 
             if (result != FORGE_RT_OK) {
                 return result;
             }
         }
 
-        if (crtStartup) {
-            const auto status = crt.emplace().initialize(narrow, *startup);
+        if (osCommandLine) {
+            static_assert(std::endian::native == std::endian::little && sizeof(char16_t) == 2);
+            wide.assign(narrow.begin(), narrow.end());
+        }
+
+        if (imports.mainArgs || !imports.data.empty()) {
+            const auto status = crt.emplace().initialize(imports, narrow, startup);
 
             if (status != FORGE_RT_OK) {
                 return status;
@@ -159,7 +162,7 @@ namespace forge::runtime {
         const auto narrowSize = narrow.size() + 1;
         const auto wideSize = (wide.size() + 1) * sizeof(char16_t);
         const auto wideOffset = (narrowSize + 1) & ~size_t{1};
-        const auto stringEnd = stringOffset + (startup ? wideOffset + wideSize : 0);
+        const auto stringEnd = stringOffset + (osCommandLine ? wideOffset + wideSize : 0);
         const auto crtOffset = (stringEnd + 7) & ~uint64_t{7};
         const auto size = crt ? crtOffset + crt->bytes.size() : stringEnd;
         std::array<Reservation, 2> occupied{
@@ -180,13 +183,13 @@ namespace forge::runtime {
 
         rows[2] = {base + parameterOffset, sizeof(crtErrno), &crtErrno, permissions, &tibClaim};
 
-        if (startup) {
+        if (osCommandLine) {
             const auto stringBase = base + stringOffset;
             rows[3] = {stringBase, narrowSize, narrow.c_str(), FORGE_RT_READ, nullptr};
             rows[4] = {stringBase + wideOffset, wideSize, wide.c_str(), FORGE_RT_READ, nullptr};
         }
 
-        size_t rowCount = startup ? 5 : 3;
+        size_t rowCount = osCommandLine ? 5 : 3;
 
         if (crt) {
             const auto crtBase = base + crtOffset;

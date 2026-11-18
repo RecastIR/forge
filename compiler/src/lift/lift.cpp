@@ -88,6 +88,7 @@ namespace forge {
             Value *markSlot(unsigned index);
             Value *loadView(Value *ptr, RegisterView view);
             void storeView(Value *ptr, RegisterView view, Value *value, uint64_t upper);
+            StoredValue loadRegister(RegisterView view);
             StoredValue readSaved(const Step &s, RegisterView view, bool allowIncoming);
             void writeSaved(RegisterView view, StoredValue value);
             Value *read(const Step &s, RegisterView view);
@@ -113,6 +114,11 @@ namespace forge {
             return ir.CreateTruncOrBitCast(bits, ir.getIntNTy(view.width));
         }
 
+        StoredValue Translator::loadRegister(RegisterView view) {
+            return {loadView(slot(view.index), view),
+                    tracksOrigins ? loadView(markSlot(view.index), view) : nullptr};
+        }
+
         StoredValue Translator::readSaved(const Step &s, RegisterView view, bool allowIncoming) {
             if (!(allowIncoming && nonvolatile(view.index)) &&
                 (defined[view.index] & view.mask()) != view.mask()) {
@@ -120,8 +126,7 @@ namespace forge {
                          "read of undefined incoming " + x86::registerName(view.index));
             }
 
-            return {loadView(slot(view.index), view),
-                    tracksOrigins ? loadView(markSlot(view.index), view) : nullptr};
+            return loadRegister(view);
         }
 
         Value *Translator::read(const Step &s, RegisterView view) {
@@ -358,16 +363,19 @@ namespace forge {
             ir.CreateCondBr(ir.CreateIsNull(count), done, begin);
             ir.SetInsertPoint(begin);
 
-            // RCX == 0 consumes neither the address nor the stored value. If either
-            // input lacks a definition, only the path which would use it fails.
-            if (defined[0] != UINT64_MAX || defined[destination.index] != UINT64_MAX) {
-                memory.checks.fail(FORGE_RT_FAULT_ABI);
-                ir.SetInsertPoint(done);
-                return;
+            // A predecessor with zero count need not define either operand. On the
+            // executing path RDI must be concrete, while RAX may carry an opaque save.
+            assert(tracksOrigins);
+            const auto stored = loadRegister({0, 64});
+
+            if (defined[0] != UINT64_MAX) {
+                auto *bytes =
+                    ir.CreateBitCast(stored.marks, FixedVectorType::get(ir.getInt8Ty(), 8));
+                memory.checks.guard(ir.CreateAndReduce(ir.CreateIsNotNull(bytes)));
             }
 
-            auto stored = readSaved(s, {0, 64}, false);
-            auto *start = read(s, destination);
+            const auto start = loadRegister(destination);
+            memory.checks.guard(ir.CreateICmpEQ(start.marks, ir.getInt64(UINT64_MAX)));
             auto *backward = ir.CreateLoad(ir.getInt1Ty(), context.directionFlag);
             auto *stride = ir.CreateSelect(backward, ir.getInt64(uint64_t{0} - 8), ir.getInt64(8));
             auto *loop = BasicBlock::Create(ir.getContext(), "stos.qword", impl);
@@ -376,7 +384,7 @@ namespace forge {
             ir.SetInsertPoint(loop);
             auto *address = ir.CreatePHI(ir.getInt64Ty(), 2);
             auto *remaining = ir.CreatePHI(ir.getInt64Ty(), 2);
-            address->addIncoming(start, first);
+            address->addIncoming(start.bits, first);
             remaining->addIncoming(count, first);
 
             // Commit progress after the whole qword passes its memory checks. A
@@ -384,7 +392,10 @@ namespace forge {
             memory.store(address, stored, plan.stackAccesses.contains(s.rva));
             auto *next = ir.CreateAdd(address, stride);
             auto *left = ir.CreateSub(remaining, ir.getInt64(1));
-            write(destination, next);
+
+            // RDI was concrete on this path. Preserve its marks and the static
+            // definition mask, which also describes the zero-count path at done.
+            storeView(slot(destination.index), destination, next, 0);
             write(counter, left);
             address->addIncoming(next, ir.GetInsertBlock());
             remaining->addIncoming(left, ir.GetInsertBlock());
@@ -532,6 +543,15 @@ namespace forge {
             auto service = impl->getParent()->getOrInsertFunction(binding.nativeSymbol, type);
             auto *status = ir.CreateCall(service, arguments);
             memory.checks.service(status, detail);
+
+            if (tracksOrigins) {
+                // Backing bits can survive an external call even though the Windows
+                // ABI clobbers them. A conditional consumer must see those bytes as
+                // unavailable until a guest write or the service result defines them.
+                ir.CreateMemSet(context.marks, ir.getInt8(FORGE_RT_MARK_UNINITIALIZED),
+                                x86::callerSlots * sizeof(uint64_t), registerStateAlignment);
+            }
+
             if (output) {
                 write({0, resultWidth}, ir.CreateLoad(ir.getIntNTy(resultWidth), output));
             }
@@ -823,7 +843,8 @@ namespace forge {
             auto &body = *bodies.at(root);
             const auto modified = analysis.functions.at(root).modified;
             auto *resolver =
-                process ? x86::emitProcessEntry(body, group, layout, analysis.image, modified)
+                process ? x86::emitProcessEntry(body, group, layout, analysis.image, modified,
+                                                request.mode)
                         : x86::emitEntryAdapter(body, root, request.mode, layout, analysis.image,
                                                 modified, request.checkedMemory);
             const x86::InstructionOperands operands{group.registers(), analysis.image.guestBase()};

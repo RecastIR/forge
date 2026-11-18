@@ -101,18 +101,33 @@ namespace forge::runtime {
         return offset;
     }
 
-    forge_rt_status CrtParameters::initialize(std::string_view command,
+    bool CrtImports::hasData(uint32_t kind) const {
+        return std::ranges::find(data, kind, &forge_rt_data_import::kind) != data.end();
+    }
+
+    forge_rt_status CrtParameters::initialize(CrtImports imports, std::string_view command,
                                               const forge_rt_process_startup &startup) {
+        bytes.resize(24);
+        const int32_t textMode = 0x4000;
+        std::memcpy(bytes.data() + fmode, &textMode, sizeof(textMode));
+
+        if (imports.hasData(FORGE_RT_CRT_ACMDLN)) {
+            bind(acmdln, appendString(command));
+        }
+
+        if (imports.mainArgs) {
+            arguments = parseArguments(command);
+        }
+
+        if (!imports.mainArgs && !imports.hasData(FORGE_RT_CRT_INITENV)) {
+            return FORGE_RT_OK;
+        }
+
         if ((startup.environmentCount && !startup.environment) ||
             startup.environmentCount > environmentLimit / sizeof(uint64_t)) {
             return FORGE_RT_INVALID_ARGUMENT;
         }
 
-        bytes.resize(24);
-        const int32_t textMode = 0x4000;
-        std::memcpy(bytes.data() + fmode, &textMode, sizeof(textMode));
-        bind(acmdln, appendString(command));
-        arguments = parseArguments(command);
         std::vector<std::string_view> variables;
         size_t remaining = environmentLimit;
 
@@ -184,7 +199,9 @@ extern "C" forge_rt_status forge_rt_msvcrt_getmainargs(forge_rt_instance *instan
         return status;
     }
 
-    if (!instance->managedExecution || !instance->parameters || !instance->parameters->crt) {
+    // A prepared argument vector always includes argv[0].
+    if (!instance->managedExecution || !instance->parameters || !instance->parameters->crt ||
+        instance->parameters->crt->count() == 0) {
         return FORGE_RT_INVALID_STATE;
     }
 

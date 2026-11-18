@@ -7,6 +7,7 @@
 #include <algorithm>
 #include <array>
 #include <cstring>
+#include <map>
 #include <memory>
 #include <span>
 #include <string_view>
@@ -21,6 +22,15 @@ namespace {
 
     template <typename T> std::span<const T> tableRows(const T *table, uint64_t count) {
         return {table, static_cast<size_t>(count)};
+    }
+
+    std::span<const forge_rt_data_import> dataImports(const forge_rt_artifact &artifact) {
+        if (artifact.version != FORGE_RT_CRT_ARTIFACT_VERSION) {
+            return {};
+        }
+
+        const auto &crt = *reinterpret_cast<const forge_rt_crt_artifact *>(&artifact);
+        return tableRows(crt.dataImports, crt.dataImportCount);
     }
 
     bool fromDll(const forge_rt_import &import, std::string_view expected) {
@@ -155,7 +165,7 @@ namespace {
 
       private:
         forge_rt_status bindRegions();
-        forge_rt_status bindDataImports();
+        forge_rt_status bindDataImports(std::span<const forge_rt_data_import> bindings);
     };
 
     forge_rt_status ProcessImage::bindRegions() {
@@ -207,15 +217,24 @@ namespace {
         return FORGE_RT_OK;
     }
 
-    forge_rt_status ProcessImage::bindDataImports() {
-        if (artifact.version != FORGE_RT_CRT_ARTIFACT_VERSION) {
-            return FORGE_RT_OK;
-        }
+    forge_rt_status ProcessImage::bindDataImports(std::span<const forge_rt_data_import> bindings) {
+        const auto templates = tableRows(artifact.regions, artifact.regionCount);
+        // A guest RVA may alias a different row of the same private backing. Check the
+        // bytes the loader will patch as well as the guest addresses it promises to bind.
+        std::map<std::pair<uint64_t, uint64_t>, uint64_t> slots;
+        const auto overlapsSlot = [&](uint64_t backing, uint64_t offset, uint64_t size) {
+            const auto after = slots.lower_bound({backing, offset + size});
 
-        const auto &descriptor = *reinterpret_cast<const forge_rt_crt_artifact *>(&artifact);
+            if (after == slots.begin()) {
+                return false;
+            }
+
+            const auto &[slotBacking, start] = std::prev(after)->first;
+            return backing == slotBacking && start + sizeof(uint64_t) > offset;
+        };
         uint64_t previousEnd = 0;
 
-        for (const auto &binding : tableRows(descriptor.dataImports, descriptor.dataImportCount)) {
+        for (const auto &binding : bindings) {
             const auto end = uint64_t{binding.slotRva} + sizeof(uint64_t);
             const auto value = instance.parameters->crt->dataAddress(binding.kind);
 
@@ -226,24 +245,39 @@ namespace {
             previousEnd = end;
             const auto slot = artifact.base + binding.slotRva;
             const auto after =
-                std::ranges::upper_bound(regions, slot, {}, &forge_rt_image_region::start);
+                std::ranges::upper_bound(templates, slot, {}, &forge_rt_region_template::start);
 
-            if (after == regions.begin()) {
+            if (after == templates.begin()) {
                 return FORGE_RT_INVALID_ARGUMENT;
             }
 
             const auto &row = *std::prev(after);
             const auto offset = slot - row.start;
 
-            if (!row.claim || !(row.permissions & FORGE_RT_READ) || offset > row.size ||
-                sizeof(value) > row.size - offset) {
+            if (backings[row.backing].bytes.empty() || !(row.permissions & FORGE_RT_READ) ||
+                offset > row.size || sizeof(value) > row.size - offset) {
                 return FORGE_RT_INVALID_ARGUMENT;
             }
 
-            // bindRegions sets a claim only on this process's private writable storage.
-            // Loader initialization precedes publication, including for read-only guest slots.
-            auto *backing = const_cast<uint8_t *>(static_cast<const uint8_t *>(row.bytes));
-            std::memcpy(backing + offset, &value, sizeof(value));
+            const auto start = row.offset + offset;
+
+            if (overlapsSlot(row.backing, start, sizeof(value))) {
+                return FORGE_RT_INVALID_ARGUMENT;
+            }
+
+            slots.emplace(std::pair{row.backing, start}, value);
+        }
+
+        for (const auto &row : templates) {
+            if ((row.permissions & FORGE_RT_WRITE) &&
+                overlapsSlot(row.backing, row.offset, row.size)) {
+                return FORGE_RT_INVALID_ARGUMENT;
+            }
+        }
+
+        for (const auto &[slot, value] : slots) {
+            const auto &[backing, offset] = slot;
+            std::memcpy(backings[backing].bytes.data() + offset, &value, sizeof(value));
         }
 
         return FORGE_RT_OK;
@@ -260,14 +294,13 @@ namespace {
             }
         }
 
-        const bool crt = artifact.version == FORGE_RT_CRT_ARTIFACT_VERSION ||
-                         std::ranges::any_of(imports, [](const auto &binding) {
-                             return win64::crtGetMainArgs.name == binding.name &&
-                                    fromDll(binding, win64::crtGetMainArgs.dll);
-                         });
-        const bool commandLine = crt || std::ranges::any_of(imports, usesCommandLine);
+        const CrtImports crt{dataImports(artifact),
+                             std::ranges::any_of(imports, [](const auto &binding) {
+                                 return win64::crtGetMainArgs.name == binding.name &&
+                                        fromDll(binding, win64::crtGetMainArgs.dll);
+                             })};
         const auto parameters = instance.parameters.emplace().initialize(
-            instance, artifact, commandLine ? &startup : nullptr, crt);
+            instance, artifact, startup, std::ranges::any_of(imports, usesCommandLine), crt);
 
         if (parameters != FORGE_RT_OK) {
             return parameters;
@@ -298,7 +331,7 @@ namespace {
             return registered;
         }
 
-        const auto boundImports = bindDataImports();
+        const auto boundImports = crt.data.empty() ? FORGE_RT_OK : bindDataImports(crt.data);
 
         if (boundImports == FORGE_RT_OK) {
             instance.managedExecution = &execution.view;

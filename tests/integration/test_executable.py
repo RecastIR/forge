@@ -356,13 +356,23 @@ class Readiness(Workspace):
         handler = self.reject(dynamic)["context"]["entry_unwind_handler"]
         self.assertNotIn("c_specific_handler", handler)
 
-        # A base relocation into the row prevents its use as stable scope metadata.
+        # The scope row, filter unwind header and filter unwind codes all contribute to the proof.
         reloc = layout.file_offset(layout.directory(5)[0])
-        struct.pack_into("<I", data, reloc, (unwind + 12) & ~0xfff)
-        struct.pack_into("<H", data, reloc + 8, (10 << 12) | ((unwind + 12) & 0xfff))
-        handler = self.reject(data)["context"]["entry_unwind_handler"]["c_specific_handler"]
-        self.assertNotIn("scope", handler)
-        self.assertIn("mutable", handler["limitation"])
+        filter_unwind = layout.u32(records + 12 + 8)
+        self.assertEqual(data[layout.file_offset(filter_unwind) + 2], 1)
+        for target, kind, reason in ((unwind + 12, 10, "mutable or split"),
+                                     (filter_unwind, 10, "mutable C-specific filter"),
+                                     (filter_unwind + 4, 3, "mutable C-specific filter")):
+            with self.subTest(relocated=hex(target)):
+                changed = data.copy()
+                struct.pack_into("<I", changed, reloc, target & ~0xfff)
+                struct.pack_into("<H", changed, reloc + 8, (kind << 12) | (target & 0xfff))
+                diagnostic = self.reject(changed)
+                self.assertEqual(diagnostic["code"], "EXECUTABLE_UNSUPPORTED_STARTUP")
+                handler = diagnostic["context"]["entry_unwind_handler"]["c_specific_handler"]
+                self.assertEqual(handler["scope_count"], 1)
+                self.assertNotIn("scope", handler)
+                self.assertIn(reason, handler["limitation"])
 
     def test_reachable_callee_unwind_handler(self):
         pe = FIXTURES / "stack.exe"
@@ -374,7 +384,10 @@ class Readiness(Workspace):
         data = bytearray(pe.read_bytes())
         layout = Layout(data)
         struct.pack_into("<I", data, layout.opt + 16, int(exports["call_released"], 16))
-        data[layout.file_offset(int(unwind, 16))] |= 2 << 3  # UNW_FLAG_UHANDLER
+        info = layout.file_offset(int(unwind, 16))
+        self.assertEqual(data[info:info + 8], bytes.fromhex("01000000 00000000"))
+        data[info] |= 2 << 3  # UNW_FLAG_UHANDLER
+        struct.pack_into("<I", data, info + 4, int(callee, 16))
         diagnostic = self.reject(data)
         self.assertEqual(diagnostic["code"], "EXECUTABLE_UNSUPPORTED_STARTUP")
         self.assertEqual(diagnostic["context"]["function_rva"], callee)
@@ -499,8 +512,6 @@ class Readiness(Workspace):
     def test_unsupported_image_startup(self):
         data = bytearray(image("return").read_bytes())
         layout = Layout(data)
-        pdata = layout.file_offset(layout.directory(3)[0])
-        unwind = layout.file_offset(layout.u32(pdata + 8))
         for label in ("TLS", "CLR", "SEH", "align"):
             with self.subTest(requirement=label):
                 changed = data.copy()
@@ -510,7 +521,7 @@ class Readiness(Workspace):
                 elif label == "CLR":
                     struct.pack_into("<II", changed, layout.directories + 14 * 8, entry(data), 72)
                 elif label == "SEH":
-                    changed[unwind] |= 1 << 3  # UNW_FLAG_EHANDLER
+                    changed = image("seh-kernel32").read_bytes()
                 else:
                     struct.pack_into("<I", changed, layout.opt + 32, 0x1800)
                 diagnostic = self.reject(changed)
@@ -568,6 +579,17 @@ class Readiness(Workspace):
         diagnostic = self.reject(data)
         self.assertEqual(diagnostic["code"], "LIFT_IMAGE_MEMORY", diagnostic)
         self.assertIn("argument 1 to strlen", diagnostic["message"])
+
+    def test_crt_argv_string_service_boundary(self):
+        data = (FIXTURES / "crt-argv-strlen.exe").read_bytes()
+        diagnostic = self.reject(data)
+        self.assertEqual(diagnostic["code"], "LIFT_IMAGE_MEMORY", diagnostic)
+        self.assertIn("argument 1 to strlen requires proven", diagnostic["message"])
+        root = entry(data)
+        start = Layout(data).file_offset(root)
+        # The call follows MOV RCX,[RDX+8], which loads argv[1].
+        load = data.index(bytes.fromhex("48 8b 4a 08 ff 15"), start)
+        self.assertEqual(diagnostic["context"]["instruction_rva"], hex(root + load - start + 4))
 
     def test_gs_requires_process_and_supported_offset(self):
         pe = image("tib")
