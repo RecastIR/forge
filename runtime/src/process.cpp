@@ -25,12 +25,22 @@ namespace {
     }
 
     std::span<const forge_rt_data_import> dataImports(const forge_rt_artifact &artifact) {
-        if (artifact.version != FORGE_RT_CRT_ARTIFACT_VERSION) {
+        if (artifact.version < FORGE_RT_CRT_ARTIFACT_VERSION) {
             return {};
         }
 
         const auto &crt = *reinterpret_cast<const forge_rt_crt_artifact *>(&artifact);
         return tableRows(crt.dataImports, crt.dataImportCount);
+    }
+
+    std::span<const forge_rt_function_import> functionImports(const forge_rt_artifact &artifact) {
+        if (artifact.version != FORGE_RT_FUNCTION_IMPORT_ARTIFACT_VERSION) {
+            return {};
+        }
+
+        const auto &extended =
+            *reinterpret_cast<const forge_rt_function_import_artifact *>(&artifact);
+        return tableRows(extended.functionImports, extended.functionImportCount);
     }
 
     bool fromDll(const forge_rt_import &import, std::string_view expected) {
@@ -76,7 +86,8 @@ namespace {
     forge_rt_status checkArtifact(const forge_rt_artifact &artifact) {
         if (artifact.version != FORGE_RT_ARTIFACT_VERSION &&
             artifact.version != FORGE_RT_NAMED_ARTIFACT_VERSION &&
-            artifact.version != FORGE_RT_CRT_ARTIFACT_VERSION) {
+            artifact.version != FORGE_RT_CRT_ARTIFACT_VERSION &&
+            artifact.version != FORGE_RT_FUNCTION_IMPORT_ARTIFACT_VERSION) {
             return FORGE_RT_ABI_MISMATCH;
         }
 
@@ -97,10 +108,19 @@ namespace {
             return FORGE_RT_MAPPING_CONFLICT;
         }
 
-        if (artifact.version == FORGE_RT_CRT_ARTIFACT_VERSION) {
+        if (artifact.version >= FORGE_RT_CRT_ARTIFACT_VERSION) {
             const auto &crt = *reinterpret_cast<const forge_rt_crt_artifact *>(&artifact);
 
             if (!validTable(crt.dataImports, crt.dataImportCount)) {
+                return FORGE_RT_INVALID_ARGUMENT;
+            }
+        }
+
+        if (artifact.version == FORGE_RT_FUNCTION_IMPORT_ARTIFACT_VERSION) {
+            const auto &extended =
+                *reinterpret_cast<const forge_rt_function_import_artifact *>(&artifact);
+
+            if (!validTable(extended.functionImports, extended.functionImportCount)) {
                 return FORGE_RT_INVALID_ARGUMENT;
             }
         }
@@ -159,13 +179,17 @@ namespace {
         std::vector<WritableBacking> backings;
         std::vector<forge_rt_image_region> regions;
         forge_rt_image image{};
+        forge_rt_image functionAddresses{};
         ExecutionContext execution;
         // Destroy the reservation/thread tables before releasing any storage they borrow.
         forge_rt_instance instance;
 
       private:
         forge_rt_status bindRegions();
-        forge_rt_status bindDataImports(std::span<const forge_rt_data_import> bindings);
+        forge_rt_status bindImports(const std::optional<CrtParameters> &crt,
+                                    std::span<const forge_rt_data_import> data,
+                                    std::span<const forge_rt_function_import> functions);
+        forge_rt_status reserveFunctionAddresses();
     };
 
     forge_rt_status ProcessImage::bindRegions() {
@@ -217,7 +241,48 @@ namespace {
         return FORGE_RT_OK;
     }
 
-    forge_rt_status ProcessImage::bindDataImports(std::span<const forge_rt_data_import> bindings) {
+    constexpr uint64_t functionStride = 16;
+
+    uint64_t functionAddress(uint64_t base, const forge_rt_import &target) {
+        if (!target.dll || !target.name) {
+            return 0;
+        }
+
+        const auto *service = std::ranges::find_if(win64::services, [&](const auto &candidate) {
+            return candidate.name == target.name && fromDll(target, candidate.dll);
+        });
+        if (service == std::end(win64::services)) {
+            return 0;
+        }
+
+        const auto index = static_cast<uint64_t>(service - std::begin(win64::services));
+        return base + index * functionStride;
+    }
+
+    forge_rt_status ProcessImage::reserveFunctionAddresses() {
+        // Both the PE and the parameters are registered. The primary stack will publish its
+        // reservation only on entry, so exclude it when choosing the service address range.
+        constexpr uint64_t size = std::size(win64::services) * functionStride;
+        const auto &occupied = instance.reservations;
+        auto base = findGuestAllocation(occupied, size, functionStride);
+
+        if (base && base < FORGE_RT_STACK_BASE + FORGE_RT_STACK_SIZE &&
+            FORGE_RT_STACK_BASE < base + size) {
+            base = findGuestAllocation(occupied, size, functionStride,
+                                       FORGE_RT_STACK_BASE + FORGE_RT_STACK_SIZE);
+        }
+
+        if (!base) {
+            return FORGE_RT_MAPPING_CONFLICT;
+        }
+
+        functionAddresses = {base, size, nullptr, 0};
+        return forge_rt_register_image(&instance, &functionAddresses);
+    }
+
+    forge_rt_status ProcessImage::bindImports(const std::optional<CrtParameters> &crt,
+                                              std::span<const forge_rt_data_import> data,
+                                              std::span<const forge_rt_function_import> functions) {
         const auto templates = tableRows(artifact.regions, artifact.regionCount);
         // A guest RVA may alias a different row of the same private backing. Check the
         // bytes the loader will patch as well as the guest addresses it promises to bind.
@@ -232,23 +297,19 @@ namespace {
             const auto &[slotBacking, start] = std::prev(after)->first;
             return backing == slotBacking && start + sizeof(uint64_t) > offset;
         };
-        uint64_t previousEnd = 0;
-
-        for (const auto &binding : bindings) {
-            const auto end = uint64_t{binding.slotRva} + sizeof(uint64_t);
-            const auto value = instance.parameters->crt->dataAddress(binding.kind);
-
-            if (!value || binding.slotRva < previousEnd || end > artifact.size) {
-                return FORGE_RT_INVALID_ARGUMENT;
+        const auto stage = [&](uint32_t rva, uint64_t value, uint64_t &previousEnd) {
+            const auto end = uint64_t{rva} + sizeof(uint64_t);
+            if (!value || rva < previousEnd || end > artifact.size) {
+                return false;
             }
 
             previousEnd = end;
-            const auto slot = artifact.base + binding.slotRva;
+            const auto slot = artifact.base + rva;
             const auto after =
                 std::ranges::upper_bound(templates, slot, {}, &forge_rt_region_template::start);
 
             if (after == templates.begin()) {
-                return FORGE_RT_INVALID_ARGUMENT;
+                return false;
             }
 
             const auto &row = *std::prev(after);
@@ -256,16 +317,32 @@ namespace {
 
             if (backings[row.backing].bytes.empty() || !(row.permissions & FORGE_RT_READ) ||
                 offset > row.size || sizeof(value) > row.size - offset) {
-                return FORGE_RT_INVALID_ARGUMENT;
+                return false;
             }
 
             const auto start = row.offset + offset;
 
             if (overlapsSlot(row.backing, start, sizeof(value))) {
-                return FORGE_RT_INVALID_ARGUMENT;
+                return false;
             }
 
             slots.emplace(std::pair{row.backing, start}, value);
+            return true;
+        };
+
+        uint64_t previousEnd = 0;
+        for (const auto &binding : data) {
+            if (!crt || !stage(binding.slotRva, crt->dataAddress(binding.kind), previousEnd)) {
+                return FORGE_RT_INVALID_ARGUMENT;
+            }
+        }
+
+        previousEnd = 0;
+        for (const auto &binding : functions) {
+            const auto address = functionAddress(functionAddresses.base, binding.target);
+            if (!stage(binding.slotRva, address, previousEnd)) {
+                return FORGE_RT_INVALID_ARGUMENT;
+            }
         }
 
         for (const auto &row : templates) {
@@ -299,11 +376,12 @@ namespace {
                                  return win64::crtGetMainArgs.name == binding.name &&
                                         fromDll(binding, win64::crtGetMainArgs.dll);
                              })};
-        const auto parameters = instance.parameters.emplace().initialize(
+        auto &parameters = instance.parameters.emplace();
+        const auto initialized = parameters.initialize(
             instance, artifact, startup, std::ranges::any_of(imports, usesCommandLine), crt);
 
-        if (parameters != FORGE_RT_OK) {
-            return parameters;
+        if (initialized != FORGE_RT_OK) {
+            return initialized;
         }
 
         const auto bound = bindRegions();
@@ -331,7 +409,17 @@ namespace {
             return registered;
         }
 
-        const auto boundImports = crt.data.empty() ? FORGE_RT_OK : bindDataImports(crt.data);
+        const auto functions = functionImports(artifact);
+        if (!functions.empty()) {
+            const auto reserved = reserveFunctionAddresses();
+            if (reserved != FORGE_RT_OK) {
+                return reserved;
+            }
+        }
+
+        const auto boundImports = crt.data.empty() && functions.empty()
+                                      ? FORGE_RT_OK
+                                      : bindImports(parameters.crt, crt.data, functions);
 
         if (boundImports == FORGE_RT_OK) {
             instance.managedExecution = &execution.view;

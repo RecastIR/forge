@@ -173,8 +173,9 @@ namespace forge::x86 {
 
         struct FunctionDiscovery {
             FunctionDiscovery(uint32_t rva, MappedRange code, const MCDisassembler &dis,
-                              const MCInstrInfo &instructions, JumpTableReader &tables)
-                : code(code), cfg(code.bytes, rva, dis, instructions, tables) {}
+                              const MCInstrInfo &instructions, JumpTableReader &tables,
+                              bool registerImports)
+                : code(code), cfg(code.bytes, rva, dis, instructions, tables, registerImports) {}
 
             MappedRange code;
             RecordedCFG cfg;
@@ -189,10 +190,10 @@ namespace forge::x86 {
                            std::span<const win64::ServiceBinding> services,
                            std::map<uint32_t, RecoveredFunction> &functions,
                            const MCDisassembler &dis, const MCInstrInfo &instructions,
-                           const MCRegisterInfo &regs)
+                           const MCRegisterInfo &regs, bool registerImports)
                 : entry(entry), services(services), functions(functions), dis(dis),
                   instructions(instructions), regs(regs), tables(entry.analysis.image(), regs),
-                  operands(regs, 0) {}
+                  operands(regs, 0), registerImports(registerImports) {}
 
             const ValidatedEntry &entry;
             std::span<const win64::ServiceBinding> services;
@@ -207,6 +208,7 @@ namespace forge::x86 {
             std::map<uint32_t, FunctionDiscovery> staging;
             std::set<uint32_t> ready, leafCandidates;
             const InstructionOperands operands;
+            bool registerImports;
             std::optional<std::vector<RvaRange>> loaderWrites;
             std::optional<std::vector<RvaRange>> recordedRanges;
             std::optional<ImageInitialization> pointerInitialization;
@@ -311,7 +313,7 @@ namespace forge::x86 {
         }
 
         void GroupDiscovery::stage(uint32_t rva, MappedRange code) {
-            staging.try_emplace(rva, rva, code, dis, instructions, tables);
+            staging.try_emplace(rva, rva, code, dis, instructions, tables, registerImports);
             ready.insert(rva);
         }
 
@@ -385,8 +387,9 @@ namespace forge::x86 {
 
         bool GroupDiscovery::advance(uint32_t rva, FunctionDiscovery &active) try {
             const auto classify = [&](const Step &step, std::optional<int64_t> target) {
-                return step.isMemoryCall() ? importFlow(rva, active, step)
-                                           : guestCallFlow(rva, step, target);
+                return step.isMemoryCall() || step.registerImportSlot
+                           ? importFlow(rva, active, step)
+                           : guestCallFlow(rva, step, target);
             };
             return active.cfg.advance(classify);
         } catch (const InspectionError &) {
@@ -582,14 +585,19 @@ namespace forge::x86 {
 
         Flow GroupDiscovery::importFlow(uint32_t rva, FunctionDiscovery &caller, const Step &step) {
             try {
-                const auto target = operands.ripRva(step, 0);
-                if (!target || *target < 0 || *target > UINT32_MAX) {
-                    step.reject(FailureCode::UnsupportedControlFlow,
-                                "expected RIP-relative call through a mapped IAT slot");
+                auto slot = step.registerImportSlot;
+                if (!slot) {
+                    const auto target = operands.ripRva(step, 0);
+                    if (!target || !std::in_range<uint32_t>(*target)) {
+                        step.reject(FailureCode::UnsupportedControlFlow,
+                                    "expected RIP-relative call through a mapped IAT slot");
+                    }
+
+                    operands.decodeAddress(step, 0, true);
+                    slot = static_cast<uint32_t>(*target);
                 }
-                operands.decodeAddress(step, 0, true);
-                const auto imported =
-                    bindImport(rva, caller.code, step, static_cast<uint32_t>(*target));
+
+                const auto imported = bindImport(rva, caller.code, step, *slot);
                 caller.resolutions.emplace(step.rva, imported);
                 return imported.binding.control == win64::Control::Terminates ? Flow::TerminalCall
                                                                               : Flow::Fallthrough;
@@ -614,7 +622,7 @@ namespace forge::x86 {
                 const auto *producer = std::exchange(previous, &step);
                 const auto found = resolutions.find(step.rva);
                 if (found != resolutions.end() &&
-                    (step.isMemoryCall() ||
+                    (step.isMemoryCall() || step.registerImportSlot ||
                      std::holds_alternative<ExternalCallTarget>(found->second))) {
                     const auto &resolution = found->second;
 
@@ -859,13 +867,14 @@ namespace forge::x86 {
 
     RecoveredFunctionGroup::RecoveredFunctionGroup(
         const ValidatedEntry &entry, std::span<const win64::ServiceBinding> services,
-        llvm::function_ref<void(const RecoveredFunctionGroup &, const InspectionError &)> onFailure)
+        llvm::function_ref<void(const RecoveredFunctionGroup &, const InspectionError &)> onFailure,
+        bool registerImports)
         : source(entry.analysis.image()), entryRva(entry.rva) {
         const auto location = entryLocation(source, entryRva, entry.code);
         withLocation(source, location, FailureCode::LiftingInternal, [&] {
             decoder = std::make_unique<Decoder>(entryRva);
             GroupDiscovery discovery(entry, services, recovered, *decoder->dis,
-                                     *decoder->instructions, *decoder->regs);
+                                     *decoder->instructions, *decoder->regs, registerImports);
             try {
                 discovery.run();
             } catch (const InspectionError &failure) {

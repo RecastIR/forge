@@ -1,12 +1,81 @@
 #include "lift/guarded_call.h"
 #include "lift/service_location.h"
 
+#include "llvm/ADT/DenseSet.h"
+#include "llvm/MC/MCInstrInfo.h"
+#include "llvm/MC/MCRegisterInfo.h"
 #include "llvm/Support/Endian.h"
+
+#include <algorithm>
+#include <utility>
 
 namespace forge::x86 {
     using namespace llvm;
 
     namespace {
+        bool allPredecessors(const std::map<uint32_t, Step> &decoded,
+                             const std::multimap<uint32_t, uint32_t> &branches, uint32_t rva,
+                             llvm::function_ref<bool(const Step &)> matches) {
+            // The function entry always includes the caller's unknown register value,
+            // even when it also has a predecessor within the function.
+            if (rva == decoded.begin()->first) {
+                return false;
+            }
+
+            const auto &previous = std::prev(decoded.find(rva))->second;
+            const auto [first, last] = branches.equal_range(rva);
+            const bool sequential = previous.next == rva && (previous.flow == Flow::Fallthrough ||
+                                                             previous.flow == Flow::Conditional);
+            if (!sequential && first == last) {
+                return false;
+            }
+
+            if (sequential && !matches(previous)) {
+                return false;
+            }
+
+            return std::all_of(first, last,
+                               [&](const auto &edge) { return matches(decoded.at(edge.second)); });
+        }
+
+        bool clobbers(const Step &s, MCRegister reg, RegisterView view, const MCInstrInfo &info,
+                      const MCRegisterInfo &registers) {
+            const auto &desc = info.get(s.inst.getOpcode());
+            if ((desc.isCall() && !nonvolatile(view.index)) ||
+                (s.isRepeatedQwordStore() && view.index == repeatCount.index)) {
+                return true;
+            }
+
+            const auto overlaps = [&](MCRegister dest) {
+                return dest && registers.regsOverlap(dest, reg);
+            };
+            if (llvm::any_of(desc.implicit_defs(), overlaps) || desc.variadicOpsAreDefs() ||
+                desc.getNumDefs() > s.inst.getNumOperands()) {
+                return true;
+            }
+
+            for (unsigned i = 0; i < desc.getNumDefs(); ++i) {
+                const auto &dest = s.inst.getOperand(i);
+                if (dest.isReg() && overlaps(dest.getReg())) {
+                    return true;
+                }
+            }
+
+            return false;
+        }
+
+        bool mergeImportLoad(const Step &load, const InstructionOperands &operands,
+                             std::optional<uint32_t> &slot) {
+            const auto rva = operands.ripRva(load, 1);
+            if (!rva || !std::in_range<uint32_t>(*rva) || (slot && *slot != *rva)) {
+                return false;
+            }
+
+            operands.decodeAddress(load, 1, true);
+            slot = static_cast<uint32_t>(*rva);
+            return true;
+        }
+
         // The supported argument setup forms write one GPR (and optionally flags).
         // A narrow write to an alias of the target still invalidates the proof.
         bool argumentSetup(const Step &step, unsigned target, const InstructionOperands &op) {
@@ -49,6 +118,51 @@ namespace forge::x86 {
             return static_cast<uint32_t>(address - base);
         }
     } // namespace
+
+    std::optional<uint32_t>
+    reachingImportSlot(const std::map<uint32_t, Step> &decoded,
+                       const std::multimap<uint32_t, uint32_t> &branchPredecessors,
+                       const Step &call, const MCInstrInfo &info, const MCRegisterInfo &registers) {
+        const InstructionOperands operands(registers, 0);
+        const auto reg = call.inst.getOperand(0).getReg();
+        const auto view = operands.reg(call, call.inst.getOperand(0), 64);
+        if (view.index == rspIndex) {
+            return {};
+        }
+
+        SmallDenseSet<uint32_t, 32> visited;
+        SmallVector<uint32_t, 16> pending{call.rva};
+        std::optional<uint32_t> slot;
+        const auto visitPredecessor = [&](const Step &s) {
+            if (s.opcode == "MOV64rm" && s.inst.getOperand(0).getReg() == reg) {
+                return mergeImportLoad(s, operands, slot);
+            }
+
+            if (clobbers(s, reg, view, info, registers)) {
+                return false;
+            }
+
+            pending.push_back(s.rva);
+            return true;
+        };
+
+        // Each path must reach a matching full-width load before entry or a clobber.
+        // A backedge which carries the same register simply revisits a program point.
+        constexpr size_t maxProofInstructions = 256;
+        while (!pending.empty()) {
+            const auto rva = pending.pop_back_val();
+            if (!visited.insert(rva).second) {
+                continue;
+            }
+
+            if (visited.size() > maxProofInstructions ||
+                !allPredecessors(decoded, branchPredecessors, rva, visitPredecessor)) {
+                return {};
+            }
+        }
+
+        return slot;
+    }
 
     std::optional<GuardedPointerCall>
     recognizeGuardedPointerCall(const std::map<uint32_t, Step> &decoded, const Step &call,

@@ -98,7 +98,8 @@ namespace forge::x86 {
             const ValidatedEntry &entry,
             std::span<const win64::ServiceBinding> services = win64::services,
             llvm::function_ref<void(const RecoveredFunctionGroup &, const InspectionError &)>
-                onFailure = nullptr);
+                onFailure = nullptr,
+            bool registerImports = false);
         ~RecoveredFunctionGroup();
         RecoveredFunctionGroup(const RecoveredFunctionGroup &) = delete;
         RecoveredFunctionGroup &operator=(const RecoveredFunctionGroup &) = delete;

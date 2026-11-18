@@ -117,6 +117,9 @@ forge_rt_status forge_rt_set_last_error(forge_rt_instance *instance, forge_rt_th
                                         uint32_t value) FORGE_RT_NOEXCEPT;
 forge_rt_status forge_rt_get_last_error(forge_rt_instance *instance, forge_rt_thread_token thread,
                                         uint32_t *outValue) FORGE_RT_NOEXCEPT;
+/* Wait on the calling host thread. Zero yields and UINT32_MAX waits indefinitely. */
+forge_rt_status forge_rt_sleep(forge_rt_instance *instance, forge_rt_thread_token thread,
+                               uint32_t milliseconds) FORGE_RT_NOEXCEPT;
 
 /* MSVCRT byte string and memory adapters. All addresses and size_t values are guest
  * 64-bit values. Result storage is written on success, fault storage on a guest fault. */

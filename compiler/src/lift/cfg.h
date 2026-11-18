@@ -39,6 +39,9 @@ namespace forge::x86 {
         llvm::StringRef bytes;  // Borrows the analyzed image.
         Flow flow = Flow::Fallthrough;
         std::optional<GuardedPointerCall> guardedPointerCall = {};
+        // A full-width RIP-relative load reaches this register on every incoming path.
+        // Recovery separately validates ownership and binds the indicated IAT slot.
+        std::optional<uint32_t> registerImportSlot = {};
 
         bool isDirectCall() const { return opcode == "CALL64pcrel32"; }
 
@@ -95,7 +98,7 @@ namespace forge::x86 {
     class RecordedCFG {
       public:
         RecordedCFG(llvm::StringRef bytes, uint32_t begin, const llvm::MCDisassembler &dis,
-                    const llvm::MCInstrInfo &info, JumpTableReader &tables);
+                    const llvm::MCInstrInfo &info, JumpTableReader &tables, bool registerImports);
         ~RecordedCFG();
         bool advance(CallFlow classify);
         void resume(uint32_t instruction);

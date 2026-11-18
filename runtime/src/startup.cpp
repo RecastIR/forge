@@ -76,7 +76,8 @@ int main(int argc, char **argv, char **environment) {
 
     if (!artifact || (artifact->version != FORGE_RT_ARTIFACT_VERSION &&
                       artifact->version != FORGE_RT_NAMED_ARTIFACT_VERSION &&
-                      artifact->version != FORGE_RT_CRT_ARTIFACT_VERSION)) {
+                      artifact->version != FORGE_RT_CRT_ARTIFACT_VERSION &&
+                      artifact->version != FORGE_RT_FUNCTION_IMPORT_ARTIFACT_VERSION)) {
         return runtimeFailure("artifact", FORGE_RT_ABI_MISMATCH);
     }
 

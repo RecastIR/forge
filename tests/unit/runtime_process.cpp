@@ -477,6 +477,94 @@ namespace {
                 result.kind == FORGE_RT_RETURNED);
     }
 
+    void inspectFunctionImports(forge_rt_execution *execution) {
+        auto *instance = execution->instance;
+        const auto thread = execution->thread;
+        forge_rt_invocation_token token = 0;
+        REQUIRE(forge_rt_current_invocation(instance, thread, &token) == FORGE_RT_OK);
+
+        std::array<uint64_t, 4> pointers{};
+        forge_rt_memory_fault fault{};
+        REQUIRE(forge_rt_read_guest(instance, thread, token, base, sizeof(pointers),
+                                    pointers.data(), sizeof(pointers), &fault) == FORGE_RT_OK);
+        REQUIRE(pointers[0] && pointers[0] == pointers[1]);
+        REQUIRE(pointers[2] && pointers[2] != pointers[0]);
+        REQUIRE(pointers[3] && pointers[3] != pointers[0] && pointers[3] != pointers[2]);
+        uint64_t alias = 0;
+        REQUIRE(forge_rt_read_guest(instance, thread, token, base + sizeof(pointers), sizeof(alias),
+                                    &alias, sizeof(alias), &fault) == FORGE_RT_OK &&
+                alias == pointers[1]);
+
+        uint64_t allocation = 0;
+        REQUIRE(forge_rt_msvcrt_malloc(instance, thread, 4096, &allocation) == FORGE_RT_OK &&
+                allocation);
+        uint8_t byte = 0;
+        for (const auto address : {pointers[0], pointers[2]}) {
+            REQUIRE(address < allocation || address - allocation >= 4096);
+            REQUIRE(forge_rt_read_guest(instance, thread, token, address, 1, &byte, 1, &fault) ==
+                    FORGE_RT_GUEST_FAULT);
+            REQUIRE(fault.reason == FORGE_RT_FAULT_UNMAPPED && fault.address == address);
+        }
+        REQUIRE(forge_rt_msvcrt_free(instance, thread, allocation) == FORGE_RT_OK);
+
+        REQUIRE(forge_rt_write_guest(instance, thread, token, base, 1, &byte, 1, &fault) ==
+                FORGE_RT_GUEST_FAULT);
+        REQUIRE(fault.reason == FORGE_RT_FAULT_PERMISSION);
+        REQUIRE(forge_rt_read_guest(instance, thread, token, pointers[3], 1, &byte, 1, &fault) ==
+                FORGE_RT_OK);
+        execution->result = {FORGE_RT_RETURNED, FORGE_RT_OK, 42, {}, 0};
+    }
+
+    void checkFunctionImports() {
+        const forge_rt_backing storage{32, nullptr, nullptr, 0};
+        forge_rt_region_template rows[]{{base, 32, 0, 0, FORGE_RT_READ},
+                                        {base + 32, 8, 0, 8, FORGE_RT_READ}};
+        forge_rt_function_import functions[]{{0, {"kernel32.dll", "GetLastError"}},
+                                             {8, {"KERNEL32.DLL", "GetLastError"}},
+                                             {16, {"KERNEL32.dll", "GetCommandLineA"}}};
+        const forge_rt_data_import data{24, FORGE_RT_CRT_FMODE};
+        const forge_rt_function_import_artifact descriptor{
+            {{{FORGE_RT_FUNCTION_IMPORT_ARTIFACT_VERSION, base, 64, 40, 40, &storage, 1, rows,
+               std::size(rows), nullptr, 0, inspectFunctionImports},
+              "functions.exe"},
+             &data,
+             1},
+            functions,
+            std::size(functions)};
+        // Merely reading the GetCommandLineA address does not consume process arguments.
+        const char *arguments[] = {"café"};
+        const forge_rt_process_startup startup{nullptr, 1, arguments, 0, nullptr};
+        auto process = create();
+        const auto registerArtifact = [&] {
+            return forge_rt_process_register_with_startup(process.get(),
+                                                          &descriptor.crt.named.artifact, &startup);
+        };
+        const auto reject = [&] {
+            REQUIRE(registerArtifact() == FORGE_RT_INVALID_ARGUMENT);
+            expectState(process.get(), FORGE_RT_PROCESS_CREATED);
+        };
+
+        functions[2].target.name = "getcommandlinea";
+        reject();
+        functions[2].target.name = "GetCommandLineA";
+        functions[2].slotRva = 24;
+        reject();
+        functions[2].slotRva = 32;
+        reject();
+        functions[2].slotRva = 16;
+        rows[1].permissions |= FORGE_RT_WRITE;
+        reject();
+        rows[1].permissions = FORGE_RT_READ;
+
+        for (unsigned i = 0; i < 2; ++i) {
+            REQUIRE(registerArtifact() == FORGE_RT_OK);
+            forge_rt_process_result result{};
+            REQUIRE(forge_rt_process_run(process.get(), nullptr, &result) == FORGE_RT_OK &&
+                    result.kind == FORGE_RT_RETURNED && result.value == 42);
+            process = create();
+        }
+    }
+
     void checkCrtInputConsumers() {
         const forge_rt_backing storage{8, nullptr, nullptr, 0};
         const forge_rt_region_template slot{base, 8, 0, 0, FORGE_RT_READ};
@@ -653,6 +741,7 @@ void testRuntimeProcess() {
     checkParameters();
     checkHeap();
     checkCrtArguments();
+    checkFunctionImports();
     checkCrtInputConsumers();
     checkIsolation();
     checkExitProcess();

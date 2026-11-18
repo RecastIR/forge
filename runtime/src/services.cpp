@@ -1,5 +1,43 @@
 #include "string_scan.h"
 
+#include <cerrno>
+#include <sched.h>
+#include <time.h>
+#include <unistd.h>
+
+extern "C" forge_rt_status forge_rt_sleep(forge_rt_instance *instance, forge_rt_thread_token thread,
+                                          uint32_t milliseconds) noexcept {
+    // Use the same live-thread and active-invocation check as GetLastError. No process
+    // lock or borrowed thread record may be held while suspending the caller.
+    uint32_t lastError;
+    const auto status = forge_rt_get_last_error(instance, thread, &lastError);
+
+    if (status != FORGE_RT_OK) {
+        return status;
+    }
+
+    if (milliseconds == 0) {
+        return sched_yield() == 0 ? FORGE_RT_OK : FORGE_RT_INTERNAL_ERROR;
+    }
+
+    if (milliseconds == UINT32_MAX) {
+        for (;;) {
+            pause();
+        }
+    }
+
+    timespec remaining{static_cast<time_t>(milliseconds / 1000),
+                       static_cast<long>(milliseconds % 1000) * 1000000L};
+
+    while (nanosleep(&remaining, &remaining) != 0) {
+        if (errno != EINTR) {
+            return FORGE_RT_INTERNAL_ERROR;
+        }
+    }
+
+    return FORGE_RT_OK;
+}
+
 extern "C" forge_rt_status forge_rt_lstrlen_a(forge_rt_instance *instance,
                                               forge_rt_thread_token thread, uint64_t address,
                                               int32_t *outLength,

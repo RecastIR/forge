@@ -14,6 +14,7 @@ extern "C" {
 #define FORGE_RT_ARTIFACT_VERSION UINT32_C(1)
 #define FORGE_RT_NAMED_ARTIFACT_VERSION UINT32_C(2)
 #define FORGE_RT_CRT_ARTIFACT_VERSION UINT32_C(3)
+#define FORGE_RT_FUNCTION_IMPORT_ARTIFACT_VERSION UINT32_C(4)
 #define FORGE_RT_STACK_BASE UINT64_C(0x70000000)
 #define FORGE_RT_STACK_SIZE UINT32_C(4096)
 #define FORGE_RT_ENTRY_RSP (FORGE_RT_STACK_BASE + FORGE_RT_STACK_SIZE - 32 - 8)
@@ -158,6 +159,22 @@ typedef struct forge_rt_crt_artifact {
     const forge_rt_data_import *dataImports;
     uint64_t dataImportCount;
 } forge_rt_crt_artifact;
+
+typedef struct forge_rt_function_import {
+    uint32_t slotRva;
+    forge_rt_import target;
+} forge_rt_function_import;
+
+/* Version 4 appends the ordinary named function IAT slots observed as guest values.
+ * These ordered, disjoint qwords have the same storage protections as data import slots.
+ * Each catalogue service has one opaque guest address per process. Those addresses occupy
+ * a reserved range with no readable/writable guest bytes and contain no native pointers.
+ * Observing a function's identity alone does not declare a call to that service. */
+typedef struct forge_rt_function_import_artifact {
+    forge_rt_crt_artifact crt;
+    const forge_rt_function_import *functionImports;
+    uint64_t functionImportCount;
+} forge_rt_function_import_artifact;
 
 /* Borrowed during registration. Arguments exclude argv[0]. A null executablePath defaults to
  * C:\\ plus the original PE basename in a v2 descriptor. Inputs to command-line services are

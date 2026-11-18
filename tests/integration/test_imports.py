@@ -150,7 +150,7 @@ class Imports(Case):
 
     def test_partial_executable_recovery_keeps_calls_before_bad_import(self):
         data = self.patch(("e8", self.helper), ("ff15", self.slots["GetLastError"]),
-                          ("ff15", self.slots["Sleep"]), "c3")
+                          ("ff15", self.slots["SwitchToThread"]), "c3")
         struct.pack_into("<I", data, self.layout.opt + 16, self.root)
         source = self.dir / "partial.exe"
         source.write_bytes(data)
@@ -158,10 +158,43 @@ class Imports(Case):
                              "--diagnostics-format", "json", code=1)
         ctx = json.loads(result.stderr)["context"]
         self.assertFalse(ctx["recovery_complete"])
-        self.assertEqual(ctx["import_symbol"], "Sleep")
+        self.assertEqual(ctx["import_symbol"], "SwitchToThread")
         self.assertIn({"dll": "kernel32.dll", "name": "GetLastError"}, ctx["imports"])
         self.assertIn({"caller_rva": hex(self.root), "instruction_rva": hex(self.root),
                        "target_rva": hex(self.helper)}, ctx["unresolved_calls"])
+
+    def test_executable_rejects_unproved_import_register(self):
+        get = self.slots["GetLastError"]
+        load = ("4c8b25", get)  # mov r12, [rip + GetLastError slot]
+        other = ("4c8b25", self.slots["SetLastError"])
+        # Each conditional edge tests the preceding service result. In the last
+        # case only the backedge carries the modified low byte back into CALL.
+        cases = (
+            ("bypass", "41ffd4", "7407", load, "41ffd4 c3"),
+            ("partial write", "41ffd4", load, "7403 41fec4 41ffd4 c3"),
+            ("different slots", "41ffd4", load, "7407", other, "41ffd4 c3"),
+            ("backedge clobber", "41ffd4", load, "41ffd4 41fec4 85c0 75f6 c3"),
+            # LAHF defines AH. A completed Windows call clobbers volatile R10.
+            ("implicit AH write", "ffd0", ("488b05", get), "9f ffd0 c3"),
+            ("volatile across call", "41ffd2", ("4c8b15", get), ("ff15", get), "41ffd2 c3"),
+        )
+        for label, call, *body in cases:
+            with self.subTest(label=label):
+                data = self.patch(("ff15", get), "85c0", *body)
+                struct.pack_into("<I", data, self.layout.opt + 16, self.root)
+                source = self.dir / "unproved.exe"
+                source.write_bytes(data)
+                self.output.write_bytes(b"previous output")
+                result = self.invoke("lift", source, "--executable", "--output", self.output,
+                                     "--diagnostics-format", "json", code=1)
+                diagnostic = json.loads(result.stderr)
+                self.assertEqual(diagnostic["code"], "LIFT_UNSUPPORTED_CONTROL_FLOW", diagnostic)
+                where = diagnostic["context"]
+                site = data.index(bytes.fromhex(call), self.code)
+                self.assertEqual((where["instruction_rva"], where["bytes"], where["opcode"]),
+                                 (hex(self.root + site - self.code), call, "CALL64r"))
+                self.assertFalse(where["recovery_complete"])
+                self.assertEqual(self.output.read_bytes(), b"previous output")
 
     def test_checked_reservation_covers_pe_headers(self):
         # The fixed guest stack occupies only the first page, before the first section.
@@ -297,9 +330,10 @@ class Imports(Case):
         self.invoke_lift(wrong, reason="unsupported import", code="LIFT_UNSUPPORTED_CONTROL_FLOW", symbol="GetLastError")
         for target in (self.root, slot + 1):
             self.invoke_lift(self.patch(("ff15", target), "c3"), reason="complete validated IAT", code="LIFT_UNSUPPORTED_CONTROL_FLOW")
-        self.invoke_lift(self.patch(("ff15", self.slots["Sleep"]), "c3"), reason="unsupported import",
-                         code="LIFT_UNSUPPORTED_CONTROL_FLOW", symbol="Sleep")
+        self.invoke_lift(self.patch(("ff15", self.slots["SwitchToThread"]), "c3"), reason="unsupported import",
+                         code="LIFT_UNSUPPORTED_CONTROL_FLOW", symbol="SwitchToThread")
         self.invoke_lift(self.patch("ff11 c3"), reason="RIP-relative call", code="LIFT_UNSUPPORTED_CONTROL_FLOW")
+        # Function-wrapper mode has no process loader to provide a stable imported function address.
         self.invoke_lift(self.patch(("488b05", slot), "ffd0 c3"), reason="expected a same-block", code="LIFT_UNSUPPORTED_CONTROL_FLOW")
         self.invoke_lift(self.patch(("488b05", slot), "c3"), reason="loader-written", code="LIFT_IMAGE_MEMORY")
         store = self.patch(("48890d", slot), "89c8 c3")

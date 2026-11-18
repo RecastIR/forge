@@ -8,6 +8,8 @@ Native C, C++ and generated ARM64 code share the same [public C ABI](include/for
 
 The separate `forge_startup` archive supplies the native `main` for executables linked by `forge lift --executable`. Existing C and C++ hosts link `forge_runtime` directly and supply their own entry. [Compile and run a native executable](../README.md#compile-and-run-a-native-executable)
 
+Process artifacts can publish read-only function IAT slots containing stable guest addresses for imported services. Registration checks their backing and reserves their addresses for the process lifetime. [Imported function addresses](../docs/runtime-architecture.md#imported-function-addresses)
+
 ## Build and test
 
 From the repository root on Apple Silicon, use CMake and the native C/C++ toolchain in a build directory separate from any Forge-managed preset.

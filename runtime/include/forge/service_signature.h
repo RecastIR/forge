@@ -286,6 +286,8 @@ namespace forge::win64 {
     inline constexpr auto getLastError =
         bind<Value::U32>("kernel32.dll", "GetLastError", LastError::Read,
                          FORGE_SERVICE_ADAPTER(forge_rt_get_last_error));
+    inline constexpr auto sleep = bind<Value::Void, Argument{Value::U32}>(
+        "kernel32.dll", "Sleep", LastError::Preserve, FORGE_SERVICE_ADAPTER(forge_rt_sleep));
 
     inline constexpr auto exitProcess = bind<Value::Void, Argument{Value::U32}>(
         "kernel32.dll", "ExitProcess", LastError::Preserve,
@@ -321,7 +323,7 @@ namespace forge::win64 {
             FORGE_SERVICE_ADAPTER(forge_rt_msvcrt_getmainargs), Requirement::Process);
 
     inline constexpr ServiceBinding services[] = {
-        crtGetMainArgs, crtStrlen, crtStrcmp,   crtStrncmp,      crtMemcpy,      crtMalloc,
-        crtCalloc,      crtFree,   crtErrno,    setLastError,    getLastError,   stringLength,
-        getStdHandle,   writeFile, exitProcess, getCommandLineA, getCommandLineW};
+        crtGetMainArgs, crtStrlen, crtStrcmp,   crtStrncmp,      crtMemcpy,       crtMalloc,
+        crtCalloc,      crtFree,   crtErrno,    setLastError,    getLastError,    stringLength,
+        getStdHandle,   writeFile, exitProcess, getCommandLineA, getCommandLineW, sleep};
 } // namespace forge::win64

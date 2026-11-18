@@ -18,7 +18,7 @@ def generate(output, mc, link, dlltool, clang):
         "Bridge.dll": ["Bridge=entry"],
         "Middle.dll": ["Middle=entry"],
         "MissingLeaf.dll": ["Leaf"],
-        "KERNEL32.dll": ["Sleep", "SetLastError", "GetLastError", "lstrlenA",
+        "KERNEL32.dll": ["Sleep", "SwitchToThread", "SetLastError", "GetLastError", "lstrlenA",
                          "GetStdHandle", "WriteFile", "ExitProcess", "GetCommandLineA", "GetCommandLineW",
                          "__C_specific_handler"],
         "vcruntime140.dll": ["Runtime"],
@@ -75,6 +75,8 @@ def generate(output, mc, link, dlltool, clang):
               [("KERNEL32.dll", name) for name in ("SetLastError", "GetLastError")])
         image("executable-import-thunk.exe", (sources / "executable-import-thunk.s").read_text(),
               [("KERNEL32.dll", name) for name in ("SetLastError", "GetLastError", "ExitProcess")])
+        image("executable-import-register.exe", (sources / "executable-import-register.s").read_text(),
+              [("KERNEL32.dll", name) for name in ("SetLastError", "GetLastError", "Sleep")])
         image("executable-headers.exe", (sources / "executable-headers.s").read_text(),
               [("KERNEL32.dll", "lstrlenA")], link_flags=["/dynamicbase:no", "/fixed:no"])
         console_imports = [("KERNEL32.dll", name) for name in ("GetStdHandle", "WriteFile", "ExitProcess")]
@@ -136,7 +138,7 @@ def generate(output, mc, link, dlltool, clang):
                  '.seh_proc leaf_fence\nleaf_fence:\n.seh_endprologue\nret\n.seh_endproc\n.byte 0x0f\n')
         image("leaves.exe", stub + leaf_calls.read_text() + probe)
         last_error = (sources.parent / "differential/fixtures/imports/last_error.S").read_text()
-        imports = [("KERNEL32.dll", name) for name in ("SetLastError", "GetLastError", "Sleep")]
+        imports = [("KERNEL32.dll", name) for name in ("SetLastError", "GetLastError", "SwitchToThread")]
         image("last-error.exe", stub + ".globl last_error_set\n" + last_error, imports + [("Physics.DLL", "Named")], exports=["last_error_set"])
         image("last-error-delay.exe", stub + last_error, imports, delays=["KERNEL32.dll"])
         string_length = (sources.parent / "differential/fixtures/imports/lstrlen.S").read_text()

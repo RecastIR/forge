@@ -16,6 +16,10 @@ namespace llvm {
     class Module;
 } // namespace llvm
 
+namespace forge::win64 {
+    struct ServiceBinding;
+}
+
 namespace forge::x86 {
     struct Continuation;
     struct ResolvedCallSite;
@@ -53,6 +57,7 @@ namespace forge::x86 {
         uint32_t sizeOfImage = 0;
         std::vector<Backing> backings;
         std::map<uint32_t, uint32_t> dataImports;
+        std::map<uint32_t, const win64::ServiceBinding *> functionImports;
     };
 
     // Selection borrows the group's steps for diagnostics and the image for section and
@@ -85,6 +90,9 @@ namespace forge::x86 {
 
         const ParsedImage &source;
         std::map<uint32_t, uint32_t> dataImports;
+        std::map<uint32_t, const win64::ServiceBinding *> functionImports;
+        std::optional<RelocationIndex> importRelocations;
+        std::optional<std::vector<RvaRange>> importWrites;
         uint64_t loadBase;
         llvm::StringRef executableHeaders;
         const Step *indirectRead = nullptr;
@@ -98,6 +106,7 @@ namespace forge::x86 {
         enum class ExecutableSelection : uint8_t { AddressTakenSection, ContinuationBytes };
 
         const ImageInitialization &contents();
+        bool selectFunctionImport(uint64_t rva, unsigned width, bool write);
         void fixedImageAccess(const Step &step, RvaRange access, bool write);
         void selectServiceSections(const Step &step, uint64_t rva, uint64_t size, bool write);
         void selectComputed(const Step &step, uint64_t va, unsigned width, bool write,

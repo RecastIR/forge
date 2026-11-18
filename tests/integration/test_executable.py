@@ -567,6 +567,25 @@ class Readiness(Workspace):
         self.assertIn({"iat_slot_rva": hex(slot), "name": "_fmode", "catalogued_data_export": True,
                        "catalogued_service": False}, symbols)
 
+    def test_function_import_slot_access(self):
+        original = image("import-register").read_bytes()
+        root = entry(original)
+        start = Layout(original).file_offset(root)
+        # The normal entry first loads the complete Sleep IAT slot into R10.
+        self.assertTrue(original.startswith(bytes.fromhex("48 83 ec 28 4c 8b 15"), start))
+        slot = root + 11 + struct.unpack_from("<i", original, start + 7)[0]
+        for label, opcode, offset in (("partial read", "8b05", 0), ("straddling read", "488b05", 1),
+                                      ("whole-slot write", "488905", 0)):
+            with self.subTest(access=label):
+                prefix = bytes.fromhex("31c0" + opcode)
+                disp = struct.pack("<i", slot + offset - (root + len(prefix) + 4))
+                code = prefix + disp + bytes.fromhex("b82a000000 c3")
+                data = bytearray(original)
+                data[start:start + len(code)] = code
+                diagnostic = self.reject(data)
+                self.assertEqual(diagnostic["code"], "LIFT_IMAGE_MEMORY", diagnostic)
+                self.assertEqual(diagnostic["context"]["instruction_rva"], hex(root + 2))
+
     def test_transformed_service_pointer_loses_provenance(self):
         data = bytearray((FIXTURES / "crt-argument-heap.exe").read_bytes())
         layout = Layout(data)
@@ -676,6 +695,7 @@ class Reference(Workspace):
         expected = {
             headers.name: (header_result(headers.read_bytes()), b"", b""),
             "crt-argument-heap.exe": (41, b"", b""),
+            image("import-register").name: (42, b"", b""),
             image("noreturn").name: (42, b"", b""),
             image("tib").name: (42, b"", b""),
             console_image("hello").name: (0, GREETING, b""),
@@ -842,6 +862,35 @@ class Console(Workspace):
 
 
 class Native(Workspace):
+    def test_import_register_loop_and_identity(self):
+        pe = image("import-register")
+        diagnostic = self.compile(pe)
+        self.assertEqual({row["name"] for row in diagnostic["context"]["imports"]},
+                         {"Sleep", "GetLastError", "SetLastError"})
+        result = run(self.output)
+        self.assertEqual((result.returncode, result.stdout, result.stderr), (42, "", ""))
+
+        # Redirect only the scalar load into R10, preserving the expected Sleep
+        # binding at CALL. An unchecked static dispatch would still return 42.
+        layout = Layout(pe.read_bytes())
+        base = struct.unpack_from("<Q", layout.data, layout.opt + 24)[0]
+        directory, = diagnostic["context"]["load_imports"]
+        slots = {row["name"]: base + int(row["iat_slot_rva"], 16) for row in directory["symbols"]}
+        sleep = f"@forge_image_address(i64 {slots['Sleep']}, i64 8, i1 false,"
+        setter = f"@forge_image_address(i64 {slots['SetLastError']}, i64 8, i1 false,"
+        ir = run(CONTRACT, pe, check=True).stdout
+        self.assertIn(sleep, ir)
+        mutated = self.dir / "mismatch.ll"
+        mutated.write_text(ir.replace(sleep, setter, 1))
+        obj = self.dir / "mismatch.o"
+        run(LLC, "-filetype=obj", mutated, "-o", obj, check=True)
+        startup, runtime, sdk, *flags = LINK
+        run("/usr/bin/xcrun", "--sdk", sdk, "clang++", "-arch", "arm64", *flags,
+            obj, startup, runtime, "-o", self.output, check=True)
+        fault = run(self.output)
+        self.assertEqual((fault.returncode, fault.stdout, fault.stderr),
+                         (125, "", "forge: guest control fault\n"))
+
     def test_guarded_call(self):
         pe = image("guarded-call")
         diagnostic = self.compile(pe)
@@ -901,6 +950,22 @@ class Native(Workspace):
                     checksum = (checksum * 33 + byte) & 255
                 result = run(self.output, *args)
                 self.assertEqual((result.returncode, result.stdout, result.stderr), (checksum, "", ""))
+
+    def test_scalar_only_import_does_not_consume_arguments(self):
+        data = bytearray((FIXTURES / "command-line.exe").read_bytes())
+        start = Layout(data).file_offset(entry(data))
+        self.assertTrue(data.startswith(bytes.fromhex("48 83 ec 28 ff 15"), start))
+        # Use the same slot as the original CALL, adjusting for the longer MOV.
+        # Return whether its guest function address is nonzero. No service runs.
+        disp = struct.unpack_from("<i", data, start + 6)[0] - 1
+        body = bytes.fromhex("48 8b 15") + struct.pack("<i", disp)
+        body += bytes.fromhex("31 c0 48 85 d2 0f 95 c0 48 83 c4 28 c3")
+        data[start + 4:start + 4 + len(body)] = body
+        pe = self.dir / "identity.exe"
+        pe.write_bytes(data)
+        self.compile(pe)
+        result = run(self.output, "café")
+        self.assertEqual((result.returncode, result.stdout, result.stderr), (1, "", ""))
 
     def test_header_reads_and_rebase(self):
         pe = image("headers")

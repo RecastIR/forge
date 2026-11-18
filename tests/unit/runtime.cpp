@@ -1,9 +1,15 @@
 #include <forge/runtime.h>
 
 #include <atomic>
+#include <cerrno>
+#include <chrono>
+#include <csignal>
 #include <cstdio>
 #include <latch>
+#include <sys/time.h>
+#include <sys/wait.h>
 #include <thread>
+#include <unistd.h>
 
 void testRuntimeMemory();
 void testRuntimeProcess();
@@ -11,6 +17,62 @@ void testRuntimeConsoleProcess();
 void testRuntimeWrite();
 
 namespace {
+    bool waitsIndefinitely(forge_rt_instance *runtime, forge_rt_thread_token thread) {
+        const auto child = fork();
+
+        if (child < 0) {
+            return false;
+        }
+
+        if (child == 0) {
+            sigset_t signals;
+            sigemptyset(&signals);
+            sigaddset(&signals, SIGALRM);
+            const itimerval timer{{0, 0}, {0, 50000}};
+
+            if (signal(SIGALRM, SIG_DFL) == SIG_ERR ||
+                sigprocmask(SIG_UNBLOCK, &signals, nullptr) != 0 ||
+                setitimer(ITIMER_REAL, &timer, nullptr) != 0) {
+                _exit(2);
+            }
+
+            forge_rt_sleep(runtime, thread, UINT32_MAX);
+            _exit(1);
+        }
+
+        int status;
+        pid_t waited;
+
+        do {
+            waited = waitpid(child, &status, 0);
+        } while (waited < 0 && errno == EINTR);
+
+        return waited == child && WIFSIGNALED(status) && WTERMSIG(status) == SIGALRM;
+    }
+
+    bool sleepContract(forge_rt_instance *runtime) {
+        using namespace std::chrono;
+        forge_rt_thread_token thread = 0;
+
+        if (forge_rt_sleep(nullptr, 0, UINT32_MAX) != FORGE_RT_INVALID_ARGUMENT ||
+            forge_rt_sleep(runtime, 0, UINT32_MAX) != FORGE_RT_INVALID_THREAD ||
+            forge_rt_thread_create(runtime, &thread) != FORGE_RT_OK ||
+            forge_rt_set_last_error(runtime, thread, 42) != FORGE_RT_OK ||
+            forge_rt_sleep(runtime, thread, 0) != FORGE_RT_OK) {
+            return false;
+        }
+
+        const auto start = steady_clock::now();
+        const auto status = forge_rt_sleep(runtime, thread, 10);
+        const auto elapsed = steady_clock::now() - start;
+        uint32_t error = 0;
+        return status == FORGE_RT_OK && elapsed >= milliseconds(10) &&
+               forge_rt_get_last_error(runtime, thread, &error) == FORGE_RT_OK && error == 42 &&
+               waitsIndefinitely(runtime, thread) &&
+               forge_rt_thread_destroy(runtime, thread) == FORGE_RT_OK &&
+               forge_rt_sleep(runtime, thread, 0) == FORGE_RT_INVALID_THREAD;
+    }
+
     bool observeRetirement(forge_rt_instance *runtime, forge_rt_thread_token thread,
                            const std::atomic<bool> &replaced) {
         uint32_t value = 0;
@@ -83,17 +145,18 @@ namespace {
 } // namespace
 
 int main() {
-    testRuntimeMemory();
-    testRuntimeProcess();
-    testRuntimeConsoleProcess();
-    testRuntimeWrite();
     forge_rt_instance *runtime = nullptr;
 
     if (forge_rt_create(FORGE_RT_ABI_VERSION, &runtime) != FORGE_RT_OK) {
         return 1;
     }
 
-    bool passed = true;
+    // The infinite-wait probe forks while the test process is still single-threaded.
+    bool passed = sleepContract(runtime);
+    testRuntimeMemory();
+    testRuntimeProcess();
+    testRuntimeConsoleProcess();
+    testRuntimeWrite();
 
     for (unsigned trial = 0; trial < 64 && passed; ++trial) {
         passed = raceDestruction(runtime);

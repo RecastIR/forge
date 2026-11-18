@@ -3,6 +3,7 @@ console-binary_stdout.exe
 console-nested_exit.exe
 crt-argument-heap.exe
 executable-headers.exe
+executable-import-register.exe
 executable-noreturn.exe
 executable-tib.exe
 hello.exe

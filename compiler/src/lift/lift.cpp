@@ -559,7 +559,13 @@ namespace forge {
 
         void Translator::lowerCall(const Step &s, const x86::ResolvedCallSite &call) {
             const auto guestBase = analysis.image.guestBase();
-            if (!call.external() && call.guest().kind == x86::CallKind::RipRelativeRegister) {
+            if (const auto *external = call.external(); external && s.isRegisterCall()) {
+                auto *target = value(s, s.inst.getOperand(0), 64);
+                auto *slotAddress = ir.getInt64(guestBase + external->slot);
+                auto *expected = memory.load(slotAddress, 64, false);
+                memory.checks.guard(ir.CreateICmpEQ(target, expected), FORGE_RT_FAULT_CONTROL);
+            } else if (!call.external() &&
+                       call.guest().kind == x86::CallKind::RipRelativeRegister) {
                 auto *target = value(s, s.inst.getOperand(0), 64);
                 memory.checks.guard(
                     ir.CreateICmpEQ(target, ir.getInt64(guestBase + call.guest().rva)),
@@ -987,9 +993,11 @@ namespace forge {
             readiness.entryRecovered = true;
             const auto guestBase = x86::validateGuestBase(entry, guestLoadBase);
             const x86::RecoveredFunctionGroup group(
-                entry, win64::services, [&](const auto &partial, const auto &error) {
+                entry, win64::services,
+                [&](const auto &partial, const auto &error) {
                     x86::recordExecutableRecovery(readiness, partial, &error);
-                });
+                },
+                true);
             x86::recordExecutableRecovery(readiness, group);
             x86::validateExecutableStartup(entry, group, guestBase, readiness);
             return generateGroupIR(

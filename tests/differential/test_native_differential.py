@@ -62,7 +62,20 @@ class NativeDifferentialTests(unittest.TestCase):
                 self.assertIs(context["recovery_complete"], False)
                 self.assertEqual((context["entry_rva"], context["function_rva"], context["instruction_rva"],
                                   context["opcode"], context["bytes"]),
-                                 ("0x14d0", "0x1180", "0x11e6", "CALL64r", "41ffd4"))
+                                 ("0x14d0", "0x1180", "0x1258", "CALL64m", "ff15426f0000"))
+                self.assertEqual((context["import_dll"], context["import_symbol"], context["iat_slot_rva"]),
+                                 ("KERNEL32.dll", "SetUnhandledExceptionFilter", "0x81a0"))
+                self.assertIn({"dll": "kernel32.dll", "name": "Sleep"}, context["imports"])
+                self.assertNotIn("0x11e6", [c["instruction_rva"] for c in context["unresolved_calls"]])
+                pe = diff.BINARIES / config / manifest.case["binary"]
+                data = pe.read_bytes()
+                # llvm-objdump and llvm-readobj place the original R12 load and register CALL
+                # in the pinned .text section at file offsets 0x7c8 and 0x7e6.
+                self.assertEqual(data[0x7c8:0x7cf], bytes.fromhex("4c8b25d96f0000"))
+                self.assertEqual(data[0x7e6:0x7e9], bytes.fromhex("41ffd4"))
+                scope = context["entry_unwind_handler"]["c_specific_handler"]["scope"]
+                self.assertEqual((scope["begin_rva"], scope["end_rva"], scope["filter_rva"]),
+                                 ("0x14d4", "0x14e7", "0x1dd0" if config == "debug" else "0x1da0"))
                 tls = context["tls"]
                 self.assertEqual((tls["raw_data_start_va"], tls["raw_data_end_va"], tls["index_va"]),
                                  ("0x14000a000", "0x14000a008", "0x14000708c"))
