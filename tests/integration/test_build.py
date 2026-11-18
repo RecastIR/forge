@@ -368,7 +368,7 @@ class BuildConfig(BuildCase):
         self.assertEqual(database.read_bytes(), contents)
 
         for missing in (harness, SOURCE / "cli/src/parsing.cpp", SOURCE / "compiler/src/pe/pe.cpp",
-                        SOURCE / "runtime/src/runtime.cpp", SOURCE / "tests/integration/runtime_smoke.c",
+                        SOURCE / "runtime/src/core/runtime.cpp", SOURCE / "tests/integration/runtime_smoke.c",
                         SOURCE / "tests/unit/integer.cpp"):
             with self.subTest(missing=missing):
                 database.write_text(json.dumps([e for e in entries if e["file"] != str(missing)]))

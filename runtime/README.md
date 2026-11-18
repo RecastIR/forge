@@ -14,7 +14,7 @@ A managed guest can set, replace, or clear its process-wide top-level exception 
 
 ## Current source organization
 
-The C ABI headers and shared C++ contracts live in `include/forge/`. All implementation files and private headers currently sit directly in `src/`. The build places `startup.cpp` in `forge_startup` and the process, memory, Win32, CRT and native operations in `forge_runtime`. The architecture guide maps each current file to its intended owner and describes the proposed R2 layout. [Build definition](CMakeLists.txt) · [Source ownership and proposed layout](../docs/runtime-architecture.md#current-source-ownership-and-proposed-layout)
+The public C ABI and shared C++ contracts live in `include/forge/`. The `forge_runtime` archive builds the process, thread and memory sources in `src/core/` and the services in `src/compat/win32/` and `src/compat/crt/`. The two service groups share `src/compat/string_scan.h`. The `forge_startup` archive builds only `src/startup.cpp`. The ownership table records where core depends on compatibility state and where Win32 still performs native I/O and waits. [Build definition](CMakeLists.txt) · [Runtime source ownership](../docs/runtime-architecture.md#runtime-source-ownership)
 
 ## Build and test
 

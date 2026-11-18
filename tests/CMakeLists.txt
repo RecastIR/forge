@@ -2,7 +2,7 @@ if(BUILD_TESTING OR CMAKE_EXPORT_COMPILE_COMMANDS)
   find_package(Threads REQUIRED)
   # Build a second copy of the checked operation with a latch immediately before transfer.
   # The renamed symbols leave every ordinary contract test linked to the production archive.
-  add_library(runtime_transfer_probe OBJECT EXCLUDE_FROM_ALL ../runtime/src/guest_memory.cpp)
+  add_library(runtime_transfer_probe OBJECT EXCLUDE_FROM_ALL ../runtime/src/core/guest_memory.cpp)
   target_link_libraries(runtime_transfer_probe PRIVATE forge_runtime)
   target_compile_definitions(runtime_transfer_probe PRIVATE FORGE_RUNTIME_TEST_TRANSFER
     forge_rt_read_guest=forgeTestReadGuest forge_rt_write_guest=forgeTestWriteGuest

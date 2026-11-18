@@ -271,7 +271,7 @@ namespace forge {
         renamed.write_text(FORMATTED.replace('Value = 4', 'Value=5'))
         new = self.root / 'cli/src/new.cpp'
         new.write_text('int  Other;\n')
-        runtime = self.root / 'runtime/src/runtime.cpp'
+        runtime = self.root / 'runtime/src/core/runtime.cpp'
         smoke = self.root / 'tests/integration/runtime_smoke.c'
         for path in (runtime, smoke):
             path.parent.mkdir(parents=True)

@@ -130,7 +130,7 @@ accesses and a checked 4 KiB invocation stack with byte marks. Guest VAs remain 
 they are not host pointers.
 
 With checked memory, [execution_context.cpp][context] publishes the generated image and active
-stack. [runtime/src/guest_memory.cpp][bridge] preflights the entire copy, traverses adjacent
+stack. [runtime/src/core/guest_memory.cpp][bridge] preflights the entire copy, traverses adjacent
 intervals and commits bytes/marks only on success. The bridge and generated instructions
 borrow the **same backing**; it is not a second memory store. Scalar accesses still require
 one interval; bridge copies can span several. [registration.cpp][registration] manages
@@ -481,8 +481,8 @@ direct page retrieval was rate-limited, so no additional implementation details 
 [group]: ../../compiler/src/lift/group_analysis.cpp
 [facts]: ../../compiler/src/lift/address_fact.cpp
 [image]: ../../compiler/src/lift/image_memory.cpp
-[bridge]: ../../runtime/src/guest_memory.cpp
-[registration]: ../../runtime/src/registration.cpp
+[bridge]: ../../runtime/src/core/guest_memory.cpp
+[registration]: ../../runtime/src/core/registration.cpp
 [rt-header]: ../../runtime/include/forge/runtime.h
 [test-cmake]: ../../tests/CMakeLists.txt
 [native]: ../../tests/differential/native.py

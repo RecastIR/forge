@@ -1,5 +1,5 @@
+#include "../../core/instance.h"
 #include "forge/msvcrt_process.h"
-#include "instance.h"
 
 #include <algorithm>
 #include <cstring>

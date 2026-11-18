@@ -1,5 +1,5 @@
+#include "../../core/instance.h"
 #include "forge/service_memory.h"
-#include "instance.h"
 
 #include <algorithm>
 #include <array>

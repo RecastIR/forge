@@ -1,4 +1,4 @@
-#include "../../runtime/src/standard_handles.h"
+#include "../../runtime/src/compat/win32/standard_handles.h"
 #include <forge/process.h>
 
 #include <algorithm>

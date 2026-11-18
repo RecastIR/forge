@@ -1,8 +1,8 @@
 #pragma once
 
+#include "../compat/win32/process_parameters.h"
+#include "../compat/win32/standard_handles.h"
 #include "forge/runtime.h"
-#include "process_parameters.h"
-#include "standard_handles.h"
 
 #include <map>
 #include <mutex>

@@ -16,7 +16,7 @@ For a runtime change, start with the resource owner, its borrowers and the guest
 
 ### Adding a runtime service
 
-Find the existing source module by responsibility in the ownership matrix. Extend it when the new operation shares its state, lifetime and failure rules. A new component earns its place when it isolates a real dependency, owns a distinct resource or serves multiple existing callers, as the shared checked string scan does. An export from another DLL can delegate to the same adapter. If that adapter needs process resources, also test that registration prepares them for the new export. [Source ownership matrix](runtime-architecture.md#current-source-ownership-and-proposed-layout)
+Start in `runtime/src/compat/win32/` for Win32 services and `runtime/src/compat/crt/` for MSVCRT services. Use the ownership matrix to find the module that implements the relevant behavior. Extend it when the new operation shares its state, lifetime and failure rules. A new component earns its place when it isolates a real dependency, owns a distinct resource or serves multiple existing callers, as the shared checked string scan does. An export from another DLL can delegate to the same adapter. If that adapter needs process resources, also test that registration prepares them for the new export. [Source ownership matrix](runtime-architecture.md#runtime-source-ownership)
 
 | Change | Where to put it and what to check |
 | --- | --- |

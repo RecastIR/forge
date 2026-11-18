@@ -1,4 +1,4 @@
-#include "string_scan.h"
+#include "../string_scan.h"
 
 #include <cerrno>
 #include <sched.h>

@@ -1,4 +1,4 @@
-#include "instance.h"
+#include "../../core/instance.h"
 
 #include <fcntl.h>
 #include <sys/resource.h>

@@ -1,6 +1,6 @@
 #include <forge/runtime.h>
 
-#include "../../runtime/src/instance.h"
+#include "../../runtime/src/core/instance.h"
 #include "forge/service_memory.h"
 
 #include <algorithm>

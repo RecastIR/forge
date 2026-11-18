@@ -1,7 +1,7 @@
 #include "process_parameters.h"
 
+#include "../../core/instance.h"
 #include "forge/guest_range.h"
-#include "instance.h"
 
 #include <algorithm>
 #include <bit>
