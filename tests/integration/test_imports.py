@@ -95,6 +95,36 @@ class Imports(Case):
         self.assertNotIn("@forge_rt_", ir)
         self.assertIn("@forge_lifted_with_runtime(", ir)
 
+    def test_process_services_require_managed_entry(self):
+        slot = self.slots["GetLastError"]
+        hint = self.layout.u32(self.layout.file_offset(self.lookup) + slot - self.iat)
+        start = self.layout.file_offset(hint) + 2
+        for name in ("GetStdHandle", "WriteFile", "ExitProcess"):
+            with self.subTest(name=name):
+                data = self.patch(("ff15", slot), "c3")
+                replacement = name.encode() + b"\0"
+                data[start:start+len(replacement)] = replacement
+                ctx = self.invoke_lift(data, "--signature", "i64(i64,i64)", "--checked-memory",
+                                       reason="managed process artifact", code="LIFT_UNSUPPORTED_CONTROL_FLOW",
+                                       symbol=name, name="KERNEL32.dll")
+                self.assertEqual(int(ctx["iat_slot_rva"], 16), slot)
+                self.assertEqual(int(ctx["instruction_rva"], 16), self.root)
+
+    def test_partial_executable_recovery_keeps_calls_before_bad_import(self):
+        data = self.patch(("e8", self.helper), ("ff15", self.slots["GetLastError"]),
+                          ("ff15", self.slots["Sleep"]), "c3")
+        struct.pack_into("<I", data, self.layout.opt + 16, self.root)
+        source = self.dir / "partial.exe"
+        source.write_bytes(data)
+        result = self.invoke("lift", source, "--executable", "--output", self.dir / "program",
+                             "--diagnostics-format", "json", code=1)
+        ctx = json.loads(result.stderr)["context"]
+        self.assertFalse(ctx["recovery_complete"])
+        self.assertEqual(ctx["import_symbol"], "Sleep")
+        self.assertIn({"dll": "kernel32.dll", "name": "GetLastError"}, ctx["imports"])
+        self.assertIn({"caller_rva": hex(self.root), "instruction_rva": hex(self.root),
+                       "target_rva": hex(self.helper)}, ctx["unresolved_calls"])
+
     def test_checked_reservation_covers_pe_headers(self):
         # The fixed guest stack occupies only the first page, before the first section.
         self.assertGreaterEqual(min(start for size, start, _, _ in self.layout.sections if size), 0x1000)

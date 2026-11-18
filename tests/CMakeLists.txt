@@ -10,6 +10,7 @@ if(BUILD_TESTING OR CMAKE_EXPORT_COMPILE_COMMANDS)
     forge_rt_report_scalar_boundary=forgeTestReportScalarBoundary)
   configure_forge_cxx(runtime_transfer_probe)
   add_executable(runtime_contract unit/runtime.cpp unit/runtime_memory.cpp unit/runtime_process.cpp
+    unit/runtime_console_process.cpp unit/runtime_write.cpp
     $<TARGET_OBJECTS:runtime_transfer_probe>)
   target_link_libraries(runtime_contract PRIVATE forge_runtime Threads::Threads)
   configure_forge_cxx(runtime_contract)

@@ -27,6 +27,13 @@ namespace {
             require(result.status == FORGE_RT_OK, "return status");
             std::printf("return %" PRIu64 "\n", result.value);
             break;
+        case FORGE_RT_EXIT_PROCESS:
+            require(result.status == FORGE_RT_OK && result.value <= UINT32_MAX &&
+                        result.fault == 0 && result.memory.address == 0 &&
+                        result.memory.access == 0 && result.memory.reason == 0,
+                    "ExitProcess result");
+            std::printf("exit %" PRIu64 "\n", result.value);
+            break;
         case FORGE_RT_EXECUTION_FAULT:
             require(result.status == FORGE_RT_GUEST_FAULT, "fault status");
             if (result.fault == FORGE_RT_FAULT_MEMORY) {
@@ -64,6 +71,7 @@ extern "C" forge_rt_status probe_process_get(forge_rt_instance *instance,
 int main(int argc, char **argv) {
     require(argc >= 4 && argc % 2 == 0, "arguments");
     failGetter = std::string_view(argv[1]) == "fail-get";
+    const bool console = std::string_view(argv[1]) == "console";
     const auto *artifact = forge_lifted_artifact();
     require(artifact && artifact == forge_lifted_artifact(), "stable artifact");
     std::printf("entry %" PRIu64 " %" PRIu64 " %" PRIu64 "\n", artifact->base, artifact->entryRva,
@@ -92,12 +100,21 @@ int main(int argc, char **argv) {
                     FORGE_RT_OK,
                 "run");
         forge_rt_process_state state = 0;
-        const auto terminal =
-            result.kind == FORGE_RT_RETURNED ? FORGE_RT_PROCESS_EXITED : FORGE_RT_PROCESS_FAULTED;
+        const auto normal =
+            result.kind == FORGE_RT_RETURNED || result.kind == FORGE_RT_EXIT_PROCESS;
+        const auto terminal = normal ? FORGE_RT_PROCESS_EXITED : FORGE_RT_PROCESS_FAULTED;
         require(forge_rt_process_get_state(processes[i].get(), &state) == FORGE_RT_OK &&
                     state == terminal,
                 "terminal state");
         report(result);
         require(forge_rt_process_close(processes[i].get()) == FORGE_RT_OK, "close");
+        processes[i].reset();
+
+        if (console) {
+            // Exercise all three host streams after releasing the guest's references.
+            require(std::fgetc(stdin) == 's', "borrowed stdin");
+            require(std::fflush(stdout) == 0, "borrowed stdout");
+            require(std::fputc('!', stderr) != EOF && std::fflush(stderr) == 0, "borrowed stderr");
+        }
     }
 }

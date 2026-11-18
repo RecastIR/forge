@@ -1,18 +1,26 @@
 #include "forge/process.h"
 
 #include <cinttypes>
+#include <csignal>
 #include <cstdio>
 
 namespace {
     constexpr int failureExit = 125;
 
     int runtimeFailure(const char *stage, forge_rt_status status) {
+        if (status == FORGE_RT_HOST_CONFIGURATION) {
+            std::fprintf(stderr, "forge: host standard stream configuration failed stage=%s\n",
+                         stage);
+            return failureExit;
+        }
+
         std::fprintf(stderr, "forge: runtime failure stage=%s status=%" PRIu32 "\n", stage, status);
         return failureExit;
     }
 
     int exitStatus(const forge_rt_process_result &result) {
         switch (result.kind) {
+        case FORGE_RT_EXIT_PROCESS:
         case FORGE_RT_RETURNED: {
             const auto dword = static_cast<uint32_t>(result.value);
             return static_cast<int>(dword & 0xffU);
@@ -48,6 +56,16 @@ namespace {
 } // namespace
 
 int main() {
+    // This executable owns its host process. A broken pipe or exceeded file-size limit
+    // must reach the Windows service as a write error, including after earlier progress.
+    struct sigaction action{};
+    action.sa_handler = SIG_IGN;
+
+    if (sigemptyset(&action.sa_mask) != 0 || ::sigaction(SIGPIPE, &action, nullptr) != 0 ||
+        ::sigaction(SIGXFSZ, &action, nullptr) != 0) {
+        return runtimeFailure("output-signals", FORGE_RT_HOST_CONFIGURATION);
+    }
+
     const auto *artifact = forge_lifted_artifact();
 
     if (!artifact || artifact->version != FORGE_RT_ARTIFACT_VERSION) {

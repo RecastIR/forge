@@ -41,7 +41,9 @@ namespace forge::win64 {
     }
 
     enum class Convention : uint8_t { WindowsX64, Variadic, Alternate, Unwinding };
-    enum class LastError : uint8_t { Read, Write, Preserve };
+    enum class Requirement : uint8_t { Instance, Process };
+    enum class Control : uint8_t { Returns, Terminates };
+    enum class LastError : uint8_t { Read, Write, Preserve, OnFailure };
 
     constexpr unsigned width(Value type) {
         switch (type) {
@@ -78,6 +80,8 @@ namespace forge::win64 {
         Value result;
         LastError lastError;
         Convention convention = Convention::WindowsX64;
+        Requirement requirement = Requirement::Instance;
+        Control control = Control::Returns;
 
         constexpr bool checkedMemory() const {
             for (auto arg : arguments) {
@@ -119,6 +123,11 @@ namespace forge::win64 {
         }
 
         constexpr std::string_view error() const {
+            if (control == Control::Terminates &&
+                (result != Value::Void || requirement != Requirement::Process)) {
+                return "a terminal service requires a managed process and void result";
+            }
+
             switch (convention) {
             case Convention::Variadic:
                 return "variadic calls are unsupported";
@@ -184,7 +193,9 @@ namespace forge::win64 {
 
     template <Value result, Argument... args, class Function>
     consteval ServiceBinding bind(std::string_view dll, std::string_view name, LastError effect,
-                                  std::string_view nativeSymbol, Function) {
+                                  std::string_view nativeSymbol, Function,
+                                  Requirement requirement = Requirement::Instance,
+                                  Control control = Control::Returns) {
         constexpr ServiceBinding shape{
             {}, {}, {}, parameters<args...>, result, LastError::Preserve};
         static_assert(shape.error().empty(),
@@ -209,11 +220,30 @@ namespace forge::win64 {
                                NativeFunction<typename NativeScalar<args.type>::Type..., Out>>);
         }
 
-        return {dll, name, nativeSymbol, parameters<args...>, result, effect};
+        const ServiceBinding binding{dll,    name,   nativeSymbol,           parameters<args...>,
+                                     result, effect, Convention::WindowsX64, requirement,
+                                     control};
+
+        if (!binding.error().empty()) {
+            throw "invalid Windows x64 service declaration";
+        }
+
+        return binding;
     }
 
     // Keep the linker spelling and the declaration used for the prototype check together.
 #define FORGE_SERVICE_ADAPTER(symbol) #symbol, symbol
+
+    inline constexpr auto getStdHandle = bind<Value::Handle, Argument{Value::U32}>(
+        "kernel32.dll", "GetStdHandle", LastError::OnFailure,
+        FORGE_SERVICE_ADAPTER(forge_rt_get_std_handle), Requirement::Process);
+    inline constexpr auto writeFile =
+        bind<Value::I32, Argument{Value::Handle},
+             Argument{Value::Address, Access::Input, Extent::CountArgument, 2},
+             Argument{Value::U32}, Argument{Value::Address, Access::Output, Extent::Fixed, 4},
+             Argument{Value::Address}>("kernel32.dll", "WriteFile", LastError::OnFailure,
+                                       FORGE_SERVICE_ADAPTER(forge_rt_write_file),
+                                       Requirement::Process);
 
     inline constexpr Argument nullableString{Value::Address, Access::Input, Extent::CString, 0,
                                              true};
@@ -227,5 +257,10 @@ namespace forge::win64 {
         bind<Value::U32>("kernel32.dll", "GetLastError", LastError::Read,
                          FORGE_SERVICE_ADAPTER(forge_rt_get_last_error));
 
-    inline constexpr ServiceBinding services[] = {setLastError, getLastError, stringLength};
+    inline constexpr auto exitProcess = bind<Value::Void, Argument{Value::U32}>(
+        "kernel32.dll", "ExitProcess", LastError::Preserve,
+        FORGE_SERVICE_ADAPTER(forge_rt_exit_process), Requirement::Process, Control::Terminates);
+
+    inline constexpr ServiceBinding services[] = {setLastError, getLastError, stringLength,
+                                                  getStdHandle, writeFile,    exitProcess};
 } // namespace forge::win64

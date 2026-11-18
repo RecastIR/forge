@@ -175,6 +175,12 @@ namespace {
     }
 
     forge_rt_status ProcessImage::initialize() {
+        const auto captured = instance.standardHandles.capture();
+
+        if (captured != FORGE_RT_OK) {
+            return captured;
+        }
+
         const auto bound = bindRegions();
 
         if (bound != FORGE_RT_OK) {
@@ -197,7 +203,7 @@ namespace {
         const auto registered = forge_rt_register_image(&instance, &image);
 
         if (registered == FORGE_RT_OK) {
-            instance.managed = true;
+            instance.managedExecution = &execution.view;
         }
 
         return registered;
@@ -209,6 +215,12 @@ namespace {
 
     forge_rt_process_result checkedResult(const forge_rt_process_result &result) {
         switch (result.kind) {
+        case FORGE_RT_EXIT_PROCESS:
+            if (result.value > UINT32_MAX) {
+                break;
+            }
+
+            [[fallthrough]];
         case FORGE_RT_RETURNED:
             if (result.status == FORGE_RT_OK) {
                 return result;
@@ -334,6 +346,18 @@ extern "C" forge_rt_status forge_rt_process_get_state(forge_rt_process *process,
     });
 }
 
+extern "C" forge_rt_status
+forge_rt_process_allow_host_output_signals(forge_rt_process *process) noexcept {
+    return withInstance(process, [](auto &owner) {
+        if (owner.state != FORGE_RT_PROCESS_READY) {
+            return owner.state == FORGE_RT_PROCESS_RUNNING ? FORGE_RT_BUSY : FORGE_RT_INVALID_STATE;
+        }
+
+        owner.image->instance.standardHandles.hostHandlesOutputSignals = true;
+        return FORGE_RT_OK;
+    });
+}
+
 extern "C" forge_rt_status forge_rt_process_run(forge_rt_process *process,
                                                 const forge_rt_entry_inputs *inputs,
                                                 forge_rt_process_result *outResult) noexcept {
@@ -365,9 +389,39 @@ extern "C" forge_rt_status forge_rt_process_run(forge_rt_process *process,
     // RUNNING pins the occurrence. No lifecycle or address-space lock spans the guest call.
     const auto result = active->run();
     return withInstance(process, [&](auto &owner) {
-        owner.state =
-            result.kind == FORGE_RT_RETURNED ? FORGE_RT_PROCESS_EXITED : FORGE_RT_PROCESS_FAULTED;
+        const bool exited =
+            result.kind == FORGE_RT_RETURNED || result.kind == FORGE_RT_EXIT_PROCESS;
+        owner.state = exited ? FORGE_RT_PROCESS_EXITED : FORGE_RT_PROCESS_FAULTED;
         *outResult = result;
+        return FORGE_RT_OK;
+    });
+}
+
+extern "C" forge_rt_status forge_rt_exit_process(forge_rt_instance *instance,
+                                                 forge_rt_thread_token thread,
+                                                 uint32_t exitCode) noexcept {
+    return withInstance(instance, [&](auto &owner) {
+        auto *execution = owner.managedExecution;
+
+        if (!execution) {
+            return FORGE_RT_INVALID_STATE;
+        }
+
+        const auto entry = owner.threads.find(thread);
+
+        if (entry == owner.threads.end()) {
+            return FORGE_RT_INVALID_THREAD;
+        }
+
+        if (!entry->second.invocation || executingInvocation != entry->second.invocation) {
+            return FORGE_RT_INVALID_INVOCATION;
+        }
+
+        if (execution->result.kind) {
+            return FORGE_RT_INVALID_STATE;
+        }
+
+        execution->result = {FORGE_RT_EXIT_PROCESS, FORGE_RT_OK, exitCode, {}, 0};
         return FORGE_RT_OK;
     });
 }

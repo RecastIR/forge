@@ -1,5 +1,5 @@
 add_library(forge_runtime STATIC src/runtime.cpp src/registration.cpp src/guest_memory.cpp
-  src/services.cpp src/process.cpp)
+  src/services.cpp src/console.cpp src/standard_handles.cpp src/process.cpp)
 target_include_directories(forge_runtime PUBLIC include)
 find_package(Threads REQUIRED)
 target_link_libraries(forge_runtime PRIVATE Threads::Threads)

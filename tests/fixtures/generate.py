@@ -18,7 +18,8 @@ def generate(output, mc, link, dlltool, clang):
         "Bridge.dll": ["Bridge=entry"],
         "Middle.dll": ["Middle=entry"],
         "MissingLeaf.dll": ["Leaf"],
-        "KERNEL32.dll": ["Sleep", "SetLastError", "GetLastError", "lstrlenA"],
+        "KERNEL32.dll": ["Sleep", "SetLastError", "GetLastError", "lstrlenA",
+                         "GetStdHandle", "WriteFile", "ExitProcess"],
         "vcruntime140.dll": ["Runtime"],
         contract: ["Contract"],
     }
@@ -36,14 +37,14 @@ def generate(output, mc, link, dlltool, clang):
             definition.write_text("LIBRARY " + dll + "\nEXPORTS\n" + "\n".join(public) + "\n")
             run(dlltool, "-m", "i386:x86-64", "-d", definition, "-l", dll + ".lib")
 
-        def image(filename, assembly=stub, imports=(), delays=(), exports=(), link_flags=()):
+        def image(filename, assembly=stub, imports=(), delays=(), exports=(), link_flags=(), entry="entry"):
             assembly += helper if delays else ""
             for _, symbol in imports:
                 assembly += "\n.section .rdata,\"dr\"\n.quad __imp_" + symbol + "\n"
             source = work / "image.s"
             source.write_text(assembly)
             run(mc, "-triple=x86_64-pc-windows-msvc", "-filetype=obj", source, "-o", "image.obj")
-            flags = ["/entry:entry", "/subsystem:console"]
+            flags = ["/entry:" + entry, "/subsystem:console"]
             if filename in definitions:
                 definition = work / "exports.def"
                 definition.write_text("EXPORTS\n" + "\n".join(definitions[filename]) + "\n")
@@ -66,6 +67,15 @@ def generate(output, mc, link, dlltool, clang):
               [("KERNEL32.dll", name) for name in ("SetLastError", "GetLastError")])
         image("executable-headers.exe", (sources / "executable-headers.s").read_text(),
               [("KERNEL32.dll", "lstrlenA")], link_flags=["/dynamicbase:no", "/fixed:no"])
+        console_imports = [("KERNEL32.dll", name) for name in ("GetStdHandle", "WriteFile", "ExitProcess")]
+        image("hello.exe", (sources / "hello.s").read_text(), console_imports)
+        console_cases = (sources / "console-cases.s").read_text()
+        console_imports += [("KERNEL32.dll", name) for name in ("GetLastError", "SetLastError")]
+        for entry in ("binary_stdout", "binary_stderr", "bad_handle", "stdin_write", "bad_selector",
+                      "stdin_handle", "bad_buffer", "bad_count", "null_count", "overlapped",
+                      "zero_length", "host_failure", "direct_exit", "nested_exit", "alternate_edge",
+                      "isolation", "large_output", "limited_file"):
+            image(f"console-{entry}.exe", console_cases, console_imports, entry=entry)
         # Remap debug paths so builds in different source directories produce identical PEs.
         for name in ("add", "inlined"):
             run(clang, "--target=x86_64-windows-msvc", "-O2", "-fwrapv", "-gdwarf-4", "-g",

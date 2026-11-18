@@ -23,6 +23,8 @@ elif MODE == "native":
     FORGE, CONTRACT, OPT, LLC, READOBJ, INVALID_ARTIFACT, PROCESS_HARNESS, *LINK = tools
 FIXTURES = Path(fixture_dir)
 NAMES = ("return", "call", "data", "fault", "last-error")
+GREETING = b"Hello from Windows!\n"
+BINARY = b"A\x00\xff\n"
 
 
 def run(*args, **options):
@@ -31,6 +33,10 @@ def run(*args, **options):
 
 def image(name):
     return FIXTURES / f"executable-{name}.exe"
+
+
+def console_image(name):
+    return FIXTURES / ("hello.exe" if name == "hello" else f"console-{name}.exe")
 
 
 def entry(data):
@@ -405,18 +411,145 @@ class Readiness(Workspace):
 
 
 class Reference(Workspace):
-    def test_header_result(self):
+    def capture(self, source):
         suite = Path(__file__).resolve().parents[1] / "differential"
         sys.path.insert(0, str(suite))
         sys.path.insert(0, str(suite / "reference"))
         from docker_wine import execute
         from fixture_images import reference_environment
 
-        pe = self.dir / "headers.exe"
-        shutil.copyfile(image("headers"), pe)
-        capture = execute(reference_environment(suite)["container_image_id"], pe, [])
-        self.assertEqual((capture.exit_code, capture.stdout, capture.stderr),
-                         (header_result(pe.read_bytes()), b"", b""))
+        pe = self.dir / source.name
+        shutil.copyfile(source, pe)
+        result = execute(reference_environment(suite)["container_image_id"], pe, [])
+        return result.exit_code, result.stdout, result.stderr
+
+    def test_header_result(self):
+        pe = image("headers")
+        self.assertEqual(self.capture(pe), (header_result(pe.read_bytes()), b"", b""))
+
+    def test_console_results(self):
+        for name, expected in (("hello", (0, GREETING, b"")), ("binary_stdout", (4, BINARY, b"")),
+                               ("binary_stderr", (4, b"", BINARY)),
+                               ("nested_exit", (0xcafe002a, b"", b""))):
+            with self.subTest(name=name):
+                self.assertEqual(self.capture(console_image(name)), expected)
+
+
+class Console(Workspace):
+    def program(self, **streams):
+        options = dict(stdout=subprocess.PIPE, stderr=subprocess.PIPE, stdin=subprocess.DEVNULL)
+        return subprocess.run([self.output], timeout=10, **(options | streams))
+
+    def test_hello(self):
+        diagnostic = self.compile(console_image("hello"))
+        self.assertEqual(diagnostic["code"], "EXECUTABLE_READY")
+        self.assertEqual({(row["dll"].lower(), row["name"]) for row in diagnostic["context"]["imports"]},
+                         {("kernel32.dll", name) for name in ("GetStdHandle", "WriteFile", "ExitProcess")})
+        self.assertIn("Format: Mach-O arm64", run(READOBJ, "--file-headers", self.output, check=True).stdout)
+        result = self.program()
+        self.assertEqual((result.returncode, result.stdout, result.stderr), (0, GREETING, b""))
+
+        # Changing only the guest .rdata bytes must change native output byte for byte.
+        changed = self.dir / "changed.exe"
+        contents = console_image("hello").read_bytes()
+        self.assertEqual(contents.count(GREETING), 1)
+        replacement = GREETING[:-2] + b"?\x00"
+        changed.write_bytes(contents.replace(GREETING, replacement))
+        self.compile(changed)
+        result = self.program()
+        self.assertEqual((result.returncode, result.stdout, result.stderr), (0, replacement, b""))
+
+    def test_binary_redirection_and_count(self):
+        for name, stream in (("binary_stdout", "stdout"), ("binary_stderr", "stderr")):
+            with self.subTest(name=name):
+                self.compile(console_image(name))
+                result = self.program()
+                expected = (BINARY, b"") if stream == "stdout" else (b"", BINARY)
+                self.assertEqual((result.returncode, result.stdout, result.stderr), (len(BINARY), *expected))
+                path = self.dir / "redirected.bin"
+                with path.open("wb") as redirected:
+                    result = self.program(**{stream: redirected})
+                other = result.stderr if stream == "stdout" else result.stdout
+                self.assertEqual((result.returncode, other, path.read_bytes()), (len(BINARY), b"", BINARY))
+
+        self.compile(console_image("large_output"))
+        result = self.program()
+        self.assertEqual((result.returncode, result.stdout, result.stderr), (0, b"a" * 65537, b""))
+
+    def test_api_results(self):
+        for name, code in (("bad_handle", 6), ("stdin_write", 5), ("bad_selector", 6),
+                           ("stdin_handle", 0), ("null_count", 87), ("overlapped", 50),
+                           ("zero_length", 0)):
+            with self.subTest(name=name):
+                self.compile(console_image(name))
+                result = self.program()
+                self.assertEqual((result.returncode, result.stdout, result.stderr), (code, b"", b""))
+
+    def test_preflight_before_output(self):
+        for name in ("bad_buffer", "bad_count"):
+            with self.subTest(name=name):
+                pe = console_image(name)
+                if name == "bad_buffer":
+                    data = pe.read_bytes()
+                    layout = Layout(data)
+                    size, rva, _, _ = next(s for s in layout.sections
+                                          if data.startswith(b".badbuf\0", layout.section_header(s[1])))
+                    self.assertEqual(size, 65537)
+                    base = struct.unpack_from("<Q", data, layout.opt + 24)[0]
+                    address, access, reason = base + rva + size, 1, 2
+                else:
+                    address, access, reason = 0x70001000 - 40, 2, 4
+                self.compile(pe)
+                result = self.program()
+                expected = f"forge: guest memory fault address={address:#x} access={access} reason={reason}\n"
+                self.assertEqual((result.returncode, result.stdout, result.stderr), (125, b"", expected.encode()))
+
+    def test_host_failures(self):
+        self.compile(console_image("host_failure"))
+        reader, writer = os.pipe()
+        os.close(reader)
+        with os.fdopen(writer, "wb") as broken:
+            result = self.program(stdout=broken)
+        self.assertEqual((result.returncode, result.stderr), (109, b""))
+        with console_image("host_failure").open("rb") as read_only:
+            result = self.program(stdout=read_only)
+        self.assertEqual((result.returncode, result.stderr), (6, b""))
+
+    def test_file_size_limit(self):
+        import resource
+        import signal
+
+        def limit_output_file():
+            signal.signal(signal.SIGXFSZ, signal.SIG_DFL)
+            resource.setrlimit(resource.RLIMIT_FSIZE, (2, 2))
+
+        self.compile(console_image("limited_file"))
+        path = self.dir / "limited.bin"
+        with path.open("wb") as stream:
+            result = self.program(stdout=stream, preexec_fn=limit_output_file)
+        # The guest checks FALSE and a count of two, then returns GetLastError().
+        self.assertEqual((result.returncode, result.stderr, path.read_bytes()), (112, b"", BINARY[:2]))
+
+    def test_termination(self):
+        for name, status, stderr in (("direct_exit", 42, b""), ("nested_exit", 42, b""),
+                                     ("alternate_edge", 9, BINARY)):
+            with self.subTest(name=name):
+                self.compile(console_image(name))
+                result = self.program()
+                self.assertEqual((result.returncode, result.stdout, result.stderr), (status, b"", stderr))
+
+    def test_same_artifact_in_two_processes(self):
+        _, runtime, sdk, *flags = LINK
+        obj = self.dir / "isolation.o"
+        run(CONTRACT, console_image("isolation"), "--object", obj, OPT, LLC, check=True)
+        run("/usr/bin/xcrun", "--sdk", sdk, "clang++", "-arch", "arm64", *flags,
+            PROCESS_HARNESS, obj, runtime, "-o", self.output, check=True)
+        captured = self.dir / "stderr.bin"
+        with captured.open("wb") as stream:
+            result = subprocess.run([self.output, "console", "0", "0", "0", "0"], input=b"ss",
+                                    stdout=subprocess.PIPE, stderr=stream, timeout=10)
+        self.assertEqual((result.returncode, captured.read_bytes()), (0, (BINARY + b"!") * 2))
+        self.assertEqual(result.stdout.splitlines()[-2:], [f"exit {0xcafe002a}".encode()] * 2)
 
 
 class Native(Workspace):
@@ -589,5 +722,5 @@ if __name__ == "__main__":
     if MODE == "native" and (platform.system(), platform.machine()) != ("Darwin", "arm64"):
         sys.exit(77)
     suites = {"compiler": ("Portable", "StartupAdmission"), "object": ("Object",),
-              "readiness": ("Readiness",), "native": ("Native",), "reference": ("Reference",)}
+              "readiness": ("Readiness",), "native": ("Native", "Console"), "reference": ("Reference",)}
     unittest.main(argv=[__file__, *suites[MODE]], verbosity=2)

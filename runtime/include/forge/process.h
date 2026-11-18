@@ -30,11 +30,13 @@ typedef uint32_t forge_rt_process_state;
 #define FORGE_RT_EXECUTION_FAULT UINT32_C(2)
 #define FORGE_RT_UNSUPPORTED UINT32_C(3)
 #define FORGE_RT_RUNTIME_FAILURE UINT32_C(4)
+#define FORGE_RT_EXIT_PROCESS UINT32_C(5)
 #define FORGE_RT_FAULT_MEMORY UINT32_C(1)
 #define FORGE_RT_FAULT_CONTROL UINT32_C(2)
 #define FORGE_RT_FAULT_ABI UINT32_C(3)
 
-/* RETURNED supplies the complete guest RAX in value. EXECUTION_FAULT identifies the
+/* RETURNED supplies the complete guest RAX in value. EXIT_PROCESS supplies the
+ * zero-extended DWORD from a non-returning guest ExitProcess call. EXECUTION_FAULT identifies the
  * fault class. FAULT_MEMORY carries the existing checked-copy diagnostic in memory.
  * RUNTIME_FAILURE supplies a nonzero native runtime status. */
 typedef struct forge_rt_process_result {
@@ -138,6 +140,12 @@ forge_rt_status forge_rt_process_register(forge_rt_process *process,
                                           const forge_rt_artifact *artifact) FORGE_PROCESS_NOEXCEPT;
 forge_rt_status forge_rt_process_get_state(forge_rt_process *process,
                                            forge_rt_process_state *outState) FORGE_PROCESS_NOEXCEPT;
+/* For READY processes only. The host guarantees its output signal policy throughout the run,
+ * including SIGPIPE on inherited pipes/devices and SIGXFSZ under a finite file-size limit.
+ * Without this assurance, those writes require an ignored signal (or Darwin F_SETNOSIGPIPE
+ * on a pipe/device). The runtime library never changes the host's signal disposition. */
+forge_rt_status
+forge_rt_process_allow_host_output_signals(forge_rt_process *process) FORGE_PROCESS_NOEXCEPT;
 /* Run enters the selected guest root exactly once. A null inputs pointer sets RCX and
  * RDX to zero. Otherwise run copies the caller's register seeds on admission. OK delivers
  * a tagged result even for execution failure. Admission errors preserve outResult. The

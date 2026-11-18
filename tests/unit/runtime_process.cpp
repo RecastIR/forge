@@ -160,6 +160,8 @@ namespace {
         REQUIRE(forge_rt_process_close(first.get()) == FORGE_RT_BUSY);
         uint8_t observed = 0;
         forge_rt_memory_fault fault{};
+        REQUIRE(forge_rt_exit_process(probe.instance, probe.thread, 17) ==
+                FORGE_RT_INVALID_INVOCATION);
         REQUIRE(forge_rt_read_guest(probe.instance, probe.thread, probe.invocation, base, 1,
                                     &observed, 1, &fault) == FORGE_RT_INVALID_INVOCATION);
         forge_rt_process_result result{};
@@ -171,6 +173,25 @@ namespace {
         running.join();
         expectState(first.get(), FORGE_RT_PROCESS_EXITED);
         rejectRun(first.get(), FORGE_RT_INVALID_STATE);
+    }
+
+    void checkExitProcess() {
+        constexpr uint32_t exitCode = UINT32_C(0xf123452a);
+        const auto artifact = artifactWith([](forge_rt_execution *execution) {
+            REQUIRE(forge_rt_exit_process(execution->instance, 0, 1) == FORGE_RT_INVALID_THREAD);
+            REQUIRE(forge_rt_exit_process(execution->instance, execution->thread, exitCode) ==
+                    FORGE_RT_OK);
+            REQUIRE(forge_rt_exit_process(execution->instance, execution->thread, 2) ==
+                    FORGE_RT_INVALID_STATE);
+        });
+        const auto process = create();
+        REQUIRE(forge_rt_process_register(process.get(), &artifact) == FORGE_RT_OK);
+        forge_rt_process_result result{};
+        REQUIRE(forge_rt_process_run(process.get(), nullptr, &result) == FORGE_RT_OK);
+        REQUIRE(result.kind == FORGE_RT_EXIT_PROCESS && result.status == FORGE_RT_OK &&
+                result.value == exitCode);
+        expectState(process.get(), FORGE_RT_PROCESS_EXITED);
+        rejectRun(process.get(), FORGE_RT_INVALID_STATE);
     }
 
     void checkRegistration() {
@@ -278,6 +299,7 @@ namespace {
 void testRuntimeProcess() {
     checkRegistration();
     checkIsolation();
+    checkExitProcess();
     checkScalarBoundaries();
     checkFaultCleanup();
 }

@@ -62,7 +62,7 @@ The caller owns one record per call instruction. Its evidence RVA identifies the
 
 ### Imported call recovery
 
-The production service catalogue binds `SetLastError`, `GetLastError`, and `lstrlenA` by normalized DLL and exact symbol. Recovery borrows the selected declaration. Address analysis and LLVM emission read the same argument locations and widths, with the CALL push accounting for their eight-byte difference in stack coordinates. The runtime supplies statically typed native adapters. [Windows x64 service contract](runtime-architecture.md#12e--windows-x64-abi-bridge)
+The production service catalogue binds imports by normalized DLL and exact symbol. Its declaration identifies services that require a managed process. Once recovery validates a terminal IAT call such as `ExitProcess`, that path ends at the call. An independent branch can still reach code at a later RVA. Recovery borrows the selected declaration. Address analysis and LLVM emission read the same argument locations and widths, with the CALL push accounting for their eight-byte difference in stack coordinates. The runtime supplies statically typed native adapters. [Windows x64 service contract](runtime-architecture.md#12e--windows-x64-abi-bridge)
 
 Pointer analysis reads argument facts before any service write or volatile clobber. It selects proven non-executable image data with the required permissions and retains protected holes and mapping budgets. Stack buffers use the current activation and byte marks. Read-only calls preserve disjoint saved pointers. Output and in/out calls invalidate possibly overwritten saves before subsequent instructions can use them as evidence.
 

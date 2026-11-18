@@ -54,7 +54,7 @@ extern "C" forge_rt_status forge_rt_destroy(forge_rt_instance *instance) noexcep
 
     // Host quiescence prevents new uses between the check and release.
     const auto status = withInstance(instance, [](const auto &process) {
-        if (process.managed) {
+        if (process.managedExecution) {
             return FORGE_RT_INVALID_STATE;
         }
 
@@ -78,7 +78,7 @@ extern "C" forge_rt_status forge_rt_thread_create(forge_rt_instance *instance,
     }
 
     return withInstance(instance, [outThread](auto &process) {
-        if (process.managed) {
+        if (process.managedExecution) {
             return FORGE_RT_INVALID_STATE;
         }
 
@@ -97,7 +97,7 @@ extern "C" forge_rt_status forge_rt_thread_create(forge_rt_instance *instance,
 extern "C" forge_rt_status forge_rt_thread_destroy(forge_rt_instance *instance,
                                                    forge_rt_thread_token thread) noexcept {
     return withInstance(instance, [thread](auto &process) {
-        if (process.managed) {
+        if (process.managedExecution) {
             return FORGE_RT_INVALID_STATE;
         }
 
@@ -126,7 +126,7 @@ extern "C" forge_rt_status forge_rt_set_last_error(forge_rt_instance *instance,
             return FORGE_RT_INVALID_THREAD;
         }
 
-        if (process.managed &&
+        if (process.managedExecution &&
             (!entry->second.invocation || executingInvocation != entry->second.invocation)) {
             return FORGE_RT_INVALID_INVOCATION;
         }
@@ -150,7 +150,7 @@ extern "C" forge_rt_status forge_rt_get_last_error(forge_rt_instance *instance,
             return FORGE_RT_INVALID_THREAD;
         }
 
-        if (process.managed &&
+        if (process.managedExecution &&
             (!entry->second.invocation || executingInvocation != entry->second.invocation)) {
             return FORGE_RT_INVALID_INVOCATION;
         }

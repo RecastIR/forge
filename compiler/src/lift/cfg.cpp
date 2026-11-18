@@ -95,7 +95,8 @@ namespace forge::x86 {
                     tail.take_front(size)};
         }
 
-        Flow control(const Step &s, const MCInstrInfo &info, bool recordedExtent) {
+        Flow control(const Step &s, const MCInstrInfo &info, bool recordedExtent,
+                     ImportFlow importFlow) {
             if (s.opcode == "RET64") {
                 return Flow::Return;
             }
@@ -112,6 +113,11 @@ namespace forge::x86 {
                 return Flow::Indirect;
             }
 
+            if (recordedExtent && s.isMemoryCall()) {
+                // Only a validated terminal import ends the path before the next byte.
+                return importFlow(s);
+            }
+
             const auto &desc = info.get(s.inst.getOpcode());
             if (!recordedExtent && desc.isIndirectBranch()) {
                 s.reject(FailureCode::UnsupportedControlFlow,
@@ -119,8 +125,7 @@ namespace forge::x86 {
                          "requires a validated unwind-backed function extent");
             }
 
-            if (desc.isCall() && !s.isDirectCall() &&
-                !(recordedExtent && (s.isRegisterCall() || s.isMemoryCall()))) {
+            if (desc.isCall() && !s.isDirectCall() && !(recordedExtent && s.isRegisterCall())) {
                 s.reject(FailureCode::UnsupportedControlFlow, "unsupported indirect or far call");
             }
 
@@ -134,9 +139,11 @@ namespace forge::x86 {
         class Discovery {
           public:
             Discovery(StringRef bytes, uint32_t begin, const MCDisassembler &dis,
-                      const MCInstrInfo &info, LeafStepCheck validateLeaf, JumpTableReader *tables)
+                      const MCInstrInfo &info, LeafStepCheck validateLeaf, JumpTableReader *tables,
+                      ImportFlow importFlow)
                 : bytes(bytes), begin(begin), end(begin + static_cast<uint32_t>(bytes.size())),
-                  dis(dis), info(info), validateLeaf(validateLeaf), tables(tables) {}
+                  dis(dis), info(info), validateLeaf(validateLeaf), tables(tables),
+                  importFlow(importFlow) {}
 
             ControlFlowGraph run();
 
@@ -147,6 +154,7 @@ namespace forge::x86 {
             const MCInstrInfo &info;
             LeafStepCheck validateLeaf;
             JumpTableReader *tables;
+            ImportFlow importFlow;
             std::map<uint32_t, Step> decoded;
 
             struct TableEdges {
@@ -244,8 +252,7 @@ namespace forge::x86 {
 
                 const auto &previous = (--before)->second;
 
-                if (previous.next != instruction ||
-                    control(previous, info, true) != Flow::Fallthrough) {
+                if (previous.next != instruction || previous.flow != Flow::Fallthrough) {
                     return origin;
                 }
 
@@ -318,15 +325,16 @@ namespace forge::x86 {
                 }
 
                 checkPrefix(s);
-                auto flow = control(s, info, tables != nullptr);
+                s.flow = control(s, info, tables != nullptr, importFlow);
+
                 if (validateLeaf) {
-                    validateLeaf(s, flow);
+                    validateLeaf(s, s.flow);
                 }
 
                 auto &step = decoded.emplace_hint(after, rva, std::move(s))->second;
-                recordEdges(step, flow);
+                recordEdges(step, step.flow);
 
-                if (flow != Flow::Fallthrough) {
+                if (step.flow != Flow::Fallthrough) {
                     return;
                 }
 
@@ -395,7 +403,7 @@ namespace forge::x86 {
 
                 for (;;) {
                     auto &step = block.steps.emplace_back(std::move(it->second));
-                    block.exit = control(step, info, tables != nullptr);
+                    block.exit = step.flow;
                     if (block.exit == Flow::Jump || block.exit == Flow::Conditional) {
                         block.successors.push_back(static_cast<uint32_t>(
                             int64_t(step.next) + step.inst.getOperand(0).getImm()));
@@ -467,11 +475,12 @@ namespace forge::x86 {
 
     ControlFlowGraph discoverCFG(StringRef bytes, uint32_t begin, const MCDisassembler &dis,
                                  const MCInstrInfo &info, LeafStepCheck validateLeaf) {
-        return Discovery(bytes, begin, dis, info, validateLeaf, nullptr).run();
+        return Discovery(bytes, begin, dis, info, validateLeaf, nullptr, {}).run();
     }
 
     ControlFlowGraph discoverCFG(StringRef bytes, uint32_t begin, const MCDisassembler &dis,
-                                 const MCInstrInfo &info, JumpTableReader &tables) {
-        return Discovery(bytes, begin, dis, info, {}, &tables).run();
+                                 const MCInstrInfo &info, JumpTableReader &tables,
+                                 ImportFlow importFlow) {
+        return Discovery(bytes, begin, dis, info, {}, &tables, importFlow).run();
     }
 } // namespace forge::x86

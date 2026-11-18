@@ -1,6 +1,7 @@
 #pragma once
 
 #include "forge/runtime.h"
+#include "standard_handles.h"
 
 #include <mutex>
 #include <new>
@@ -30,12 +31,16 @@ namespace forge::runtime {
     extern thread_local forge_rt_invocation_token executingInvocation;
 } // namespace forge::runtime
 
+struct forge_rt_execution;
+
 struct forge_rt_instance {
     std::mutex mutex;
     std::unordered_map<forge_rt_thread_token, forge::runtime::Thread> threads;
     std::vector<forge::runtime::Reservation> reservations;
-    // Once published by a managed process, only its owner admits and retires executions.
-    bool managed = false;
+    forge::runtime::StandardHandles standardHandles;
+    // Borrows the owning process's stable execution record until this instance is destroyed.
+    // Only the owner admits and retires executions. Only the active guest thread can publish exit.
+    forge_rt_execution *managedExecution = nullptr;
 };
 
 namespace forge::runtime {

@@ -30,6 +30,7 @@ typedef uint32_t forge_rt_status;
 #define FORGE_RT_MAPPING_CONFLICT UINT32_C(8)
 #define FORGE_RT_GUEST_FAULT UINT32_C(9)
 #define FORGE_RT_INVALID_STATE UINT32_C(10)
+#define FORGE_RT_HOST_CONFIGURATION UINT32_C(11)
 
 #define FORGE_RT_READ UINT32_C(1)
 #define FORGE_RT_WRITE UINT32_C(2)
@@ -101,7 +102,7 @@ forge_rt_status forge_rt_destroy(forge_rt_instance *instance) FORGE_RT_NOEXCEPT;
 
 /* Thread operations on a live instance may be called concurrently. A token identifies one guest
  * thread in its owning instance. Native callers treat the token as opaque. Guest-visible Windows
- * handles belong to a separate future contract. Zero, destroyed and foreign tokens report
+ * handles have a separate representation. Zero, destroyed and foreign tokens report
  * FORGE_RT_INVALID_THREAD. A new thread's last-error value is zero. */
 forge_rt_status forge_rt_thread_create(forge_rt_instance *instance,
                                        forge_rt_thread_token *outThread) FORGE_RT_NOEXCEPT;
@@ -112,6 +113,21 @@ forge_rt_status forge_rt_set_last_error(forge_rt_instance *instance, forge_rt_th
                                         uint32_t value) FORGE_RT_NOEXCEPT;
 forge_rt_status forge_rt_get_last_error(forge_rt_instance *instance, forge_rt_thread_token thread,
                                         uint32_t *outValue) FORGE_RT_NOEXCEPT;
+
+/* Console services require the currently executing managed process. Guest handles and addresses
+ * are integer bits. Only the native out parameters are host pointers. A Win32 failure delivers
+ * the guest failure value with status OK and sets the selected guest thread's last error. */
+forge_rt_status forge_rt_get_std_handle(forge_rt_instance *instance, forge_rt_thread_token thread,
+                                        uint32_t selector, uint64_t *outHandle) FORGE_RT_NOEXCEPT;
+forge_rt_status forge_rt_write_file(forge_rt_instance *instance, forge_rt_thread_token thread,
+                                    uint64_t handle, uint64_t buffer, uint32_t length,
+                                    uint64_t written, uint64_t overlapped, int32_t *outResult,
+                                    forge_rt_memory_fault *fault) FORGE_RT_NOEXCEPT;
+
+/* Completes the current managed guest process with the given Windows DWORD.
+ * The generated call site propagates this terminal result to the process runner. */
+forge_rt_status forge_rt_exit_process(forge_rt_instance *instance, forge_rt_thread_token thread,
+                                      uint32_t exitCode) FORGE_RT_NOEXCEPT;
 
 /* Read a guest NUL-terminated byte string in the current synchronous invocation.
  * A null guest address returns zero after validating the invocation. The initial service

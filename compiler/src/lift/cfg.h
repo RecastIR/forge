@@ -17,11 +17,22 @@ namespace llvm {
 namespace forge::x86 {
     class JumpTableReader;
 
+    enum class Flow : uint8_t {
+        Fallthrough,
+        Jump,
+        Conditional,
+        Indirect,
+        Return,
+        TerminalCall,
+        FallOff
+    };
+
     struct Step {
         uint32_t rva, next;
         llvm::MCInst inst;
         llvm::StringRef opcode; // Borrows the decoder's instruction-name table.
         llvm::StringRef bytes;  // Borrows the analyzed image.
+        Flow flow = Flow::Fallthrough;
 
         bool isDirectCall() const { return opcode == "CALL64pcrel32"; }
 
@@ -34,8 +45,6 @@ namespace forge::x86 {
                                  std::optional<uint32_t> importSlot = {},
                                  const std::optional<ImportOwnershipFailure> &ownership = {}) const;
     };
-
-    enum class Flow : uint8_t { Fallthrough, Jump, Conditional, Indirect, Return, FallOff };
 
     struct RelativeTable {
         uint32_t compareRva, guardRva, loadRva, tableRva;
@@ -61,11 +70,12 @@ namespace forge::x86 {
     inline constexpr unsigned maxFunctionBytes = 64 * 1024;
 
     using LeafStepCheck = llvm::function_ref<void(const Step &, Flow)>;
+    using ImportFlow = llvm::function_ref<Flow(const Step &)>;
 
     ControlFlowGraph discoverCFG(llvm::StringRef bytes, uint32_t begin,
                                  const llvm::MCDisassembler &dis, const llvm::MCInstrInfo &info,
                                  LeafStepCheck validateLeaf);
     ControlFlowGraph discoverCFG(llvm::StringRef bytes, uint32_t begin,
                                  const llvm::MCDisassembler &dis, const llvm::MCInstrInfo &info,
-                                 JumpTableReader &tables);
+                                 JumpTableReader &tables, ImportFlow importFlow);
 } // namespace forge::x86

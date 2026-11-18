@@ -200,7 +200,7 @@ namespace {
             }
 
             if (!invocation || entry->second.invocation != invocation ||
-                (process.managed && executingInvocation != invocation)) {
+                (process.managedExecution && executingInvocation != invocation)) {
                 return FORGE_RT_INVALID_INVOCATION;
             }
 

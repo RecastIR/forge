@@ -456,6 +456,13 @@ namespace forge {
             x86::SavedRegisters saved{};
             if (const auto *external = call.external()) {
                 lowerService(s, external->binding, calleeRsp);
+
+                if (external->binding.control == win64::Control::Terminates) {
+                    // The adapter published the terminal result. Skip the guest RET frame
+                    // checks and propagate it through every caller of this managed body.
+                    ir.CreateRet(ir.getFalse());
+                    return;
+                }
             } else {
                 const auto target = call.guest().rva;
                 saved =
@@ -540,6 +547,9 @@ namespace forge {
             }
 
             switch (block.exit) {
+            case x86::Flow::TerminalCall:
+                lowerCall(last, *function.callAt(last.rva));
+                break;
             case x86::Flow::Return:
                 emitReturn(last);
                 break;
@@ -661,12 +671,13 @@ namespace forge {
             connectFlags(states);
         }
 
-        // Checked-pointer imports have diagnostic priority over other missing services.
-        const Step *firstImport(const x86::RecoveredFunctionGroup &group, bool checkedOnly) {
+        const Step *firstImport(const x86::RecoveredFunctionGroup &group,
+                                function_ref<bool(const win64::ServiceBinding &)> matches) {
             for (const auto &[address, function] : group.functions()) {
                 for (const auto &[rva, call] : function.calls) {
                     const auto *external = call.external();
-                    if (external && (!checkedOnly || external->binding.checkedMemory())) {
+
+                    if (external && matches(external->binding)) {
                         return function.instructionContaining(rva);
                     }
                 }
@@ -746,8 +757,21 @@ namespace forge {
                         FailureCode::UnsupportedControlFlow);
                 }
 
+                if (!process) {
+                    const auto *site = firstImport(group, [](const auto &binding) {
+                        return binding.requirement == win64::Requirement::Process;
+                    });
+
+                    if (site) {
+                        site->reject(
+                            FailureCode::UnsupportedControlFlow,
+                            "imported service requires a managed process artifact or --executable");
+                    }
+                }
+
                 if (!checked) {
-                    if (const auto *site = firstImport(group, true)) {
+                    if (const auto *site = firstImport(
+                            group, [](const auto &binding) { return binding.checkedMemory(); })) {
                         site->reject(FailureCode::UnsupportedControlFlow,
                                      "imported service requires --checked-memory --signature "
                                      "'i64(i64,i64)'");
@@ -755,7 +779,7 @@ namespace forge {
                 }
 
                 if (!request.runtime) {
-                    if (const auto *site = firstImport(group, false)) {
+                    if (const auto *site = firstImport(group, [](const auto &) { return true; })) {
                         site->reject(
                             FailureCode::UnsupportedControlFlow,
                             "imported service requires --runtime --signature 'i64(i64,i64)'");

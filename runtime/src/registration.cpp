@@ -172,7 +172,7 @@ extern "C" forge_rt_status forge_rt_register_image(forge_rt_instance *instance,
     }
 
     return withInstance(instance, [&](auto &process) {
-        if (process.managed) {
+        if (process.managedExecution) {
             return FORGE_RT_INVALID_STATE;
         }
 
@@ -187,7 +187,7 @@ extern "C" forge_rt_status forge_rt_detach_image(forge_rt_instance *instance,
     }
 
     return withInstance(instance, [&](auto &process) {
-        if (process.managed) {
+        if (process.managedExecution) {
             return FORGE_RT_INVALID_STATE;
         }
 
@@ -221,7 +221,7 @@ forge_rt_status forge::runtime::enterInvocation(forge_rt_instance *instance,
     }
 
     return withInstance(instance, [&](auto &process) {
-        if (process.managed != (admission == Admission::Process)) {
+        if ((process.managedExecution != nullptr) != (admission == Admission::Process)) {
             return FORGE_RT_INVALID_STATE;
         }
 
@@ -271,7 +271,7 @@ forge_rt_status forge::runtime::leaveInvocation(forge_rt_instance *instance,
                                                 forge_rt_invocation_token invocation,
                                                 Admission admission) noexcept {
     return withInstance(instance, [&](auto &process) {
-        if (process.managed != (admission == Admission::Process)) {
+        if ((process.managedExecution != nullptr) != (admission == Admission::Process)) {
             return FORGE_RT_INVALID_STATE;
         }
 

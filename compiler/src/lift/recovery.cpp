@@ -14,6 +14,7 @@
 #include "llvm/Support/TargetSelect.h"
 
 #include <algorithm>
+#include <exception>
 #include <mutex>
 #include <utility>
 
@@ -163,6 +164,9 @@ namespace forge::x86 {
             }
         }
 
+        using ImportResolutions =
+            std::map<uint32_t, std::variant<ExternalCallTarget, std::exception_ptr>>;
+
         struct GroupDiscovery {
             const ValidatedEntry &entry;
             std::span<const win64::ServiceBinding> services;
@@ -180,7 +184,10 @@ namespace forge::x86 {
                                       int64_t target);
             ExternalCallTarget bindImport(const RecoveredFunction &caller, const Step &step);
             bool schedule(uint32_t target, const Step &step);
-            void scanCalls(RecoveredFunction &caller, const GuestBlock &block);
+            void scanCalls(RecoveredFunction &caller, const GuestBlock &block,
+                           const ImportResolutions &imports);
+            Flow importFlow(const RecoveredFunction &caller, const Step &step,
+                            ImportResolutions &imports);
             void run(const MCDisassembler &dis, const MCInstrInfo &instructions,
                      const MCRegisterInfo &regs);
         };
@@ -326,7 +333,8 @@ namespace forge::x86 {
                             hex(*changed));
                 }
 
-                if (step.next >= uint64_t(caller.entry) + caller.code.bytes.size()) {
+                if (binding->control == win64::Control::Returns &&
+                    step.next >= uint64_t(caller.entry) + caller.code.bytes.size()) {
                     step.reject(FailureCode::UnsupportedControlFlow,
                                 "external call has no in-function continuation");
                 }
@@ -344,7 +352,23 @@ namespace forge::x86 {
             }
         }
 
-        void GroupDiscovery::scanCalls(RecoveredFunction &caller, const GuestBlock &block) try {
+        Flow GroupDiscovery::importFlow(const RecoveredFunction &caller, const Step &step,
+                                        ImportResolutions &imports) {
+            try {
+                const auto imported = bindImport(caller, step);
+                imports.emplace(step.rva, imported);
+                return imported.binding.control == win64::Control::Terminates ? Flow::TerminalCall
+                                                                              : Flow::Fallthrough;
+            } catch (const InspectionError &) {
+                // Only a proven non-returning import stops decoding. Report failed proofs in
+                // the ordered call scan, after recording every preceding call in that block.
+                imports.emplace(step.rva, std::current_exception());
+                return Flow::Fallthrough;
+            }
+        }
+
+        void GroupDiscovery::scanCalls(RecoveredFunction &caller, const GuestBlock &block,
+                                       const ImportResolutions &imports) try {
             const auto leader = block.steps.front().rva;
             // Partitioning has already placed every possible entry to the sequence at a leader.
             const Step *previous = nullptr;
@@ -355,9 +379,15 @@ namespace forge::x86 {
 
                 const auto *producer = std::exchange(previous, &step);
                 if (step.isMemoryCall()) {
-                    caller.calls.emplace(step.rva,
-                                         ResolvedCallSite{caller.entry, leader, step.rva, step.next,
-                                                          bindImport(caller, step)});
+                    const auto &resolution = imports.at(step.rva);
+
+                    if (const auto *error = std::get_if<std::exception_ptr>(&resolution)) {
+                        std::rethrow_exception(*error);
+                    }
+
+                    caller.calls.emplace(
+                        step.rva, ResolvedCallSite{caller.entry, leader, step.rva, step.next,
+                                                   std::get<ExternalCallTarget>(resolution)});
                     continue;
                 }
 
@@ -415,10 +445,16 @@ namespace forge::x86 {
                         .first->second;
 
                 try {
-                    function.graph =
-                        discoverCFG(function.code.bytes, rva, dis, instructions, tables);
+                    ImportResolutions imports;
+                    const auto classifyImport = [&](const Step &step) {
+                        return importFlow(function, step, imports);
+                    };
+
+                    function.graph = discoverCFG(function.code.bytes, rva, dis, instructions,
+                                                 tables, classifyImport);
+
                     for (const auto &[leader, block] : function.graph) {
-                        scanCalls(function, block);
+                        scanCalls(function, block, imports);
                     }
 
                     // Give a register CALL or table JMP its more specific proof diagnostic first.

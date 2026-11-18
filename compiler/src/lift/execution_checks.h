@@ -8,8 +8,8 @@ namespace forge::x86 {
     llvm::StructType *memoryFaultType(llvm::LLVMContext &context);
     llvm::StructType *processResultType(llvm::LLVMContext &context);
 
-    // Function entries trap. Process entries write one terminal result and unwind
-    // nested guest bodies through a failure return before executing a continuation.
+    // Function entries trap. A managed body returns false for any terminal result,
+    // propagating it through every caller before executing a guest continuation.
     class ExecutionChecks {
       public:
         explicit ExecutionChecks(llvm::IRBuilder<> &builder) : ir(builder) {}
