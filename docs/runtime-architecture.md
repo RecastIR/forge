@@ -1,6 +1,6 @@
 # Forge Runtime on macOS ARM64
 
-A native host can link `libforge_runtime.a`, create a runtime instance and keep a 32-bit last-error value for each of its guest threads. A C translation unit and hand-authored LLVM IR compiled to ARM64 Mach-O exercise the public ABI alongside real lifted calls. The compiler API also produces reusable process artifacts for one-shot execution. The `forge lift` command produces function-level LLVM modules. [Process artifact contract](#12f--process-lifecycle-integration) [Public C header](../runtime/include/forge/runtime.h) · [Build and linkage](../runtime/README.md)
+A native host can link `libforge_runtime.a`, create a runtime instance and keep a 32-bit last-error value for each of its guest threads. A C translation unit and hand-authored LLVM IR compiled to ARM64 Mach-O exercise the public ABI alongside real lifted calls. The compiler API also produces reusable process artifacts for one-shot execution. The CLI can publish a function-level LLVM module or link a process artifact with the native startup adapter. [Compile a native executable](../README.md#compile-and-run-a-native-executable) [Process artifact contract](#12f--process-lifecycle-integration) [Public C header](../runtime/include/forge/runtime.h) · [Build and linkage](../runtime/README.md)
 
 ## Guest process and address space
 
@@ -176,7 +176,9 @@ When a scalar stack access crosses the outer return slot or stack end, the proce
 
 A scalar image access must fit a single resolver interval. If it crosses into a gap or a region that denies the requested access, the process reports the first failing address and the full access mask. If every byte is accessible across consecutive intervals, the process returns `FORGE_RT_UNSUPPORTED` with status `FORGE_RT_OK` and an empty fault payload. Both outcomes leave the process `Faulted` before the instruction transfers data. Regenerate process artifacts and link them with the runtime providing `forge_rt_report_scalar_boundary` to obtain these diagnostics.
 
-Task 13 can select the PE entry through the compiler API, link the artifact, create and run the process, and interpret its tagged result. CLI artifact production, Windows startup arguments, and Windows exit APIs belong to the executable bootstrap. Multiple groups in one process, image unload/reload, guest callbacks, and multiple active stacks need separate admission and lifetime contracts.
+The executable bootstrap in `libforge_startup.a` is a native host for this ABI. Its `main` checks the artifact version and confirms that the compiled entry RVA equals the original PE entry RVA. It creates a process, registers the artifact, runs it with null entry inputs, and destroys the process before returning the host status. Registration and execution borrow the statically linked descriptor and code. Only a tagged normal return supplies a guest DWORD, whose low byte becomes the process exit status. All other outcomes produce a diagnostic on stderr and status 125. The bootstrap uses the same checked stack, image, service adapters and direct guest calls as other process hosts. [Bootstrap source](../runtime/src/startup.cpp)
+
+Guest code currently completes by returning from its PE entry. Windows `ExitProcess` will need a termination path that propagates out of nested guest calls while preserving teardown. Standard handles, I/O, Windows arguments, and guest callbacks require additional runtime support.
 
 ## Wine source investigation
 

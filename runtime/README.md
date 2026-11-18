@@ -6,6 +6,8 @@ Hosts using compiler-generated process artifacts can register the same artifact 
 
 Native C, C++ and generated ARM64 code share the same [public C ABI](include/forge/runtime.h). The runtime links independently of the Forge compiler, CLI and Wine.
 
+The separate `forge_startup` archive supplies the native `main` for executables linked by `forge lift --executable`. Existing C and C++ hosts link `forge_runtime` directly and supply their own entry. [Compile and run a native executable](../README.md#compile-and-run-a-native-executable)
+
 ## Build and test
 
 From the repository root on Apple Silicon, use CMake and the native C/C++ toolchain in a build directory separate from any Forge-managed preset.

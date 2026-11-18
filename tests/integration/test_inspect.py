@@ -380,7 +380,7 @@ class CLI(Case):
         commands = {"": ["inspect", "analyze", "lift"],
                     "inspect": ["--help", "--format", "--strict", "--verbose", "--dll-path"],
                     "analyze": ["--help", "--format", "--strict", "--functions"],
-                    "lift": ["--help", "--rva", "--output", "--signature", "--runtime", "--checked-memory",
+                    "lift": ["--help", "--rva", "--executable", "--output", "--signature", "--runtime", "--checked-memory",
                              "--diagnostics-format"]}
         for name, expected in commands.items():
             with self.subTest(command=name):
@@ -406,6 +406,10 @@ class CLI(Case):
             (), ("unknown",), ("--", "inspect", image), ("--inspect.verbose", image),
             ("inspect",), ("analyze", "--functions"), ("analyze", image),
             ("lift", image, "--rva", "0"), ("lift", image, "--output", "out.ll"),
+            ("lift", image, "--executable", "--rva", "0", "--output", "out"),
+            ("lift", image, "--executable", "--signature", "i64(i64,i64)", "--output", "out"),
+            ("lift", image, "--executable", "--runtime", "--output", "out"),
+            ("lift", image, "--executable", "--checked-memory", "--output", "out"),
             ("lift", "--rva", "0", "--output", "out.ll"), ("inspect", image, "lift"),
             ("inspect", "--unknown", "--help"), ("inspect", "--format", "yaml", "--help"),
             ("inspect", image, "extra", "--help"), ("inspect", "--format", "--help"),

@@ -2,6 +2,8 @@
 
 Forge inspects Windows PE32+ AMD64 executables and DLLs on macOS. It reports the image layout, imported and exported symbols, base relocations, TLS, AMD64 exception metadata, and the static dependency graph. Function analysis identifies unwind-backed code ranges. The experimental lifter translates statically connected integer functions with a shared guest stack and persistent PE image memory into LLVM IR for native ARM64 compilation. A runtime-enabled lift can execute named KERNEL32 last-error calls on macOS ARM64; checked-memory lifts also support `lstrlenA` over guest image and stack strings. Inspection and lifting both read the PE as a file.
 
+On Apple Silicon, `forge lift --executable` compiles a CRT-free PE entry point and its reachable functions into a standalone ARM64 Mach-O. [Build and run an executable](#compile-and-run-a-native-executable)
+
 ## Repository layout
 
 The root CMake project builds the `forge_core` compiler library, the independent `forge_runtime` static library and, when `FORGE_BUILD_CLI` is enabled, the `forge` executable. The CLI and core contract tests call the compiler library. Native hosts can link the runtime through its [public C header](runtime/include/forge/runtime.h). See the [standalone build instructions](runtime/README.md).
@@ -14,7 +16,7 @@ The root CMake project builds the `forge_core` compiler library, the independent
 | `compiler/src/pe/` | File input, PE parsing, image metadata, and DLL dependency resolution |
 | `compiler/src/analysis/` | Function discovery, range validation, findings, and optional debug enrichment |
 | `compiler/src/lift/` | Translation of supported function instructions to LLVM IR |
-| `compiler/src/output/` | Publication of completed LLVM modules |
+| `compiler/src/output/` | LLVM module publication, ARM64 object emission, native executable linking and publication |
 | `runtime/` | Native macOS ARM64 runtime, versioned C ABI and guest thread last-error state |
 | `cmake/` | Formatting and static-analysis commands |
 | `tests/integration/` | Build, CLI, code generation, and native execution suites and their Python helpers |
@@ -109,6 +111,7 @@ Run `forge --help` or `forge -h` for the command list. Use either spelling after
 | `inspect <image>` | Repeat `--dll-path <directory>` for existing directories in search order. `--format` accepts `text` (default) or `json`. `--verbose` and `--strict` default off. | Reports go to stdout and diagnostics to stderr. Verbose adds detail to text. Exit 0 on completion, or 3 for required dependency failures under strict mode. |
 | `analyze <image> --functions` | `--functions` is required. `--format` accepts `text` (default) or `json`. `--strict` defaults off. | The function report goes to stdout and findings to stderr. Exit 0 on completion, or 3 for findings under strict mode. |
 | `lift <exe> --rva <rva> --output <file>` | Use an unsigned 32-bit decimal RVA or hexadecimal with `0x` or `0X`. The default entry mode uses register state. The optional `--signature` accepts `i64(i64,i64)`. Add `--runtime` for an explicit runtime instance and thread, or `--checked-memory` to also publish the selected image and active stack for native services. `--diagnostics-format` accepts `text` (default) or `json`. | Success writes the IR file, leaves both streams empty, and exits 0. Handled execution failures exit 1. JSON diagnostics contain one object followed by LF on stderr. An output that aliases the input is a text usage error in either mode. |
+| `lift <exe> --executable --output <file>` | Select the PE header entry. Choose `text` or `json` with `--diagnostics-format`. | Publishes a native ARM64 Mach-O and writes a readiness diagnostic to stderr. Exit 0 on successful compilation, 1 on build failure, or 2 for invalid options. |
 
 Each command takes exactly one nonempty input path. Options may appear on either side of it. Use `--` before a filename beginning with a dash. Pass option values as separate, nonempty arguments. Values beginning with `--` are rejected. Repeated flags are idempotent. Each occurrence of a scalar option must be valid, and the last value takes effect. Usage errors print text and usage to stderr and exit 2. Input read and PE errors exit 1.
 
@@ -202,6 +205,29 @@ Exact duplicate triples share one row with all their indices. Overlapping, neste
 For AMD64 unwind versions 1 and 2, Forge checks the four-byte header and the extent of the declared unwind codes. A record with `UNW_FLAG_CHAININFO` describes a continuation of another function. Forge checks that its aligned chain trailer fits and reports `chained_fragment: true`. A valid disjoint fragment counts as covered code, passes strict analysis, and has `liftable: false`. Both lift interfaces reject that start. An unrecognized version produces `status: "unsupported"` and the numeric `unwind_version`. Its range stays unknown. Strict analysis returns 0 when the only issue is an unrecognized version.
 
 The analysis JSON has its own schema version 1. Rows are sorted by start, end, unwind RVA, and original record index. `liftable` means discovery accepts the range. Instruction and ABI checks run during `lift`. Analysis exits with 0 upon completion, 3 for record findings under `--strict`, 1 for unreadable input or tables, and 2 for usage errors. A trailing partial record produces a finding and preserves the complete records before it.
+
+## Compile and run a native executable
+
+From a provisioned development build on Apple Silicon, compile the direct-call fixture and observe the guest exit status.
+
+```sh
+make
+make fixtures
+build/dev/forge lift build/dev/fixtures/Debug/executable-call.exe \
+  --executable --output build/dev/executable-call
+file build/dev/executable-call
+status=0
+build/dev/executable-call || status=$?
+echo "$status"
+```
+
+`file` identifies a Mach-O 64-bit arm64 executable. Its PE entry calls a translated helper and returns 42. The linked program can be moved and run independently of the source PE, Forge CLI, LLVM tools, Wine, and Rosetta.
+
+**Input contract.** The input is a CRT-free AMD64 PE32+ console or GUI-subsystem image with standard section and file alignment. The current startup contract rejects load configuration, delay or bound imports, and writable sections marked executable or shared. Every eager import must have a known native service, even if the entry does not call it. Its header entry RVA must exactly match an eligible unwind-backed function in a complete AMD64 exception directory. The entry can be unexported. Each reachable call must resolve through the existing recovery rules or bind to a supported native service. Startup supplies a Windows x64 stack and requires a defined return value. Entry code that reads unspecified input registers is rejected. TLS startup, managed images, DLL loading, exception handlers, Windows arguments, and explicit `ExitProcess` termination are outside this contract.
+
+**Build.** Use `--executable` in place of `--rva` and the function-wrapper flags. Forge verifies the process module, runs the configured LLVM 23 `opt` O2 pipeline and `llc`, and invokes `xcrun` with the macOS SDK to link the active Forge startup and runtime archives using the native C++ driver. These tools and archives must be available at compile time. Forge checks the resulting architecture, executable type, and macOS platform before replacing the output file.
+
+**Diagnostics and termination.** The compiler writes the PE architecture, entry RVA, recovery status, guest call sites and required imports to stderr. Add `--diagnostics-format json` for the structured report. A successful compilation produces `EXECUTABLE_READY`. A rejection identifies the first blocker and marks incomplete call recovery when applicable. At execution time a normal return produces no output. The runtime retains full RAX and the host reports the low eight bits of the guest DWORD exit value. A Forge execution or startup failure exits 125 with a diagnostic on stderr. A guest that returns 125 normally leaves stderr empty. [Runtime ownership and fault results](docs/runtime-architecture.md#12f--process-lifecycle-integration)
 
 ## Lift and run a native function
 
@@ -299,17 +325,19 @@ Import address slots, delay-import slots and handles, TLS index storage, the loa
 
 `generateIR(analyzedImage, request, context)` takes an exact discovered start RVA, an explicit runtime opt-in (default false), and an entry mode, `RegisterState` or `WindowsX64I64Pair`. It validates the selected range, unwind and relocation constraints, translates the function, verifies the LLVM module, and returns exclusive ownership of that module. Declare the caller-owned `LLVMContext` before the returned module so the context survives its destruction. Publication serializes the completed module to a sibling temporary, checks writing and closing, and replaces the destination by rename. Publication protects the input directory entry as opened and the captured physical file identity, including when a caller changes working directories. Diagnostics retain the supplied path spelling.
 
+`generateExecutableIR` selects the header RVA and returns a verified process module with an owned readiness report. `publishIR` can save that module for inspection. `publishNativeObject` can emit its ARM64 Mach-O object using the same baseline or O2 code generation used by `publishExecutable`. The final linking step requires an Apple Silicon host. [Compiler interface](compiler/src/lift/lift.h) · [Native output interface](compiler/src/output/executable.h)
+
 The PE machine identifies the guest. Today's decoder uses `x86_64-pc-windows-msvc`, discovery understands AMD64 unwind metadata, and the wrapper uses the Windows x64 register convention. The output module independently selects `arm64-apple-macosx11.0.0` and its data layout. RVAs are 32-bit image-relative quantities, guest virtual addresses and file offsets retain their own widths, and LLVM pointers belong to the generated program. Future x86 work would need PE32 validation and address handling, an appropriate discovery mechanism, 32-bit decoding and state, and a defined guest calling convention. AMD64 is the only implemented guest.
 
 ### Lift diagnostics
 
-`forge lift … --diagnostics-format json` writes one UTF-8 JSON object followed by LF to stderr for a handled execution failure (exit 1). Success leaves both streams empty. The default `text` format retains the human diagnostic. Invalid arguments, including an output alias, produce text and usage with exit 2 in either mode. Inspection and analysis keep their existing report formats.
+`forge lift … --rva <rva> --diagnostics-format json` writes one UTF-8 JSON object followed by LF to stderr for a handled execution failure (exit 1). Success leaves both streams empty. The default `text` format retains the human diagnostic. Invalid arguments, including an output alias, produce text and usage with exit 2 in either mode. Inspection and analysis keep their existing report formats.
 
 ```json
 {"schema_version":1,"stage":"lifting","category":"unsupported","code":"LIFT_UNSUPPORTED_INSTRUCTION","message":"0x1003: PUSH64rmm [ff31]: unsupported instruction or operand form","context":{"input":"example.exe","entry_rva":"0x1000","end_rva":"0x1007","signature":"register-state","block_rva":"0x1000","instruction_rva":"0x1003","opcode":"PUSH64rmm","bytes":"ff31","file_offset":1027}}
 ```
 
-The version is the integer `1`. The stage, category, code, and human-readable message are strings. Every lift diagnostic carries a context object with the input path as supplied and the requested `entry_rva`. The `signature` field identifies the declared wrapper or `register-state`. Instruction failures include the basic block’s `block_rva` when known. A failure in a nested function also identifies its start with `function_rva`. An instruction diagnostic while checking or lifting a leaf candidate can also carry `caller_rva` and `call_site_rva` identifying its source call. The exclusive `end_rva` describes the selected external entry. The instruction’s file offset comes from its own PE section. A branch failure can include the signed integer `branch_target`, the computed image-relative destination before range checking. For a proved RIP-relative memory call, `iat_slot_rva` identifies the addressed slot candidate. `import_dll` and `import_symbol` identify a resolved descriptor and symbol when available. For an ownership failure, `import_descriptor_rva` identifies the offending descriptor or descriptor terminator and `import_ownership_reason` identifies the conflict (`overlapping_iat`, `overlapping_lookup`, `overlapping_loader_field`) or unstable evidence (`relocated_ownership`, `loader_written_ownership`). Optional fields include the failing `instruction_rva`, LLVM MC `opcode`, and lowercase hex `bytes` (the available prefix for a decode error). RVA fields with the `_rva` suffix are lowercase hexadecimal strings with a `0x` prefix. A `file_offset` is an integer byte offset. Unsupported guest diagnostics identify the detected `architecture`; publication failures include `output`. Paths and messages are rendered as valid UTF-8. Consumers classify the stage, category and code together.
+The version is the integer `1`. The stage, category, code, and human-readable message are strings. Every function-lift diagnostic carries a context object with the input path as supplied and the requested `entry_rva`. The `signature` field identifies the declared wrapper or `register-state`. Instruction failures include the basic block’s `block_rva` when known. A failure in a nested function also identifies its start with `function_rva`. An instruction diagnostic while checking or lifting a leaf candidate can also carry `caller_rva` and `call_site_rva` identifying its source call. The exclusive `end_rva` describes the selected external entry. The instruction’s file offset comes from its own PE section. A branch failure can include the signed integer `branch_target`, the computed image-relative destination before range checking. For a proved RIP-relative memory call, `iat_slot_rva` identifies the addressed slot candidate. `import_dll` and `import_symbol` identify a resolved descriptor and symbol when available. For an ownership failure, `import_descriptor_rva` identifies the offending descriptor or descriptor terminator and `import_ownership_reason` identifies the conflict (`overlapping_iat`, `overlapping_lookup`, `overlapping_loader_field`) or unstable evidence (`relocated_ownership`, `loader_written_ownership`). Optional fields include the failing `instruction_rva`, LLVM MC `opcode`, and lowercase hex `bytes` (the available prefix for a decode error). RVA fields with the `_rva` suffix are lowercase hexadecimal strings with a `0x` prefix. A `file_offset` is an integer byte offset. Unsupported guest diagnostics identify the detected `architecture`; publication failures include `output`. Paths and messages are rendered as valid UTF-8. Consumers classify the stage, category and code together.
 
 | Stage | Category | Codes and meaning |
 | --- | --- | --- |

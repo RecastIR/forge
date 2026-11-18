@@ -193,13 +193,14 @@ namespace forge {
             }
 
             f.chainedFragment = header.getFlags() & Win64EH::UNW_ChainInfo;
+            f.hasUnwindHandler =
+                header.getFlags() & (Win64EH::UNW_ExceptionHandler | Win64EH::UNW_TerminateHandler);
             const size_t codesEnd = headerSize + header.NumCodes * sizeof(Win64EH::UnwindCode);
 
             if (data->bytes.size() < codesEnd) {
                 invalid("truncated unwind code array");
             } else if (f.chainedFragment) {
-                if (header.getFlags() &
-                    (Win64EH::UNW_ExceptionHandler | Win64EH::UNW_TerminateHandler)) {
+                if (f.hasUnwindHandler) {
                     invalid("chained unwind info also declares a handler");
                 }
 

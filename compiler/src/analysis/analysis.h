@@ -11,6 +11,7 @@ namespace forge {
         bool entry = false, callback = false;
         std::optional<RecordDefect> defect;
         bool chainedFragment = false;
+        bool hasUnwindHandler = false;
         std::optional<unsigned> unsupportedUnwindVersion;
         std::optional<size_t> overlapGroup;
         std::string name, file;

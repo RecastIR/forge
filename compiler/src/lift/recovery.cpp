@@ -304,10 +304,8 @@ namespace forge::x86 {
                                 "bound IAT has no independent import lookup table");
                 }
 
-                const auto binding = std::ranges::find_if(services, [&](const auto &service) {
-                    return service.dll == descriptor.normalizedName && service.name == symbol.name;
-                });
-                if (descriptor.delayed || binding == services.end()) {
+                const auto *binding = findService(services, descriptor, symbol);
+                if (descriptor.delayed || !binding) {
                     step.reject(FailureCode::UnsupportedControlFlow,
                                 Twine(descriptor.delayed ? "unsupported delay import "
                                                          : "unsupported import ") +
@@ -455,6 +453,15 @@ namespace forge::x86 {
         }
     } // namespace
 
+    const win64::ServiceBinding *findService(std::span<const win64::ServiceBinding> services,
+                                             const Import &descriptor, const Symbol &symbol) {
+        const auto binding = std::ranges::find_if(services, [&](const auto &service) {
+            return service.dll == descriptor.normalizedName && service.name == symbol.name;
+        });
+
+        return binding == services.end() ? nullptr : &*binding;
+    }
+
     ValidatedEntry::ValidatedEntry(const AnalyzedImage &analysis, uint32_t rva, MappedRange code,
                                    RelocationIndex &&relocations)
         : analysis(analysis), rva(rva), code(code), relocations(std::move(relocations)) {}
@@ -573,21 +580,45 @@ namespace forge::x86 {
     RecoveredFunctionGroup::RecoveredFunctionGroup(const AnalyzedImage &analysis, uint32_t rva)
         : RecoveredFunctionGroup(validateEntry(analysis, rva)) {}
 
-    RecoveredFunctionGroup::RecoveredFunctionGroup(const ValidatedEntry &entry,
-                                                   std::span<const win64::ServiceBinding> services)
+    RecoveredFunctionGroup::RecoveredFunctionGroup(
+        const ValidatedEntry &entry, std::span<const win64::ServiceBinding> services,
+        llvm::function_ref<void(const RecoveredFunctionGroup &, const InspectionError &)> onFailure)
         : source(entry.analysis.image()), entryRva(entry.rva) {
         const auto location = entryLocation(source, entryRva, entry.code);
         withLocation(source, location, FailureCode::LiftingInternal, [&] {
             decoder = std::make_unique<Decoder>(entryRva);
             GroupDiscovery discovery{
                 entry, services, recovered, {}, {}, InstructionOperands(*decoder->regs, 0), {}};
-            discovery.run(*decoder->dis, *decoder->instructions, *decoder->regs);
+            try {
+                discovery.run(*decoder->dis, *decoder->instructions, *decoder->regs);
+            } catch (const InspectionError &failure) {
+                if (onFailure) {
+                    onFailure(*this, failure);
+                }
+
+                throw;
+            }
         });
     }
 
     RecoveredFunctionGroup::~RecoveredFunctionGroup() = default;
 
     const MCRegisterInfo &RecoveredFunctionGroup::registers() const & { return *decoder->regs; }
+
+    std::set<std::pair<std::string_view, std::string_view>>
+    RecoveredFunctionGroup::requiredImports() const & {
+        std::set<std::pair<std::string_view, std::string_view>> names;
+
+        for (const auto &[rva, function] : recovered) {
+            for (const auto &[site, call] : function.calls) {
+                if (const auto *service = call.external()) {
+                    names.emplace(service->binding.dll, service->binding.name);
+                }
+            }
+        }
+
+        return names;
+    }
 
     void RecoveredFunctionGroup::annotateFailure(InspectionError &failure) const {
         addLocation(failure, source, entryLocation(source, entryRva, function(entryRva).code));

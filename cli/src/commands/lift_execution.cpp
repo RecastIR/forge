@@ -7,8 +7,23 @@
 #include "llvm/IR/Module.h"
 
 namespace forge::cli {
+    namespace {
+        void reportLiftFailure(const LiftOptions &options, const ExecutableReadiness &readiness,
+                               const InspectionError &error, llvm::raw_ostream &err) {
+            if (options.executable) {
+                printExecutableDiagnostic(readiness, options.input, options.output, &error,
+                                          options.jsonDiagnostics, err);
+            } else if (options.jsonDiagnostics) {
+                printLiftDiagnostic(error, options.input, options.request, err);
+            } else {
+                printFailure(error, options.input, err);
+            }
+        }
+    } // namespace
+
     int executeLift(const LiftOptions &options, llvm::raw_ostream &err) {
         FailureCode stage = FailureCode::InputInternal;
+        ExecutableReadiness readiness;
 
         try {
             const auto analysis = analyzeInput(options.input, DebugInfo::Omit, stage);
@@ -17,25 +32,31 @@ namespace forge::cli {
 
             stage = FailureCode::LiftingInternal;
             llvm::LLVMContext context;
-            const auto module = generateIR(analysis, options.request, context);
 
-            stage = FailureCode::PublicationInternal;
-            publishIR(*module, analysis.image(), options.output);
+            if (options.executable) {
+                const auto module =
+                    generateExecutableIR(analysis, std::nullopt, context, readiness);
+                stage = FailureCode::PublicationInternal;
+                publishExecutable(*module, analysis.image(), options.output, options.toolchain,
+                                  /*optimize=*/true);
+                printExecutableDiagnostic(readiness, options.input, options.output, nullptr,
+                                          options.jsonDiagnostics, err);
+            } else {
+                const auto module = generateIR(analysis, options.request, context);
+                stage = FailureCode::PublicationInternal;
+                publishIR(*module, analysis.image(), options.output);
+            }
+
             return 0;
         } catch (const InspectionError &error) {
-            if (error.kind == FailureCode::OutputAlias) {
+            if (error.kind == FailureCode::OutputAlias && !options.executable) {
                 throw std::invalid_argument(error.what());
             }
 
-            if (options.jsonDiagnostics) {
-                printLiftDiagnostic(error, options.input, options.request, err);
-            } else {
-                printFailure(error, options.input, err);
-            }
-
+            reportLiftFailure(options, readiness, error, err);
             return 1;
         } catch (const std::exception &error) {
-            if (!options.jsonDiagnostics) {
+            if (!options.jsonDiagnostics && !options.executable) {
                 throw;
             }
 
@@ -45,7 +66,7 @@ namespace forge::cli {
                 failure.context.output = options.output;
             }
 
-            printLiftDiagnostic(failure, options.input, options.request, err);
+            reportLiftFailure(options, readiness, failure, err);
             return 1;
         }
     }

@@ -338,20 +338,10 @@ namespace forge::x86 {
 
         SmallVector<Constant *> processImports(llvm::Module &module,
                                                const RecoveredFunctionGroup &group) {
-            std::set<std::pair<std::string_view, std::string_view>> names;
-
-            for (const auto &[rva, function] : group.functions()) {
-                for (const auto &[site, call] : function.calls) {
-                    if (const auto *service = call.external()) {
-                        names.emplace(service->binding.dll, service->binding.name);
-                    }
-                }
-            }
-
             IRBuilder<> ir(module.getContext());
             SmallVector<Constant *> imports;
 
-            for (const auto &[dll, name] : names) {
+            for (const auto &[dll, name] : group.requiredImports()) {
                 imports.push_back(ConstantStruct::getAnon(
                     {ir.CreateGlobalString(dll, "service.dll", 0, &module),
                      ir.CreateGlobalString(name, "service.name", 0, &module)}));

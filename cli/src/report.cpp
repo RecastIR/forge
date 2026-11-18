@@ -44,13 +44,9 @@ namespace forge {
                            })}};
         }
 
-        std::string machineText(const Module &module) {
-            return module.machine == COFF::IMAGE_FILE_MACHINE_AMD64 ? "AMD64" : hex(module.machine);
-        }
-
         Object moduleJson(const Module &m) {
             Object o{{"path", pathText(m.path)},
-                     {"machine", machineText(m)},
+                     {"machine", m.architecture()},
                      {"pe_type", "PE32+"},
                      {"image_kind", m.dll ? "dll" : "exe"},
                      {"image_base_va", hex(m.imageBase)},
@@ -184,7 +180,7 @@ namespace forge {
         }
 
         void textModule(const Module &m, bool verbose, raw_ostream &out) {
-            out << m.path.string() << "  (PE32+ " << machineText(m) << " "
+            out << m.path.string() << "  (PE32+ " << m.architecture() << " "
                 << (m.dll ? "DLL" : "EXE") << ")\n"
                 << "  Image base VA " << hex(m.imageBase) << "  Entry point RVA "
                 << hex(m.entryPoint) << "\n";

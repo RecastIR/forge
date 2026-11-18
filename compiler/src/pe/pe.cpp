@@ -10,6 +10,7 @@
 #include "llvm/Support/Win64EH.h"
 
 #include <algorithm>
+#include <bit>
 #include <cstddef>
 #include <cstring>
 #include <map>
@@ -128,8 +129,10 @@ namespace forge {
                     rva};
         }
 
-        std::string machineName(uint16_t machine) {
+        std::string machineName(uint32_t machine) {
             switch (machine) {
+            case COFF::IMAGE_FILE_MACHINE_AMD64:
+                return "AMD64";
             case COFF::IMAGE_FILE_MACHINE_I386:
                 return "i386";
             case COFF::IMAGE_FILE_MACHINE_ARM64:
@@ -277,7 +280,8 @@ namespace forge {
                                     s.VirtualSize,
                                     s.PointerToRawData,
                                     s.SizeOfRawData,
-                                    (s.Characteristics & COFF::IMAGE_SCN_MEM_DISCARDABLE) != 0});
+                                    (s.Characteristics & COFF::IMAGE_SCN_MEM_DISCARDABLE) != 0,
+                                    (s.Characteristics & COFF::IMAGE_SCN_MEM_SHARED) != 0});
             }
             if (coffHeader.NumberOfSymbols && !coffHeader.PointerToSymbolTable) {
                 invalid("COFF symbol table", pe + 4, "missing file offset");
@@ -783,6 +787,8 @@ namespace forge {
         }
     } // namespace
 
+    std::string Module::architecture() const { return machineName(machine); }
+
     unsigned Exceptions::trailingBytes() const {
         return size % sizeof(llvm::Win64EH::RuntimeFunction);
     }
@@ -993,6 +999,68 @@ namespace forge {
                (config->Size >= offsetof(Config, DynamicValueRelocTableSection) +
                                     sizeof(config->DynamicValueRelocTableSection) &&
                 config->DynamicValueRelocTableSection);
+    }
+
+    void ParsedImage::validateExecutableLayout(uint64_t guestBase) const {
+        using namespace llvm::COFF;
+        const auto &header = *coff->getPE32PlusHeader();
+        const auto unsupported = [](const std::string &message) {
+            throw InspectionError(message, FailureCode::ExecutableStartup);
+        };
+
+        if ((header.Subsystem != IMAGE_SUBSYSTEM_WINDOWS_CUI &&
+             header.Subsystem != IMAGE_SUBSYSTEM_WINDOWS_GUI) ||
+            (coff->getCharacteristics() & IMAGE_FILE_SYSTEM) ||
+            (header.DLLCharacteristics &
+             (IMAGE_DLL_CHARACTERISTICS_WDM_DRIVER | IMAGE_DLL_CHARACTERISTICS_APPCONTAINER |
+              IMAGE_DLL_CHARACTERISTICS_GUARD_CF))) {
+            unsupported("executable requires unsupported Windows subsystem or loader features");
+        }
+
+        if (metadata.tls) {
+            unsupported("executable requires TLS initialization");
+        }
+
+        for (const auto &[index, name] : {std::pair{CLR_RUNTIME_HEADER, "managed runtime"},
+                                          {LOAD_CONFIG_TABLE, "load configuration"},
+                                          {BOUND_IMPORT, "bound imports"},
+                                          {DELAY_IMPORT_DESCRIPTOR, "delay imports"},
+                                          {GLOBAL_PTR, "global pointer initialization"},
+                                          {ARCHITECTURE, "architecture-specific initialization"}}) {
+            const auto *directory = coff->getDataDirectory(index);
+
+            if (directory && (directory->RelativeVirtualAddress || directory->Size)) {
+                unsupported(std::string("unsupported executable startup requirement: ") + name);
+            }
+        }
+
+        const uint32_t sectionAlignment = header.SectionAlignment;
+        const uint32_t fileAlignment = header.FileAlignment;
+
+        if (!std::has_single_bit(fileAlignment) || fileAlignment < 512 || fileAlignment > 65536 ||
+            !std::has_single_bit(sectionAlignment) || sectionAlignment < 4096 ||
+            sectionAlignment < fileAlignment || metadata.sizeOfImage % sectionAlignment ||
+            header.SizeOfHeaders % fileAlignment || header.SizeOfHeaders > metadata.sizeOfImage ||
+            metadata.imageBase % 65536 || metadata.imageBase % sectionAlignment ||
+            guestBase % 65536 || guestBase % sectionAlignment) {
+            unsupported("unsupported PE image, section or file alignment");
+        }
+
+        for (const auto &section : metadata.sections) {
+            if (section.rva % sectionAlignment ||
+                (section.rawSize &&
+                 (section.fileOffset % fileAlignment || section.rawSize % fileAlignment))) {
+                unsupported("section " + section.name + " violates declared PE alignment");
+            }
+
+            if (section.permissions[1] == 'w' && section.permissions[2] == 'x') {
+                unsupported("writable executable section " + section.name + " is unsupported");
+            }
+
+            if (section.shared && section.permissions[1] == 'w') {
+                unsupported("shared writable section " + section.name + " is unsupported");
+            }
+        }
     }
 
     std::vector<RvaRange> ParsedImage::tlsAndConfigWrites() const {

@@ -54,6 +54,10 @@ def generate(output, mc, link, dlltool, clang):
             (output / filename).write_bytes((work / filename).read_bytes())
 
         sources = Path(__file__).resolve().parent
+        for name in ("executable-return", "executable-call", "executable-data", "executable-fault"):
+            image(f"{name}.exe", (sources / f"{name}.s").read_text())
+        image("executable-last-error.exe", (sources / "executable-last-error.s").read_text(),
+              [("KERNEL32.dll", name) for name in ("SetLastError", "GetLastError")])
         # Remap debug paths so builds in different source directories produce identical PEs.
         for name in ("add", "inlined"):
             run(clang, "--target=x86_64-windows-msvc", "-O2", "-fwrapv", "-gdwarf-4", "-g",

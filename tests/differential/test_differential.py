@@ -681,7 +681,7 @@ class LiftDiagnosticTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "fresh output"):
             self.lift(0, b"")
 
-    def test_recognized_execution_codes_match_forge(self):
+    def test_recognized_function_lift_codes_match_forge(self):
         catalog = (diff.SUITE.parents[1] / "compiler/src/diagnostics.def").read_text()
         expected = set()
         row = r'FORGE_FAILURE\(\w+,\s*"(\w+)",\s*"(\w+)",\s*"(\w+)",\s*"\w+"\)'
@@ -691,11 +691,23 @@ class LiftDiagnosticTests(unittest.TestCase):
             match = re.fullmatch(row, line.strip())
             self.assertIsNotNone(match, line)
             code, stage, category = match.groups()
-            if code not in ("OUTPUT_ALIAS", "NOT_DLL"):
-                expected.add((stage, category, code))
+            expected.add((stage, category, code))
         actual = {(stage, category, code) for (stage, category), codes in lift_diagnostics.FAILURE_KINDS.items()
                   for code in codes}
-        self.assertEqual(actual, expected)
+        # The differential runner requests function IR. It must reject a diagnostic
+        # produced by another command or output mode, even when the code is genuine.
+        other = {
+            ("pe", "invalid_input", "NOT_DLL"),
+            ("publication", "invalid_input", "OUTPUT_ALIAS"),
+            ("entry", "unsupported", "EXECUTABLE_UNSUPPORTED_STARTUP"),
+            ("optimization", "tool", "NATIVE_OPTIMIZATION_FAILED"),
+            ("codegen", "tool", "NATIVE_CODEGEN_FAILED"),
+            ("linking", "io", "NATIVE_TOOL_UNAVAILABLE"),
+            ("linking", "unsupported", "NATIVE_HOST_UNSUPPORTED"),
+            ("linking", "tool", "NATIVE_LINK_FAILED"),
+        }
+        self.assertTrue(actual.isdisjoint(other))
+        self.assertEqual(actual | other, expected)
 
 
 class AnalysisTests(unittest.TestCase):

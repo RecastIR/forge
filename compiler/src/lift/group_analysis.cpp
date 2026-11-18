@@ -729,7 +729,7 @@ namespace forge::x86 {
 
         if (mode == EntryMode::RegisterState) {
             std::fill_n(initial.registers.begin(), callerSlots, UINT64_MAX);
-        } else {
+        } else if (mode == EntryMode::WindowsX64I64Pair) {
             initial.registers[1] = initial.registers[2] = UINT64_MAX;
         }
 

@@ -1,6 +1,7 @@
 #include "lift/lift.h"
 
 #include "analysis/analysis.h"
+#include "lift/executable.h"
 #include "lift/execution_context.h"
 #include "lift/group_analysis.h"
 #include "lift/operands.h"
@@ -708,7 +709,7 @@ namespace forge {
             for (const auto &[rva, function] : group.functions()) {
                 Translator translator(rva, function, analysis, bodies, operands);
                 translator.translate(layout, resolver,
-                                     rva == root && request.mode == EntryMode::WindowsX64I64Pair);
+                                     rva == root && request.mode != EntryMode::RegisterState);
             }
 
             return module;
@@ -728,6 +729,61 @@ namespace forge {
         }
     }
 
+    namespace {
+        std::unique_ptr<llvm::Module> generateGroupIR(const x86::RecoveredFunctionGroup &group,
+                                                      uint64_t guestBase, LiftRequest request,
+                                                      llvm::LLVMContext &context) {
+            auto stage = FailureCode::LiftingInternal;
+
+            try {
+                const bool process = request.output == LiftOutput::ProcessArtifact;
+                const bool checked = process || request.checkedMemory;
+                request.runtime = request.runtime || checked;
+
+                if (process && request.mode == EntryMode::RegisterState) {
+                    throw InspectionError(
+                        "process artifact requires the Windows x64 integer-pair entry contract",
+                        FailureCode::UnsupportedControlFlow);
+                }
+
+                if (!checked) {
+                    if (const auto *site = firstImport(group, true)) {
+                        site->reject(FailureCode::UnsupportedControlFlow,
+                                     "imported service requires --checked-memory --signature "
+                                     "'i64(i64,i64)'");
+                    }
+                }
+
+                if (!request.runtime) {
+                    if (const auto *site = firstImport(group, false)) {
+                        site->reject(
+                            FailureCode::UnsupportedControlFlow,
+                            "imported service requires --runtime --signature 'i64(i64,i64)'");
+                    }
+                } else if (request.mode == EntryMode::RegisterState) {
+                    const std::string option =
+                        request.checkedMemory ? "--checked-memory" : "--runtime";
+                    throw InspectionError(option + " requires --signature 'i64(i64,i64)'",
+                                          FailureCode::UnsupportedControlFlow);
+                }
+
+                const auto prepared = x86::analyzeGroup(group, guestBase, request.mode,
+                                                        request.checkedMemory, request.output);
+                auto module = emitGroup(group, prepared, request, context);
+                stage = FailureCode::VerificationInternal;
+                verifyLiftedIR(*module, group.image().module().path, group.root());
+                return module;
+            } catch (InspectionError &failure) {
+                group.annotateFailure(failure);
+                throw;
+            } catch (const std::exception &error) {
+                InspectionError failure(error.what(), stage);
+                group.annotateFailure(failure);
+                throw failure;
+            }
+        }
+    } // namespace
+
     std::unique_ptr<llvm::Module> generateIR(const AnalyzedImage &analysis, LiftRequest request,
                                              llvm::LLVMContext &context) {
         return generateIR(analysis, request, context, win64::services);
@@ -736,54 +792,58 @@ namespace forge {
     std::unique_ptr<llvm::Module> generateIR(const AnalyzedImage &analysis, LiftRequest request,
                                              llvm::LLVMContext &context,
                                              std::span<const win64::ServiceBinding> services) {
+        if (request.mode == EntryMode::PeEntry) {
+            throw InspectionError("PE entry compilation requires generateExecutableIR",
+                                  FailureCode::ExecutableStartup);
+        }
+
         const auto entry = x86::validateEntry(analysis, request.startRva);
         const auto guestBase = x86::validateGuestBase(entry, request.guestLoadBase);
         const x86::RecoveredFunctionGroup group(entry, services);
-        auto stage = FailureCode::LiftingInternal;
+        return generateGroupIR(group, guestBase, request, context);
+    }
+
+    std::unique_ptr<llvm::Module> generateExecutableIR(const AnalyzedImage &analysis,
+                                                       std::optional<uint64_t> guestLoadBase,
+                                                       llvm::LLVMContext &context,
+                                                       ExecutableReadiness &readiness) {
+        const auto rva = analysis.module().entryPoint;
+        readiness = {};
+        readiness.architecture = analysis.module().architecture();
+        readiness.entryRva = rva;
 
         try {
-            const bool process = request.output == LiftOutput::ProcessArtifact;
-            const bool checked = process || request.checkedMemory;
-            request.runtime = request.runtime || checked;
+            if (!rva) {
+                throw InspectionError("PE header has no executable entry point",
+                                      FailureCode::InvalidEntry);
+            }
 
-            if (process && request.mode != EntryMode::WindowsX64I64Pair) {
+            const auto &unwind = analysis.module().exceptions;
+
+            if (unwind && unwind->trailingBytes()) {
                 throw InspectionError(
-                    "process artifact requires the Windows x64 integer-pair entry contract",
-                    FailureCode::UnsupportedControlFlow);
+                    "partial PE runtime function record in the exception directory",
+                    FailureCode::ExecutableStartup);
             }
 
-            if (!checked) {
-                if (const auto *site = firstImport(group, true)) {
-                    site->reject(
-                        FailureCode::UnsupportedControlFlow,
-                        "imported service requires --checked-memory --signature 'i64(i64,i64)'");
-                }
-            }
-
-            if (!request.runtime) {
-                if (const auto *site = firstImport(group, false)) {
-                    site->reject(FailureCode::UnsupportedControlFlow,
-                                 "imported service requires --runtime --signature 'i64(i64,i64)'");
-                }
-            } else if (request.mode != EntryMode::WindowsX64I64Pair) {
-                const std::string option = request.checkedMemory ? "--checked-memory" : "--runtime";
-                throw InspectionError(option + " requires --signature 'i64(i64,i64)'",
-                                      FailureCode::UnsupportedControlFlow);
-            }
-
-            const auto prepared = x86::analyzeGroup(group, guestBase, request.mode,
-                                                    request.checkedMemory, request.output);
-            auto module = emitGroup(group, prepared, request, context);
-            stage = FailureCode::VerificationInternal;
-            verifyLiftedIR(*module, analysis.module().path, group.root());
-            return module;
+            const auto entry = x86::validateEntry(analysis, rva);
+            readiness.entryRecovered = true;
+            const auto guestBase = x86::validateGuestBase(entry, guestLoadBase);
+            const x86::RecoveredFunctionGroup group(
+                entry, win64::services, [&](const auto &partial, const auto &error) {
+                    x86::recordExecutableRecovery(readiness, partial, &error);
+                });
+            x86::recordExecutableRecovery(readiness, group);
+            x86::validateExecutableStartup(entry, group, guestBase, readiness);
+            return generateGroupIR(
+                group, guestBase,
+                {rva, EntryMode::PeEntry, guestLoadBase, true, true, LiftOutput::ProcessArtifact},
+                context);
         } catch (InspectionError &failure) {
-            group.annotateFailure(failure);
+            failure.context.input = analysis.module().path;
+            failure.context.entryRva = rva;
+            failure.context.architecture = readiness.architecture;
             throw;
-        } catch (const std::exception &error) {
-            InspectionError failure(error.what(), stage);
-            group.annotateFailure(failure);
-            throw failure;
         }
     }
 } // namespace forge

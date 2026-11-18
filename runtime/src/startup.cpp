@@ -1,0 +1,95 @@
+#include "forge/process.h"
+
+#include <cinttypes>
+#include <cstdio>
+
+namespace {
+    constexpr int failureExit = 125;
+
+    int runtimeFailure(const char *stage, forge_rt_status status) {
+        std::fprintf(stderr, "forge: runtime failure stage=%s status=%" PRIu32 "\n", stage, status);
+        return failureExit;
+    }
+
+    int exitStatus(const forge_rt_process_result &result) {
+        switch (result.kind) {
+        case FORGE_RT_RETURNED: {
+            const auto dword = static_cast<uint32_t>(result.value);
+            return static_cast<int>(dword & 0xffU);
+        }
+        case FORGE_RT_EXECUTION_FAULT:
+            switch (result.fault) {
+            case FORGE_RT_FAULT_MEMORY:
+                std::fprintf(stderr,
+                             "forge: guest memory fault address=0x%" PRIx64 " access=%" PRIu32
+                             " reason=%" PRIu32 "\n",
+                             result.memory.address, result.memory.access, result.memory.reason);
+                break;
+            case FORGE_RT_FAULT_CONTROL:
+                std::fputs("forge: guest control fault\n", stderr);
+                break;
+            case FORGE_RT_FAULT_ABI:
+                std::fputs("forge: guest ABI fault\n", stderr);
+                break;
+            default:
+                return runtimeFailure("result", FORGE_RT_INTERNAL_ERROR);
+            }
+
+            return failureExit;
+        case FORGE_RT_UNSUPPORTED:
+            std::fputs("forge: unsupported guest execution\n", stderr);
+            return failureExit;
+        case FORGE_RT_RUNTIME_FAILURE:
+            return runtimeFailure("execution", result.status);
+        default:
+            return runtimeFailure("result", FORGE_RT_INTERNAL_ERROR);
+        }
+    }
+} // namespace
+
+int main() {
+    const auto *artifact = forge_lifted_artifact();
+
+    if (!artifact || artifact->version != FORGE_RT_ARTIFACT_VERSION) {
+        return runtimeFailure("artifact", FORGE_RT_ABI_MISMATCH);
+    }
+
+    if (!artifact->peEntryRva) {
+        std::fputs("forge: runtime failure: PE image has no entry point\n", stderr);
+        return failureExit;
+    }
+
+    if (artifact->entryRva != artifact->peEntryRva) {
+        std::fputs("forge: runtime failure: compiled entry differs from PE entry point\n", stderr);
+        return failureExit;
+    }
+
+    forge_rt_process *process = nullptr;
+    auto status = forge_rt_process_create(FORGE_RT_ABI_VERSION, &process);
+
+    if (status != FORGE_RT_OK) {
+        return runtimeFailure("create", status);
+    }
+
+    forge_rt_process_result result{};
+    const char *stage = "register";
+    status = forge_rt_process_register(process, artifact);
+
+    if (status == FORGE_RT_OK) {
+        stage = "run";
+        status = forge_rt_process_run(process, nullptr, &result);
+    }
+
+    // All admitted runs are synchronous, including faults. Destroy also closes the process.
+    const auto destroyed = forge_rt_process_destroy(process);
+
+    if (status != FORGE_RT_OK) {
+        return runtimeFailure(stage, status);
+    }
+
+    if (destroyed != FORGE_RT_OK) {
+        return runtimeFailure("destroy", destroyed);
+    }
+
+    return exitStatus(result);
+}

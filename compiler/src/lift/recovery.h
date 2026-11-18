@@ -4,6 +4,7 @@
 #include "lift/cfg.h"
 #include "pe/image.h"
 
+#include <set>
 #include <span>
 #include <variant>
 
@@ -50,6 +51,9 @@ namespace forge::x86 {
         const win64::ServiceBinding &binding;
     };
 
+    const win64::ServiceBinding *findService(std::span<const win64::ServiceBinding> services,
+                                             const Import &descriptor, const Symbol &symbol);
+
     // All RVAs in a recovered group belong to its one immutable source snapshot.
     struct ResolvedCallSite {
         uint32_t caller, block, instruction, continuation;
@@ -92,7 +96,9 @@ namespace forge::x86 {
         // Catalogue storage and its strings must outlive this group.
         explicit RecoveredFunctionGroup(
             const ValidatedEntry &entry,
-            std::span<const win64::ServiceBinding> services = win64::services);
+            std::span<const win64::ServiceBinding> services = win64::services,
+            llvm::function_ref<void(const RecoveredFunctionGroup &, const InspectionError &)>
+                onFailure = nullptr);
         ~RecoveredFunctionGroup();
         RecoveredFunctionGroup(const RecoveredFunctionGroup &) = delete;
         RecoveredFunctionGroup &operator=(const RecoveredFunctionGroup &) = delete;
@@ -113,6 +119,8 @@ namespace forge::x86 {
         const RecoveredFunction &function(uint32_t rva) const && = delete;
 
         void annotateFailure(InspectionError &failure) const;
+        std::set<std::pair<std::string_view, std::string_view>> requiredImports() const &;
+        std::set<std::pair<std::string_view, std::string_view>> requiredImports() const && = delete;
 
       private:
         struct Decoder;

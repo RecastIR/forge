@@ -5,6 +5,8 @@
 
 #include "llvm/Support/JSON.h"
 
+#include <utility>
+
 namespace forge {
     void printFailure(const InspectionError &error, const fs::path &input, llvm::raw_ostream &err) {
         const auto prefix = failureKind(error.kind).legacy;
@@ -24,85 +26,200 @@ namespace forge {
         err << '\n';
     }
 
+    namespace {
+        llvm::json::Object failureFields(const FailureContext &context, const fs::path &input) {
+            const auto &source = context.input.empty() ? input : context.input;
+            llvm::json::Object fields{{"input", llvm::json::fixUTF8(source.native())}};
+
+            if (context.blockRva) {
+                fields["block_rva"] = hex(*context.blockRva);
+            }
+
+            if (context.functionRva) {
+                fields["function_rva"] = hex(*context.functionRva);
+            }
+
+            if (const auto site = context.sourceCall) {
+                fields["caller_rva"] = hex(site->caller);
+                fields["call_site_rva"] = hex(site->instruction);
+            }
+
+            if (context.branchTarget) {
+                fields["branch_target"] = *context.branchTarget;
+            }
+
+            if (context.importSlot) {
+                fields["iat_slot_rva"] = hex(*context.importSlot);
+            }
+
+            if (context.importOwnership) {
+                fields["import_descriptor_rva"] = hex(context.importOwnership->descriptorRva);
+                fields["import_ownership_reason"] = context.importOwnership->reason;
+            }
+
+            if (!context.importDll.empty()) {
+                fields["import_dll"] = context.importDll;
+            }
+
+            if (!context.importSymbol.empty()) {
+                fields["import_symbol"] = context.importSymbol;
+            }
+
+            if (!context.output.empty()) {
+                fields["output"] = llvm::json::fixUTF8(context.output.native());
+            }
+
+            if (context.endRva) {
+                fields["end_rva"] = hex(*context.endRva);
+            }
+
+            if (context.instructionRva) {
+                fields["instruction_rva"] = hex(*context.instructionRva);
+            }
+
+            if (context.fileOffset) {
+                fields["file_offset"] = *context.fileOffset;
+            }
+
+            if (!context.architecture.empty()) {
+                fields["architecture"] = llvm::json::fixUTF8(context.architecture);
+            }
+
+            if (!context.opcode.empty()) {
+                fields["opcode"] = context.opcode;
+            }
+
+            if (!context.bytes.empty()) {
+                fields["bytes"] = context.bytes;
+            }
+
+            return fields;
+        }
+
+        void writeFailure(const InspectionError &error, llvm::json::Object fields,
+                          llvm::raw_ostream &out) {
+            const auto &kind = failureKind(error.kind);
+            out << llvm::json::Value(
+                       llvm::json::Object{{"schema_version", 1},
+                                          {"stage", kind.stage},
+                                          {"category", kind.category},
+                                          {"code", kind.code},
+                                          {"message", llvm::json::fixUTF8(error.what())},
+                                          {"context", std::move(fields)}})
+                << '\n';
+        }
+
+        void addReadinessFields(llvm::json::Object &fields, const ExecutableReadiness &readiness) {
+            if (!readiness.architecture.empty()) {
+                fields["architecture"] = readiness.architecture;
+            }
+
+            if (readiness.entryRva) {
+                fields["entry_rva"] = hex(*readiness.entryRva);
+            }
+
+            fields["entry_recovered"] = readiness.entryRecovered;
+            fields["recovery_complete"] = readiness.recoveryComplete;
+            llvm::json::Array calls, imports, unresolved;
+
+            for (const auto &call : readiness.calls) {
+                calls.emplace_back(llvm::json::Object{{"caller_rva", hex(call.callerRva)},
+                                                      {"instruction_rva", hex(call.instructionRva)},
+                                                      {"target_rva", hex(call.targetRva)}});
+            }
+
+            for (const auto &service : readiness.imports) {
+                imports.emplace_back(
+                    llvm::json::Object{{"dll", service.dll}, {"name", service.name}});
+            }
+
+            for (const auto &site : readiness.unresolvedCalls) {
+                llvm::json::Object call{{"caller_rva", hex(site.callerRva)},
+                                        {"instruction_rva", hex(site.instructionRva)}};
+
+                if (site.targetRva && std::in_range<uint32_t>(*site.targetRva)) {
+                    call["target_rva"] = hex(static_cast<uint32_t>(*site.targetRva));
+                } else if (site.targetRva) {
+                    call["branch_target"] = *site.targetRva;
+                }
+
+                unresolved.emplace_back(std::move(call));
+            }
+
+            fields["calls"] = std::move(calls);
+            fields["imports"] = std::move(imports);
+            fields["unresolved_calls"] = std::move(unresolved);
+        }
+    } // namespace
+
     void printLiftDiagnostic(const InspectionError &error, const fs::path &input,
                              LiftRequest request, llvm::raw_ostream &out) {
-        const auto &kind = failureKind(error.kind);
-        const auto &context = error.context;
-        // Loading and publication can fail before the core operation sees the requested RVA.
-        const auto &source = context.input.empty() ? input : context.input;
-        llvm::json::Object fields{{"input", llvm::json::fixUTF8(source.native())},
-                                  {"entry_rva", hex(context.entryRva.value_or(request.startRva))}};
-
+        auto fields = failureFields(error.context, input);
+        fields["entry_rva"] = hex(error.context.entryRva.value_or(request.startRva));
         fields["signature"] =
             request.mode == EntryMode::RegisterState ? "register-state" : "i64(i64,i64)";
-        if (context.blockRva) {
-            fields["block_rva"] = hex(*context.blockRva);
+        writeFailure(error, std::move(fields), out);
+    }
+
+    void printExecutableDiagnostic(const ExecutableReadiness &readiness, const fs::path &input,
+                                   const fs::path &output, const InspectionError *failure,
+                                   bool json, llvm::raw_ostream &out) {
+        if (json) {
+            auto fields = failure
+                              ? failureFields(failure->context, input)
+                              : llvm::json::Object{{"input", llvm::json::fixUTF8(input.native())}};
+            fields["output"] = llvm::json::fixUTF8(output.native());
+            addReadinessFields(fields, readiness);
+
+            if (failure) {
+                writeFailure(*failure, std::move(fields), out);
+            } else {
+                out << llvm::json::Value(llvm::json::Object{
+                           {"schema_version", 1},
+                           {"stage", "publication"},
+                           {"category", "success"},
+                           {"code", "EXECUTABLE_READY"},
+                           {"message", "Published native ARM64 Mach-O executable"},
+                           {"context", std::move(fields)}})
+                    << '\n';
+            }
+
+            return;
         }
 
-        if (context.functionRva) {
-            fields["function_rva"] = hex(*context.functionRva);
+        if (failure) {
+            printFailure(*failure, input, out);
         }
 
-        if (const auto site = context.sourceCall) {
-            fields["caller_rva"] = hex(site->caller);
-            fields["call_site_rva"] = hex(site->instruction);
+        if (readiness.entryRva) {
+            out << input.string() << ": " << readiness.architecture << " PE entry "
+                << hex(*readiness.entryRva)
+                << (readiness.entryRecovered ? " recovered" : " unrecovered") << ", "
+                << (readiness.recoveryComplete ? "complete" : "partial") << " call recovery"
+                << ", " << readiness.calls.size() << " guest calls, " << readiness.imports.size()
+                << " imported services\n";
         }
 
-        if (context.branchTarget) {
-            fields["branch_target"] = *context.branchTarget;
+        for (const auto &call : readiness.calls) {
+            out << "  " << hex(call.callerRva) << " calls " << hex(call.targetRva) << " at "
+                << hex(call.instructionRva) << '\n';
         }
 
-        if (context.importSlot) {
-            fields["iat_slot_rva"] = hex(*context.importSlot);
+        for (const auto &service : readiness.imports) {
+            out << "  requires " << service.dll << '!' << service.name << '\n';
         }
 
-        if (context.importOwnership) {
-            fields["import_descriptor_rva"] = hex(context.importOwnership->descriptorRva);
-            fields["import_ownership_reason"] = context.importOwnership->reason;
-        }
+        for (const auto &call : readiness.unresolvedCalls) {
+            out << "  unresolved call at " << hex(call.instructionRva) << " in "
+                << hex(call.callerRva);
 
-        if (!context.importDll.empty()) {
-            fields["import_dll"] = context.importDll;
-        }
+            if (call.targetRva && std::in_range<uint32_t>(*call.targetRva)) {
+                out << " to " << hex(static_cast<uint32_t>(*call.targetRva));
+            } else if (call.targetRva) {
+                out << " to out-of-range target " << *call.targetRva;
+            }
 
-        if (!context.importSymbol.empty()) {
-            fields["import_symbol"] = context.importSymbol;
+            out << '\n';
         }
-
-        if (!context.output.empty()) {
-            fields["output"] = llvm::json::fixUTF8(context.output.native());
-        }
-
-        if (context.endRva) {
-            fields["end_rva"] = hex(*context.endRva);
-        }
-
-        if (context.instructionRva) {
-            fields["instruction_rva"] = hex(*context.instructionRva);
-        }
-
-        if (context.fileOffset) {
-            fields["file_offset"] = *context.fileOffset;
-        }
-
-        if (!context.architecture.empty()) {
-            fields["architecture"] = llvm::json::fixUTF8(context.architecture);
-        }
-
-        if (!context.opcode.empty()) {
-            fields["opcode"] = context.opcode;
-        }
-
-        if (!context.bytes.empty()) {
-            fields["bytes"] = context.bytes;
-        }
-
-        out << llvm::json::Value(llvm::json::Object{{"schema_version", 1},
-                                                    {"stage", kind.stage},
-                                                    {"category", kind.category},
-                                                    {"code", kind.code},
-                                                    {"message", llvm::json::fixUTF8(error.what())},
-                                                    {"context", std::move(fields)}})
-            << '\n';
     }
 } // namespace forge

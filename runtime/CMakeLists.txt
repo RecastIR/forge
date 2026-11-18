@@ -6,3 +6,9 @@ target_link_libraries(forge_runtime PRIVATE Threads::Threads)
 target_link_options(forge_runtime INTERFACE ${sanitizer_link_flags})
 configure_forge_output(forge_runtime ARCHIVE_OUTPUT_DIRECTORY LIBRARY_OUTPUT_PATH)
 configure_forge_cxx(forge_runtime)
+
+# Link this archive only when the translated PE supplies the executable's entry.
+add_library(forge_startup STATIC src/startup.cpp)
+target_link_libraries(forge_startup PUBLIC forge_runtime)
+configure_forge_output(forge_startup ARCHIVE_OUTPUT_DIRECTORY LIBRARY_OUTPUT_PATH)
+configure_forge_cxx(forge_startup)

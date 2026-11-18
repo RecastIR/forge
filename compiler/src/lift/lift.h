@@ -5,6 +5,8 @@
 #include <memory>
 #include <optional>
 #include <span>
+#include <string>
+#include <vector>
 
 namespace llvm {
     class LLVMContext;
@@ -18,7 +20,7 @@ namespace forge {
         struct ServiceBinding;
     }
 
-    enum class EntryMode { RegisterState, WindowsX64I64Pair };
+    enum class EntryMode { RegisterState, WindowsX64I64Pair, PeEntry };
 
     enum class LiftOutput { Function, ProcessArtifact };
 
@@ -33,6 +35,38 @@ namespace forge {
         // Process artifacts are an explicit compiler output with their own checked entry ABI.
         LiftOutput output = LiftOutput::Function;
     };
+
+    struct ExecutableCall {
+        uint32_t callerRva, instructionRva, targetRva;
+    };
+
+    struct ExecutableUnresolvedCall {
+        uint32_t callerRva, instructionRva;
+        std::optional<int64_t> targetRva;
+    };
+
+    struct ExecutableImport {
+        std::string dll, name;
+    };
+
+    // Owned facts, including progress up to the first failing dependency. Entry recovery
+    // identifies an exact function start. Group recovery includes all reachable callees.
+    struct ExecutableReadiness {
+        std::string architecture;
+        std::optional<uint32_t> entryRva;
+        bool entryRecovered = false, recoveryComplete = false;
+        std::vector<ExecutableCall> calls;
+        std::vector<ExecutableImport> imports;
+        std::vector<ExecutableUnresolvedCall> unresolvedCalls;
+    };
+
+    // Selects the PE header entry and emits a checked process artifact. The entry
+    // receives no guest arguments and must return a defined result. Readiness is
+    // populated on success and on an InspectionError.
+    std::unique_ptr<llvm::Module> generateExecutableIR(const AnalyzedImage &analysis,
+                                                       std::optional<uint64_t> guestLoadBase,
+                                                       llvm::LLVMContext &context,
+                                                       ExecutableReadiness &readiness);
 
     // The module is independent of the image after generation. The caller's context
     // must outlive the module and all of its IR.

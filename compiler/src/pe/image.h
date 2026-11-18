@@ -26,7 +26,7 @@ namespace forge {
     struct Section {
         std::string name, permissions;
         uint32_t rva, virtualSize, fileOffset, rawSize;
-        bool discardable;
+        bool discardable, shared;
 
         uint32_t initializedSize() const { return std::min(virtualSize, rawSize); }
 
@@ -81,6 +81,10 @@ namespace forge {
 
     class ImportBindings {
       public:
+        llvm::ArrayRef<Import> entries() const & { return descriptors; }
+
+        llvm::ArrayRef<Import> entries() const && = delete;
+
         std::optional<ImportSlot> at(uint32_t slotRva) const &;
         std::optional<ImportSlot> at(uint32_t) const && = delete;
 
@@ -173,6 +177,8 @@ namespace forge {
         std::vector<RelocationBlock> relocations;
         std::optional<TLS> tls;
         std::optional<Exceptions> exceptions;
+
+        std::string architecture() const;
     };
 
     enum class ParsePolicy { Inspection, FunctionAnalysis };
@@ -199,6 +205,8 @@ namespace forge {
         // The remaining bytes in the interval are zero-filled by the PE loader.
         llvm::StringRef initializedBytes(RvaRange range) const;
         bool advertisesDynamicRelocations() const;
+        // Checks the PE loader requirements for a standalone native executable.
+        void validateExecutableLayout(uint64_t guestBase) const;
         std::vector<RvaRange> loaderWrittenRanges() const;
         // Borrows the immutable index for this snapshot. Ownership failures are cached too.
         const ImportBindings &importBindings() const &;
