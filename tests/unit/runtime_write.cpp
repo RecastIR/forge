@@ -104,15 +104,15 @@ namespace {
         REQUIRE(success == 0);
         uint32_t count = 0, error = 0;
         REQUIRE(forge_rt_get_last_error(instance, thread, &error) == FORGE_RT_OK);
-        REQUIRE(error == 1237); // ERROR_RETRY for a nonblocking pipe with no remaining room.
+        REQUIRE(error == 1237); // ERROR_RETRY when the next atomic write cannot fit.
         REQUIRE(forge_rt_read_guest(instance, thread, token, countAddress, sizeof(count), &count,
                                     sizeof(count), &fault) == FORGE_RT_OK);
         REQUIRE(count == PIPE_BUF);
         execution->result = {FORGE_RT_RETURNED, FORGE_RT_OK, count, {}, 0};
     }
 
-    // Saturate the real pipe, then make room for exactly one atomic write. No concurrent
-    // reader or scheduler timing is involved in the short logical transfer.
+    // Leave room for one atomic write and half of the next. An oversized write can
+    // consume the extra space, which the guest count and observed bytes would reveal.
     size_t fillPipe(int reader, int writer) {
         const auto flags = fcntl(writer, F_GETFL);
         REQUIRE(flags >= 0 && fcntl(writer, F_SETFL, flags | O_NONBLOCK) == 0);
@@ -123,9 +123,11 @@ namespace {
             filled += filler.size();
         }
 
-        REQUIRE(errno == EAGAIN && filled >= filler.size());
+        constexpr auto halfChunk = PIPE_BUF / 2;
+        REQUIRE(errno == EAGAIN && filled >= filler.size() + halfChunk);
         REQUIRE(read(reader, filler.data(), filler.size()) == PIPE_BUF);
-        return filled - filler.size();
+        REQUIRE(read(reader, filler.data(), halfChunk) == halfChunk);
+        return filled - filler.size() - halfChunk;
     }
 
     void checkPartialCount() {

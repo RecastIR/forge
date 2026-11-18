@@ -7,6 +7,7 @@
 #include <fcntl.h>
 #include <iterator>
 #include <memory>
+#include <pthread.h>
 #include <sys/resource.h>
 #include <sys/socket.h>
 #include <unistd.h>
@@ -362,7 +363,13 @@ namespace {
     void checkClosedSocket() {
         int ends[2];
         REQUIRE(socketpair(AF_UNIX, SOCK_STREAM, 0, ends) == 0 && close(ends[0]) == 0);
+
+        // An inherited signal mask could hide a send that omitted MSG_NOSIGNAL.
+        sigset_t signals, previousMask;
+        REQUIRE(sigemptyset(&signals) == 0 && sigaddset(&signals, SIGPIPE) == 0);
+        REQUIRE(pthread_sigmask(SIG_UNBLOCK, &signals, &previousMask) == 0);
         checkSignalPolicy(ends[1], SIGPIPE, SIG_DFL, false, 109);
+        REQUIRE(pthread_sigmask(SIG_SETMASK, &previousMask, nullptr) == 0);
         REQUIRE(close(ends[1]) == 0);
     }
 
