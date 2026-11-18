@@ -293,6 +293,11 @@ namespace forge::win64 {
         "kernel32.dll", "ExitProcess", LastError::Preserve,
         FORGE_SERVICE_ADAPTER(forge_rt_exit_process), Requirement::Process, Control::Terminates);
 
+    inline constexpr auto setUnhandledExceptionFilter =
+        bind<Value::Address, Argument{Value::Address}>(
+            "kernel32.dll", "SetUnhandledExceptionFilter", LastError::Preserve,
+            FORGE_SERVICE_ADAPTER(forge_rt_set_unhandled_exception_filter), Requirement::Process);
+
     inline constexpr auto getCommandLineA = processPointer(bind<Value::Address>(
         "kernel32.dll", "GetCommandLineA", LastError::Preserve,
         FORGE_SERVICE_ADAPTER(forge_rt_get_command_line_a), Requirement::Process));
@@ -323,7 +328,24 @@ namespace forge::win64 {
             FORGE_SERVICE_ADAPTER(forge_rt_msvcrt_getmainargs), Requirement::Process);
 
     inline constexpr ServiceBinding services[] = {
-        crtGetMainArgs, crtStrlen, crtStrcmp,   crtStrncmp,      crtMemcpy,       crtMalloc,
-        crtCalloc,      crtFree,   crtErrno,    setLastError,    getLastError,    stringLength,
-        getStdHandle,   writeFile, exitProcess, getCommandLineA, getCommandLineW, sleep};
+        crtGetMainArgs,
+        crtStrlen,
+        crtStrcmp,
+        crtStrncmp,
+        crtMemcpy,
+        crtMalloc,
+        crtCalloc,
+        crtFree,
+        crtErrno,
+        setLastError,
+        getLastError,
+        stringLength,
+        getStdHandle,
+        writeFile,
+        exitProcess,
+        getCommandLineA,
+        getCommandLineW,
+        sleep,
+        setUnhandledExceptionFilter,
+    };
 } // namespace forge::win64

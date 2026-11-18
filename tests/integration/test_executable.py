@@ -610,6 +610,16 @@ class Readiness(Workspace):
         load = data.index(bytes.fromhex("48 8b 4a 08 ff 15"), start)
         self.assertEqual(diagnostic["context"]["instruction_rva"], hex(root + load - start + 4))
 
+    def test_top_level_filter_requires_managed_process(self):
+        pe = image("top-level-filter")
+        result = run(FORGE, "lift", pe, "--rva", hex(entry(pe.read_bytes())), "--checked-memory",
+                     "--signature", "i64(i64,i64)", "--diagnostics-format", "json", "--output", self.output)
+        self.assertEqual(result.returncode, 1)
+        diagnostic = json.loads(result.stderr)
+        self.assertEqual(diagnostic["code"], "LIFT_UNSUPPORTED_CONTROL_FLOW")
+        self.assertEqual(diagnostic["context"]["import_symbol"], "SetUnhandledExceptionFilter")
+        self.assertIn("requires a managed process artifact", diagnostic["message"])
+
     def test_gs_requires_process_and_supported_offset(self):
         pe = image("tib")
         data = bytearray(pe.read_bytes())
@@ -698,6 +708,7 @@ class Reference(Workspace):
             image("import-register").name: (42, b"", b""),
             image("noreturn").name: (42, b"", b""),
             image("tib").name: (42, b"", b""),
+            image("top-level-filter").name: (42, b"", b""),
             console_image("hello").name: (0, GREETING, b""),
             console_image("binary_stdout").name: (len(BINARY), BINARY, b""),
             console_image("binary_stderr").name: (len(BINARY), b"", BINARY),
@@ -862,6 +873,35 @@ class Console(Workspace):
 
 
 class Native(Workspace):
+    def test_top_level_filter_registration(self):
+        pe = image("top-level-filter")
+        self.compile(pe)
+        result = run(self.output)
+        self.assertEqual((result.returncode, result.stdout, result.stderr), (42, "", ""))
+
+        data = pe.read_bytes()
+        preferred, = struct.unpack_from("<Q", data, Layout(data).opt + 24)
+        run(CONTRACT, "--guest-base", hex(preferred + 0x30000000), pe, self.output,
+            OPT, LLC, "/usr/bin/xcrun", *LINK, check=True)
+        rebased = run(self.output)
+        self.assertEqual((rebased.returncode, rebased.stdout, rebased.stderr), (42, "", ""))
+
+        # Each process leaves filter B installed after checking its predecessor.
+        obj = self.dir / "filter.o"
+        run(CONTRACT, pe, "--object", obj, OPT, LLC, check=True)
+        _, runtime, sdk, *flags = LINK
+        run("/usr/bin/xcrun", "--sdk", sdk, "clang++", "-arch", "arm64", *flags,
+            PROCESS_HARNESS, obj, runtime, "-o", self.output, check=True)
+        result = run(self.output, "run", "0", "0", "0", "0", check=True)
+        self.assertEqual(result.stderr, "")
+        self.assertEqual(result.stdout.splitlines()[-2:], ["return 42"] * 2)
+
+    def test_installed_filter_preserves_terminal_fault(self):
+        self.compile(image("top-level-filter-fault"))
+        result = run(self.output)
+        self.assertEqual((result.returncode, result.stdout, result.stderr),
+                         (125, "", "forge: guest memory fault address=0x1 access=1 reason=2\n"))
+
     def test_import_register_loop_and_identity(self):
         pe = image("import-register")
         diagnostic = self.compile(pe)

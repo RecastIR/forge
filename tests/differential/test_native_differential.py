@@ -60,19 +60,30 @@ class NativeDifferentialTests(unittest.TestCase):
                 context = record["context"]
                 self.assertIs(context["entry_recovered"], True)
                 self.assertIs(context["recovery_complete"], False)
+                call_bytes = "e89f120000" if config == "debug" else "e86f120000"
+                thunk = "0x26b0" if config == "debug" else "0x2680"
                 self.assertEqual((context["entry_rva"], context["function_rva"], context["instruction_rva"],
                                   context["opcode"], context["bytes"]),
-                                 ("0x14d0", "0x1180", "0x1258", "CALL64m", "ff15426f0000"))
+                                 ("0x14d0", "0x1180", "0x140c", "CALL64pcrel32", call_bytes))
                 self.assertEqual((context["import_dll"], context["import_symbol"], context["iat_slot_rva"]),
-                                 ("KERNEL32.dll", "SetUnhandledExceptionFilter", "0x81a0"))
-                self.assertIn({"dll": "kernel32.dll", "name": "Sleep"}, context["imports"])
-                self.assertNotIn("0x11e6", [c["instruction_rva"] for c in context["unresolved_calls"]])
+                                 ("msvcrt.dll", "_amsg_exit", "0x8208"))
+                unresolved = context["unresolved_calls"]
+                self.assertIn({"caller_rva": "0x1180", "instruction_rva": "0x140c", "target_rva": thunk},
+                              unresolved)
+                for symbol, site in (("Sleep", "0x11e6"), ("SetUnhandledExceptionFilter", "0x1258")):
+                    self.assertIn({"dll": "kernel32.dll", "name": symbol}, context["imports"])
+                    self.assertNotIn(site, [c["instruction_rva"] for c in unresolved])
                 pe = diff.BINARIES / config / manifest.case["binary"]
                 data = pe.read_bytes()
                 # llvm-objdump and llvm-readobj place the original R12 load and register CALL
                 # in the pinned .text section at file offsets 0x7c8 and 0x7e6.
                 self.assertEqual(data[0x7c8:0x7cf], bytes.fromhex("4c8b25d96f0000"))
                 self.assertEqual(data[0x7e6:0x7e9], bytes.fromhex("41ffd4"))
+                # RCX receives the relocated filter from .rdata, then RAX is saved after the IAT call.
+                self.assertEqual(data[0x851:0x85e], bytes.fromhex("488b0d68320000 ff15426f0000"))
+                self.assertEqual(data[0x86c:0x86f], bytes.fromhex("488902"))
+                filter_va, = struct.unpack_from("<Q", data, 0x24c0)
+                self.assertEqual(filter_va, 0x140001dd0 if config == "debug" else 0x140001da0)
                 scope = context["entry_unwind_handler"]["c_specific_handler"]["scope"]
                 self.assertEqual((scope["begin_rva"], scope["end_rva"], scope["filter_rva"]),
                                  ("0x14d4", "0x14e7", "0x1dd0" if config == "debug" else "0x1da0"))

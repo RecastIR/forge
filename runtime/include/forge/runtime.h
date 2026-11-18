@@ -163,6 +163,14 @@ forge_rt_status forge_rt_write_file(forge_rt_instance *instance, forge_rt_thread
 forge_rt_status forge_rt_exit_process(forge_rt_instance *instance, forge_rt_thread_token thread,
                                       uint32_t exitCode) FORGE_RT_NOEXCEPT;
 
+/* Replace this managed process's top-level exception filter. Both filter values are guest
+ * addresses. Zero restores default handling. Writes outPrevious only on success. Registration
+ * preserves last error. Guest faults remain terminal. */
+forge_rt_status forge_rt_set_unhandled_exception_filter(forge_rt_instance *instance,
+                                                        forge_rt_thread_token thread,
+                                                        uint64_t guestFilter,
+                                                        uint64_t *outPrevious) FORGE_RT_NOEXCEPT;
+
 /* Read a guest NUL-terminated byte string in the current synchronous invocation.
  * A null guest address returns zero after validating the invocation. The initial service
  * scans at most 1 MiB, including the terminator; exhaustion returns RESOURCE_EXHAUSTED.

@@ -6,4 +6,5 @@ executable-headers.exe
 executable-import-register.exe
 executable-noreturn.exe
 executable-tib.exe
+executable-top-level-filter.exe
 hello.exe

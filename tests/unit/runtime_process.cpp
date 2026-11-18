@@ -111,6 +111,18 @@ namespace {
                 lastError == 0);
         const auto tag = static_cast<uint8_t>(execution->rcx);
         REQUIRE(forge_rt_set_last_error(instance, thread, tag) == FORGE_RT_OK);
+        const auto filter = UINT64_C(0x180000000) + tag;
+        uint64_t previous = UINT64_MAX;
+        REQUIRE(forge_rt_set_unhandled_exception_filter(instance, thread, filter, &previous) ==
+                    FORGE_RT_OK &&
+                previous == 0);
+        REQUIRE(forge_rt_set_unhandled_exception_filter(instance, thread, 0, nullptr) ==
+                FORGE_RT_INVALID_ARGUMENT);
+        previous = UINT64_MAX;
+        REQUIRE(forge_rt_set_unhandled_exception_filter(instance, 0, 0, &previous) ==
+                    FORGE_RT_INVALID_THREAD &&
+                previous == UINT64_MAX);
+
         forge_rt_memory_fault fault{};
         REQUIRE(forge_rt_write_guest(instance, thread, invocation, base + 2, 1, &tag, 1, &fault) ==
                 FORGE_RT_OK);
@@ -137,6 +149,13 @@ namespace {
                     observed == tag);
         }
 
+        REQUIRE(forge_rt_set_unhandled_exception_filter(instance, thread, 0, &previous) ==
+                    FORGE_RT_OK &&
+                previous == filter);
+        // Leave a nonzero filter installed through teardown.
+        REQUIRE(forge_rt_set_unhandled_exception_filter(instance, thread, filter + 1, &previous) ==
+                    FORGE_RT_OK &&
+                previous == 0);
         REQUIRE(forge_rt_get_last_error(instance, thread, &lastError) == FORGE_RT_OK &&
                 lastError == tag);
         execution->result = {FORGE_RT_RETURNED, FORGE_RT_OK, execution->rdx, {}, 0};
@@ -163,6 +182,10 @@ namespace {
         REQUIRE(forge_rt_process_close(first.get()) == FORGE_RT_BUSY);
         uint8_t observed = 0;
         forge_rt_memory_fault fault{};
+        uint64_t previous = UINT64_MAX;
+        REQUIRE(forge_rt_set_unhandled_exception_filter(probe.instance, probe.thread, 0,
+                                                        &previous) == FORGE_RT_INVALID_INVOCATION &&
+                previous == UINT64_MAX);
         REQUIRE(forge_rt_exit_process(probe.instance, probe.thread, 17) ==
                 FORGE_RT_INVALID_INVOCATION);
         REQUIRE(forge_rt_read_guest(probe.instance, probe.thread, probe.invocation, base, 1,
@@ -172,10 +195,34 @@ namespace {
         REQUIRE(forge_rt_process_run(second.get(), &inputs, &result) == FORGE_RT_OK);
         REQUIRE(result.kind == FORGE_RT_RETURNED && result.value == 31);
         REQUIRE(forge_rt_process_close(second.get()) == FORGE_RT_OK);
+        // Reusing this native thread must start with an empty registration.
+        const auto fresh = create();
+        REQUIRE(forge_rt_process_register(fresh.get(), &artifact) == FORGE_RT_OK);
+        REQUIRE(forge_rt_process_run(fresh.get(), &inputs, &result) == FORGE_RT_OK);
+        REQUIRE(result.kind == FORGE_RT_RETURNED && result.value == 31);
         probe.resume.count_down();
         running.join();
         expectState(first.get(), FORGE_RT_PROCESS_EXITED);
         rejectRun(first.get(), FORGE_RT_INVALID_STATE);
+    }
+
+    void checkUnmanagedExceptionFilter() {
+        forge_rt_instance *instance = nullptr;
+        forge_rt_thread_token thread = 0;
+        forge_rt_invocation_token invocation = 0;
+        const forge_rt_image image{base, 16, nullptr, 0};
+        uint64_t previous = UINT64_MAX;
+        REQUIRE(forge_rt_set_unhandled_exception_filter(nullptr, 0, 0, &previous) ==
+                    FORGE_RT_INVALID_ARGUMENT &&
+                previous == UINT64_MAX);
+        REQUIRE(forge_rt_create(FORGE_RT_ABI_VERSION, &instance) == FORGE_RT_OK);
+        REQUIRE(forge_rt_thread_create(instance, &thread) == FORGE_RT_OK);
+        REQUIRE(forge_rt_enter(instance, thread, &image, nullptr, &invocation) == FORGE_RT_OK);
+        REQUIRE(forge_rt_set_unhandled_exception_filter(instance, thread, 0, &previous) ==
+                    FORGE_RT_INVALID_STATE &&
+                previous == UINT64_MAX);
+        REQUIRE(forge_rt_leave(instance, thread, invocation) == FORGE_RT_OK);
+        REQUIRE(forge_rt_destroy(instance) == FORGE_RT_OK);
     }
 
     void checkExitProcess() {
@@ -186,6 +233,11 @@ namespace {
                     FORGE_RT_OK);
             REQUIRE(forge_rt_exit_process(execution->instance, execution->thread, 2) ==
                     FORGE_RT_INVALID_STATE);
+            uint64_t previous = UINT64_MAX;
+            REQUIRE(forge_rt_set_unhandled_exception_filter(execution->instance, execution->thread,
+                                                            0,
+                                                            &previous) == FORGE_RT_INVALID_STATE &&
+                    previous == UINT64_MAX);
         });
         const auto process = create();
         REQUIRE(forge_rt_process_register(process.get(), &artifact) == FORGE_RT_OK);
@@ -744,6 +796,7 @@ void testRuntimeProcess() {
     checkFunctionImports();
     checkCrtInputConsumers();
     checkIsolation();
+    checkUnmanagedExceptionFilter();
     checkExitProcess();
     checkScalarBoundaries();
     checkFaultCleanup();

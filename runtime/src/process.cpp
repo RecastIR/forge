@@ -11,6 +11,7 @@
 #include <memory>
 #include <span>
 #include <string_view>
+#include <utility>
 
 using namespace forge;
 using namespace forge::runtime;
@@ -432,6 +433,28 @@ namespace {
         return {FORGE_RT_RUNTIME_FAILURE, status, 0, {}, 0};
     }
 
+    forge_rt_status checkProcessInvocation(const forge_rt_instance &owner,
+                                           forge_rt_thread_token thread) {
+        const auto *execution = owner.managedExecution;
+
+        if (!execution) {
+            return FORGE_RT_INVALID_STATE;
+        }
+
+        const auto entry = owner.threads.find(thread);
+
+        if (entry == owner.threads.end()) {
+            return FORGE_RT_INVALID_THREAD;
+        }
+
+        if (!entry->second.invocation || executingInvocation != entry->second.invocation ||
+            execution->thread != thread) {
+            return FORGE_RT_INVALID_INVOCATION;
+        }
+
+        return execution->result.kind ? FORGE_RT_INVALID_STATE : FORGE_RT_OK;
+    }
+
     forge_rt_process_result checkedResult(const forge_rt_process_result &result) {
         switch (result.kind) {
         case FORGE_RT_EXIT_PROCESS:
@@ -637,28 +660,32 @@ extern "C" forge_rt_status forge_rt_exit_process(forge_rt_instance *instance,
                                                  forge_rt_thread_token thread,
                                                  uint32_t exitCode) noexcept {
     return withInstance(instance, [&](auto &owner) {
-        auto *execution = owner.managedExecution;
+        const auto status = checkProcessInvocation(owner, thread);
 
-        if (!execution) {
-            return FORGE_RT_INVALID_STATE;
+        if (status == FORGE_RT_OK) {
+            owner.managedExecution->result = {FORGE_RT_EXIT_PROCESS, FORGE_RT_OK, exitCode, {}, 0};
         }
 
-        const auto entry = owner.threads.find(thread);
+        return status;
+    });
+}
 
-        if (entry == owner.threads.end()) {
-            return FORGE_RT_INVALID_THREAD;
+extern "C" forge_rt_status forge_rt_set_unhandled_exception_filter(forge_rt_instance *instance,
+                                                                   forge_rt_thread_token thread,
+                                                                   uint64_t guestFilter,
+                                                                   uint64_t *outPrevious) noexcept {
+    if (!outPrevious) {
+        return FORGE_RT_INVALID_ARGUMENT;
+    }
+
+    return withInstance(instance, [&](auto &owner) {
+        const auto status = checkProcessInvocation(owner, thread);
+
+        if (status == FORGE_RT_OK) {
+            *outPrevious = std::exchange(owner.topLevelExceptionFilter, guestFilter);
         }
 
-        if (!entry->second.invocation || executingInvocation != entry->second.invocation) {
-            return FORGE_RT_INVALID_INVOCATION;
-        }
-
-        if (execution->result.kind) {
-            return FORGE_RT_INVALID_STATE;
-        }
-
-        execution->result = {FORGE_RT_EXIT_PROCESS, FORGE_RT_OK, exitCode, {}, 0};
-        return FORGE_RT_OK;
+        return status;
     });
 }
 

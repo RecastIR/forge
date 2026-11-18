@@ -55,17 +55,21 @@ Forge recovers the guest startup call at `0x124a` by validating both immutable, 
 
 The Debug `startup/argc` PE loads `KERNEL32.dll!Sleep` into R12 at `0x11c8` from IAT slot `0x81a8`. The contention path passes 1000 milliseconds in ECX at the register call `0x11e6` and retries the startup lock. On the uncontended path, the runtime relocator still saves R12 on the guest stack. Forge now proves the binding across the loop. A separately linked PE exercises `Sleep(0)`, runs a register-held `SetLastError` call twice and zero times, and checks the imported address after a nested callee saves and restores R12. Its Windows PE under pinned Wine and its standalone ARM64 translation both returned 42 with empty streams. [Regression source](../../../fixtures/executable-import-register.s) · [Imported call recovery](../../../../docs/program-architecture.md#imported-call-recovery)
 
-All 16 conventional comparisons next stop at `0x1258`, a call through the IAT to `KERNEL32.dll!SetUnhandledExceptionFilter`. In the primary Debug PE, `0x1251` loads the guest filter address from `.refptr._gnu_exception_handler` at `0x44c0`. The call uses slot `0x81a0` and `0x126c` stores the returned previous filter. The readiness regression checks the original PE hash, `Sleep` load and call bytes, resolved service, new unresolved call, loader imports, TLS callbacks and entry scope in both configurations. [Readiness regression](../../test_native_differential.py)
+All 16 original inputs now resolve the registration call at `0x1258` to `KERNEL32.dll!SetUnhandledExceptionFilter`. In the primary PE, `0x1251` loads RCX from the DIR64 pointer cell at `0x44c0`. Its target is the guest filter at RVA `0x1dd0` in Debug and `0x1da0` in Release. The call uses IAT slot `0x81a0`, then `0x126c` stores RAX as the previous filter. The original diagnostic occurred during lifting, before guest execution. [Readiness regression](../../test_native_differential.py) · [Registration contract](../../../../docs/runtime-architecture.md#top-level-exception-filter-registration)
 
-The PE also uses the same filter for its entry's C-specific exception scope. The protected call at `0x14e1` enters the CRT and its callees. The Debug filter at `0x1dd0` reads the guest exception record, can invoke a signal handler through RAX at `0x1e5b`, and can request continued execution at `0x1e5d`. Another path chains to a previous guest filter at `0x1e83`. Forge's current process fault ends the invocation. Delivering a fault in a nested call to this filter requires the faulting guest PC, Windows exception and register context, correct frame selection, guest callback entry, and the ability to resume a translated instruction if requested. Registering an address alone would leave the observable behavior incomplete. [Process result ABI](../../../../runtime/include/forge/process.h) · [Windows filter contract](https://learn.microsoft.com/en-us/windows/win32/api/errhandlingapi/nf-errhandlingapi-setunhandledexceptionfilter)
+The focused PE installs two distinct filters, restores a previous filter from guest storage, clears it, and verifies each returned address. Its SHA-256 is `9919f98845de11676dc6767f39935ebf77b80dabb2f4deeb1ea4aefc2067235b`. Pinned Wine 8 and the standalone ARM64 executable returned 42 with empty stdout and stderr. The ARM64 result also matched at a guest base offset by `0x30000000`. A separate native test installs a filter and reads unmapped guest address 1. It exits 125 with the original memory fault. [Fixture source](../../../fixtures/executable-top-level-filter.s) · [ARM64 integration tests](../../../integration/test_executable.py)
+
+The PE also uses this guest function for its entry's C-specific exception scope. The protected call at `0x14e1` enters the CRT and its callees. On exception delivery the Debug filter could read the guest exception record, call a signal handler at `0x1e5b`, request continued execution at `0x1e5d`, or chain to a previous handler at `0x1e83`. Forge supports registering the address. A subsequent guest fault still ends the invocation with its original result. [Process result ABI](../../../../runtime/include/forge/process.h) · [Windows filter contract](https://learn.microsoft.com/en-us/windows/win32/api/errhandlingapi/nf-errhandlingapi-setunhandledexceptionfilter)
 
 Argument duplication exposes a later boundary. The compiler accepts `strlen` on a proved heap allocation. For `strlen(argv[1])` after `__getmainargs`, both the output slot and vector element are writable guest memory. The compiler currently lacks the pointer provenance required at that service call and reports `LIFT_IMAGE_MEMORY`. A separate fixture isolates this dependency from the earlier startup lock. [Fixture](../../../fixtures/crt-argv-strlen.s)
 
 ## Compatibility boundary
 
-For the primary PE, Forge recognizes 13 of 36 load-time symbols. These are KERNEL32 `GetLastError` and `Sleep`, the seven MSVCRT functions `__getmainargs`, `calloc`, `free`, `malloc`, `memcpy`, `strlen` and `strncmp`, and the four MSVCRT data exports. Ten KERNEL32 symbols and thirteen MSVCRT symbols still lack bindings. The argument fixture’s additional `strcmp` import has a binding.
+For the primary PE, Forge recognizes 14 of 36 load-time symbols. These are KERNEL32 `GetLastError`, `SetUnhandledExceptionFilter` and `Sleep`, the seven MSVCRT functions `__getmainargs`, `calloc`, `free`, `malloc`, `memcpy`, `strlen` and `strncmp`, and the four MSVCRT data exports. Nine KERNEL32 symbols and thirteen MSVCRT symbols still lack bindings. The argument fixture’s additional `strcmp` import has a binding.
 
-All eight Debug and eight Release cases matched the pinned Wine expectations. On ARM64 macOS, all 16 standalone comparison reports recorded `reference=passed`, followed by a lifting-stage `LIFT_UNSUPPORTED_CONTROL_FLOW` at `SetUnhandledExceptionFilter`, RVA `0x1258`. Native build, publication and execution remained `not_run` in every case. There is no native exit status or output for these ordinary C applications yet.
+All eight Debug and eight Release cases matched the pinned Wine expectations. On ARM64 macOS, every comparison then reported `LIFT_UNSUPPORTED_CONTROL_FLOW` at RVA `0x140c` in `__tmainCRTStartup`. The direct call reaches a linker thunk for **`msvcrt.dll!_amsg_exit`**. In the primary PE the thunk is at `0x26b0` in Debug and `0x2680` in Release, both jumping through IAT slot `0x8208`. A branch on CRT initialization state reaches `mov ecx, 31` at `0x1407`. Recovery requires a binding for this error path. All 16 reports record native build and execution as `not_run`.
+
+The missing behavior belongs to **Windows compatibility (MSVCRT)**. For a console application, `_amsg_exit(int)` reports the specified CRT error to stderr and terminates the process. The next focused task is to capture the legacy MSVCRT reference's bytes and exit status for error 31 and implement that terminal service. [Microsoft CRT contract](https://learn.microsoft.com/en-us/cpp/c-runtime-library/reference/amsg-exit)
 
 | Responsibility | Current result for the selected configuration |
 | --- | --- |
@@ -75,7 +79,7 @@ All eight Debug and eight Release cases matched the pinned Wine expectations. On
 | Deliver guest exceptions | The compiler reports validated entry scope, filter, handler import and continuation evidence. Running the filter on a guest exception requires the guest fault PC, exception context, guest stack unwinding and continuation. The current process fault result terminates the run. |
 | Print through stdio | `puts` remains a required external MSVCRT symbol in its own fixture. The primary fixture already imports `__iob_func`, `fprintf`, `fwrite` and `vfprintf` for CRT paths. These need Windows stream objects, the applicable guest calling conventions and exit-time flushing. |
 
-The smallest next exception-handling task is to preserve the faulting guest instruction RVA and enough guest register and stack state to expose the faulting context from a nested call. Test this independently before implementing guest filter entry, filter replacement and resumption. TLS initialization and CRT lifetime services remain separate prerequisites. Task 13.4 stays gated on all 16 native comparisons.
+Exception delivery would require preserving the faulting guest instruction, registers and stack across nested calls. TLS initialization and CRT lifetime services remain separate prerequisites. Task 13.4 stays gated on all 16 native comparisons.
 
 These commands inspect the exact primary input and attempt a native build from the repository root on Apple Silicon.
 
@@ -96,4 +100,12 @@ build/dev/forge lift build/dev/fixtures/Debug/executable-import-register.exe --e
     --diagnostics-format json --output build/dev/import-register
 build/dev/import-register
 test "$?" -eq 42
+```
+
+To reproduce the filter registration comparison on an ARM64 Mac with the pinned Wine image and the dev build, run the executable reference suite and the native executable tests. The native tests also cover rebasing and fault behavior.
+
+```sh
+make fixtures
+./tools/test-forge.sh --executable-reference
+ctest --test-dir build/dev -C Debug -R '^native_executable$' --output-on-failure
 ```

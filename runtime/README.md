@@ -10,6 +10,8 @@ The separate `forge_startup` archive supplies the native `main` for executables 
 
 Process artifacts can publish read-only function IAT slots containing stable guest addresses for imported services. Registration checks their backing and reserves their addresses for the process lifetime. [Imported function addresses](../docs/runtime-architecture.md#imported-function-addresses)
 
+A managed guest can set, replace, or clear its process-wide top-level exception filter and retrieve the previous guest address. A guest fault still terminates execution. [Top-level exception filter registration](../docs/runtime-architecture.md#top-level-exception-filter-registration)
+
 ## Build and test
 
 From the repository root on Apple Silicon, use CMake and the native C/C++ toolchain in a build directory separate from any Forge-managed preset.

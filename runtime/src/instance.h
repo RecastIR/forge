@@ -60,6 +60,7 @@ struct forge_rt_instance {
     uint64_t nextHeapAddress = 65536;
     std::vector<forge::runtime::Reservation> reservations;
     std::optional<forge::runtime::StandardHandles> standardHandles;
+    uint64_t topLevelExceptionFilter = 0;
     // Borrows the owning process's stable execution record until this instance is destroyed.
     // Only the owner admits and retires executions. Only the active guest thread can publish exit.
     forge_rt_execution *managedExecution = nullptr;

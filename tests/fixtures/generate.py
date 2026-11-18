@@ -20,7 +20,7 @@ def generate(output, mc, link, dlltool, clang):
         "MissingLeaf.dll": ["Leaf"],
         "KERNEL32.dll": ["Sleep", "SwitchToThread", "SetLastError", "GetLastError", "lstrlenA",
                          "GetStdHandle", "WriteFile", "ExitProcess", "GetCommandLineA", "GetCommandLineW",
-                         "__C_specific_handler"],
+                         "SetUnhandledExceptionFilter", "__C_specific_handler"],
         "vcruntime140.dll": ["Runtime"],
         "msvcrt.dll": ["__getmainargs", "calloc", "free", "strlen", "__C_specific_handler", "_fmode=entry DATA",
                        "_commode=entry DATA", "__initenv=entry DATA", "_acmdln=entry DATA"],
@@ -77,6 +77,10 @@ def generate(output, mc, link, dlltool, clang):
               [("KERNEL32.dll", name) for name in ("SetLastError", "GetLastError", "ExitProcess")])
         image("executable-import-register.exe", (sources / "executable-import-register.s").read_text(),
               [("KERNEL32.dll", name) for name in ("SetLastError", "GetLastError", "Sleep")])
+        filter_source = (sources / "executable-top-level-filter.s").read_text()
+        filter_imports = [("KERNEL32.dll", name) for name in ("SetUnhandledExceptionFilter", "ExitProcess")]
+        image("executable-top-level-filter.exe", filter_source, filter_imports)
+        image("executable-top-level-filter-fault.exe", "check_guest_fault = 1\n" + filter_source, filter_imports)
         image("executable-headers.exe", (sources / "executable-headers.s").read_text(),
               [("KERNEL32.dll", "lstrlenA")], link_flags=["/dynamicbase:no", "/fixed:no"])
         console_imports = [("KERNEL32.dll", name) for name in ("GetStdHandle", "WriteFile", "ExitProcess")]
