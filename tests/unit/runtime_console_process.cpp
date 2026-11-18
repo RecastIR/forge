@@ -8,6 +8,7 @@
 #include <iterator>
 #include <memory>
 #include <sys/resource.h>
+#include <sys/socket.h>
 #include <unistd.h>
 
 namespace {
@@ -358,6 +359,13 @@ namespace {
         REQUIRE(close(ends[1]) == 0);
     }
 
+    void checkClosedSocket() {
+        int ends[2];
+        REQUIRE(socketpair(AF_UNIX, SOCK_STREAM, 0, ends) == 0 && close(ends[0]) == 0);
+        checkSignalPolicy(ends[1], SIGPIPE, SIG_DFL, false, 109);
+        REQUIRE(close(ends[1]) == 0);
+    }
+
     void checkReadOnlyPipe() {
         int ends[2];
         REQUIRE(pipe(ends) == 0);
@@ -392,6 +400,7 @@ void testRuntimeConsoleProcess() {
     checkNoDescriptorBudget();
     checkCaptureExhaustion();
     checkReadOnlyPipe();
+    checkClosedSocket();
     checkPipePolicy(SIG_DFL, false, false);
     checkPipePolicy(SIG_IGN, false, false);
     checkPipePolicy(handleOutputSignal, false, true);

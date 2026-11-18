@@ -14,7 +14,9 @@ A managed guest can set, replace, or clear its process-wide top-level exception 
 
 ## Current source organization
 
-The public C ABI and shared C++ contracts live in `include/forge/`. The `forge_runtime` archive builds the process, thread and memory sources in `src/core/` and the services in `src/compat/win32/` and `src/compat/crt/`. The two service groups share `src/compat/string_scan.h`. The `forge_startup` archive builds only `src/startup.cpp`. The ownership table records where core depends on compatibility state and where Win32 still performs native I/O and waits. [Build definition](CMakeLists.txt) · [Runtime source ownership](../docs/runtime-architecture.md#runtime-source-ownership)
+The public C ABI and shared C++ contracts live in `include/forge/`. The `forge_runtime` archive builds the process, thread and memory sources in `src/core/` and the services in `src/compat/win32/` and `src/compat/crt/`. The two service groups share `src/compat/string_scan.h`. The `forge_startup` archive builds only `src/startup.cpp`. [Build definition](CMakeLists.txt)
+
+Each available standard-handle slot pairs a Win32 handle with a process-owned Darwin descriptor. The private I/O component in `src/platform/darwin/` owns the close-on-exec duplicate, checks the host’s output signal policy, and writes a host byte span. Win32 stages checked guest bytes, publishes the committed count, and translates native write errors. The source ownership table also records the native wait in `Sleep` and the compatibility state that core still holds. [Runtime source ownership](../docs/runtime-architecture.md#runtime-source-ownership)
 
 ## Build and test
 

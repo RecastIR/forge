@@ -3,12 +3,7 @@
 
 #include <algorithm>
 #include <array>
-#include <climits>
-#include <csignal>
-#include <fcntl.h>
-#include <sys/resource.h>
-#include <sys/socket.h>
-#include <unistd.h>
+#include <cerrno>
 
 using namespace forge::runtime;
 using namespace forge::win64;
@@ -57,57 +52,24 @@ namespace {
         return status;
     }
 
-    bool ignoresSignal(int signal) {
-        struct sigaction action{};
-        return ::sigaction(signal, nullptr, &action) == 0 && action.sa_handler == SIG_IGN;
-    }
-
-    bool outputSignalsSafe(const StandardStream &output, bool hostHandlesOutputSignals) {
-        if (hostHandlesOutputSignals) {
-            return true;
-        }
-
-        if (output.kind == StreamKind::RegularFile) {
-            struct rlimit limit{};
-            return ::getrlimit(RLIMIT_FSIZE, &limit) == 0 &&
-                   (limit.rlim_cur == RLIM_INFINITY || ignoresSignal(SIGXFSZ));
-        }
-
-        if (output.kind != StreamKind::Pipe && output.kind != StreamKind::OtherDevice) {
-            return true;
-        }
-
-#ifdef F_GETNOSIGPIPE
-        // The flag belongs to the shared open file description, even after dup. Only inspect it.
-        if (::fcntl(output.descriptor, F_GETNOSIGPIPE) == 1) {
-            return true;
-        }
-#endif
-
-        return ignoresSignal(SIGPIPE);
-    }
-
     struct Transfer {
         forge_rt_status status;
         uint32_t count = 0;
         uint32_t error = 0;
     };
 
-    Transfer transferOutput(const StandardStream &output, bool hostHandlesOutputSignals,
+    Transfer transferOutput(const darwin::Descriptor &output, bool hostHandlesOutputSignals,
                             const GuestBuffer<writeFile.arguments[1]> &input, uint32_t length) {
         if (!length) {
             return {FORGE_RT_OK};
         }
 
-        if (!outputSignalsSafe(output, hostHandlesOutputSignals)) {
+        if (!output.outputSignalsSafe(hostHandlesOutputSignals)) {
             return {FORGE_RT_HOST_CONFIGURATION};
         }
 
         std::array<uint8_t, 16384> storage;
-        // PIPE_BUF-sized requests cannot commit an unreported prefix if the reader closes.
-        const auto capacity = output.kind == StreamKind::Pipe
-                                  ? std::min(storage.size(), static_cast<size_t>(PIPE_BUF))
-                                  : storage.size();
+        const auto capacity = output.writeChunkSize(storage.size());
         uint32_t done = 0;
 
         while (done < length) {
@@ -118,13 +80,7 @@ namespace {
                 return {read, done};
             }
 
-            const auto progress = writeAll(chunk, [&](std::span<const uint8_t> bytes) {
-                if (output.kind == StreamKind::Socket) {
-                    return ::send(output.descriptor, bytes.data(), bytes.size(), MSG_NOSIGNAL);
-                }
-
-                return ::write(output.descriptor, bytes.data(), bytes.size());
-            });
+            const auto progress = output.write(chunk);
             done += static_cast<uint32_t>(progress.count);
 
             if (progress.error) {
@@ -226,11 +182,12 @@ extern "C" forge_rt_status forge_rt_write_file(forge_rt_instance *instance,
         return fail(errorInvalidHandle);
     }
 
-    if (!output->writable) {
+    if (output == streams.begin() || !output->descriptor->writable()) {
         return fail(errorAccessDenied);
     }
 
-    const auto transfer = transferOutput(*output, handles.hostHandlesOutputSignals, input, length);
+    const auto transfer =
+        transferOutput(*output->descriptor, handles.hostHandlesOutputSignals, input, length);
 
     if (transfer.status != FORGE_RT_OK) {
         return transfer.status;

@@ -1,4 +1,4 @@
-#include "../../runtime/src/compat/win32/standard_handles.h"
+#include "../../runtime/src/platform/darwin/io.h"
 #include <forge/process.h>
 
 #include <algorithm>
@@ -7,7 +7,9 @@
 #include <cstdio>
 #include <cstdlib>
 #include <fcntl.h>
+#include <optional>
 #include <unistd.h>
+#include <utility>
 #include <vector>
 
 namespace {
@@ -30,7 +32,7 @@ namespace {
         std::vector<uint8_t> observed;
         size_t call = 0;
         const auto progress =
-            forge::runtime::writeAll(source, [&](std::span<const uint8_t> remaining) {
+            forge::runtime::darwin::writeAll(source, [&](std::span<const uint8_t> remaining) {
                 if (call >= attempts.size() ||
                     remaining.size() != source.size() - observed.size()) {
                     std::abort();
@@ -54,6 +56,33 @@ namespace {
                        stderr);
             std::abort();
         }
+    }
+
+    void checkDescriptorOwnership() {
+        using namespace forge::runtime::darwin;
+        int ends[2];
+        REQUIRE(pipe(ends) == 0);
+        std::optional<Descriptor> owner;
+
+        {
+            std::optional<Descriptor> captured;
+            const auto result = Descriptor::capture(ends[1], captured);
+            REQUIRE(result.status == CaptureResult::Status::Captured && result.error == 0);
+            REQUIRE(captured && captured->kind() == StreamKind::Pipe &&
+                    captured->accessMode() == O_WRONLY);
+            owner.emplace(std::move(*captured));
+        }
+
+        const auto missing = Descriptor::capture(-1, owner);
+        REQUIRE(missing.status == CaptureResult::Status::Unavailable && missing.error == EBADF);
+        const int copy = owner->get();
+        REQUIRE(copy >= 3 && copy != ends[1]);
+        REQUIRE(fcntl(copy, F_GETFD) == FD_CLOEXEC);
+        owner.reset();
+        REQUIRE(fcntl(copy, F_GETFD) == -1 && errno == EBADF);
+        char byte;
+        REQUIRE(write(ends[1], "H", 1) == 1 && read(ends[0], &byte, 1) == 1 && byte == 'H');
+        REQUIRE(close(ends[1]) == 0 && close(ends[0]) == 0);
     }
 
     constexpr uint64_t sourceAddress = 0x2000;
@@ -155,6 +184,7 @@ namespace {
 } // namespace
 
 void testRuntimeWrite() {
+    checkDescriptorOwnership();
     constexpr std::array success{Attempt{-1, EINTR}, Attempt{2, 0}, Attempt{-1, EINTR},
                                  Attempt{3, 0}};
     constexpr std::array errorAfterPrefix{Attempt{1, 0}, Attempt{2, 0}, Attempt{-1, EPIPE}};

@@ -8,6 +8,7 @@ add_library(forge_runtime STATIC
   src/compat/win32/services.cpp
   src/compat/win32/console.cpp
   src/compat/win32/standard_handles.cpp
+  src/platform/darwin/io.cpp
   src/core/process.cpp
   src/compat/win32/process_parameters.cpp)
 target_include_directories(forge_runtime PUBLIC include)
