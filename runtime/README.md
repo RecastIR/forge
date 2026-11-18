@@ -6,11 +6,15 @@ Hosts using compiler-generated process artifacts can register the same artifact 
 
 Native C, C++ and generated ARM64 code share the same [public C ABI](include/forge/runtime.h). The runtime links independently of the Forge compiler, CLI and Wine.
 
-The separate `forge_startup` archive supplies the native `main` for executables linked by `forge lift --executable`. Existing C and C++ hosts link `forge_runtime` directly and supply their own entry. [Compile and run a native executable](../README.md#compile-and-run-a-native-executable)
+The separate `forge_startup` archive supplies the native `main` for executables linked by `forge lift --executable`. It forwards host startup inputs, calls the process ABI and reports the guest outcome. Existing C and C++ hosts link `forge_runtime` directly and supply their own entry. [Compile and run a native executable](../README.md#compile-and-run-a-native-executable)
 
 Process artifacts can publish read-only function IAT slots containing stable guest addresses for imported services. Registration checks their backing and reserves their addresses for the process lifetime. [Imported function addresses](../docs/runtime-architecture.md#imported-function-addresses)
 
 A managed guest can set, replace, or clear its process-wide top-level exception filter and retrieve the previous guest address. A guest fault still terminates execution. [Top-level exception filter registration](../docs/runtime-architecture.md#top-level-exception-filter-registration)
+
+## Current source organization
+
+The C ABI headers and shared C++ contracts live in `include/forge/`. All implementation files and private headers currently sit directly in `src/`. The build places `startup.cpp` in `forge_startup` and the process, memory, Win32, CRT and native operations in `forge_runtime`. The architecture guide maps each current file to its intended owner and describes the proposed R2 layout. [Build definition](CMakeLists.txt) · [Source ownership and proposed layout](../docs/runtime-architecture.md#current-source-ownership-and-proposed-layout)
 
 ## Build and test
 
@@ -22,7 +26,7 @@ cmake --build build/tmp/runtime-only
 ctest --test-dir build/tmp/runtime-only --output-on-failure
 ```
 
-This configuration produces `build/tmp/runtime-only/libforge_runtime.a`. For a manual build, compile C callers as C and use the native C++ linker driver to link their objects with the archive and the platform C++ runtime.
+This configuration produces `libforge_runtime.a` and `libforge_startup.a` in `build/tmp/runtime-only/`. For a manual embedding build, compile C callers as C and use the native C++ linker driver to link their objects with `libforge_runtime.a` and the platform C++ runtime.
 
 The full Apple Silicon development build requires the C and LLVM IR smoke tests. A compiler-only build includes the IR smoke when its selected LLVM installation provides matching LLVM 23 `opt` and ARM64-capable `llc` binaries. A runtime-only build accepts the same pair through `-DFORGE_RUNTIME_IR_TOOLS_DIR=/path/to/llvm/bin`. Both configurations run the native tests when the pair is unavailable. Configure the runtime-only build with `-DFORGE_ENABLE_SANITIZERS=ON` for sanitizer coverage.
 
