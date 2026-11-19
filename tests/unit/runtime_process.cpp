@@ -938,6 +938,71 @@ namespace {
         expectState(process.get(), FORGE_RT_PROCESS_FAULTED);
     }
 
+    void checkTerminationRegistry() {
+        static constexpr auto dispatch =
+            +[](forge_rt_execution *execution, uint64_t site, uint64_t target) noexcept {
+                REQUIRE(target == base + 14 && site == execution->rcx);
+                ++execution->rdx;
+            };
+
+        const auto artifact = artifactWith([](forge_rt_execution *execution) {
+            const auto instance = execution->instance;
+            const auto thread = execution->thread;
+            uint64_t out = 99;
+            REQUIRE(forge_rt_msvcrt_onexit(instance, thread, 0, &out, execution->rcx) ==
+                        FORGE_RT_OK &&
+                    !out);
+            if (execution->rcx == 1) {
+                REQUIRE(forge_rt_msvcrt_onexit(instance, thread, base + 14, &out, 1) ==
+                            FORGE_RT_OK &&
+                        out == base + 14);
+                execution->result = {FORGE_RT_RETURNED, FORGE_RT_OK, 1, {}, 0};
+                return;
+            }
+
+            // Exercise the guest-visible failure, then verify every successful registration.
+            unsigned accepted = 0;
+            do {
+                REQUIRE(forge_rt_msvcrt_onexit(instance, thread, base + 14, &out, execution->rcx) ==
+                        FORGE_RT_OK);
+                if (out) {
+                    REQUIRE(out == base + 14 && ++accepted <= 4096);
+                }
+            } while (out);
+            REQUIRE(accepted == 4096);
+            uint32_t lastError = 0;
+            REQUIRE(forge_rt_get_last_error(instance, thread, &lastError) == FORGE_RT_OK && lastError == 8);
+            uint64_t errnoAddress = 0;
+            forge_rt_invocation_token token = 0;
+            REQUIRE(forge_rt_current_invocation(instance, thread, &token) == FORGE_RT_OK);
+            REQUIRE(forge_rt_msvcrt_errno(instance, thread, &errnoAddress) == FORGE_RT_OK);
+            int32_t error = 0;
+            forge_rt_memory_fault detail{};
+            REQUIRE(forge_rt_read_guest(instance, thread, token, errnoAddress, sizeof(error), &error,
+                                        sizeof(error), &detail) == FORGE_RT_OK && error == 12);
+            REQUIRE(forge_rt_msvcrt_cexit(instance, thread, dispatch) == FORGE_RT_OK);
+            REQUIRE(execution->rdx == accepted && !execution->result.kind);
+            REQUIRE(forge_rt_msvcrt_exit(instance, thread, -2, dispatch) == FORGE_RT_OK);
+            REQUIRE(execution->rdx == accepted);
+            REQUIRE(forge_rt_msvcrt_onexit(instance, thread, base + 14, &out, 1) ==
+                    FORGE_RT_INVALID_STATE);
+        });
+
+        const auto first = create(), second = create();
+        for (auto *process : {first.get(), second.get()}) {
+            REQUIRE(forge_rt_process_register(process, &artifact) == FORGE_RT_OK);
+        }
+
+        forge_rt_process_result result{};
+        const forge_rt_entry_inputs one{1, 0}, two{2, 0};
+        REQUIRE(forge_rt_process_run(first.get(), &one, &result) == FORGE_RT_OK &&
+                result.value == 1);
+        REQUIRE(forge_rt_process_run(second.get(), &two, &result) == FORGE_RT_OK);
+        REQUIRE(result.kind == FORGE_RT_EXIT_PROCESS && result.value == UINT32_C(0xfffffffe));
+        REQUIRE(forge_rt_process_close(first.get()) == FORGE_RT_OK);
+        REQUIRE(forge_rt_process_close(second.get()) == FORGE_RT_OK);
+    }
+
     void checkFaultCleanup() {
         const auto artifact = artifactWith([](forge_rt_execution *execution) {
             if (execution->rcx) {
@@ -978,6 +1043,7 @@ void testRuntimeProcess() {
     checkIsolation();
     checkUnmanagedExceptionFilter();
     checkInitializerTable();
+    checkTerminationRegistry();
     checkExitProcess();
     checkInvalidExitCode();
     checkScalarBoundaries();

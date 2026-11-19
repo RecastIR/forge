@@ -126,9 +126,9 @@ namespace forge::x86 {
           public:
             FunctionAnalyzer(const RecoveredFunctionGroup &group, uint32_t rva,
                              const InstructionOperands &operands, ImageMemory &imageMemory,
-                             FunctionPlan &plan)
+                             FunctionPlan &plan, const std::vector<uint32_t> &terminationTargets)
                 : group(group), function(group.function(rva)), rva(rva), operands(operands),
-                  imageMemory(imageMemory), plan(plan) {}
+                  imageMemory(imageMemory), plan(plan), terminationTargets(terminationTargets) {}
 
             void summarizeFunction(FunctionFlow &flow);
             void analyzeAddresses(CallAddresses &calls);
@@ -144,6 +144,7 @@ namespace forge::x86 {
             const InstructionOperands &operands;
             ImageMemory &imageMemory;
             FunctionPlan &plan;
+            const std::vector<uint32_t> &terminationTargets;
             AddressFact entryAddresses;
             std::map<uint32_t, AddressFacts> blockAddresses;
 
@@ -250,7 +251,7 @@ namespace forge::x86 {
         void FunctionAnalyzer::planMemoryAccess(const Step &s, unsigned width, bool write,
                                                 const AddressOperand &operand,
                                                 const AddressFact &address) {
-            if (function.initializerSource && address.frameOffset()) {
+            if (function.callbackSource && address.frameOffset()) {
                 const auto offset = std::bit_cast<int64_t>(*address.frameOffset());
                 if (offset > int64_t{GuestMemory::initializerHomeEnd} - width / 8) {
                     s.reject(FailureCode::UnsupportedControlFlow,
@@ -539,8 +540,14 @@ namespace forge::x86 {
             if (site.external()) {
                 traceServiceArguments(site, facts, collect);
 
-                if (const auto &table = site.external()->initializers;
-                    table && !table->targets.empty()) {
+                std::span<const uint32_t> targets;
+                if (const auto &table = site.external()->initializers) {
+                    targets = table->targets;
+                } else if (site.external()->binding.callback == win64::Callback::Cleanup) {
+                    targets = terminationTargets;
+                }
+
+                if (!targets.empty()) {
                     if (!collect) {
                         // Relative to the guest caller's pre-CALL RSP, the imported
                         // CALL and native callback frame both consume stack space.
@@ -548,7 +555,7 @@ namespace forge::x86 {
                                              .project(entryAddresses)
                                              .plus(AddressFact(uint64_t(0) - 8 -
                                                                GuestMemory::initializerFrameSize));
-                        for (auto target : table->targets) {
+                        for (auto target : targets) {
                             calls.enter(target, {rsp, {}});
                         }
                     }
@@ -686,7 +693,7 @@ namespace forge::x86 {
                 auto &registers = blockAddresses[rva].registers;
                 const auto &arguments = state.entry.arguments;
                 std::copy(arguments.begin(), arguments.end(), registers.begin() + 1);
-                registers[rspIndex] = incoming.empty() && !function.initializerSource
+                registers[rspIndex] = incoming.empty() && !function.callbackSource
                                           ? AddressFact(GuestMemory::entryRsp, AddressFact::Stack)
                                           : AddressFact::frameStack();
             }
@@ -868,16 +875,37 @@ namespace forge::x86 {
         const InstructionOperands operands(group.registers(), guestBase);
         std::map<uint32_t, FunctionAnalyzer> analyzers;
 
+        std::set<uint32_t> retainedTargets;
+        for (const auto &[address, function] : group.functions()) {
+            for (const auto &[instruction, call] : function.calls) {
+                const auto *service = call.external();
+                if (service && service->binding.callback == win64::Callback::Cleanup) {
+                    result.usesTermination = true;
+                }
+
+                if (service && service->registration) {
+                    result.usesTermination = true;
+                    for (const auto &[origin, target] : service->registration->targets) {
+                        if (target) {
+                            retainedTargets.insert(target);
+                        }
+                    }
+                }
+            }
+        }
+        const std::vector<uint32_t> terminationTargets(retainedTargets.begin(),
+                                                       retainedTargets.end());
+
         for (const auto &[address, function] : group.functions()) {
             auto &analyzer = analyzers
                                  .try_emplace(address, group, address, operands, image,
-                                              result.functions[address])
+                                              result.functions[address], terminationTargets)
                                  .first->second;
             analyzer.summarizeFunction(result.flows[address]);
             result.stack |= analyzer.accessesMemory;
             result.origins |= analyzer.tracksOrigins;
             result.setsDirection |= analyzer.setsDirection;
-            result.hasInitializers |= function.initializerSource != nullptr;
+            result.hasGuestCallbacks |= function.callbackSource != nullptr;
         }
 
         proveCallFlow(group, result.flows, {entryRegisterDefinitions(mode), {}});

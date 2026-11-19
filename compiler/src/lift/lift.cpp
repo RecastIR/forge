@@ -38,16 +38,80 @@ namespace forge {
         using BlockStates = std::map<uint32_t, BlockState>;
         using GuestBodies = std::map<uint32_t, Function *>;
 
+        struct TerminationDispatch {
+            Function *lookup = nullptr;
+            Function *invoke = nullptr;
+        };
+
+        TerminationDispatch emitTerminationDispatch(llvm::Module &module,
+                                                    const x86::RecoveredFunctionGroup &group,
+                                                    const GuestBodies &thunks,
+                                                    const x86::ContextLayout &layout,
+                                                    uint64_t base) {
+            IRBuilder<> ir(module.getContext());
+            auto *lookupType =
+                FunctionType::get(ir.getPtrTy(), {ir.getInt64Ty(), ir.getInt64Ty()}, false);
+            auto *lookup = Function::Create(lookupType, Function::InternalLinkage,
+                                            "forge_termination_lookup", module);
+            auto *entry = BasicBlock::Create(module.getContext(), "entry", lookup);
+            auto *absent = BasicBlock::Create(module.getContext(), "unknown.site", lookup);
+            ir.SetInsertPoint(entry);
+            auto *sites = ir.CreateSwitch(lookup->getArg(0), absent);
+            auto *null = ConstantPointerNull::get(ir.getPtrTy());
+            ir.SetInsertPoint(absent);
+            ir.CreateRet(null);
+
+            for (const auto &[rva, function] : group.functions()) {
+                for (const auto &[instruction, call] : function.calls) {
+                    const auto *service = call.external();
+                    if (!service || !service->registration) {
+                        continue;
+                    }
+
+                    for (const auto &[origin, target] : service->registration->targets) {
+                        if (!target) {
+                            continue;
+                        }
+
+                        auto *block =
+                            BasicBlock::Create(module.getContext(), "registration", lookup);
+                        sites->addCase(ir.getInt64((uint64_t{origin} << 32) | instruction), block);
+                        ir.SetInsertPoint(block);
+                        auto *match =
+                            ir.CreateICmpEQ(lookup->getArg(1), ir.getInt64(base + target));
+                        ir.CreateRet(ir.CreateSelect(match, thunks.at(target), null));
+                    }
+                }
+            }
+
+            auto *type = FunctionType::get(
+                ir.getVoidTy(), {ir.getPtrTy(), ir.getInt64Ty(), ir.getInt64Ty()}, false);
+            auto *invoke = Function::Create(type, Function::InternalLinkage,
+                                            "forge_termination_dispatch", module);
+            ir.SetInsertPoint(BasicBlock::Create(module.getContext(), "entry", invoke));
+            auto *thunk = ir.CreateCall(lookup, {invoke->getArg(1), invoke->getArg(2)});
+            const x86::ContextView view(ir, layout, invoke->getArg(0));
+            x86::ExecutionChecks checks(ir);
+            checks.bind(view.result);
+            checks.requireSupported(ir.CreateIsNotNull(thunk),
+                                    FORGE_RT_UNSUPPORTED_TERMINATION_TARGET);
+            // The lookup returns exclusively translated thunks from this module.
+            ir.CreateCall(FunctionType::get(ir.getVoidTy(), ir.getPtrTy(), false), thunk,
+                          invoke->getArg(0));
+            ir.CreateRetVoid();
+            return {lookup, invoke};
+        }
+
         class Translator {
           public:
             Translator(uint32_t rva, const x86::RecoveredFunction &function,
                        const x86::GroupAnalysis &analysis, const GuestBodies &bodies,
                        const GuestBodies &initializers, const x86::InstructionOperands &operands,
-                       const x86::ContextLayout &layout)
+                       const x86::ContextLayout &layout, TerminationDispatch termination)
                 : impl(bodies.at(rva)), ir(impl->getContext()), semantics(ir), memory(ir),
                   function(function), analysis(analysis), bodies(bodies),
                   initializers(initializers), plan(analysis.functions.at(rva)), operands(operands),
-                  flow(analysis.flows.at(rva)), layout(layout) {}
+                  flow(analysis.flows.at(rva)), layout(layout), termination(termination) {}
 
             void translate(Function *resolver, bool typedRoot);
 
@@ -64,6 +128,7 @@ namespace forge {
             const x86::InstructionOperands &operands;
             const x86::FunctionFlow &flow;
             const x86::ContextLayout &layout;
+            TerminationDispatch termination;
             bool tracksOrigins = false;
             bool requiresFullReturn = false;
             x86::ContextView context;
@@ -576,6 +641,20 @@ namespace forge {
                 memory.checks.requireSupported(ir.CreateAnd(sameFirst, sameLast),
                                                FORGE_RT_UNSUPPORTED_INITIALIZER_RANGE);
                 arguments.push_back(initializerDispatcher(s, *table));
+            } else if (const auto &proof = external.registration) {
+                Value *site = ir.getInt64(s.rva);
+                if (proof->forwarded) {
+                    site = ir.CreateOr(
+                        site, ir.CreateShl(impl->getArg(analysis.hasGuestCallbacks ? 2 : 1), 32));
+                }
+                auto *target = arguments[2];
+                auto *thunk = ir.CreateCall(termination.lookup, {site, target});
+                memory.checks.requireSupported(
+                    ir.CreateOr(ir.CreateIsNull(target), ir.CreateIsNotNull(thunk)),
+                    FORGE_RT_UNSUPPORTED_TERMINATION_TARGET);
+                arguments.push_back(site);
+            } else if (binding.callback == win64::Callback::Cleanup) {
+                arguments.push_back(termination.invoke);
             }
 
             SmallVector<Type *, 5> types;
@@ -586,7 +665,7 @@ namespace forge {
             auto *type = FunctionType::get(ir.getInt32Ty(), types, false);
             auto service = impl->getParent()->getOrInsertFunction(binding.nativeSymbol, type);
             auto *status = ir.CreateCall(service, arguments);
-            if (external.initializers) {
+            if (external.initializers || binding.callback == win64::Callback::Cleanup) {
                 // A successful native adapter can return because a nested guest call
                 // has already published a fault or exit. Its result wins unchanged.
                 memory.checks.propagatePending();
@@ -636,8 +715,11 @@ namespace forge {
 
                 storeFlags();
                 SmallVector<Value *, 2> bodyArgs{impl->getArg(0)};
-                if (analysis.hasInitializers) {
+                if (analysis.hasGuestCallbacks) {
                     bodyArgs.push_back(impl->getArg(1));
+                }
+                if (bodies.at(target)->arg_size() > bodyArgs.size()) {
+                    bodyArgs.push_back(ir.getInt64(s.rva));
                 }
                 auto *returned = ir.CreateCall(bodies.at(target), bodyArgs);
                 if (s.flow != x86::Flow::TerminalCall) {
@@ -800,7 +882,7 @@ namespace forge {
             ir.SetInsertPoint(entry);
             context = x86::ContextView(ir, layout, impl->getArg(0));
             memory.bind(context.bytes, context.validity, resolver, context.regions,
-                        analysis.hasInitializers ? impl->getArg(1) : nullptr);
+                        analysis.hasGuestCallbacks ? impl->getArg(1) : nullptr);
             memory.checks.bind(context.result);
             entryRsp = loadView(slot(x86::rspIndex), stackPointer);
 
@@ -889,16 +971,19 @@ namespace forge {
             const bool process = request.output == LiftOutput::ProcessArtifact;
             auto *returns = process ? Type::getInt1Ty(context) : Type::getVoidTy(context);
             SmallVector<Type *, 2> parameters{PointerType::getUnqual(context)};
-            if (analysis.hasInitializers) {
+            if (analysis.hasGuestCallbacks) {
                 parameters.push_back(Type::getInt64Ty(context));
             }
-            auto *type = FunctionType::get(returns, parameters, false);
-
             for (const auto &[rva, function] : group.functions()) {
+                auto bodyParameters = parameters;
+                if (function.receivesRegistrationOrigin) {
+                    bodyParameters.push_back(Type::getInt64Ty(context));
+                }
+                auto *type = FunctionType::get(returns, bodyParameters, false);
                 auto *body = Function::Create(type, Function::InternalLinkage,
                                               "forge_guest_" + utohexstr(rva, true), *module);
                 body->getArg(0)->setName("context");
-                if (analysis.hasInitializers) {
+                if (analysis.hasGuestCallbacks) {
                     body->getArg(1)->setName("stack.ceiling");
                 }
                 bodies.emplace(rva, body);
@@ -915,18 +1000,23 @@ namespace forge {
                                                 modified, request.checkedMemory);
             GuestBodies initializers;
             for (const auto &[rva, function] : group.functions()) {
-                if (function.initializerSource) {
+                if (function.callbackSource) {
                     initializers.emplace(
                         rva, x86::emitInitializerThunk(*bodies.at(rva), layout,
                                                        analysis.functions.at(rva).modified));
                 }
             }
 
+            TerminationDispatch termination;
+            if (analysis.usesTermination) {
+                termination = emitTerminationDispatch(*module, group, initializers, layout,
+                                                      analysis.image.guestBase());
+            }
             const x86::InstructionOperands operands{group.registers(), analysis.image.guestBase()};
 
             for (const auto &[rva, function] : group.functions()) {
                 Translator translator(rva, function, analysis, bodies, initializers, operands,
-                                      layout);
+                                      layout, termination);
                 translator.translate(resolver,
                                      rva == root && request.mode != EntryMode::RegisterState);
             }

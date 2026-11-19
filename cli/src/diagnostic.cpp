@@ -23,6 +23,10 @@ namespace forge {
         if (site && error.context.initializerTargetRva) {
             err << " (initializer " << hex(*error.context.initializerTargetRva) << " from call at "
                 << hex(site->instruction) << " in " << hex(site->caller) << ")";
+        } else if (site && error.context.terminationTargetRva) {
+            err << " (termination callback " << hex(*error.context.terminationTargetRva)
+                << " from registration at " << hex(site->instruction) << " in " << hex(site->caller)
+                << ")";
         } else if (site && callee) {
             err << " (function " << hex(*callee) << " reached from call at "
                 << hex(site->instruction) << " in " << hex(site->caller) << ")";
@@ -51,6 +55,10 @@ namespace forge {
 
             if (context.initializerTargetRva) {
                 fields["initializer_target_rva"] = hex(*context.initializerTargetRva);
+            }
+
+            if (context.terminationTargetRva) {
+                fields["termination_target_rva"] = hex(*context.terminationTargetRva);
             }
 
             if (context.branchTarget) {

@@ -173,7 +173,7 @@ namespace forge::x86 {
         Definitions initializer{};
         initializer.registers[rspIndex] = UINT64_MAX;
         for (const auto &[address, function] : group.functions()) {
-            if (function.initializerSource) {
+            if (function.callbackSource) {
                 flows.at(address).entry.intersect(initializer);
             }
         }

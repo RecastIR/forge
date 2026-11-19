@@ -306,7 +306,7 @@ namespace forge::x86 {
                 recovery.recover(rva, *call);
             } catch (InspectionError &error) {
                 if (call->external()) {
-                    call->annotateInitializerFailure(error.context, rva);
+                    call->annotateCallbackFailure(error.context, rva);
                 }
                 throw;
             }

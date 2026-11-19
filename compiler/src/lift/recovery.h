@@ -51,11 +51,19 @@ namespace forge::x86 {
         std::vector<uint32_t> targets;
     };
 
+    struct TerminationRegistration {
+        // A zero origin denotes a locally proved argument. Forwarded RCX keeps a separate
+        // proof for each direct caller instruction. A zero target denotes a literal NULL.
+        bool forwarded = false;
+        std::map<uint32_t, uint32_t> targets;
+    };
+
     struct ExternalCallTarget {
         uint32_t slot;
         const Import &descriptor;
         const win64::ServiceBinding &binding;
         std::optional<InitializerTable> initializers = {};
+        std::optional<TerminationRegistration> registration = {};
     };
 
     const win64::ServiceBinding *findService(std::span<const win64::ServiceBinding> services,
@@ -66,7 +74,7 @@ namespace forge::x86 {
         uint32_t caller, block, instruction, continuation;
         std::variant<GuestCallTarget, ExternalCallTarget> target;
 
-        void annotateInitializerFailure(FailureContext &context, uint32_t targetRva) const;
+        void annotateCallbackFailure(FailureContext &context, uint32_t targetRva) const;
 
         const GuestCallTarget &guest() const { return std::get<GuestCallTarget>(target); }
 
@@ -89,8 +97,10 @@ namespace forge::x86 {
 
         const uint32_t entry;
         const RecoveryOrigin origin;
-        // Borrows the first admitting initializer call in a group-owned caller.
-        const ResolvedCallSite *initializerSource = nullptr;
+        // Borrows the first admitting callback registration or initializer call in a group-owned
+        // caller.
+        const ResolvedCallSite *callbackSource = nullptr;
+        bool receivesRegistrationOrigin = false;
         // For an inferred leaf this is the bounded decode window. Only graph steps claim bytes.
         MappedRange code;
         ControlFlowGraph graph;

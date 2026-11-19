@@ -6,8 +6,23 @@
 
 #include <array>
 #include <optional>
+#include <vector>
 
 namespace forge::runtime {
+    struct TerminationRegistry {
+        struct Handler {
+            uint64_t site, target;
+        };
+
+        static constexpr size_t limit = 4096;
+
+        static constexpr unsigned maxDepth = 16;
+        unsigned depth = 0;
+        size_t dispatched = 0;
+        bool completed = false;
+        std::vector<Handler> entries;
+    };
+
     // Owned at a stable address by the managed occurrence. Its core reservations borrow
     // the combined parameter mapping until registration rollback or process close.
     struct WindowsProcessState {
@@ -18,6 +33,7 @@ namespace forge::runtime {
         std::optional<CrtParameters> crt;
         int32_t crtErrno = 0;
         size_t heapUsage = 0;
+        TerminationRegistry termination;
 
         static constexpr size_t errnoRow = 2, narrowCommandRow = 3, wideCommandRow = 4;
         std::array<forge_rt_image_region, 6 + StartupInfo::maxRows> rows{};

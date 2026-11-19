@@ -36,7 +36,7 @@ namespace forge {
         std::optional<uint32_t> entryRva, endRva, instructionRva, blockRva, functionRva;
         // Source call evidence for an inferred leaf or a table-discovered initializer.
         std::optional<CallLocation> sourceCall;
-        std::optional<uint32_t> initializerTargetRva;
+        std::optional<uint32_t> initializerTargetRva, terminationTargetRva;
         std::optional<int64_t> branchTarget;
         std::optional<uint32_t> importSlot;
         std::optional<ImportOwnershipFailure> importOwnership;

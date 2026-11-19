@@ -57,26 +57,27 @@ class NativeDifferentialTests(unittest.TestCase):
                 self.assertFalse(os.path.lexists(work / "translated"))
                 record = report["compiler_diagnostic"]
                 self.assertEqual((record["stage"], record["category"], record["code"]),
-                                 ("lifting", "unsupported", "LIFT_UNSUPPORTED_CONTROL_FLOW"))
+                                 ("lifting", "unsupported", "LIFT_UNSUPPORTED_PREFIX"))
                 context = record["context"]
                 self.assertIs(context["entry_recovered"], True)
                 self.assertIs(context["recovery_complete"], False)
                 self.assertEqual((context["entry_rva"], context["function_rva"], context["instruction_rva"],
                                   context["opcode"], context["bytes"]),
-                                 ("0x14d0", "0x1180", "0x1460", "CALL64pcrel32",
-                                  "e853120000" if config == "debug" else "e823120000"))
+                                 ("0x14d0", "0x1010", "0x1044", "CMP16mi", "6681384d5a"))
                 self.assertEqual((context["import_dll"], context["import_symbol"], context["iat_slot_rva"]),
-                                 ("msvcrt.dll", "_cexit", "0x8210"))
+                                 ("msvcrt.dll", "_initterm", "0x8228"))
                 self.assertIn({"caller_rva": "0x1180", "instruction_rva": "0x142a",
                                "first_rva": "0x9000", "last_rva": "0x9010",
                                "initial_target_rvas": ["0x1130"]}, context["initializer_tables"])
                 unresolved = context["unresolved_calls"]
-                self.assertIn({"caller_rva": "0x1180", "instruction_rva": "0x1460",
-                               "target_rva": "0x26b8" if config == "debug" else "0x2688"}, unresolved)
+                self.assertIn({"caller_rva": "0x1180", "instruction_rva": "0x1494", "target_rva": "0x1010"},
+                              unresolved)
                 for dll, symbol, site in (("kernel32.dll", "GetStartupInfoA", "0x1453"),
                                           ("kernel32.dll", "Sleep", "0x11e6"),
                                           ("kernel32.dll", "SetUnhandledExceptionFilter", "0x1258"),
                                           ("msvcrt.dll", "_amsg_exit", "0x140c"),
+                                          ("msvcrt.dll", "_cexit", "0x1460"),
+                                          ("msvcrt.dll", "exit", "0x14a8"),
                                           ("msvcrt.dll", "_initterm", "0x142a")):
                     self.assertIn({"dll": dll, "name": symbol}, context["imports"])
                     self.assertNotIn(site, [c["instruction_rva"] for c in unresolved])
@@ -122,7 +123,7 @@ class NativeDifferentialTests(unittest.TestCase):
 
         original = (diff.BINARIES / "debug/crt_argc.exe").read_bytes()
         # Isolate each original argument sequence, import call and table. The startup
-        # comparison above uses the untouched PE and stops before the second call site.
+        # comparison above uses the untouched PE and reaches the second table’s initializer.
         with tempfile.TemporaryDirectory(dir=self.tmp) as tmp:
             pe, output = Path(tmp) / "probe.exe", Path(tmp) / "translated"
             for start, site, slot in ((0x141c, 0x142a, 0x9008), (0x1480, 0x1494, 0x9020)):

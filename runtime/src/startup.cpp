@@ -54,10 +54,16 @@ namespace {
                            stderr);
             } else if (result.status == FORGE_RT_UNSUPPORTED_INITIALIZER_TARGET) {
                 std::fputs("forge: unsupported MSVCRT initializer target\n", stderr);
+            } else if (result.status == FORGE_RT_UNSUPPORTED_TERMINATION_TARGET) {
+                std::fputs("forge: unproven MSVCRT termination callback for registration site\n",
+                           stderr);
+            } else if (result.status == FORGE_RT_UNSUPPORTED_TERMINATION_REENTRY) {
+                std::fputs("forge: unsupported recursive MSVCRT cleanup or handler limit\n",
+                           stderr);
             } else if (result.status == FORGE_RT_UNSUPPORTED_INITIALIZER_RANGE) {
                 std::fputs("forge: unsupported MSVCRT initializer table range\n", stderr);
             } else if (result.status == FORGE_RT_UNSUPPORTED_CALLBACK_ARGUMENT) {
-                std::fputs("forge: unsupported guest access above the initializer home space\n",
+                std::fputs("forge: unsupported guest access above the callback home space\n",
                            stderr);
             } else {
                 std::fputs("forge: unsupported guest execution\n", stderr);

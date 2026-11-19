@@ -209,7 +209,7 @@ namespace forge::x86 {
             std::map<uint32_t, FunctionDiscovery> staging;
             std::set<uint32_t> ready, leafCandidates;
             std::set<uint32_t> publishedReturns;
-            std::map<uint32_t, const ResolvedCallSite *> initializerSources;
+            std::map<uint32_t, const ResolvedCallSite *> callbackSources;
             const InstructionOperands operands;
             RecoveryMode mode;
             std::optional<std::vector<RvaRange>> loaderWrites;
@@ -238,10 +238,13 @@ namespace forge::x86 {
             void publishImport(RecoveredFunction &caller, const GuestBlock &block, const Step &step,
                                const ExternalCallTarget &service,
                                InitializerRecovery &initializers);
-            void admitInitializer(const ResolvedCallSite &site, const Step &step, uint32_t rva);
+            void admitCallback(const ResolvedCallSite &site, const Step &step, uint32_t rva);
             void scanCalls(RecoveredFunction &caller, const GuestBlock &block,
                            const CallResolutions &resolutions, InitializerRecovery &initializers);
             Flow importFlow(uint32_t rva, FunctionDiscovery &caller, const Step &step);
+            std::vector<ResolvedCallSite *> forwardedRegistrations;
+
+            void resolveForwardedRegistrations();
             void run();
         };
 
@@ -465,24 +468,46 @@ namespace forge::x86 {
                                            const Step &step, const ExternalCallTarget &service,
                                            InitializerRecovery &initializers) try {
             auto imported = service;
-            if (imported.binding.callback == win64::Callback::Initializer) {
-                if (!pointerInitialization) {
-                    pointerInitialization = entry.analysis.image().imageInitialization();
-                }
+            const auto callback = imported.binding.callback;
+            if (!pointerInitialization && (callback == win64::Callback::Initializer ||
+                                           callback == win64::Callback::Registration)) {
+                pointerInitialization = entry.analysis.image().imageInitialization();
+            }
+
+            if (callback == win64::Callback::Initializer) {
                 imported.initializers = recoverInitializerTable(
                     caller, block, step, imported.binding, entry.analysis.image(),
                     *pointerInitialization, instructions, regs, initializers);
             }
 
+            if (callback == win64::Callback::Registration) {
+                auto &proof = imported.registration.emplace();
+                if (const auto target =
+                        terminationTarget(caller, block, step, entry.analysis.image(),
+                                          *pointerInitialization, instructions, regs)) {
+                    proof.targets.emplace(0, *target);
+                } else {
+                    proof.forwarded = true;
+                    caller.receivesRegistrationOrigin = true;
+                }
+            }
+
             const auto leader = block.steps.front().rva;
-            const auto &site =
-                caller.calls
-                    .emplace(step.rva, ResolvedCallSite{caller.entry, leader, step.rva, step.next,
-                                                        std::move(imported)})
-                    .first->second;
+            auto &site = caller.calls
+                             .emplace(step.rva, ResolvedCallSite{caller.entry, leader, step.rva,
+                                                                 step.next, std::move(imported)})
+                             .first->second;
+            if (const auto &proof = site.external()->registration) {
+                if (proof->forwarded) {
+                    forwardedRegistrations.push_back(&site);
+                } else if (const auto target = proof->targets.at(0)) {
+                    admitCallback(site, step, target);
+                }
+            }
+
             if (site.external()->initializers) {
                 for (const auto rva : site.external()->initializers->targets) {
-                    admitInitializer(site, step, rva);
+                    admitCallback(site, step, rva);
                 }
             }
         } catch (InspectionError &error) {
@@ -495,15 +520,17 @@ namespace forge::x86 {
             throw;
         }
 
-        void GroupDiscovery::admitInitializer(const ResolvedCallSite &site, const Step &step,
-                                              uint32_t rva) try {
+        void GroupDiscovery::admitCallback(const ResolvedCallSite &site, const Step &step,
+                                           uint32_t rva) try {
             const auto *section = entry.analysis.image().sectionAtRva(rva);
             if (!section || section->permissions[2] != 'x' || !section->immutable()) {
                 step.reject(FailureCode::InvalidCallTarget,
-                            "initializer target requires immutable executable bytes");
+                            site.external()->registration
+                                ? "termination callback requires immutable executable bytes"
+                                : "initializer target requires immutable executable bytes");
             }
 
-            if (!initializerSources.try_emplace(rva, &site).second || functions.contains(rva)) {
+            if (!callbackSources.try_emplace(rva, &site).second || functions.contains(rva)) {
                 return;
             }
 
@@ -521,7 +548,7 @@ namespace forge::x86 {
                 pending.insert(rva);
             }
         } catch (InspectionError &error) {
-            site.annotateInitializerFailure(error.context, rva);
+            site.annotateCallbackFailure(error.context, rva);
             throw;
         }
 
@@ -709,7 +736,7 @@ namespace forge::x86 {
 
                     const auto &service = std::get<ExternalCallTarget>(resolution);
                     if (mode == RecoveryMode::FunctionLift &&
-                        service.binding.callback == win64::Callback::Initializer) {
+                        service.binding.callback != win64::Callback::None) {
                         // A direct CALL encodes the thunk RVA. Only the memory CALL
                         // has an IAT slot as its own operand in a function diagnostic.
                         const auto slot =
@@ -769,6 +796,51 @@ namespace forge::x86 {
             throw;
         }
 
+        void GroupDiscovery::resolveForwardedRegistrations() {
+            if (forwardedRegistrations.empty()) {
+                return;
+            }
+
+            std::map<uint32_t, std::vector<const ResolvedCallSite *>> callers;
+            for (const auto &[rva, function] : functions) {
+                for (const auto &[address, call] : function.calls) {
+                    if (!call.external()) {
+                        callers[call.guest().rva].push_back(&call);
+                    }
+                }
+            }
+
+            for (auto *site : forwardedRegistrations) {
+                auto &proof = *std::get<ExternalCallTarget>(site->target).registration;
+                for (const auto *incoming : callers[site->caller]) {
+                    if (proof.targets.contains(incoming->instruction)) {
+                        continue;
+                    }
+
+                    const auto &caller = functions.at(incoming->caller);
+                    const auto &step = *caller.instructionContaining(incoming->instruction);
+                    if (incoming->guest().kind != CallKind::Direct ||
+                        proof.targets.size() >= 4096) {
+                        step.reject(FailureCode::UnsupportedControlFlow,
+                                    "unsupported CRT registration wrapper origin");
+                    }
+
+                    const auto target = terminationTarget(
+                        caller, caller.graph.at(incoming->block), step, entry.analysis.image(),
+                        *pointerInitialization, instructions, regs);
+                    if (!target) {
+                        step.reject(FailureCode::UnsupportedControlFlow,
+                                    "unproven callback at caller of CRT registration wrapper");
+                    }
+
+                    proof.targets.emplace(incoming->instruction, *target);
+                    if (*target) {
+                        admitCallback(*site, step, *target);
+                    }
+                }
+            }
+        }
+
         void GroupDiscovery::run() {
             stage(entry.rva, entry.code);
             pending.insert(entry.rva);
@@ -807,11 +879,24 @@ namespace forge::x86 {
                         error.context.functionRva = rva;
                     }
 
-                    const auto source = initializerSources.find(rva);
-                    if (!error.context.sourceCall && source != initializerSources.end()) {
-                        source->second->annotateInitializerFailure(error.context, rva);
+                    const auto source = callbackSources.find(rva);
+                    if (!error.context.sourceCall && source != callbackSources.end()) {
+                        source->second->annotateCallbackFailure(error.context, rva);
                     }
                     throw;
+                }
+                if (pending.empty()) {
+                    resolveForwardedRegistrations();
+                }
+            }
+
+            for (const auto *site : forwardedRegistrations) {
+                if (site->caller == entry.rva || callbackSources.contains(site->caller) ||
+                    site->external()->registration->targets.empty()) {
+                    functions.at(site->caller)
+                        .instructionContaining(site->instruction)
+                        ->reject(FailureCode::UnsupportedControlFlow,
+                                 "CRT registration wrapper requires a proven direct guest caller");
                 }
             }
 
@@ -824,8 +909,8 @@ namespace forge::x86 {
                               loaderWrittenRanges(), dis, instructions, regs);
             }
 
-            for (const auto &[rva, site] : initializerSources) {
-                functions.at(rva).initializerSource = site;
+            for (const auto &[rva, site] : callbackSources) {
+                functions.at(rva).callbackSource = site;
             }
 
             // Incoming indices follow source order even when discovery began at a higher RVA.
@@ -839,9 +924,14 @@ namespace forge::x86 {
         }
     } // namespace
 
-    void ResolvedCallSite::annotateInitializerFailure(FailureContext &context,
-                                                      uint32_t targetRva) const {
-        context.initializerTargetRva = targetRva;
+    void ResolvedCallSite::annotateCallbackFailure(FailureContext &context,
+                                                   uint32_t targetRva) const {
+        if (external()->registration) {
+            context.terminationTargetRva = targetRva;
+        } else {
+            context.initializerTargetRva = targetRva;
+        }
+
         context.sourceCall = CallLocation{caller, instruction};
 
         if (!context.importSlot) {
@@ -1043,8 +1133,8 @@ namespace forge::x86 {
 
             failure.context.functionRva = rva;
 
-            if (const auto *sourceSite = owner.initializerSource) {
-                sourceSite->annotateInitializerFailure(failure.context, rva);
+            if (const auto *sourceSite = owner.callbackSource) {
+                sourceSite->annotateCallbackFailure(failure.context, rva);
             } else if (owner.origin == RecoveryOrigin::InferredLeaf && !owner.incoming.empty()) {
                 const auto &site = *owner.incoming.front();
                 failure.context.sourceCall = CallLocation{site.caller, site.instruction};

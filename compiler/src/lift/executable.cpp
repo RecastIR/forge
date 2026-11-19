@@ -38,7 +38,9 @@ namespace forge::x86 {
                 if (context.instructionRva == source.instruction ||
                     !llvm::StringRef(context.opcode).starts_with("CALL")) {
                     return ExecutableUnresolvedCall{source.caller, source.instruction,
-                                                    context.initializerTargetRva};
+                                                    context.terminationTargetRva
+                                                        ? context.terminationTargetRva
+                                                        : context.initializerTargetRva};
                 }
             }
 

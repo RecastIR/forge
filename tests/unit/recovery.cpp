@@ -524,11 +524,10 @@ namespace {
         bool nestedLeaf = false;
         for (const auto &[rva, function] : group.functions()) {
             const auto origin = initializers.find(rva);
-            check(function.initializerSource ==
+            check(function.callbackSource ==
                       (origin == initializers.end() ? nullptr : origin->second),
                   "initializer origin differs from its first admitting table");
-            if (function.initializerSource &&
-                function.origin == x86::RecoveryOrigin::InferredLeaf &&
+            if (function.callbackSource && function.origin == x86::RecoveryOrigin::InferredLeaf &&
                 !function.incoming.empty()) {
                 nestedLeaf |= initializers.contains(function.incoming.front()->caller);
             }

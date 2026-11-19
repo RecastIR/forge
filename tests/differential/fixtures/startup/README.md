@@ -75,9 +75,7 @@ The focused executable imports the real legacy MSVCRT function. One initializer 
 
 The spill regression reloads a caller-local string pointer after an empty table and again after an all-NULL table. The test shortens the raw extent of a read-only section so four bytes of its eight-byte endpoint pointer come from the PE loader’s zero fill. That PE returned 2 with empty streams under pinned Wine and on ARM64 at guest bases `0x400000` and `0x180000000`. [Fixture source](../../../fixtures/crt-initterm-spill.s) · [PE layout and execution tests](../../../integration/test_executable.py)
 
-Forge resolves the RIP-relative IAT call to **`KERNEL32.dll!GetStartupInfoA` at `0x1453`** in every original input. At `0x1460` in `__tmainCRTStartup`, recovery stops at a direct call to the **`msvcrt.dll!_cexit`** import thunk. In the Debug argc PE, after the call to `main` at `0x13a9`, MinGW tests its `managedapp` and `has_cctor` variables. The `managedapp != 0 && has_cctor == 0` branch calls `_cexit` and returns `mainret`. With `managedapp == 0`, the branch calls `exit` at `0x14a8`. All 16 comparisons stopped before native compilation, so the recovery diagnostic supplies no execution evidence for either cleanup path. [Forge startup-info contract](../../../../docs/runtime-architecture.md#win32-startup-information)
-
-Microsoft documents `_cexit` as running registered exit callbacks in reverse registration order, flushing I/O buffers, closing open streams and returning to the caller. Pinned Wine 8 invokes the exit callbacks and returns without an explicit stream flush or close in its `_cexit` path. Establishing what the legacy Windows DLL does to an open stream requires a direct observation. [Microsoft CRT contract](https://learn.microsoft.com/en-us/cpp/c-runtime-library/reference/cexit-c-exit) · [Wine 8 exit callbacks](https://github.com/wine-mirror/wine/blob/wine-8.0/dlls/msvcrt/exit.c#L135-L140) · [Wine 8 `_cexit`](https://github.com/wine-mirror/wine/blob/wine-8.0/dlls/msvcrt/exit.c#L313-L321)
+Forge resolves the `GetStartupInfoA` IAT call at RVA `0x1453` and both termination thunks in `__tmainCRTStartup`. The managed path calls `_cexit` at `0x1460`, while the ordinary path calls `exit(mainret)` at `0x14a8`. Recovery reaches the C initializer `pre_c_init`. Its operand-size-prefixed comparison checks the PE’s DOS signature at RVA `0x1044`. [MinGW startup](https://github.com/mingw-w64/mingw-w64/blob/v10.0.0/mingw-w64-crt/crt/crtexe.c) · [Runtime termination contract](../../../../docs/runtime-architecture.md#legacy-crt-termination)
 
 Three SDK-free PEs exercise A alone, W alone, and both calls from one entry. Each checks the structure size, reserved pointer, last error and all three handle fields. On ARM64 all three returned 42 with the flag clear. The pinned Wine capture parent supplies `STARTF_USESTDHANDLES`; all three PEs verified the current guest handles and returned 43. Starting the same PEs directly under pinned Wine 8 left the flag clear and returned 44 after checking all three cached handle values. All three probes produced empty stdout and stderr. Native Windows observations for these PEs are pending. The ARM64 fault variant places the last output byte on the protected outer return address and reports a write fault at `0x70000fd8`, even though W would leave that handle untouched. [Probe source](../../../fixtures/executable-startup-info.s) · [Executable tests](../../../integration/test_executable.py)
 
@@ -96,24 +94,26 @@ docker run --rm --platform linux/amd64 --network none --cap-drop ALL \
 
 ### Startup comparison results
 
-**16/16 resolved the startup-info call, 0/16 reached native compilation, 0/16 ran, and 0/16 completed native byte comparison.** All 16 passed reference validation. Every Debug and Release cell below stopped in recovery with `LIFT_UNSUPPORTED_CONTROL_FLOW`, opcode `CALL64pcrel32`, at RVA `0x1460` in function `0x1180`. The standalone comparator exited 1. The columns show each original PE’s call bytes and its resolved thunk’s IAT slot. The [fixture table](#conventional-windows-c-startup-fixtures) gives the corresponding Wine exit status and output.
+All eight original fixtures in both configurations validated their pinned Wine reference and resolved the two termination imports. Each run stopped during recovery in function `0x1010`, reached by the `_initterm` call at `0x1494`. The diagnostic was `LIFT_UNSUPPORTED_PREFIX`, opcode `CMP16mi`, RVA `0x1044`, bytes `66 81 38 4d 5a`. The comparator exited 1. No case produced a Mach-O, native exit status, stdout or stderr.
 
-| Startup case | Debug call bytes | Release call bytes | `_cexit` IAT RVA (both) |
+| Original case | Debug | Release | Native execution and stream comparison |
 | --- | --- | --- | --- |
-| argc | `e853120000` | `e823120000` | `0x8210` |
-| argc_none | `e853120000` | `e823120000` | `0x8210` |
-| argv | `e8c3120000` | `e823120000` | `0x8218` |
-| argv_edges | `e873130000` | `e823120000` | `0x8218` |
-| cleanup | `e843130000` | `e8c3120000` | `0x8240` |
-| globals | `e873120000` | `e823120000` | `0x8210` |
-| puts | `e853120000` | `e823120000` | `0x8218` |
-| return | `e843120000` | `e823120000` | `0x8210` |
+| argc | CMP16mi at 0x1044 | CMP16mi at 0x1044 | Not reached |
+| argc_none | CMP16mi at 0x1044 | CMP16mi at 0x1044 | Not reached |
+| argv | CMP16mi at 0x1044 | CMP16mi at 0x1044 | Not reached |
+| argv_edges | CMP16mi at 0x1044 | CMP16mi at 0x1044 | Not reached |
+| cleanup | CMP16mi at 0x1044 | CMP16mi at 0x1044 | Not reached |
+| globals | CMP16mi at 0x1044 | CMP16mi at 0x1044 | Not reached |
+| puts | CMP16mi at 0x1044 | CMP16mi at 0x1044 | Not reached |
+| return | CMP16mi at 0x1044 | CMP16mi at 0x1044 | Not reached |
+
+The next startup task is the 16-bit memory/immediate comparison in the DOS signature check. The `startup/cleanup` reference still produces `IMBA`, empty stderr and status 42. Its native behavior remains unobserved.
 
 | Responsibility | Current result for the selected configuration |
 | --- | --- |
 | Translate instructions in the executable | Forge lifts the observed repeat store, direction flag operations, aligned 64-bit interlocked operations and primary-thread TIB self read. Recovery also handles a direct linker import thunk and the proved guarded callback load. Managed executable artifacts preserve the imported-function address in R12 and guard its call through the loop. |
 | Initialize the PE and its primary thread | The runtime provides process parameters, guest stack bounds and isolated mappings. The PE additionally needs a TLS template and index, followed by the two process-attach callbacks before entry. The callbacks enter a critical-section lifecycle. A successful dry recovery of a callback target does not execute a loader callback. |
-| Call the external Windows CRT | There are typed adapters for a bounded argument/heap/byte subset and four writable data exports. MSVCRT can call recovered guest initializers from bounded tables. The exit path still needs guest termination handlers. Reaching `main` alone would leave that exit path untested. |
+| Call the external Windows CRT | There are typed adapters for a bounded argument/heap/byte subset and four writable data exports. MSVCRT can call recovered guest initializers from bounded tables. The exit path can run admitted guest termination handlers in the managed process. The full CRT still has unrecovered dependencies. |
 | Deliver guest exceptions | The compiler reports validated entry scope, filter, handler import and continuation evidence. Running the filter on a guest exception requires the guest fault PC, exception context, guest stack unwinding and continuation. The current process fault result terminates the run. |
 | Print through stdio | `puts` remains a required external MSVCRT symbol in its own fixture. The primary fixture already imports `__iob_func`, `fprintf`, `fwrite` and `vfprintf` for CRT paths. These need Windows stream objects, the applicable guest calling conventions and exit-time flushing. |
 

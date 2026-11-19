@@ -1323,7 +1323,7 @@ class Native(Workspace):
     def test_initializer_outcomes(self):
         opaque = "forge: unsupported guest access to a native callback return slot\n"
         unknown = "forge: unsupported MSVCRT initializer target\n"
-        argument = "forge: unsupported guest access above the initializer home space\n"
+        argument = "forge: unsupported guest access above the callback home space\n"
         for variant, status, stdout, stderr in (
                 ("nested_table", 42, "MMM", ""), ("terminal", 57, "", ""),
                 ("guest_fault", 125, "", "forge: guest memory fault address=0x1 access=1 reason=2\n"),
@@ -1352,6 +1352,41 @@ class Native(Workspace):
                                  ("lifting", "unsupported", code))
                 self.assertIn(reason, diagnostic["message"])
                 self.assertFalse(self.output.exists())
+
+    def test_termination_callback_guards(self):
+        for variant, marker, detail in (
+                ("wrong-origin", "", "unproven MSVCRT termination callback for registration site"),
+                ("unmapped", "", "unproven MSVCRT termination callback for registration site"),
+                ("fault", "B", "guest memory fault address=0x1 access=1 reason=2"),
+                ("return-slot", "B", "unsupported guest access to a native callback return slot"),
+                ("stack-above", "B", "unsupported guest access above the callback home space")):
+            with self.subTest(variant=variant):
+                self.compile(FIXTURES / f"crt-term-{variant}.exe")
+                result = run(self.output)
+                self.assertEqual((result.returncode, result.stdout, result.stderr), (125, marker, f"forge: {detail}\n"))
+
+        diagnostic = self.compile(FIXTURES / "crt-term-data.exe", success=False)
+        self.assertEqual(diagnostic["code"], "LIFT_INVALID_CALL_TARGET")
+        self.assertEqual(diagnostic["context"]["import_symbol"], "_onexit")
+        self.assertIn("termination_target_rva", diagnostic["context"])
+
+    def test_termination_rebased_dword(self):
+        pe = FIXTURES / "crt-term-exit.exe"
+        obj = self.dir / "termination.o"
+        run(CONTRACT, "--guest-base", "0x180000000", pe, "--object", obj, OPT, LLC, check=True)
+        _, runtime, sdk, *flags = LINK
+        run("/usr/bin/xcrun", "--sdk", sdk, "clang++", "-arch", "arm64", *flags,
+            PROCESS_HARNESS, obj, runtime, "-o", self.output, check=True)
+        # The embedder borrows a regular output file. A captured pipe requires an
+        # explicit host SIGPIPE policy and is already exercised by the standalone test.
+        captured = self.dir / "stdout.bin"
+        with captured.open("wb") as stream:
+            result = subprocess.run([self.output, "run", "0", "0", "0", "0"], stdout=stream,
+                                    stderr=subprocess.PIPE, timeout=10, check=True)
+        self.assertEqual(result.stderr, b"")
+        output = captured.read_bytes().decode()
+        self.assertEqual(output.replace("BAA", "").splitlines()[-2:], [f"exit {0xcafe002a}"] * 2)
+        self.assertEqual(output.count("BAA"), 2)
 
     def test_startup_info(self):
         for variants in ("a", "w", "aw"):

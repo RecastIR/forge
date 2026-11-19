@@ -10,6 +10,12 @@ namespace forge::x86 {
         unsigned entries = 0;
     };
 
+    // Empty means the entry RCX reaches this instruction unchanged.
+    std::optional<uint32_t>
+    terminationTarget(const RecoveredFunction &function, const GuestBlock &block, const Step &call,
+                      const ParsedImage &image, const ImageInitialization &init,
+                      const llvm::MCInstrInfo &instructions, const llvm::MCRegisterInfo &registers);
+
     InitializerTable
     recoverInitializerTable(const RecoveredFunction &caller, const GuestBlock &block,
                             const Step &call, const win64::ServiceBinding &binding,

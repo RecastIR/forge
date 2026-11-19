@@ -26,7 +26,7 @@ namespace forge::win64 {
     };
     enum class Access : uint8_t { None, Input, Output, InOut };
     enum class Extent : uint8_t { None, Fixed, CountArgument, CString, InitializerEnd };
-    enum class Callback : uint8_t { None, Initializer };
+    enum class Callback : uint8_t { None, Initializer, Registration, Cleanup };
 
     // Match the compiler's per-table indirect dispatch budget.
     inline constexpr uint64_t maxInitializerEntries = 1024;
@@ -153,6 +153,13 @@ namespace forge::win64 {
                 return "initializer dispatch requires a managed void service with a pointer range";
             }
 
+            if (callback != Callback::None && requirement != Requirement::Process) {
+                return "guest callbacks require a managed process";
+            }
+            if (callback == Callback::Cleanup && lastError != LastError::CallbackDefined) {
+                return "CRT cleanup requires callback-defined last error";
+            }
+
             if (returnsProcessStorage &&
                 (result != Value::Address || requirement != Requirement::Process)) {
                 return "process storage requires a managed service returning a guest address";
@@ -241,7 +248,17 @@ namespace forge::win64 {
         constexpr bool initializer =
             std::is_same_v<Function, NativeFunction<typename NativeScalar<args.type>::Type...,
                                                     Fault, forge_rt_initializer_dispatch>>;
-        if constexpr (initializer) {
+        constexpr bool registration =
+            std::is_same_v<Function, NativeFunction<uint64_t, uint64_t *, uint64_t>>;
+        constexpr bool cleanup =
+            std::is_same_v<Function, NativeFunction<typename NativeScalar<args.type>::Type...,
+                                                    forge_rt_termination_dispatch>>;
+        if constexpr (registration) {
+            static_assert(result == Value::Address && sizeof...(args) == 1 &&
+                          ((args.type == Value::Address) && ...));
+        } else if constexpr (cleanup) {
+            static_assert(result == Value::Void && !shape.checkedMemory());
+        } else if constexpr (initializer) {
             static_assert(result == Value::Void && shape.checkedMemory());
         } else if constexpr (result == Value::Void && !shape.checkedMemory()) {
             static_assert(
@@ -266,6 +283,10 @@ namespace forge::win64 {
                                control};
         if constexpr (initializer) {
             binding.callback = Callback::Initializer;
+        } else if constexpr (registration) {
+            binding.callback = Callback::Registration;
+        } else if constexpr (cleanup) {
+            binding.callback = Callback::Cleanup;
         }
 
         if (!binding.error().empty()) {
@@ -384,6 +405,16 @@ namespace forge::win64 {
                                        FORGE_SERVICE_ADAPTER(forge_rt_msvcrt_initterm),
                                        Requirement::Process);
 
+    inline constexpr auto crtOnexit = bind<Value::Address, Argument{Value::Address}>(
+        "msvcrt.dll", "_onexit", LastError::OnFailure, FORGE_SERVICE_ADAPTER(forge_rt_msvcrt_onexit),
+        Requirement::Process);
+    inline constexpr auto crtCexit =
+        bind<Value::Void>("msvcrt.dll", "_cexit", LastError::CallbackDefined,
+                          FORGE_SERVICE_ADAPTER(forge_rt_msvcrt_cexit), Requirement::Process);
+    inline constexpr auto crtExit = bind<Value::Void, Argument{Value::I32}>(
+        "msvcrt.dll", "exit", LastError::CallbackDefined,
+        FORGE_SERVICE_ADAPTER(forge_rt_msvcrt_exit), Requirement::Process, Control::Terminates);
+
     inline constexpr ServiceBinding services[] = {
         crtGetMainArgs,
         crtStrlen,
@@ -408,5 +439,8 @@ namespace forge::win64 {
         crtInitterm,
         getStartupInfoA,
         getStartupInfoW,
+        crtOnexit,
+        crtCexit,
+        crtExit,
     };
 } // namespace forge::win64

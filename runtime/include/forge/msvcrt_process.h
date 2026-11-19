@@ -36,6 +36,17 @@ forge_rt_status forge_rt_msvcrt_amsg_exit(forge_rt_instance *instance, forge_rt_
 /* Compiler-to-CRT linkage. The generated call site supplies its own trusted dispatcher.
  * Guest code supplies only the two table addresses. The borrow expires on return. */
 struct forge_rt_execution;
+/* Hidden linkage operands come from translated code. Each retained entry stores only
+ * the proof identity and guest VA. Cleanup borrows the current artifact dispatcher. */
+typedef void (*forge_rt_termination_dispatch)(struct forge_rt_execution *, uint64_t site,
+                                              uint64_t target) FORGE_CRT_NOEXCEPT;
+forge_rt_status forge_rt_msvcrt_onexit(forge_rt_instance *, forge_rt_thread_token, uint64_t target,
+                                       uint64_t *out, uint64_t site) FORGE_CRT_NOEXCEPT;
+forge_rt_status forge_rt_msvcrt_cexit(forge_rt_instance *, forge_rt_thread_token,
+                                      forge_rt_termination_dispatch) FORGE_CRT_NOEXCEPT;
+forge_rt_status forge_rt_msvcrt_exit(forge_rt_instance *, forge_rt_thread_token, int32_t,
+                                     forge_rt_termination_dispatch) FORGE_CRT_NOEXCEPT;
+
 typedef void (*forge_rt_initializer_dispatch)(struct forge_rt_execution *,
                                               uint64_t) FORGE_CRT_NOEXCEPT;
 forge_rt_status forge_rt_msvcrt_initterm(forge_rt_instance *instance, forge_rt_thread_token thread,

@@ -148,6 +148,79 @@ namespace forge::x86 {
         }
     } // namespace
 
+    std::optional<uint32_t>
+    terminationTarget(const RecoveredFunction &function, const GuestBlock &block, const Step &call,
+                      const ParsedImage &image, const ImageInitialization &init,
+                      const MCInstrInfo &instructions, const MCRegisterInfo &registers) {
+        InitializerRecovery recovery;
+        RangeProof proof{function,
+                         call,
+                         image,
+                         init,
+                         instructions,
+                         registers,
+                         InstructionOperands(registers, 0),
+                         recovery.predecessors};
+        RegisterView view{ServiceLocation{0}.registerIndex(), 64};
+        auto reg = proof.argumentRegister(view);
+        const auto prefix =
+            ArrayRef(block.steps).take_front(static_cast<size_t>(&call - block.steps.data()));
+        unsigned budget = 256;
+        for (const auto &step : llvm::reverse(prefix)) {
+            if (!budget--) {
+                break;
+            }
+
+            if (!clobbersRegister(step, reg, view, instructions, registers)) {
+                continue;
+            }
+
+            if (!step.inst.getNumOperands()) {
+                call.reject(FailureCode::UnsupportedControlFlow,
+                            "implicit clobber of termination callback");
+            }
+
+            const auto &dest = step.inst.getOperand(0);
+            if (step.opcode == "MOV64rr" && dest.isReg() && dest.getReg() == reg) {
+                const auto source = step.inst.getOperand(1);
+                view = proof.operands.reg(step, source, 64);
+                reg = source.getReg();
+                continue;
+            }
+
+            if ((step.opcode == "LEA64r" || step.opcode == "MOV64rm") && dest.isReg() &&
+                dest.getReg() == reg) {
+                const auto slot = proof.operands.ripRva(step, 1);
+                if (slot && std::in_range<uint32_t>(*slot)) {
+                    const auto rva = static_cast<uint32_t>(*slot);
+                    proof.operands.decodeAddress(step, 1, step.opcode == "MOV64rm");
+                    if (step.opcode == "LEA64r") {
+                        return rva;
+                    }
+                    init.validateRelocations({rva, uint64_t(rva) + 8});
+                    return initialTarget(call, rva, image, init).value_or(0);
+                }
+            }
+
+            if (step.opcode == "XOR32rr" &&
+                step.inst.getOperand(1).getReg() == step.inst.getOperand(2).getReg() &&
+                proof.operands.reg(step, dest, 32).index == view.index) {
+                return 0;
+            }
+
+            call.reject(FailureCode::UnsupportedControlFlow,
+                        "unproven MSVCRT termination callback at definition " + hex(step.rva));
+        }
+
+        if (prefix.size() <= 256 && block.steps.front().rva == function.entry && view.index == 1 &&
+            !proof.blockPredecessors().contains(function.entry)) {
+            return {};
+        }
+
+        call.reject(FailureCode::UnsupportedControlFlow,
+                    "unproven incoming MSVCRT termination callback");
+    }
+
     InitializerTable
     recoverInitializerTable(const RecoveredFunction &caller, const GuestBlock &block,
                             const Step &call, const win64::ServiceBinding &binding,

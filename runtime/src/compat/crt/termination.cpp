@@ -32,6 +32,7 @@ extern "C" forge_rt_status forge_rt_msvcrt_onexit(forge_rt_instance *instance,
         if (registry.entries.size() < TerminationRegistry::limit) {
             try {
                 registry.entries.push_back({site, target});
+                registry.completed = false;
                 *out = target;
                 return FORGE_RT_OK;
             } catch (const std::bad_alloc &) {
@@ -39,6 +40,8 @@ extern "C" forge_rt_status forge_rt_msvcrt_onexit(forge_rt_instance *instance,
             }
         }
 
+        // ERROR_NOT_ENOUGH_MEMORY and ENOMEM from the legacy Windows DLL.
+        owner.threads.at(thread).lastError = 8;
         windows.crtErrno = 12;
         return FORGE_RT_OK;
     });
@@ -60,20 +63,31 @@ namespace {
 
         auto &registry = instance->windows->termination;
 
-        if (registry.phase == TerminationRegistry::Running) {
+        if (registry.completed) {
+            return FORGE_RT_OK;
+        }
+
+        if (registry.depth == TerminationRegistry::maxDepth) {
             return FORGE_RT_UNSUPPORTED_TERMINATION_REENTRY;
         }
 
-        registry.phase = TerminationRegistry::Running;
+        if (!registry.depth) {
+            registry.dispatched = 0;
+            registry.completed = false;
+        }
 
-        // Remove the entry before re-entry. Never retain a reference into a vector
-        // across guest execution. The active invocation owns this synchronous borrow.
-        size_t remaining = TerminationRegistry::limit;
+        ++registry.depth;
+        forge_rt_status outcome = FORGE_RT_OK;
+
+        // Remove the entry before re-entry. A newly registered handler joins the live
+        // stack. Nested cleanup shares the outer budget and can consume pending entries.
         while (!registry.entries.empty()) {
-            if (!remaining--) {
-                return FORGE_RT_UNSUPPORTED_TERMINATION_REENTRY;
+            if (registry.dispatched == TerminationRegistry::limit) {
+                outcome = FORGE_RT_UNSUPPORTED_TERMINATION_REENTRY;
+                break;
             }
 
+            ++registry.dispatched;
             const auto handler = registry.entries.back();
             registry.entries.pop_back();
             const auto previous = std::exchange(callbackInvocation, executingInvocation);
@@ -81,12 +95,16 @@ namespace {
             callbackInvocation = previous;
 
             if (instance->managedExecution->result.kind) {
-                return FORGE_RT_OK;
+                break;
             }
         }
 
-        registry.phase = TerminationRegistry::Completed;
-        return FORGE_RT_OK;
+        --registry.depth;
+        if (!registry.depth) {
+            registry.completed = outcome == FORGE_RT_OK && !instance->managedExecution->result.kind;
+        }
+
+        return outcome;
     }
 } // namespace
 
