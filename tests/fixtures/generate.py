@@ -19,10 +19,12 @@ def generate(output, mc, link, dlltool, clang):
         "Middle.dll": ["Middle=entry"],
         "MissingLeaf.dll": ["Leaf"],
         "KERNEL32.dll": ["Sleep", "SwitchToThread", "SetLastError", "GetLastError", "lstrlenA",
-                         "GetStdHandle", "WriteFile", "ExitProcess", "GetCommandLineA", "GetCommandLineW",
+                         "GetStdHandle", "WriteFile", "ExitProcess", "GetCommandLineA", "GetCommandLineW", "SetStdHandle", "GetFileType", "GetFileSize",
+                         "CreateJobObjectA", "SetInformationJobObject", "AssignProcessToJobObject", "GetCurrentProcess",
                          "SetUnhandledExceptionFilter", "__C_specific_handler", "GetStartupInfoA", "GetStartupInfoW"],
         "vcruntime140.dll": ["Runtime"],
-        "msvcrt.dll": ["__getmainargs", "_amsg_exit", "_initterm", "calloc", "free", "malloc", "strlen",
+        "msvcrt.dll": ["_cexit", "_onexit", "exit", "_errno", "fopen", "fclose", "fputc", "setvbuf",
+                       "_fileno", "_get_osfhandle", "memset", "fwrite", "__getmainargs", "_amsg_exit", "_initterm", "calloc", "free", "malloc", "strlen",
                        "__C_specific_handler", "_fmode=entry DATA", "_commode=entry DATA",
                        "__initenv=entry DATA", "_acmdln=entry DATA"],
         contract: ["Contract"],
@@ -111,6 +113,22 @@ def generate(output, mc, link, dlltool, clang):
                         "service_return", "register_arg", "nonvolatile_arg", "stack_arg", "stack_alias",
                         "service_alias", "nested_table", "stack_exhaustion"):
             image(f"crt-initterm-{variant}.exe", f"{variant} = 1\n" + initializer_probe, link_flags=initializer_flags)
+        termination = (sources / "crt-termination.s").read_text()
+        for name, switches in (
+            ("cexit", ()), ("exit", ("normal_exit",)), ("nested-exit", ("normal_exit", "terminal")),
+            ("register", ("add_during",)), ("recursive", ("add_during", "recurse")),
+            ("recursive-exit", ("add_during", "recursive_exit")), ("fault", ("fault",)),
+            ("return-slot", ("corrupt_return",))):
+            setup = "".join(f"{switch} = 1\n" for switch in switches)
+            image(f"crt-term-{name}.exe", setup + termination, link_flags=initializer_flags)
+        for name in ("startup", "stream", "stream_exit", "registration", "pressure"):
+            run(clang, "--target=x86_64-pc-windows-msvc", "-O1", "-ffreestanding",
+                "-fno-stack-protector", "-D" + name.upper(), "-c", sources / "crt-termination-reference.c",
+                "-o", "reference.obj")
+            filename = f"crt-observe-{name}.exe"
+            run(link, "/nodefaultlib", "/timestamp:0", "/entry:entry", "/subsystem:console",
+                "/out:" + filename, "reference.obj", "msvcrt.dll.lib", "KERNEL32.dll.lib")
+            (output / filename).write_bytes((work / filename).read_bytes())
         fatal = (sources / "crt-amsg-exit.s").read_text()
         for number in (31, 8, -1, -2147483648):
             image(f"crt-amsg-exit-{number}.exe", f"error_number = {number}\n" + fatal,

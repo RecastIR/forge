@@ -25,6 +25,7 @@ jobs:
       stages: ${{ steps.native.outputs.stages }}
       release_forge: ${{ steps.native.outputs.sha256 }}
       executable_inputs_sha256: ${{ steps.executables.outputs.sha256 }}
+      termination_sha256: ${{ steps.termination.outputs.sha256 }}
     steps:
       - uses: actions/checkout@v6
         with:
@@ -50,6 +51,49 @@ jobs:
           if-no-files-found: error
           retention-days: 7
           overwrite: true
+
+      - name: Package focused Windows reference inputs when compatibility changes
+        id: termination
+        shell: bash
+        env:
+          BASE: ${{ github.event.pull_request.base.sha || github.event.before }}
+        run: |
+          if ! git diff --name-only "$BASE" HEAD | grep -E '(^tests/(fixtures/(crt-termination|generate.py|executable-startup-info)|differential/reference/termination/)|^runtime/src/compat/(crt/termination|win32/startup_info)|^\.github/workflows/ci\.yml$)' >/dev/null; then
+            exit 0
+          fi
+          list="$PWD/tests/differential/reference/termination/inputs.txt"
+          dest="$RUNNER_TEMP/termination-inputs"
+          mkdir "$dest"
+          cd build/dev/fixtures/Debug
+          while IFS= read -r pe; do cp "$pe" "$dest/"; done < "$list"
+          xargs shasum -a 256 < "$list" > "$dest/SHA256SUMS"
+          echo "sha256=$(shasum -a 256 "$dest/SHA256SUMS" | cut -d' ' -f1)" >> "$GITHUB_OUTPUT"
+      - uses: actions/upload-artifact@v4
+        if: steps.termination.outputs.sha256 != ''
+        with:
+          name: termination-inputs
+          path: ${{ runner.temp }}/termination-inputs
+          if-no-files-found: error
+
+  legacy-windows-capture:
+    needs: macos-dev
+    if: needs.macos-dev.outputs.termination_sha256 != ''
+    runs-on: windows-2022
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/download-artifact@v4
+        with:
+          name: termination-inputs
+          path: inputs
+      - name: Measure legacy system MSVCRT and startup information
+        run: python -B tests/differential/reference/termination/observe.py inputs observations --manifest-sha256 ${{ needs.macos-dev.outputs.termination_sha256 }}
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: legacy-windows-observations
+          path: observations
+          if-no-files-found: error
 
   macos-sanitize:
     runs-on: macos-26
