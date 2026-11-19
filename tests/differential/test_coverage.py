@@ -53,6 +53,8 @@ class CoverageTests(ArtifactSetup):
         digest = diff.sha256(self.forge.read_bytes())
         needs["macos-sanitize"]["outputs"]["debug_forge"] = digest
         needs["macos-dev"]["outputs"]["release_forge"] = digest
+        for job in ("macos-dev", "windows-executable-reference"):
+            needs[job]["outputs"]["executable_inputs_sha256"] = "f" * 64
         needs["differential"]["outputs"]["evidence_run_id"] = self.run_id
         return needs
 
@@ -86,6 +88,16 @@ class CoverageTests(ArtifactSetup):
                     self.assertEqual(report["gate"], "failed")
                     self.assertIn(f"{job}: {outcome}", report["errors"])
 
+    def test_windows_capture_required_when_its_inputs_are_published(self):
+        needs = self.needs()
+        self.assertEqual(self.hosted(needs)["gate"], "passed")
+        needs["macos-dev"]["outputs"]["termination_sha256"] = "a" * 64
+        self.assertEqual(self.hosted(needs)["gate"], "failed")
+        for outcome in ("skipped", "failure", "success"):
+            with self.subTest(outcome=outcome):
+                needs["legacy-windows-capture"] = {"result": outcome, "outputs": {}}
+                self.assertEqual(self.hosted(needs)["gate"], "passed" if outcome == "success" else "failed")
+
     def test_green_jobs_require_complete_stage_outputs(self):
         valid = self.needs()
         for job, required in coverage.JOB_STAGES.items():
@@ -104,6 +116,22 @@ class CoverageTests(ArtifactSetup):
                 needs = copy.deepcopy(valid)
                 needs["macos-presets"]["outputs"] = outputs
                 self.assertEqual(self.hosted(needs)["gate"], "failed")
+
+    def test_wine_requires_the_native_tested_pe_inputs(self):
+        valid = self.needs()
+        self.assertEqual(self.hosted(valid)["executable_inputs_sha256"], "f" * 64)
+        for job in ("macos-dev", "windows-executable-reference"):
+            for value in (None, "invalid", "0" * 64):
+                with self.subTest(job=job, value=value):
+                    needs = copy.deepcopy(valid)
+                    if value is None:
+                        del needs[job]["outputs"]["executable_inputs_sha256"]
+                    else:
+                        needs[job]["outputs"]["executable_inputs_sha256"] = value
+                    report = self.hosted(needs)
+                    self.assertEqual(report["gate"], "failed")
+                    self.assertNotIn("executable_inputs_sha256", report)
+                    self.assertTrue(any("standalone PE input checksums" in error for error in report["errors"]))
 
     def test_both_tested_binaries_are_required(self):
         for config, job in (("debug", "macos-sanitize"), ("release", "macos-dev")):

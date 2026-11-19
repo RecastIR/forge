@@ -2,9 +2,31 @@
 
 `forge_runtime` is a native static library for macOS ARM64. A host creates a runtime instance and guest thread tokens, then uses the tokens to set and read 32-bit last-error values. With `forge lift --checked-memory`, synchronous native services can also validate, read and write guest buffers using the active invocation. [Checked guest buffers](../docs/runtime-architecture.md#checked-guest-buffers)
 
-Hosts using compiler-generated process artifacts can register the same artifact in independent processes, invoke its lifted entry once per process, and inspect the tagged return or fault. [Process C ABI](include/forge/process.h) · [Host lifecycle](../docs/runtime-architecture.md#12f--process-lifecycle-integration)
+Hosts using compiler-generated process artifacts can register the same artifact in independent processes, invoke its lifted entry once per process, and inspect a tagged return, explicit exit, or fault. Managed programs can write guest bytes to inherited stdout and stderr. Embedders using pipes or finite file-size limits configure output signal handling before the run. [Standard streams and process exit](../docs/runtime-architecture.md#standard-streams-and-process-exit) · [Process C ABI](include/forge/process.h) · [Host lifecycle](../docs/runtime-architecture.md#12f--process-lifecycle-integration)
 
 Native C, C++ and generated ARM64 code share the same [public C ABI](include/forge/runtime.h). The runtime links independently of the Forge compiler, CLI and Wine.
+
+The separate `forge_startup` archive supplies the native `main` for executables linked by `forge lift --executable`. It forwards host startup inputs, calls the process ABI and reports the guest outcome. Existing C and C++ hosts link `forge_runtime` directly and supply their own entry. [Compile and run a native executable](../README.md#compile-and-run-a-native-executable)
+
+Process artifacts can publish read-only function IAT slots containing stable guest addresses for imported services. Registration checks their backing and reserves their addresses for the process lifetime. [Imported function addresses](../docs/runtime-architecture.md#imported-function-addresses)
+
+A managed guest can set, replace, or clear its process-wide top-level exception filter and retrieve the previous guest address. A guest fault still terminates execution. [Top-level exception filter registration](../docs/runtime-architecture.md#top-level-exception-filter-registration)
+
+Legacy MSVCRT's `_amsg_exit(int)` reports a fatal CRT error through the process's captured stderr and returns a tagged guest exit with code 255 to the host. The standalone executable exits with the same status. [Fatal CRT diagnostics](../docs/runtime-architecture.md#fatal-crt-diagnostics)
+
+Managed `msvcrt.dll!_initterm` walks a bounded table in guest memory and calls compiled Windows x64 `void(void)` initializers in order. Each nonzero target must belong to the recovered set for that call site. A callback shares the active thread, stack, heap and last-error state, and its exit or fault reaches the host. The native caller's synthetic return slot is protected against guest inspection. [Initializer callback contract](../docs/runtime-architecture.md#crt-initializer-callback-design)
+
+Managed `_onexit` registers a proved guest callback in process-owned storage. Returning `_cexit` and terminating `exit` share reverse-order dispatch, the active guest thread and the existing terminal-result channel. The supported subset covers programs without CRT-managed buffered streams. [Termination contract and limits](../docs/runtime-architecture.md#legacy-msvcrt-termination-handlers)
+
+## Current source organization
+
+The public C ABI and shared C++ contracts live in `include/forge/`. Within `forge_runtime`, managed registration stages one process occurrence that owns both the core image and the Windows compatibility state. Core owns the primary execution context, thread records, reservations, private PE backing and heap blocks. Win32 and MSVCRT own the guest-visible parameters, CRT cells, standard handles, filter and service behavior. The instance lends adapters access to that state during execution. The separate `forge_startup` archive builds only `src/startup.cpp`. [Build definition](CMakeLists.txt) · [Ownership diagram](../docs/runtime-architecture.md#resource-ownership-and-borrowing)
+
+Composition selects startup resources from recovered calls and CRT data imports. It publishes `Ready` after registering the required mappings and binding the IAT. Failure leaves the handle in `Created` for a retry. On completion it releases captured standard streams after invocation retirement, so a host retaining the process can already observe pipe EOF. On close it retires image registrations before releasing the storage they borrow. [Managed registration](src/managed_process.cpp) · [Lifecycle and results](../docs/runtime-architecture.md#12f--process-lifecycle-integration)
+
+Each available standard-handle slot pairs a Win32 handle with a process-owned Darwin descriptor. The private I/O component in `src/platform/darwin/` owns the close-on-exec duplicate, checks the host’s output signal policy, and writes a host byte span. Darwin distinguishes a missing source, exhausted descriptor resources and other capture failures. Win32 leaves missing streams unassigned and maps the two failures to `FORGE_RT_RESOURCE_EXHAUSTED` and `FORGE_RT_HOST_CONFIGURATION` respectively. For writes, Win32 stages checked guest bytes, publishes the committed count, and translates native write errors.
+
+Win32 validates `Sleep` and selects a yield, a finite millisecond delay or an indefinite wait. Darwin performs that operation outside the instance lock and retries interrupted sleeps and waits. Win32 maps a native failure to `FORGE_RT_INTERNAL_ERROR` and preserves guest last error. [Runtime source ownership](../docs/runtime-architecture.md#runtime-source-ownership)
 
 ## Build and test
 
@@ -16,7 +38,7 @@ cmake --build build/tmp/runtime-only
 ctest --test-dir build/tmp/runtime-only --output-on-failure
 ```
 
-This configuration produces `build/tmp/runtime-only/libforge_runtime.a`. For a manual build, compile C callers as C and use the native C++ linker driver to link their objects with the archive and the platform C++ runtime.
+This configuration produces `libforge_runtime.a` and `libforge_startup.a` in `build/tmp/runtime-only/`. For a manual embedding build, compile C callers as C and use the native C++ linker driver to link their objects with `libforge_runtime.a` and the platform C++ runtime.
 
 The full Apple Silicon development build requires the C and LLVM IR smoke tests. A compiler-only build includes the IR smoke when its selected LLVM installation provides matching LLVM 23 `opt` and ARM64-capable `llc` binaries. A runtime-only build accepts the same pair through `-DFORGE_RUNTIME_IR_TOOLS_DIR=/path/to/llvm/bin`. Both configurations run the native tests when the pair is unavailable. Configure the runtime-only build with `-DFORGE_ENABLE_SANITIZERS=ON` for sanitizer coverage.
 

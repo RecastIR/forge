@@ -1,0 +1,13 @@
+{
+  "schema_version": 1,
+  "id": "startup/cleanup",
+  "description": "Observe a C initializer, main, and two exit callbacks in reverse registration order.",
+  "source": "fixtures/startup/cleanup.c",
+  "binary": "crt_cleanup.exe",
+  "args": [],
+  "expected": {
+    "exit_code": 42,
+    "stdout": "IMBA",
+    "stderr": ""
+  }
+}

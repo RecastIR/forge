@@ -2,6 +2,8 @@
 
 These C11 and C++20 console programs provide Windows x64 inputs for whole-executable reference runs. Each manifest records a single invocation and its expected output. The programs build independently of Forge.
 
+The conventional C startup group compares entire native ARM64 executables with their Windows observations. Its guide records the default MinGW-w64 startup, import and TLS inventory, fixture invocations and exact stream bytes. [Conventional C startup fixtures](fixtures/startup/README.md)
+
 | Fixture | What the invocation exercises |
 | --- | --- |
 | `arithmetic/add_i64` | Two signed 64-bit sums, one positive and one negative, computed by the exported two-argument leaf. Enabled for function-level differential testing. |
@@ -91,11 +93,11 @@ Each UTF-8 JSON file under `manifests/` declares one executable. For example:
 
 Use a unique lowercase `category/name` ID and a portable, case-insensitively unique `.exe` basename. Source paths are relative to this guide's directory and must resolve inside `fixtures/`. Binary names resolve inside the selected configuration's export directory. The ordered `args` list excludes the executable name. Use `[]` for an invocation without arguments.
 
-Both expected streams are required, including empty strings. Their UTF-8 encoding specifies the exact bytes and ordering within each stream. Fixtures use ASCII and set stdout and stderr to binary mode so LF remains LF in redirected Windows output. The exit code is an unsigned 32-bit process status. The contract preserves whitespace and trailing newlines and uses literal strings throughout.
+Both expected streams are required, including empty strings. Their UTF-8 encoding specifies the exact bytes and ordering within each stream. Fixtures that request binary mode preserve LF in redirected Windows output. The conventional `puts` fixture uses default text mode and expects CRLF. The exit code is an unsigned 32-bit process status. The contract preserves whitespace and trailing newlines and uses literal strings throughout.
 
 ## Add a fixture
 
-1. Add a small source under `fixtures/<category>/`. Include `streams.h` and call `open_binary_streams()` before output. Make the result depend on arguments or an observable API operation. Bound arithmetic, shifts, memory accesses, and recursion for every accepted input. Convert environment-dependent values into deterministic checks inside the program.
+1. Add a small source under `fixtures/<category>/`. For binary stdio output, include `streams.h` and call `open_binary_streams()` before output. Make the result depend on arguments or an observable API operation. Bound arithmetic, shifts, memory accesses, and recursion for every accepted input. Convert environment-dependent values into deterministic checks inside the program.
 2. Add the manifest under `manifests/` or a category subdirectory. Derive the expected exit status and streams from the declared input. CMake discovers targets from the validated manifests.
 3. Run `python3 -B tests/differential/manifests.py`, `make format-check`, and the Docker build from the repository root. Inspect optimized code when a particular call, memory access, or branch is essential to the case. Commit source and metadata. Git ignores the generated binaries and checksums under `build/`.
 
@@ -243,7 +245,9 @@ make provision-fixtures
 ./tools/test-forge.sh --all
 ```
 
-The stage commands also work individually. Run `--native` for formatting, clang-tidy, Debug CTest, and ASan/UBSan CTest. This stage sets `FORGE_TEST_PROVISIONING=1` and checks both JUnit reports for execution of the native, Unicorn, guest stack, guest image, jump-table and cache-only provisioning tests. Run `--references` to build both PE configurations twice, inspect them, capture Wine behavior, and exercise the real capture boundaries. Run `--differential` after those stages, or after extracting the matching CI inputs. It consumes the existing exports, checks every reference, runs both configurations and the negative integrations, and writes local coverage. Preserved Wine observations from before the Conan migration can be supplied with `--reference-root` on the individual differential runner. Each observation must match the selected PE and manifest and pass the same stream and provenance checks. Use the individual fixture commands above to investigate a failure. A single-fixture run replaces that configuration’s suite index. Rerun the full differential stage to produce complete evidence.
+The stage commands also work individually. Run `--native` for formatting, clang-tidy, Debug CTest, and ASan/UBSan CTest. This stage sets `FORGE_TEST_PROVISIONING=1` and checks both JUnit reports for execution of the native executable, executable readiness, function-level native and Unicorn, guest stack, guest image, jump-table and cache-only provisioning tests. Run `./tools/test-forge.sh --executable-reference` after the dev CTest suite to check its exact PEs under pinned Wine. Local `--all` also runs this stage. The executable suite checks both byte streams and full Windows exit codes, including the marker after a fatal CRT call. For `_amsg_exit`, Wine and genuine Windows have separate recorded expectations. [Executable input list](reference/executable-inputs.txt) · [Fatal CRT reference evidence](fixtures/startup/amsg-exit/)
+
+Run `--references` to build both PE configurations twice, inspect them, capture Wine behavior, and exercise the real capture boundaries. Run `--differential` after those stages, or after extracting the matching CI inputs. It consumes the existing exports, checks every reference, runs both configurations and the negative integrations, and writes local coverage. Preserved Wine observations from before the Conan migration can be supplied with `--reference-root` on the individual differential runner. Each observation must match the selected PE and manifest and pass the same stream and provenance checks. Use the individual fixture commands above to investigate a failure. A single-fixture run replaces that configuration’s suite index. Rerun the full differential stage to produce complete evidence.
 
 PRs into `main` and pushes to `main` start three Apple Silicon jobs and one Linux job together. A newer commit cancels the superseded run for the same PR.
 
@@ -252,8 +256,11 @@ PRs into `main` and pushes to `main` start three Apple Silicon jobs and one Linu
 | `macos-dev` and `macos-sanitize` | Each runs its full CTest suite with outbound networking disabled, checks JUnit for execution of the native, Unicorn, guest memory/control-flow, runtime contract, C and LLVM IR runtime linkage, and provisioning tests, and publishes its tested Forge executable and SHA-256. |
 | `macos-presets` | Runs formatting and clang-tidy, builds Release and both Xcode configurations, runs their CLI smoke tests with fixture setup, and checks the build layout. |
 | `windows-fixtures` | On Linux amd64, builds each Windows configuration twice, checks PE reproducibility, captures Wine behavior and tests the capture boundaries. Publishes the exports and references together. |
+| `windows-executable-reference` | Downloads the PEs listed in the [executable input manifest](reference/executable-inputs.txt) from the successful macOS dev tests. Checks the exact filenames and the producer’s SHA-256 manifest, then runs those same bytes with pinned Wine on Linux amd64. |
 | `differential` | Downloads the tested Forge executables, matching `recovery_contract` and `lift_contract` helpers, and the Windows inputs after those producers succeed. Verifies that all three executables are present and executable for each native preset before comparisons. Uses sanitized Forge with Xcode for Debug and ordinary dev Forge with Unix Makefiles for Release. Runs the negative integrations, including rebased string-service comparisons through `lift_contract`. |
 | `regression-gate` | Requires every preceding job and stage. Independently checks suite membership, producer digests, IR and saved native observations against the validated Windows inputs. |
+
+The gate requires the `executable_reference` stage and verifies that the Wine input digest matches the macOS producer. Retrieve `executable-reference-inputs` from the run to inspect the PE files and their checksums.
 
 The gate binds the differential evidence to its producing attempt, workflow run and checked-out revision. This allows a gate-only rerun to verify its successful producer's original artifacts. Each macOS runner verifies the pinned LLVM archive before extraction.
 

@@ -23,6 +23,7 @@ namespace forge::runtime {
     }
 
     thread_local forge_rt_invocation_token executingInvocation = 0;
+    thread_local forge_rt_invocation_token callbackInvocation = 0;
 } // namespace forge::runtime
 
 using namespace forge::runtime;
@@ -54,7 +55,7 @@ extern "C" forge_rt_status forge_rt_destroy(forge_rt_instance *instance) noexcep
 
     // Host quiescence prevents new uses between the check and release.
     const auto status = withInstance(instance, [](const auto &process) {
-        if (process.managed) {
+        if (process.managedExecution) {
             return FORGE_RT_INVALID_STATE;
         }
 
@@ -78,7 +79,7 @@ extern "C" forge_rt_status forge_rt_thread_create(forge_rt_instance *instance,
     }
 
     return withInstance(instance, [outThread](auto &process) {
-        if (process.managed) {
+        if (process.managedExecution) {
             return FORGE_RT_INVALID_STATE;
         }
 
@@ -97,7 +98,7 @@ extern "C" forge_rt_status forge_rt_thread_create(forge_rt_instance *instance,
 extern "C" forge_rt_status forge_rt_thread_destroy(forge_rt_instance *instance,
                                                    forge_rt_thread_token thread) noexcept {
     return withInstance(instance, [thread](auto &process) {
-        if (process.managed) {
+        if (process.managedExecution) {
             return FORGE_RT_INVALID_STATE;
         }
 
@@ -112,50 +113,6 @@ extern "C" forge_rt_status forge_rt_thread_destroy(forge_rt_instance *instance,
         }
 
         process.threads.erase(entry);
-        return FORGE_RT_OK;
-    });
-}
-
-extern "C" forge_rt_status forge_rt_set_last_error(forge_rt_instance *instance,
-                                                   forge_rt_thread_token thread,
-                                                   uint32_t value) noexcept {
-    return withInstance(instance, [thread, value](auto &process) {
-        const auto entry = process.threads.find(thread);
-
-        if (entry == process.threads.end()) {
-            return FORGE_RT_INVALID_THREAD;
-        }
-
-        if (process.managed &&
-            (!entry->second.invocation || executingInvocation != entry->second.invocation)) {
-            return FORGE_RT_INVALID_INVOCATION;
-        }
-
-        entry->second.lastError = value;
-        return FORGE_RT_OK;
-    });
-}
-
-extern "C" forge_rt_status forge_rt_get_last_error(forge_rt_instance *instance,
-                                                   forge_rt_thread_token thread,
-                                                   uint32_t *outValue) noexcept {
-    if (outValue == nullptr) {
-        return FORGE_RT_INVALID_ARGUMENT;
-    }
-
-    return withInstance(instance, [thread, outValue](const auto &process) {
-        const auto entry = process.threads.find(thread);
-
-        if (entry == process.threads.end()) {
-            return FORGE_RT_INVALID_THREAD;
-        }
-
-        if (process.managed &&
-            (!entry->second.invocation || executingInvocation != entry->second.invocation)) {
-            return FORGE_RT_INVALID_INVOCATION;
-        }
-
-        *outValue = entry->second.lastError;
         return FORGE_RT_OK;
     });
 }

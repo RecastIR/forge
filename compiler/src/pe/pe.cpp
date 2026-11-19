@@ -7,9 +7,11 @@
 #include "llvm/Support/Endian.h"
 #include "llvm/Support/ErrorHandling.h"
 #include "llvm/Support/JSON.h"
+#include "llvm/Support/MathExtras.h"
 #include "llvm/Support/Win64EH.h"
 
 #include <algorithm>
+#include <bit>
 #include <cstddef>
 #include <cstring>
 #include <map>
@@ -128,8 +130,10 @@ namespace forge {
                     rva};
         }
 
-        std::string machineName(uint16_t machine) {
+        std::string machineName(uint32_t machine) {
             switch (machine) {
+            case COFF::IMAGE_FILE_MACHINE_AMD64:
+                return "AMD64";
             case COFF::IMAGE_FILE_MACHINE_I386:
                 return "i386";
             case COFF::IMAGE_FILE_MACHINE_ARM64:
@@ -277,7 +281,8 @@ namespace forge {
                                     s.VirtualSize,
                                     s.PointerToRawData,
                                     s.SizeOfRawData,
-                                    (s.Characteristics & COFF::IMAGE_SCN_MEM_DISCARDABLE) != 0});
+                                    (s.Characteristics & COFF::IMAGE_SCN_MEM_DISCARDABLE) != 0,
+                                    (s.Characteristics & COFF::IMAGE_SCN_MEM_SHARED) != 0});
             }
             if (coffHeader.NumberOfSymbols && !coffHeader.PointerToSymbolTable) {
                 invalid("COFF symbol table", pe + 4, "missing file offset");
@@ -323,16 +328,122 @@ namespace forge {
             object = std::move(*parsed);
         }
 
-        std::optional<View> ImageParser::directory(unsigned index, StringRef label) const {
-            const auto *dir = object->getDataDirectory(index);
+        std::optional<View> mappedDirectory(const data_directory *dir, ArrayRef<Section> sections,
+                                            StringRef bytes, StringRef label) {
             if (!dir || (!dir->RelativeVirtualAddress && !dir->Size)) {
                 return std::nullopt;
             }
+
             if (!dir->RelativeVirtualAddress || !dir->Size) {
                 throw InspectionError(label.str() + " has an incomplete directory entry at RVA " +
                                       hex(dir->RelativeVirtualAddress));
             }
-            return tail(dir->RelativeVirtualAddress, label).slice(0, dir->Size);
+
+            return mappedTail(sections, bytes, dir->RelativeVirtualAddress, label)
+                .slice(0, dir->Size);
+        }
+
+        std::optional<View> ImageParser::directory(unsigned index, StringRef label) const {
+            return mappedDirectory(object->getDataDirectory(index), sections, file.bytes, label);
+        }
+
+        [[noreturn]] void unsupportedStartup(const std::string &message) {
+            throw InspectionError(message, FailureCode::ExecutableStartup);
+        }
+
+        void validateExecutableResources(const std::optional<View> &resources) {
+            if (!resources) {
+                return;
+            }
+
+            const auto root = resources->read<coff_resource_dir_table>();
+            const unsigned count = unsigned(root.NumberOfNameEntries) + root.NumberOfIDEntries;
+            const View entries =
+                resources->slice(sizeof(root), count * sizeof(coff_resource_dir_entry));
+
+            // Startup manifest policy depends only on the numeric resource type.
+            for (unsigned i = 0; i < count; ++i) {
+                const auto offset = i * sizeof(coff_resource_dir_entry);
+                const auto entry = entries.read<coff_resource_dir_entry>(offset);
+                const uint32_t type = entry.Identifier.ID;
+                const bool named = (type >> 31U) != 0;
+
+                if (named != (i < root.NumberOfNameEntries)) {
+                    invalid(entries.label, entries.offset + offset,
+                            "invalid named or numeric resource type");
+                }
+
+                if (named) {
+                    const auto nameOffset = entry.Identifier.getNameOffset();
+                    const uint16_t length = resources->read<ulittle16_t>(nameOffset);
+                    resources->slice(uint64_t(nameOffset) + sizeof(length),
+                                     length * sizeof(char16_t));
+                }
+
+                if (!entry.Offset.isSubDir()) {
+                    invalid(entries.label, entries.offset + offset,
+                            "resource type must reference a name table");
+                }
+
+                resources->slice(entry.Offset.value(), sizeof(coff_resource_dir_table));
+
+                // Win32 looks up numeric resource IDs through the 16-bit Id union member.
+                if (!named && static_cast<uint16_t>(type) == COFF::RID_Manifest) {
+                    unsupportedStartup(
+                        "executable contains an unsupported embedded application manifest");
+                }
+            }
+        }
+
+        void validateExecutableSections(const pe32plus_header &header, const Module &metadata,
+                                        uint64_t guestBase) {
+            const uint32_t sectionAlignment = header.SectionAlignment;
+            const uint32_t fileAlignment = header.FileAlignment;
+
+            if (!std::has_single_bit(fileAlignment) || fileAlignment < 512 ||
+                fileAlignment > 65536 || !std::has_single_bit(sectionAlignment) ||
+                sectionAlignment < 4096 || sectionAlignment < fileAlignment ||
+                metadata.sizeOfImage % sectionAlignment || header.SizeOfHeaders % fileAlignment ||
+                header.SizeOfHeaders > metadata.sizeOfImage || metadata.imageBase % 65536 ||
+                metadata.imageBase % sectionAlignment || guestBase % 65536 ||
+                guestBase % sectionAlignment) {
+                unsupportedStartup("unsupported PE image, section or file alignment");
+            }
+
+            uint64_t nextRva = llvm::alignTo(uint64_t(header.SizeOfHeaders), sectionAlignment);
+
+            for (const auto &section : metadata.sections) {
+                if (!section.virtualSize && section.rawSize) {
+                    unsupportedStartup("section " + section.name +
+                                       " has raw data with zero virtual size");
+                }
+
+                if (section.rva % sectionAlignment ||
+                    (section.rawSize &&
+                     (section.fileOffset % fileAlignment || section.rawSize % fileAlignment))) {
+                    unsupportedStartup("section " + section.name +
+                                       " violates declared PE alignment");
+                }
+
+                if (section.rva != nextRva) {
+                    unsupportedStartup("section " + section.name + " is at RVA " +
+                                       hex(section.rva) + ", expected adjacent section at RVA " +
+                                       hex(nextRva));
+                }
+
+                nextRva =
+                    llvm::alignTo(uint64_t(section.rva) + section.virtualSize, sectionAlignment);
+
+                if (section.permissions[1] == 'w' && section.permissions[2] == 'x') {
+                    unsupportedStartup("writable executable section " + section.name +
+                                       " is unsupported");
+                }
+
+                if (section.shared && section.permissions[1] == 'w') {
+                    unsupportedStartup("shared writable section " + section.name +
+                                       " is unsupported");
+                }
+            }
         }
 
         void ImageParser::count(size_t records, const View &where) {
@@ -783,6 +894,8 @@ namespace forge {
         }
     } // namespace
 
+    std::string Module::architecture() const { return machineName(machine); }
+
     unsigned Exceptions::trailingBytes() const {
         return size % sizeof(llvm::Win64EH::RuntimeFunction);
     }
@@ -801,6 +914,10 @@ namespace forge {
     }
 
     ParsedImage::~ParsedImage() = default;
+
+    llvm::StringRef ParsedImage::headerBytes() const & {
+        return buffer->getBuffer().take_front(coff->getPE32PlusHeader()->SizeOfHeaders);
+    }
 
     std::optional<MappedRange> ParsedImage::mapRva(uint64_t rva,
                                                    std::optional<uint32_t> size) const {
@@ -993,6 +1110,54 @@ namespace forge {
                (config->Size >= offsetof(Config, DynamicValueRelocTableSection) +
                                     sizeof(config->DynamicValueRelocTableSection) &&
                 config->DynamicValueRelocTableSection);
+    }
+
+    void ParsedImage::validateExecutableLayout(uint64_t guestBase) const {
+        using namespace llvm::COFF;
+        const auto &header = *coff->getPE32PlusHeader();
+
+        if (guestBase == 0) {
+            unsupportedStartup(
+                "executable headers would map the null guest address at image base zero");
+        }
+
+        if (header.DLLCharacteristics & IMAGE_DLL_CHARACTERISTICS_FORCE_INTEGRITY) {
+            unsupportedStartup("executable requires Windows loader signature verification");
+        }
+
+        if ((header.Subsystem != IMAGE_SUBSYSTEM_WINDOWS_CUI &&
+             header.Subsystem != IMAGE_SUBSYSTEM_WINDOWS_GUI) ||
+            (coff->getCharacteristics() & IMAGE_FILE_SYSTEM) ||
+            (header.DLLCharacteristics &
+             (IMAGE_DLL_CHARACTERISTICS_WDM_DRIVER | IMAGE_DLL_CHARACTERISTICS_APPCONTAINER |
+              IMAGE_DLL_CHARACTERISTICS_GUARD_CF))) {
+            unsupportedStartup(
+                "executable requires unsupported Windows subsystem or loader features");
+        }
+
+        if (metadata.tls) {
+            unsupportedStartup("executable requires TLS initialization");
+        }
+
+        for (const auto &[index, name] : {std::pair{CLR_RUNTIME_HEADER, "managed runtime"},
+                                          {LOAD_CONFIG_TABLE, "load configuration"},
+                                          {BOUND_IMPORT, "bound imports"},
+                                          {DELAY_IMPORT_DESCRIPTOR, "delay imports"},
+                                          {GLOBAL_PTR, "global pointer initialization"},
+                                          {ARCHITECTURE, "architecture-specific initialization"}}) {
+            const auto *directory = coff->getDataDirectory(index);
+
+            if (directory && (directory->RelativeVirtualAddress || directory->Size)) {
+                unsupportedStartup(std::string("unsupported executable startup requirement: ") +
+                                   name);
+            }
+        }
+
+        validateExecutableResources(mappedDirectory(coff->getDataDirectory(RESOURCE_TABLE),
+                                                    metadata.sections, buffer->getBuffer(),
+                                                    "resource directory"));
+
+        validateExecutableSections(header, metadata, guestBase);
     }
 
     std::vector<RvaRange> ParsedImage::tlsAndConfigWrites() const {
@@ -1297,6 +1462,13 @@ namespace forge {
         return result;
     }
 
+    uint64_t ParsedImage::initialQword(uint32_t rva) const {
+        char bytes[sizeof(uint64_t)]{};
+        const auto raw = initializedBytes({rva, uint64_t(rva) + sizeof(bytes)});
+        std::copy(raw.begin(), raw.end(), bytes);
+        return llvm::support::endian::read64le(bytes);
+    }
+
     ImageBytes ParsedImage::imageBytes(RvaRange range, const ImageInitialization &init,
                                        uint64_t guestLoadBase) const {
         // The backing can extend beyond the access that selected it. Conflicting fields
@@ -1319,10 +1491,8 @@ namespace forge {
 
             // Decode the complete field even when a fixed image read selects only part of it.
             // Its last bytes may be loader-provided zeros beyond the PE raw extent.
-            char bytes[sizeof(uint64_t)]{};
-            const auto raw = initializedBytes(field);
-            std::copy(raw.begin(), raw.end(), bytes);
-            const uint64_t relocated = llvm::support::endian::read64le(bytes) + delta;
+            char bytes[sizeof(uint64_t)];
+            const uint64_t relocated = initialQword(rel->rva) + delta;
             llvm::support::endian::write64le(bytes, relocated);
 
             const auto begin = std::max(field.begin, range.begin);

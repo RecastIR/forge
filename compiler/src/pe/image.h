@@ -26,7 +26,7 @@ namespace forge {
     struct Section {
         std::string name, permissions;
         uint32_t rva, virtualSize, fileOffset, rawSize;
-        bool discardable;
+        bool discardable, shared;
 
         uint32_t initializedSize() const { return std::min(virtualSize, rawSize); }
 
@@ -81,6 +81,10 @@ namespace forge {
 
     class ImportBindings {
       public:
+        llvm::ArrayRef<Import> entries() const & { return descriptors; }
+
+        llvm::ArrayRef<Import> entries() const && = delete;
+
         std::optional<ImportSlot> at(uint32_t slotRva) const &;
         std::optional<ImportSlot> at(uint32_t) const && = delete;
 
@@ -173,6 +177,8 @@ namespace forge {
         std::vector<RelocationBlock> relocations;
         std::optional<TLS> tls;
         std::optional<Exceptions> exceptions;
+
+        std::string architecture() const;
     };
 
     enum class ParsePolicy { Inspection, FunctionAnalysis };
@@ -190,6 +196,10 @@ namespace forge {
 
         const Module &module() const { return metadata; }
 
+        // Borrow exactly the validated SizeOfHeaders bytes from the input snapshot.
+        llvm::StringRef headerBytes() const &;
+        llvm::StringRef headerBytes() const && = delete;
+
         // Both the section and bytes in a returned range borrow this image.
         // Omitting size maps to the end of the file-backed extent.
         std::optional<MappedRange> mapRva(uint64_t rva,
@@ -198,7 +208,10 @@ namespace forge {
         // Borrow the initialized prefix of a virtual interval inside a single section.
         // The remaining bytes in the interval are zero-filled by the PE loader.
         llvm::StringRef initializedBytes(RvaRange range) const;
+        uint64_t initialQword(uint32_t rva) const;
         bool advertisesDynamicRelocations() const;
+        // Checks the PE loader requirements for a standalone native executable.
+        void validateExecutableLayout(uint64_t guestBase) const;
         std::vector<RvaRange> loaderWrittenRanges() const;
         // Borrows the immutable index for this snapshot. Ownership failures are cached too.
         const ImportBindings &importBindings() const &;

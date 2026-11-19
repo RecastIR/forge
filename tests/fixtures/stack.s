@@ -653,10 +653,19 @@ probe call_redirect
 direct_caller recovery_mutual_a, recovery_mutual_b
 probe recovery_mutual_b
     subq $40, %rsp
+    testl %ecx, %ecx
+    jz .Lmutual_return
     callq recovery_mutual_a
     callq recovery_mutual_b
+.Lmutual_return:
     addq $40, %rsp
     ret
+    .seh_endproc
+
+probe recovery_no_base
+    subq $40, %rsp
+    callq recovery_no_base
+    callq recovery_invalid_callee
     .seh_endproc
 
 direct_caller recovery_invalid_entry, recovery_invalid_callee
@@ -712,5 +721,130 @@ probe scalar_boundary_prefix
     ret
 2:
     movzwl (%rcx), %eax
+    ret
+    .seh_endproc
+
+# Preserve the Windows nonvolatile destination register. Exercise count, final
+# destination, incoming carry, and a qword pattern with distinct bytes.
+probe repeat_qword
+    pushq %rdi
+    subq $32, %rsp
+    movq %rsp, %rdi
+    testq %rcx, %rcx
+    jz 1f
+    std
+    addq $16, %rdi
+1:
+    movq %rdx, %rax
+    cmpq $1, %rdx
+    movl $3, %ecx
+    rep stosq
+    cld
+    setb %r9b
+    movzbl %r9b, %r9d
+    movq (%rsp), %rax
+    addq 8(%rsp), %rax
+    addq 16(%rsp), %rax
+    addq %rcx, %rax
+    addq %r9, %rax
+    subq %rsp, %rdi
+    addq %rdi, %rax
+    addq $32, %rsp
+    popq %rdi
+    ret
+    .seh_endproc
+
+probe repeat_unconsumed
+    rep stosq
+    movl $42, %eax
+    ret
+    .seh_endproc
+
+probe repeat_opaque_destination
+    movq %rdi, %r11
+    movl $17, %eax
+    rep stosq
+    movq %r11, %rdi
+    ret
+    .seh_endproc
+
+# The zero-count predecessor defines neither RDI nor RAX.
+probe repeat_join
+    pushq %rdi
+    subq $8, %rsp
+    movq $17, (%rsp)
+    testq %rcx, %rcx
+    je 1f
+    movq %rsp, %rdi
+    movq %rdx, %rax
+    movl $1, %ecx
+1:
+    rep stosq
+    movq (%rsp), %rax
+    addq $8, %rsp
+    popq %rdi
+    ret
+    .seh_endproc
+
+# Saving an opaque nonvolatile through RAX requires preserving its byte origins.
+probe repeat_join_opaque
+    pushq %rdi
+    pushq %rbx
+    testq %rcx, %rcx
+    je 1f
+    movq %rbx, %rax
+    movq $0, (%rsp)
+    movq %rsp, %rdi
+    movl $19, %ebx
+1:
+    rep stosq
+    popq %rbx
+    popq %rdi
+    movl $42, %eax
+    ret
+    .seh_endproc
+
+probe repeat_to_address
+    movq %rdi, %r11
+    movq %rcx, %rdi
+    movq %rdx, %rcx
+    movabsq $0x123456789abcdef0, %rax
+    rep stosq
+    movq %r11, %rdi
+    ret
+    .seh_endproc
+
+probe atomic_lock
+    subq $24, %rsp
+    movq %rdx, (%rsp)
+    movq %rcx, %rax
+    movabsq $0x123456789abcdef0, %r9
+    lock cmpxchgq %r9, (%rsp)
+    movl $0x42, %r8d
+    xchgq %r8, (%rsp)
+    setb %cl
+    sete %r10b
+    movzbl %cl, %ecx
+    movzbl %r10b, %r10d
+    addq %r8, %rax
+    addq (%rsp), %rax
+    addq %rcx, %rax
+    leaq (%rax,%r10,2), %rax
+    addq $24, %rsp
+    ret
+    .seh_endproc
+
+probe atomic_readonly
+    movq (%rcx), %r8
+    movq $-1, %rax
+    lock cmpxchgq %rdx, (%rcx)
+    ret
+    .seh_endproc
+
+probe atomic_unaligned
+    movq %rdx, 8(%rsp)
+    movq %rdx, 16(%rsp)
+    xchgq %rcx, 9(%rsp)
+    movq %rcx, %rax
     ret
     .seh_endproc

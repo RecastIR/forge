@@ -18,8 +18,15 @@ def generate(output, mc, link, dlltool, clang):
         "Bridge.dll": ["Bridge=entry"],
         "Middle.dll": ["Middle=entry"],
         "MissingLeaf.dll": ["Leaf"],
-        "KERNEL32.dll": ["Sleep", "SetLastError", "GetLastError", "lstrlenA"],
+        "KERNEL32.dll": ["Sleep", "SwitchToThread", "SetLastError", "GetLastError", "lstrlenA",
+                         "GetStdHandle", "WriteFile", "ExitProcess", "GetCommandLineA", "GetCommandLineW", "SetStdHandle", "GetFileType", "GetFileSize",
+                         "CreateJobObjectA", "SetInformationJobObject", "AssignProcessToJobObject", "GetCurrentProcess",
+                         "SetUnhandledExceptionFilter", "__C_specific_handler", "GetStartupInfoA", "GetStartupInfoW"],
         "vcruntime140.dll": ["Runtime"],
+        "msvcrt.dll": ["_cexit", "_onexit", "exit", "_errno", "fopen", "fclose", "fputc", "setvbuf",
+                       "_fileno", "_get_osfhandle", "memset", "fwrite", "__getmainargs", "_amsg_exit", "_initterm", "calloc", "free", "malloc", "strlen",
+                       "__C_specific_handler", "_fmode=entry DATA", "_commode=entry DATA",
+                       "__initenv=entry DATA", "_acmdln=entry DATA"],
         contract: ["Contract"],
     }
     with tempfile.TemporaryDirectory() as folder:
@@ -36,14 +43,14 @@ def generate(output, mc, link, dlltool, clang):
             definition.write_text("LIBRARY " + dll + "\nEXPORTS\n" + "\n".join(public) + "\n")
             run(dlltool, "-m", "i386:x86-64", "-d", definition, "-l", dll + ".lib")
 
-        def image(filename, assembly=stub, imports=(), delays=(), exports=(), link_flags=()):
+        def image(filename, assembly=stub, imports=(), delays=(), exports=(), link_flags=(), entry="entry"):
             assembly += helper if delays else ""
             for _, symbol in imports:
                 assembly += "\n.section .rdata,\"dr\"\n.quad __imp_" + symbol + "\n"
             source = work / "image.s"
             source.write_text(assembly)
             run(mc, "-triple=x86_64-pc-windows-msvc", "-filetype=obj", source, "-o", "image.obj")
-            flags = ["/entry:entry", "/subsystem:console"]
+            flags = ["/entry:" + entry, "/subsystem:console"]
             if filename in definitions:
                 definition = work / "exports.def"
                 definition.write_text("EXPORTS\n" + "\n".join(definitions[filename]) + "\n")
@@ -54,6 +61,106 @@ def generate(output, mc, link, dlltool, clang):
             (output / filename).write_bytes((work / filename).read_bytes())
 
         sources = Path(__file__).resolve().parent
+        for name in ("executable-return", "executable-call", "executable-data", "executable-fault",
+                     "executable-tib", "executable-guarded-call"):
+            image(f"{name}.exe", (sources / f"{name}.s").read_text())
+        returns = (sources / "executable-return.s").read_text()
+        for dll in ("KERNEL32.dll", "msvcrt.dll"):
+            name = dll.split(".")[0].lower()
+            image(f"executable-seh-{name}.exe", (sources / "executable-seh.s").read_text(),
+                  [(dll, "__C_specific_handler")])
+        image("executable-integrity.exe", returns, link_flags=["/integritycheck"])
+        image("executable-manifest.exe", returns, link_flags=[
+            "/manifest:embed",
+            "/manifestdependency:type='win32' name='Forge.Missing' version='1.0.0.0' processorArchitecture='amd64'",
+        ])
+        image("executable-last-error.exe", (sources / "executable-last-error.s").read_text(),
+              [("KERNEL32.dll", name) for name in ("SetLastError", "GetLastError")])
+        image("executable-import-thunk.exe", (sources / "executable-import-thunk.s").read_text(),
+              [("KERNEL32.dll", name) for name in ("SetLastError", "GetLastError", "ExitProcess")])
+        image("executable-import-register.exe", (sources / "executable-import-register.s").read_text(),
+              [("KERNEL32.dll", name) for name in ("SetLastError", "GetLastError", "Sleep")])
+        startup_info = (sources / "executable-startup-info.s").read_text()
+        for variants in ("a", "w", "aw"):
+            setup = "".join(f"probe_{variant} = 1\n" for variant in variants)
+            image(f"executable-startup-info-{variants}.exe", setup + startup_info,
+                  link_flags=["KERNEL32.dll.lib"])
+        image("executable-startup-info-fields.exe",
+              "probe_a = 1\nprobe_w = 1\nmeasured_fields = 1\n" + startup_info,
+              link_flags=["KERNEL32.dll.lib"])
+        image("executable-startup-info-w-fault.exe", "probe_w = 1\nfault = 1\n" + startup_info,
+              link_flags=["KERNEL32.dll.lib"])
+        filter_source = (sources / "executable-top-level-filter.s").read_text()
+        filter_imports = [("KERNEL32.dll", name) for name in ("SetUnhandledExceptionFilter", "ExitProcess")]
+        image("executable-top-level-filter.exe", filter_source, filter_imports)
+        image("executable-top-level-filter-fault.exe", "check_guest_fault = 1\n" + filter_source, filter_imports)
+        image("executable-headers.exe", (sources / "executable-headers.s").read_text(),
+              [("KERNEL32.dll", "lstrlenA")], link_flags=["/dynamicbase:no", "/fixed:no"])
+        console_imports = [("KERNEL32.dll", name) for name in ("GetStdHandle", "WriteFile", "ExitProcess")]
+        image("hello.exe", (sources / "hello.s").read_text(), console_imports)
+        image("command-line.exe", (sources / "command-line.s").read_text(),
+              [("KERNEL32.dll", "GetCommandLineA")])
+        image("crt-argv-strlen.exe", (sources / "crt-argv-strlen.s").read_text(),
+              [("msvcrt.dll", name) for name in ("__getmainargs", "strlen")])
+        image("crt-argument-heap.exe", (sources / "crt-argument-heap.s").read_text(),
+              [("msvcrt.dll", name) for name in ("__getmainargs", "calloc", "free", "strlen",
+                                                 "_fmode", "_commode", "__initenv", "_acmdln")] +
+              [("KERNEL32.dll", "GetCommandLineA")])
+        initializer_flags = ["/section:.CRT,RW", "msvcrt.dll.lib", "KERNEL32.dll.lib"]
+        image("crt-initterm.exe", (sources / "crt-initterm.s").read_text(), link_flags=initializer_flags)
+        image("crt-initterm-spill.exe", (sources / "crt-initterm-spill.s").read_text(),
+              link_flags=[*initializer_flags, "/base:0x400000"])
+        initializer_probe = (sources / "crt-initterm-probe.s").read_text()
+        for variant in ("terminal", "guest_fault", "unknown_target", "data_target", "other_function",
+                        "other_initializer", "clobber", "bad_rsp", "read_return", "before_return", "write_return",
+                        "service_return", "register_arg", "nonvolatile_arg", "stack_arg", "stack_alias",
+                        "service_alias", "nested_table", "stack_exhaustion"):
+            image(f"crt-initterm-{variant}.exe", f"{variant} = 1\n" + initializer_probe, link_flags=initializer_flags)
+        termination = (sources / "crt-termination.s").read_text()
+        for name, switches in (
+            ("cexit", ()), ("exit", ("normal_exit",)), ("nested-exit", ("normal_exit", "terminal")),
+            ("register", ("add_during",)), ("recursive", ("add_during", "recurse")),
+            ("recursive-order", ("add_during", "recurse", "trace_recursive_return")),
+            ("recursive-limit", ("recurse_forever",)), ("recursive-exit", ("add_during", "recursive_exit")),
+            ("fault", ("fault",)), ("nested-fault", ("add_during", "recurse", "nested_fault")),
+            ("stdio", ("crt_stream",)),
+            ("return-slot", ("corrupt_return",)), ("stack-above", ("stack_above",)),
+            ("wrong-origin", ("changed_target", "needs_evidence")),
+            ("unmapped", ("unmapped_target", "needs_evidence")), ("data", ("data_target", "needs_evidence"))):
+            setup = "".join(f"{switch} = 1\n" for switch in switches)
+            image(f"crt-term-{name}.exe", setup + termination, link_flags=initializer_flags)
+        for name in ("startup", "stream", "stream_exit", "registration", "pressure"):
+            run(clang, "--target=x86_64-pc-windows-msvc", "-O1", "-ffreestanding",
+                "-fno-stack-protector", "-D" + name.upper(), "-c", sources / "crt-termination-reference.c",
+                "-o", "reference.obj")
+            filename = f"crt-observe-{name}.exe"
+            run(link, "/nodefaultlib", "/timestamp:0", "/entry:entry", "/subsystem:console",
+                "/out:" + filename, "reference.obj", "msvcrt.dll.lib", "KERNEL32.dll.lib")
+            (output / filename).write_bytes((work / filename).read_bytes())
+        fatal = (sources / "crt-amsg-exit.s").read_text()
+        for number in (31, 8, -1, -2147483648):
+            image(f"crt-amsg-exit-{number}.exe", f"error_number = {number}\n" + fatal,
+                  link_flags=["msvcrt.dll.lib"])
+        image("crt-amsg-exit-unused.exe", fatal, link_flags=["msvcrt.dll.lib"])
+        marker = "observe_continuation = 1\n" + fatal
+        for variant, setup in (("fatal", "error_number = 31\n"), ("control", "")):
+            image(f"crt-amsg-marker-{variant}.exe", setup + marker,
+                  link_flags=["msvcrt.dll.lib", "KERNEL32.dll.lib"])
+        # Retain the compiler's instructions after the call to a non-returning guest helper.
+        run(clang, "--target=x86_64-pc-windows-msvc", "-O2", "-fno-stack-protector", "-c",
+            sources / "executable-noreturn.c", "-o", "noreturn.obj")
+        run(link, "/nodefaultlib", "/timestamp:0", "/entry:entry", "/subsystem:console",
+            "noreturn.obj", "KERNEL32.dll.lib", "/out:executable-noreturn.exe")
+        (output / "executable-noreturn.exe").write_bytes((work / "executable-noreturn.exe").read_bytes())
+        console_cases = (sources / "console-cases.s").read_text()
+        console_imports += [("KERNEL32.dll", name) for name in ("GetLastError", "SetLastError")]
+        for entry in ("binary_stdout", "binary_stderr", "bad_handle", "stdin_write", "bad_selector",
+                      "stdin_handle", "bad_buffer", "bad_count", "null_count", "overlapped",
+                      "zero_length", "host_failure", "direct_exit", "nested_exit", "alternate_edge",
+                      "isolation", "large_output", "limited_file", "stderr_failure",
+                      "zero_stdout_failure", "zero_stderr_failure", "call_at_end", "branch_past_call",
+                      "recursive_return", "recursive_exit"):
+            image(f"console-{entry}.exe", console_cases, console_imports, entry=entry)
         # Remap debug paths so builds in different source directories produce identical PEs.
         for name in ("add", "inlined"):
             run(clang, "--target=x86_64-windows-msvc", "-O2", "-fwrapv", "-gdwarf-4", "-g",
@@ -88,7 +195,7 @@ def generate(output, mc, link, dlltool, clang):
                  '.seh_proc leaf_fence\nleaf_fence:\n.seh_endprologue\nret\n.seh_endproc\n.byte 0x0f\n')
         image("leaves.exe", stub + leaf_calls.read_text() + probe)
         last_error = (sources.parent / "differential/fixtures/imports/last_error.S").read_text()
-        imports = [("KERNEL32.dll", name) for name in ("SetLastError", "GetLastError", "Sleep")]
+        imports = [("KERNEL32.dll", name) for name in ("SetLastError", "GetLastError", "SwitchToThread")]
         image("last-error.exe", stub + ".globl last_error_set\n" + last_error, imports + [("Physics.DLL", "Named")], exports=["last_error_set"])
         image("last-error-delay.exe", stub + last_error, imports, delays=["KERNEL32.dll"])
         string_length = (sources.parent / "differential/fixtures/imports/lstrlen.S").read_text()
@@ -97,7 +204,7 @@ def generate(output, mc, link, dlltool, clang):
         abi_imports = [("ForgeAbi.dll", name) for name in definitions["ForgeAbi.dll"]]
         image("service-abi.exe", (sources / "service-abi.s").read_text(),
               abi_imports + [("KERNEL32.dll", name) for name in ("SetLastError", "GetLastError", "lstrlenA")],
-              exports=["pair", "triple", "four", "echo_bits", "six", "bad_stack", "bad_sig", "void_result",
+              exports=["pair", "triple", "four", "echo_bits", "six", "bad_stack", "bad_sig", "void_result", "repeat_after_void",
                        "write_call", "write_nested", "disjoint_record", "nested_disjoint", "nested_overlap", "nested_optional",
                        "unmapped", "stale_spill", "disjoint_spill", "image_output", "readonly_output",
                        "counted_boundary", "counted_with_load", "fixed_boundary", "counted_gap", "stack_count", "zero_count"])

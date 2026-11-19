@@ -12,6 +12,9 @@ extern "C" {
 
 // NOLINTBEGIN(readability-identifier-naming)
 #define FORGE_RT_ARTIFACT_VERSION UINT32_C(1)
+#define FORGE_RT_NAMED_ARTIFACT_VERSION UINT32_C(2)
+#define FORGE_RT_CRT_ARTIFACT_VERSION UINT32_C(3)
+#define FORGE_RT_FUNCTION_IMPORT_ARTIFACT_VERSION UINT32_C(4)
 #define FORGE_RT_STACK_BASE UINT64_C(0x70000000)
 #define FORGE_RT_STACK_SIZE UINT32_C(4096)
 #define FORGE_RT_ENTRY_RSP (FORGE_RT_STACK_BASE + FORGE_RT_STACK_SIZE - 32 - 8)
@@ -30,12 +33,14 @@ typedef uint32_t forge_rt_process_state;
 #define FORGE_RT_EXECUTION_FAULT UINT32_C(2)
 #define FORGE_RT_UNSUPPORTED UINT32_C(3)
 #define FORGE_RT_RUNTIME_FAILURE UINT32_C(4)
+#define FORGE_RT_EXIT_PROCESS UINT32_C(5)
 #define FORGE_RT_FAULT_MEMORY UINT32_C(1)
 #define FORGE_RT_FAULT_CONTROL UINT32_C(2)
 #define FORGE_RT_FAULT_ABI UINT32_C(3)
 
-/* RETURNED supplies the complete guest RAX in value. EXECUTION_FAULT identifies the
- * fault class. FAULT_MEMORY carries the existing checked-copy diagnostic in memory.
+/* RETURNED supplies the complete guest RAX in value. EXIT_PROCESS supplies the
+ * zero-extended DWORD exit code from a terminal guest service such as ExitProcess or _amsg_exit.
+ * EXECUTION_FAULT identifies the fault class. FAULT_MEMORY carries the checked-copy diagnostic.
  * RUNTIME_FAILURE supplies a nonzero native runtime status. */
 typedef struct forge_rt_process_result {
     uint32_t kind;
@@ -66,6 +71,7 @@ typedef struct forge_rt_execution {
     uint64_t registers[16];
     uint64_t registerMarks[16];
     uint8_t flags[6];
+    uint8_t directionFlag;
 } forge_rt_execution;
 
 /* Generated entry slow path for a failed scalar image lookup or stack
@@ -111,7 +117,9 @@ typedef struct forge_rt_import {
  * entryRva can differ from the PE header's peEntryRva. The trusted native entry and its
  * layout tables must come from the same translation. All descriptor tables, immutable
  * bytes, names, and native code have stable addresses and outlive every registered use.
- * Imports describe services resolved by the native linker. The runtime does no DLL lookup. */
+ * Imports describe services resolved by the native linker. Include the console imports used by
+ * hand-authored entries and their native adapters: registration captures standard streams when
+ * the table declares KERNEL32.dll GetStdHandle or WriteFile. DLL names are case-insensitive. */
 typedef struct forge_rt_artifact {
     uint32_t version;
     uint64_t base;
@@ -127,6 +135,58 @@ typedef struct forge_rt_artifact {
     void (*entry)(forge_rt_execution *);
 } forge_rt_artifact;
 
+/* Version 2 appends the original PE basename. The prefix is the complete v1 descriptor. */
+typedef struct forge_rt_named_artifact {
+    forge_rt_artifact artifact;
+    const char *executableName;
+} forge_rt_named_artifact;
+
+#define FORGE_RT_CRT_ACMDLN UINT32_C(1)
+#define FORGE_RT_CRT_INITENV UINT32_C(2)
+#define FORGE_RT_CRT_FMODE UINT32_C(3)
+#define FORGE_RT_CRT_COMMODE UINT32_C(4)
+
+typedef struct forge_rt_data_import {
+    uint32_t slotRva;
+    uint32_t kind;
+} forge_rt_data_import;
+
+/* Version 3 describes ordered, disjoint 8-byte IAT slots in private image backing.
+ * Their backing bytes must also be disjoint and guest write-protected through every
+ * mapping. Registration publishes the writable CRT cell's guest VA in each slot. */
+typedef struct forge_rt_crt_artifact {
+    forge_rt_named_artifact named;
+    const forge_rt_data_import *dataImports;
+    uint64_t dataImportCount;
+} forge_rt_crt_artifact;
+
+typedef struct forge_rt_function_import {
+    uint32_t slotRva;
+    forge_rt_import target;
+} forge_rt_function_import;
+
+/* Version 4 appends the ordinary named function IAT slots observed as guest values.
+ * These ordered, disjoint qwords have the same storage protections as data import slots.
+ * Each catalogue service has one opaque guest address per process. Those addresses occupy
+ * a reserved range with no readable/writable guest bytes and contain no native pointers.
+ * Observing a function's identity alone does not declare a call to that service. */
+typedef struct forge_rt_function_import_artifact {
+    forge_rt_crt_artifact crt;
+    const forge_rt_function_import *functionImports;
+    uint64_t functionImportCount;
+} forge_rt_function_import_artifact;
+
+/* Borrowed during registration. Arguments exclude argv[0]. A null executablePath defaults to
+ * C:\\ plus the original PE basename in a v2 descriptor. Inputs to command-line services are
+ * ASCII and the encoded command line is limited to 32767 UTF-16 units including the NUL. */
+typedef struct forge_rt_process_startup {
+    const char *executablePath;
+    size_t argumentCount;
+    const char *const *arguments;
+    size_t environmentCount;
+    const char *const *environment;
+} forge_rt_process_startup;
+
 /* Exported by a linked compiler-generated process artifact. */
 const forge_rt_artifact *forge_lifted_artifact(void);
 
@@ -136,11 +196,32 @@ forge_rt_status forge_rt_process_create(uint32_t expectedVersion,
  * the identical descriptor succeeds. Failed initial registration leaves CREATED retryable. */
 forge_rt_status forge_rt_process_register(forge_rt_process *process,
                                           const forge_rt_artifact *artifact) FORGE_PROCESS_NOEXCEPT;
+/* One-shot configuration of a CREATED process. Failure leaves registration retryable.
+ * The runtime materializes parameters when the artifact declares a consuming import. */
+forge_rt_status forge_rt_process_register_with_startup(
+    forge_rt_process *process, const forge_rt_artifact *artifact,
+    const forge_rt_process_startup *startup) FORGE_PROCESS_NOEXCEPT;
+
+/* A managed scalar miss may resolve into process-owned memory outside the PE. The returned
+ * native pointer is borrowed by the current guest instruction only. A null result publishes
+ * a terminal diagnostic in the execution view. */
+void *forge_rt_resolve_process_scalar(forge_rt_execution *execution, uint64_t address,
+                                      uint32_t size, uint32_t access) FORGE_PROCESS_NOEXCEPT;
+/* Primary guest thread GS base. A zero result publishes a failure on the supplied view. */
+uint64_t forge_rt_primary_teb(forge_rt_execution *execution) FORGE_PROCESS_NOEXCEPT;
 forge_rt_status forge_rt_process_get_state(forge_rt_process *process,
                                            forge_rt_process_state *outState) FORGE_PROCESS_NOEXCEPT;
+/* For READY processes only. Records the host's assurance of safe output signal handling,
+ * including SIGPIPE on pipes/devices and SIGXFSZ under a finite file-size limit. Otherwise
+ * writes rely on an ignored signal or Darwin F_SETNOSIGPIPE on a pipe/device. Under either
+ * policy the host keeps applicable dispositions, descriptor flags and file-size limits safe
+ * throughout execution, including across descriptor aliases and blocked writes. */
+forge_rt_status
+forge_rt_process_allow_host_output_signals(forge_rt_process *process) FORGE_PROCESS_NOEXCEPT;
 /* Run enters the selected guest root exactly once. A null inputs pointer sets RCX and
  * RDX to zero. Otherwise run copies the caller's register seeds on admission. OK delivers
- * a tagged result even for execution failure. Admission errors preserve outResult. The
+ * a tagged result even for execution failure. Captured descriptor duplicates are released
+ * before any terminal state becomes visible. Admission errors preserve outResult. The
  * caller supplies live native input/output storage disjoint from each other and guest data. */
 forge_rt_status forge_rt_process_run(forge_rt_process *process, const forge_rt_entry_inputs *inputs,
                                      forge_rt_process_result *outResult) FORGE_PROCESS_NOEXCEPT;

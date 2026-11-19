@@ -29,6 +29,12 @@ namespace forge::win64 {
       public:
         bool absent() const { return arg.optional && !start.value; }
 
+        uint64_t byteSize() const
+            requires(arg.extent == Extent::InitializerEnd)
+        {
+            return size;
+        }
+
         forge_rt_status validate() const
             requires(arg.extent != Extent::CString)
         {
@@ -132,6 +138,19 @@ namespace forge::win64 {
             size = arg.size;
         }
 
-        return GuestBuffer<arg>(call, {std::get<position>(arguments)}, size);
+        const GuestAddress first{std::get<position>(arguments)};
+
+        if constexpr (arg.extent == Extent::InitializerEnd) {
+            using Table = std::optional<GuestBuffer<arg>>;
+            const auto bytes = initializerRangeBytes(first.value, std::get<arg.size>(arguments));
+
+            if (!bytes) {
+                return Table{};
+            }
+
+            return Table{GuestBuffer<arg>(call, first, *bytes)};
+        } else {
+            return GuestBuffer<arg>(call, first, size);
+        }
     }
 } // namespace forge::win64

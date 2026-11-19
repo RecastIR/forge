@@ -87,6 +87,30 @@ class GuestExecution(unittest.TestCase):
 
 
 class StackTests(GuestExecution):
+    def test_rep_stosq_operands(self):
+        for exe in self.variants("repeat_unconsumed"):
+            self.expect(exe, 0, 123, 42)
+            self.trap(exe, [(1, 123)])
+
+        # An opaque incoming RDI can have bits equal to a writable stack address.
+        for exe in self.variants("repeat_opaque_destination", incoming_bits=RSP - 8):
+            self.expect(exe, 0, 0, 17)
+            self.trap(exe, [(1, 0)])
+
+        for exe in self.variants("repeat_join_opaque"):
+            self.expect(exe, 0, 0, 42)
+            self.expect(exe, 1, 0, 42)
+
+        for exe in self.variants("repeat_to_address"):
+            self.expect(exe, MASK, 0, 0x123456789abcdef0)
+            self.trap(exe, [(RSP, 1)])
+
+    def test_recursion_without_a_return(self):
+        # The recursive call consumes guest stack until the normal stack guard trips.
+        # Its unreachable continuation references a callee with an invalid target.
+        for exe in self.variants("recovery_no_base"):
+            self.trap(exe, [(0, 0)])
+
     def test_boundaries(self):
         value = 0x876543210fedcba9
         for width, suffix in ((1, "b"), (2, "w"), (4, "l"), (8, "q")):

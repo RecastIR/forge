@@ -18,6 +18,8 @@ namespace forge::x86 {
         static constexpr uint64_t base = FORGE_RT_STACK_BASE;
         static constexpr unsigned capacity = FORGE_RT_STACK_SIZE;
         static constexpr uint64_t entryRsp = FORGE_RT_ENTRY_RSP;
+        static constexpr unsigned initializerHomeEnd = FORGE_RT_INITIALIZER_HOME_END;
+        static constexpr unsigned initializerFrameSize = initializerHomeEnd + 8;
 
         explicit GuestMemory(llvm::IRBuilder<> &builder) : checks(builder), ir(builder) {}
 
@@ -27,12 +29,14 @@ namespace forge::x86 {
         // into the same invocation without clearing bytes or origin marks.
         void initialize(llvm::Value *stackBytes, llvm::Value *stackValidity);
         void bind(llvm::Value *stackBytes, llvm::Value *stackValidity, llvm::Function *resolver,
-                  llvm::Value *regions = nullptr);
+                  llvm::Value *regions = nullptr, llvm::Value *stackCeiling = nullptr);
         llvm::Value *load(llvm::Value *address, unsigned width, bool stackOnly);
         StoredValue loadSaved(llvm::Value *address, unsigned width, bool stackOnly);
         void store(llvm::Value *address, StoredValue value, bool stackOnly);
         void modify(llvm::Value *address, unsigned width, bool stackOnly,
                     llvm::function_ref<llvm::Value *(llvm::Value *)> operation);
+        llvm::Value *atomicExchange(llvm::Value *address, llvm::Value *replacement,
+                                    llvm::Value *expected, bool stackOnly);
         void checkReturn(llvm::Value *rsp);
         // Keep the pushed entry RSP in the caller's native activation and use
         // that same value for popReturn, even when guest code has changed RSP.
@@ -40,9 +44,12 @@ namespace forge::x86 {
                                 uint64_t nextGuestVA);
         llvm::Value *popReturn(llvm::Value *rsp, llvm::Value *expectedEntryRsp,
                                uint64_t nextGuestVA);
+        llvm::Value *pushInitializerReturn(llvm::Value *serviceRsp);
+        void popInitializerReturn(llvm::Value *rsp, llvm::Value *expectedEntryRsp);
 
       private:
         llvm::IRBuilder<> &ir;
+        llvm::Value *stackCeiling = nullptr;
         llvm::Value *bytes = nullptr;
         llvm::Value *validity = nullptr;
         llvm::Value *regions = nullptr;
@@ -65,8 +72,14 @@ namespace forge::x86 {
         Location resolve(llvm::Value *address, unsigned width, Access access, bool stackOnly,
                          llvm::Value *storeMarks = nullptr);
         llvm::Value *checkedOffset(llvm::Value *address, unsigned width, Access access);
-        void installReturn(llvm::Value *offset, uint64_t address);
-        void verifyReturn(llvm::Value *offset, uint64_t address);
+        void installReturn(llvm::Value *offset, uint64_t address,
+                           uint8_t mark = FORGE_RT_MARK_RETURN);
+        void verifyReturn(llvm::Value *offset, uint64_t address,
+                          uint8_t mark = FORGE_RT_MARK_RETURN);
+        llvm::Value *reserveReturn(llvm::Value *callRsp, llvm::Value *callerEntryRsp,
+                                   uint64_t address, uint8_t mark);
+        llvm::Value *returnOffset(llvm::Value *rsp, llvm::Value *expectedEntryRsp, uint64_t address,
+                                  uint8_t mark);
         Location stackLocation(llvm::Value *offset, unsigned width, Access access,
                                llvm::Value *storeMarks = nullptr);
     };

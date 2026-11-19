@@ -1,0 +1,126 @@
+#pragma once
+
+#include "forge/runtime.h"
+
+#include <map>
+#include <mutex>
+#include <new>
+#include <span>
+#include <stdexcept>
+#include <unordered_map>
+#include <vector>
+
+namespace forge::runtime {
+    struct WindowsProcessState;
+
+    struct Thread {
+        // This cell follows the guest thread in both standalone and managed execution.
+        uint32_t lastError = 0;
+        forge_rt_invocation_token invocation = 0;
+        forge_rt_invocation_token parent = 0;
+        const forge_rt_image *image = nullptr;
+        forge_rt_stack stack{};
+    };
+
+    // A reservation covers the whole image, including holes, or one active stack.
+    // Thread references survive table rehash. An active thread cannot be destroyed.
+    struct Reservation {
+        uint64_t base;
+        uint64_t size;
+        const forge_rt_image *image;
+        const Thread *stackOwner;
+    };
+
+    struct HeapBlock {
+        HeapBlock(uint64_t base, size_t size)
+            : bytes(size), region{base, size, bytes.data(), FORGE_RT_READ | FORGE_RT_WRITE, &claim},
+              image{base, size, &region, 1} {}
+
+        HeapBlock(const HeapBlock &) = delete;
+        HeapBlock &operator=(const HeapBlock &) = delete;
+
+        std::vector<uint8_t> bytes;
+        uint64_t claim = 0;
+        forge_rt_image_region region;
+        forge_rt_image image;
+    };
+
+    // Select a vacant, aligned range in the ordered reservations. Zero denotes exhaustion.
+    uint64_t findGuestAllocation(std::span<const Reservation> reservations, uint64_t size,
+                                 uint64_t alignment, uint64_t hint = 65536) noexcept;
+    uint64_t issueToken() noexcept;
+    extern thread_local forge_rt_invocation_token executingInvocation;
+    // The existing invocation borrowed by the innermost synchronous native-to-guest call.
+    extern thread_local forge_rt_invocation_token callbackInvocation;
+
+    // The caller has checked the live managed invocation. Nested callbacks must restore
+    // the previous token so checked service transfers use the innermost guest frame.
+    template <typename Dispatch, typename... Args>
+    void dispatchGuestCallback(Dispatch dispatch, Args... args) noexcept {
+        const auto previous = callbackInvocation;
+        callbackInvocation = executingInvocation;
+        dispatch(args...);
+        callbackInvocation = previous;
+    }
+} // namespace forge::runtime
+
+struct forge_rt_execution;
+struct forge_rt_process_result;
+
+struct forge_rt_instance {
+    std::mutex mutex;
+    std::unordered_map<forge_rt_thread_token, forge::runtime::Thread> threads;
+    std::map<uint64_t, forge::runtime::HeapBlock> heap;
+    uint64_t nextHeapAddress = 65536;
+    std::vector<forge::runtime::Reservation> reservations;
+    // Both borrows are installed together on the unpublished occurrence after registration.
+    forge::runtime::WindowsProcessState *windows = nullptr;
+    forge_rt_execution *managedExecution = nullptr;
+};
+
+namespace forge::runtime {
+    // Caller holds the process mapping lock and supplies stable, private registered storage.
+    forge_rt_status publishOwnedImage(forge_rt_instance &instance, const forge_rt_image &image);
+    // Caller holds the same lock. A vacant address may be unavailable (OK with a null
+    // block). A published block stays stable until free or process retirement.
+    forge_rt_status allocateHeapBlock(forge_rt_instance &instance, size_t size,
+                                      HeapBlock *&outBlock);
+    forge_rt_status freeHeapBlock(forge_rt_instance &instance, uint64_t address,
+                                  size_t &releasedSize);
+
+    // The caller holds the instance lock. Terminal actions also require an empty result.
+    forge_rt_status checkManagedInvocation(const forge_rt_instance &owner,
+                                           forge_rt_thread_token thread) noexcept;
+    forge_rt_status checkPendingExecution(const forge_rt_instance &owner,
+                                          forge_rt_thread_token thread) noexcept;
+    // Validate the active execution and publish its tagged result under one lock.
+    forge_rt_status publishTerminalResult(forge_rt_instance *instance, forge_rt_thread_token thread,
+                                          const forge_rt_process_result &result) noexcept;
+
+    enum class Admission : uint8_t { Host, Process };
+    forge_rt_status enterInvocation(forge_rt_instance *instance, forge_rt_thread_token thread,
+                                    const forge_rt_image *image, const forge_rt_stack *stack,
+                                    forge_rt_invocation_token *outInvocation,
+                                    Admission admission) noexcept;
+    forge_rt_status leaveInvocation(forge_rt_instance *instance, forge_rt_thread_token thread,
+                                    forge_rt_invocation_token invocation,
+                                    Admission admission) noexcept;
+
+    template <typename Instance, typename Operation>
+    forge_rt_status withInstance(Instance *instance, Operation operation) noexcept {
+        if (instance == nullptr) {
+            return FORGE_RT_INVALID_ARGUMENT;
+        }
+
+        try {
+            const std::lock_guard lock(instance->mutex);
+            return operation(*instance);
+        } catch (const std::bad_alloc &) {
+            return FORGE_RT_RESOURCE_EXHAUSTED;
+        } catch (const std::length_error &) {
+            return FORGE_RT_RESOURCE_EXHAUSTED;
+        } catch (...) {
+            return FORGE_RT_INTERNAL_ERROR;
+        }
+    }
+} // namespace forge::runtime

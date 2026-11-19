@@ -1,6 +1,7 @@
 #include "lift/lift.h"
 
 #include "analysis/analysis.h"
+#include "lift/executable.h"
 #include "lift/execution_context.h"
 #include "lift/group_analysis.h"
 #include "lift/operands.h"
@@ -37,17 +38,82 @@ namespace forge {
         using BlockStates = std::map<uint32_t, BlockState>;
         using GuestBodies = std::map<uint32_t, Function *>;
 
+        struct TerminationDispatch {
+            Function *lookup = nullptr;
+            Function *invoke = nullptr;
+        };
+
+        TerminationDispatch emitTerminationDispatch(llvm::Module &module,
+                                                    const x86::RecoveredFunctionGroup &group,
+                                                    const GuestBodies &thunks,
+                                                    const x86::ContextLayout &layout,
+                                                    uint64_t base) {
+            IRBuilder<> ir(module.getContext());
+            auto *lookupType =
+                FunctionType::get(ir.getPtrTy(), {ir.getInt64Ty(), ir.getInt64Ty()}, false);
+            auto *lookup = Function::Create(lookupType, Function::InternalLinkage,
+                                            "forge_termination_lookup", module);
+            auto *entry = BasicBlock::Create(module.getContext(), "entry", lookup);
+            auto *absent = BasicBlock::Create(module.getContext(), "unknown.site", lookup);
+            ir.SetInsertPoint(entry);
+            auto *sites = ir.CreateSwitch(lookup->getArg(0), absent);
+            auto *null = ConstantPointerNull::get(ir.getPtrTy());
+            ir.SetInsertPoint(absent);
+            ir.CreateRet(null);
+
+            for (const auto &[rva, function] : group.functions()) {
+                for (const auto &[instruction, call] : function.calls) {
+                    const auto *service = call.external();
+                    if (!service || !service->registration) {
+                        continue;
+                    }
+
+                    for (const auto &[origin, target] : service->registration->targets) {
+                        if (!target) {
+                            continue;
+                        }
+
+                        auto *block =
+                            BasicBlock::Create(module.getContext(), "registration", lookup);
+                        sites->addCase(ir.getInt64((uint64_t{origin} << 32) | instruction), block);
+                        ir.SetInsertPoint(block);
+                        auto *match =
+                            ir.CreateICmpEQ(lookup->getArg(1), ir.getInt64(base + target));
+                        ir.CreateRet(ir.CreateSelect(match, thunks.at(target), null));
+                    }
+                }
+            }
+
+            auto *type = FunctionType::get(
+                ir.getVoidTy(), {ir.getPtrTy(), ir.getInt64Ty(), ir.getInt64Ty()}, false);
+            auto *invoke = Function::Create(type, Function::InternalLinkage,
+                                            "forge_termination_dispatch", module);
+            ir.SetInsertPoint(BasicBlock::Create(module.getContext(), "entry", invoke));
+            auto *thunk = ir.CreateCall(lookup, {invoke->getArg(1), invoke->getArg(2)});
+            const x86::ContextView view(ir, layout, invoke->getArg(0));
+            x86::ExecutionChecks checks(ir);
+            checks.bind(view.result);
+            checks.requireSupported(ir.CreateIsNotNull(thunk),
+                                    FORGE_RT_UNSUPPORTED_TERMINATION_TARGET);
+            // The lookup returns exclusively translated thunks from this module.
+            ir.CreateCall(FunctionType::get(ir.getVoidTy(), ir.getPtrTy(), false), thunk,
+                          invoke->getArg(0));
+            ir.CreateRetVoid();
+            return {lookup, invoke};
+        }
+
         class Translator {
           public:
             Translator(uint32_t rva, const x86::RecoveredFunction &function,
                        const x86::GroupAnalysis &analysis, const GuestBodies &bodies,
-                       const x86::InstructionOperands &operands)
+                       const GuestBodies &initializers, const x86::InstructionOperands &operands,
+                       const x86::ContextLayout &layout, TerminationDispatch termination)
                 : impl(bodies.at(rva)), ir(impl->getContext()), semantics(ir), memory(ir),
                   function(function), analysis(analysis), bodies(bodies),
-                  plan(analysis.functions.at(rva)), operands(operands),
-                  flow(analysis.flows.at(rva)) {}
+                  initializers(initializers), plan(analysis.functions.at(rva)), operands(operands),
+                  flow(analysis.flows.at(rva)), layout(layout), termination(termination) {}
 
-            void translate(const x86::ContextLayout &layout, Function *resolver, bool typedRoot);
+            void translate(Function *resolver, bool typedRoot);
 
           private:
             Function *impl;
@@ -57,9 +123,12 @@ namespace forge {
             const x86::RecoveredFunction &function;
             const x86::GroupAnalysis &analysis;
             const GuestBodies &bodies;
+            const GuestBodies &initializers;
             const x86::FunctionPlan &plan;
             const x86::InstructionOperands &operands;
             const x86::FunctionFlow &flow;
+            const x86::ContextLayout &layout;
+            TerminationDispatch termination;
             bool tracksOrigins = false;
             bool requiresFullReturn = false;
             x86::ContextView context;
@@ -76,15 +145,19 @@ namespace forge {
             }
 
             void storeFlags();
-            void lowerService(const Step &s, const win64::ServiceBinding &binding,
+            Function *initializerDispatcher(const Step &s, const x86::InitializerTable &table);
+            void lowerService(const Step &s, const x86::ExternalCallTarget &external,
                               Value *calleeRsp);
             void lowerCall(const Step &s, const x86::ResolvedCallSite &call);
             void emitReturn(const Step &s);
             void emitDispatch(const x86::GuestBlock &block, const BlockStates &states);
             void lowerStack(const Step &s, StackOp op);
+            void lowerRepeatedStore(const Step &s);
+            void lowerAtomicExchange(const Step &s);
             Value *markSlot(unsigned index);
             Value *loadView(Value *ptr, RegisterView view);
             void storeView(Value *ptr, RegisterView view, Value *value, uint64_t upper);
+            StoredValue loadRegister(RegisterView view);
             StoredValue readSaved(const Step &s, RegisterView view, bool allowIncoming);
             void writeSaved(RegisterView view, StoredValue value);
             Value *read(const Step &s, RegisterView view);
@@ -110,6 +183,11 @@ namespace forge {
             return ir.CreateTruncOrBitCast(bits, ir.getIntNTy(view.width));
         }
 
+        StoredValue Translator::loadRegister(RegisterView view) {
+            return {loadView(slot(view.index), view),
+                    tracksOrigins ? loadView(markSlot(view.index), view) : nullptr};
+        }
+
         StoredValue Translator::readSaved(const Step &s, RegisterView view, bool allowIncoming) {
             if (!(allowIncoming && nonvolatile(view.index)) &&
                 (defined[view.index] & view.mask()) != view.mask()) {
@@ -117,8 +195,7 @@ namespace forge {
                          "read of undefined incoming " + x86::registerName(view.index));
             }
 
-            return {loadView(slot(view.index), view),
-                    tracksOrigins ? loadView(markSlot(view.index), view) : nullptr};
+            return loadRegister(view);
         }
 
         Value *Translator::read(const Step &s, RegisterView view) {
@@ -192,6 +269,19 @@ namespace forge {
         Value *Translator::effectiveAddress(const Step &s, unsigned first, bool access) {
             const auto operand = operands.decodeAddress(s, first, access);
             Value *address = ir.getInt64(operand.displacement);
+            if (operand.gsRelative) {
+                if (!memory.checks.managed()) {
+                    s.reject(FailureCode::UnsupportedInstruction,
+                             "GS-relative NT_TIB access requires a managed guest process");
+                }
+
+                auto teb = impl->getParent()->getOrInsertFunction("forge_rt_primary_teb",
+                                                                  ir.getInt64Ty(), ir.getPtrTy());
+                auto *base = ir.CreateCall(teb, {impl->getArg(0)});
+                memory.checks.propagate(ir.CreateIsNotNull(base));
+                return ir.CreateAdd(base, address);
+            }
+
             if (operand.base) {
                 address = ir.CreateAdd(address, read(s, *operand.base));
             }
@@ -333,7 +423,89 @@ namespace forge {
             writeSaved(destination, saved);
         }
 
+        void Translator::lowerRepeatedStore(const Step &s) {
+            const auto destination = x86::stringDestination;
+            const auto counter = x86::repeatCount;
+            auto *count = read(s, counter);
+            auto *begin = BasicBlock::Create(ir.getContext(), "stos.begin", impl);
+            auto *done = BasicBlock::Create(ir.getContext(), "stos.done", impl);
+            ir.CreateCondBr(ir.CreateIsNull(count), done, begin);
+            ir.SetInsertPoint(begin);
+
+            // A predecessor with zero count need not define either operand. On the
+            // executing path RDI must be concrete, while RAX may carry an opaque save.
+            assert(tracksOrigins);
+            const auto stored = loadRegister({0, 64});
+
+            if (defined[0] != UINT64_MAX) {
+                auto *bytes =
+                    ir.CreateBitCast(stored.marks, FixedVectorType::get(ir.getInt8Ty(), 8));
+                memory.checks.guard(ir.CreateAndReduce(ir.CreateIsNotNull(bytes)));
+            }
+
+            const auto start = loadRegister(destination);
+            memory.checks.guard(ir.CreateICmpEQ(start.marks, ir.getInt64(UINT64_MAX)));
+            auto *backward = ir.CreateLoad(ir.getInt1Ty(), context.directionFlag);
+            auto *stride = ir.CreateSelect(backward, ir.getInt64(uint64_t{0} - 8), ir.getInt64(8));
+            auto *loop = BasicBlock::Create(ir.getContext(), "stos.qword", impl);
+            auto *first = ir.GetInsertBlock();
+            ir.CreateBr(loop);
+            ir.SetInsertPoint(loop);
+            auto *address = ir.CreatePHI(ir.getInt64Ty(), 2);
+            auto *remaining = ir.CreatePHI(ir.getInt64Ty(), 2);
+            address->addIncoming(start.bits, first);
+            remaining->addIncoming(count, first);
+
+            // Commit progress after the whole qword passes its memory checks. A
+            // subsequent fault leaves earlier stores and the restart registers intact.
+            memory.store(address, stored, plan.stackAccesses.contains(s.rva));
+            auto *next = ir.CreateAdd(address, stride);
+            auto *left = ir.CreateSub(remaining, ir.getInt64(1));
+
+            // RDI was concrete on this path. Preserve its marks and the static
+            // definition mask, which also describes the zero-count path at done.
+            storeView(slot(destination.index), destination, next, 0);
+            write(counter, left);
+            address->addIncoming(next, ir.GetInsertBlock());
+            remaining->addIncoming(left, ir.GetInsertBlock());
+            ir.CreateCondBr(ir.CreateIsNull(left), done, loop);
+            ir.SetInsertPoint(done);
+        }
+
+        void Translator::lowerAtomicExchange(const Step &s) {
+            const bool compare = s.isLockedCompareExchange();
+            auto *address = effectiveAddress(s, compare ? 0 : 2, true);
+            const auto source = operands.reg(s, s.inst.getOperand(compare ? 5 : 0), 64);
+            auto *replacement = read(s, source);
+            auto *expected = compare ? read(s, {0, 64}) : nullptr;
+            auto *old = memory.atomicExchange(address, replacement, expected,
+                                              plan.stackAccesses.contains(s.rva));
+
+            if (compare) {
+                semantics.arithmetic(x86::Op::Cmp, expected, old);
+                provedFlags.set();
+                write({0, 64}, old);
+            } else {
+                write(source, old);
+            }
+        }
+
         void Translator::lower(const Step &s) {
+            if (s.isAtomicExchange()) {
+                lowerAtomicExchange(s);
+                return;
+            }
+
+            if (s.isRepeatedQwordStore()) {
+                lowerRepeatedStore(s);
+                return;
+            }
+
+            if (s.opcode == "STD" || s.opcode == "CLD") {
+                ir.CreateStore(ir.getInt1(s.opcode == "STD"), context.directionFlag);
+                return;
+            }
+
             if (auto op = x86::stackInstruction(s.opcode)) {
                 lowerStack(s, *op);
                 return;
@@ -394,8 +566,44 @@ namespace forge {
             }
         }
 
-        void Translator::lowerService(const Step &s, const win64::ServiceBinding &binding,
+        Function *Translator::initializerDispatcher(const Step &s,
+                                                    const x86::InitializerTable &table) {
+            auto &module = *impl->getParent();
+            IRBuilder<> builder(module.getContext());
+            auto *type = FunctionType::get(builder.getVoidTy(),
+                                           {builder.getPtrTy(), builder.getInt64Ty()}, false);
+            auto *dispatch = Function::Create(type, Function::InternalLinkage,
+                                              "forge_initterm_" + utohexstr(s.rva, true), module);
+            auto *entry = BasicBlock::Create(builder.getContext(), "entry", dispatch);
+            auto *unknown =
+                BasicBlock::Create(builder.getContext(), "unsupported.target", dispatch);
+            builder.SetInsertPoint(entry);
+            auto *select = builder.CreateSwitch(dispatch->getArg(1), unknown,
+                                                static_cast<unsigned>(table.targets.size()));
+            for (auto rva : table.targets) {
+                auto *target = BasicBlock::Create(builder.getContext(), "initializer", dispatch);
+                select->addCase(builder.getInt64(analysis.image.guestBase() + rva), target);
+                builder.SetInsertPoint(target);
+                builder.CreateCall(initializers.at(rva), dispatch->getArg(0));
+                builder.CreateRetVoid();
+            }
+
+            builder.SetInsertPoint(unknown);
+            const x86::ContextView view(builder, layout, dispatch->getArg(0));
+            x86::ExecutionChecks checks(builder);
+            checks.bind(view.result);
+            checks.unsupported(FORGE_RT_UNSUPPORTED_INITIALIZER_TARGET);
+            return dispatch;
+        }
+
+        void Translator::lowerService(const Step &s, const x86::ExternalCallTarget &external,
                                       Value *calleeRsp) {
+            const auto &binding = external.binding;
+            if (analysis.setsDirection) {
+                memory.checks.guard(
+                    ir.CreateNot(ir.CreateLoad(ir.getInt1Ty(), context.directionFlag)));
+            }
+
             auto *instance = ir.CreateLoad(ir.getPtrTy(), context.instance);
             auto *thread = ir.CreateLoad(ir.getInt64Ty(), context.thread);
             SmallVector<Value *, 5> arguments{instance, thread};
@@ -426,6 +634,29 @@ namespace forge {
                 arguments.push_back(detail);
             }
 
+            if (const auto &table = external.initializers) {
+                const auto base = analysis.image.guestBase();
+                auto *sameFirst = ir.CreateICmpEQ(arguments[2], ir.getInt64(base + table->first));
+                auto *sameLast = ir.CreateICmpEQ(arguments[3], ir.getInt64(base + table->last));
+                memory.checks.requireSupported(ir.CreateAnd(sameFirst, sameLast),
+                                               FORGE_RT_UNSUPPORTED_INITIALIZER_RANGE);
+                arguments.push_back(initializerDispatcher(s, *table));
+            } else if (const auto &proof = external.registration) {
+                Value *site = ir.getInt64(s.rva);
+                if (proof->forwarded) {
+                    site = ir.CreateOr(
+                        site, ir.CreateShl(impl->getArg(analysis.hasGuestCallbacks ? 2 : 1), 32));
+                }
+                auto *target = arguments[2];
+                auto *thunk = ir.CreateCall(termination.lookup, {site, target});
+                memory.checks.requireSupported(
+                    ir.CreateOr(ir.CreateIsNull(target), ir.CreateIsNotNull(thunk)),
+                    FORGE_RT_UNSUPPORTED_TERMINATION_TARGET);
+                arguments.push_back(site);
+            } else if (binding.callback == win64::Callback::Cleanup) {
+                arguments.push_back(termination.invoke);
+            }
+
             SmallVector<Type *, 5> types;
             for (auto *argument : arguments) {
                 types.push_back(argument->getType());
@@ -434,7 +665,21 @@ namespace forge {
             auto *type = FunctionType::get(ir.getInt32Ty(), types, false);
             auto service = impl->getParent()->getOrInsertFunction(binding.nativeSymbol, type);
             auto *status = ir.CreateCall(service, arguments);
+            if (external.initializers || binding.callback == win64::Callback::Cleanup) {
+                // A successful native adapter can return because a nested guest call
+                // has already published a fault or exit. Its result wins unchanged.
+                memory.checks.propagatePending();
+            }
             memory.checks.service(status, detail);
+
+            if (tracksOrigins) {
+                // Backing bits can survive an external call even though the Windows
+                // ABI clobbers them. A conditional consumer must see those bytes as
+                // unavailable until a guest write or the service result defines them.
+                ir.CreateMemSet(context.marks, ir.getInt8(FORGE_RT_MARK_UNINITIALIZED),
+                                x86::callerSlots * sizeof(uint64_t), registerStateAlignment);
+            }
+
             if (output) {
                 write({0, resultWidth}, ir.CreateLoad(ir.getIntNTy(resultWidth), output));
             }
@@ -442,7 +687,13 @@ namespace forge {
 
         void Translator::lowerCall(const Step &s, const x86::ResolvedCallSite &call) {
             const auto guestBase = analysis.image.guestBase();
-            if (!call.external() && call.guest().kind == x86::CallKind::RipRelativeRegister) {
+            if (const auto *external = call.external(); external && s.isRegisterCall()) {
+                auto *target = value(s, s.inst.getOperand(0), 64);
+                auto *slotAddress = ir.getInt64(guestBase + external->slot);
+                auto *expected = memory.load(slotAddress, 64, false);
+                memory.checks.guard(ir.CreateICmpEQ(target, expected), FORGE_RT_FAULT_CONTROL);
+            } else if (!call.external() &&
+                       call.guest().kind == x86::CallKind::RipRelativeRegister) {
                 auto *target = value(s, s.inst.getOperand(0), 64);
                 memory.checks.guard(
                     ir.CreateICmpEQ(target, ir.getInt64(guestBase + call.guest().rva)),
@@ -454,13 +705,37 @@ namespace forge {
             write(stackPointer, calleeRsp);
             x86::SavedRegisters saved{};
             if (const auto *external = call.external()) {
-                lowerService(s, external->binding, calleeRsp);
+                lowerService(s, *external, calleeRsp);
             } else {
                 const auto target = call.guest().rva;
-                saved =
-                    x86::captureNonvolatiles(ir, context, analysis.functions.at(target).modified);
+                if (s.flow != x86::Flow::TerminalCall) {
+                    saved = x86::captureNonvolatiles(ir, context,
+                                                     analysis.functions.at(target).modified);
+                }
+
                 storeFlags();
-                memory.checks.propagate(ir.CreateCall(bodies.at(target), impl->getArg(0)));
+                SmallVector<Value *, 2> bodyArgs{impl->getArg(0)};
+                if (analysis.hasGuestCallbacks) {
+                    bodyArgs.push_back(impl->getArg(1));
+                }
+                if (bodies.at(target)->arg_size() > bodyArgs.size()) {
+                    bodyArgs.push_back(ir.getInt64(s.rva));
+                }
+                auto *returned = ir.CreateCall(bodies.at(target), bodyArgs);
+                if (s.flow != x86::Flow::TerminalCall) {
+                    memory.checks.propagate(returned);
+                }
+            }
+
+            if (s.flow == x86::Flow::TerminalCall) {
+                // A managed callee can physically return to propagate a fault or ExitProcess.
+                // Neither outcome executes the architectural RET half of this call.
+                if (memory.checks.managed()) {
+                    ir.CreateRet(ir.getFalse());
+                } else {
+                    ir.CreateUnreachable();
+                }
+                return;
             }
 
             // This continuation is the other half of the guest RET. No caller
@@ -481,6 +756,11 @@ namespace forge {
         }
 
         void Translator::emitReturn(const Step &s) {
+            if (analysis.setsDirection) {
+                memory.checks.guard(
+                    ir.CreateNot(ir.CreateLoad(ir.getInt1Ty(), context.directionFlag)));
+            }
+
             if (requiresFullReturn && defined[0] != UINT64_MAX) {
                 s.reject(FailureCode::UndefinedRegister, "return with undefined RAX");
             }
@@ -539,6 +819,9 @@ namespace forge {
             }
 
             switch (block.exit) {
+            case x86::Flow::TerminalCall:
+                lowerCall(last, *function.callAt(last.rva));
+                break;
             case x86::Flow::Return:
                 emitReturn(last);
                 break;
@@ -590,8 +873,7 @@ namespace forge {
             }
         }
 
-        void Translator::translate(const x86::ContextLayout &layout, Function *resolver,
-                                   bool typedRoot) {
+        void Translator::translate(Function *resolver, bool typedRoot) {
             const auto &graph = function.graph;
             requiresFullReturn = typedRoot;
             tracksOrigins = layout.origins;
@@ -599,7 +881,8 @@ namespace forge {
             auto *entry = BasicBlock::Create(ir.getContext(), "entry", impl);
             ir.SetInsertPoint(entry);
             context = x86::ContextView(ir, layout, impl->getArg(0));
-            memory.bind(context.bytes, context.validity, resolver, context.regions);
+            memory.bind(context.bytes, context.validity, resolver, context.regions,
+                        analysis.hasGuestCallbacks ? impl->getArg(1) : nullptr);
             memory.checks.bind(context.result);
             entryRsp = loadView(slot(x86::rspIndex), stackPointer);
 
@@ -660,12 +943,13 @@ namespace forge {
             connectFlags(states);
         }
 
-        // Checked-pointer imports have diagnostic priority over other missing services.
-        const Step *firstImport(const x86::RecoveredFunctionGroup &group, bool checkedOnly) {
+        const Step *firstImport(const x86::RecoveredFunctionGroup &group,
+                                function_ref<bool(const win64::ServiceBinding &)> matches) {
             for (const auto &[address, function] : group.functions()) {
                 for (const auto &[rva, call] : function.calls) {
                     const auto *external = call.external();
-                    if (external && (!checkedOnly || external->binding.checkedMemory())) {
+
+                    if (external && matches(external->binding)) {
                         return function.instructionContaining(rva);
                     }
                 }
@@ -686,12 +970,22 @@ namespace forge {
             GuestBodies bodies;
             const bool process = request.output == LiftOutput::ProcessArtifact;
             auto *returns = process ? Type::getInt1Ty(context) : Type::getVoidTy(context);
-            auto *type = FunctionType::get(returns, PointerType::getUnqual(context), false);
-
+            SmallVector<Type *, 2> parameters{PointerType::getUnqual(context)};
+            if (analysis.hasGuestCallbacks) {
+                parameters.push_back(Type::getInt64Ty(context));
+            }
             for (const auto &[rva, function] : group.functions()) {
+                auto bodyParameters = parameters;
+                if (function.receivesRegistrationOrigin) {
+                    bodyParameters.push_back(Type::getInt64Ty(context));
+                }
+                auto *type = FunctionType::get(returns, bodyParameters, false);
                 auto *body = Function::Create(type, Function::InternalLinkage,
                                               "forge_guest_" + utohexstr(rva, true), *module);
                 body->getArg(0)->setName("context");
+                if (analysis.hasGuestCallbacks) {
+                    body->getArg(1)->setName("stack.ceiling");
+                }
                 bodies.emplace(rva, body);
             }
 
@@ -700,15 +994,31 @@ namespace forge {
             auto &body = *bodies.at(root);
             const auto modified = analysis.functions.at(root).modified;
             auto *resolver =
-                process ? x86::emitProcessEntry(body, group, layout, analysis.image, modified)
+                process ? x86::emitProcessEntry(body, group, layout, analysis.image, modified,
+                                                request.mode)
                         : x86::emitEntryAdapter(body, root, request.mode, layout, analysis.image,
                                                 modified, request.checkedMemory);
+            GuestBodies initializers;
+            for (const auto &[rva, function] : group.functions()) {
+                if (function.callbackSource) {
+                    initializers.emplace(
+                        rva, x86::emitInitializerThunk(*bodies.at(rva), layout,
+                                                       analysis.functions.at(rva).modified));
+                }
+            }
+
+            TerminationDispatch termination;
+            if (analysis.usesTermination) {
+                termination = emitTerminationDispatch(*module, group, initializers, layout,
+                                                      analysis.image.guestBase());
+            }
             const x86::InstructionOperands operands{group.registers(), analysis.image.guestBase()};
 
             for (const auto &[rva, function] : group.functions()) {
-                Translator translator(rva, function, analysis, bodies, operands);
-                translator.translate(layout, resolver,
-                                     rva == root && request.mode == EntryMode::WindowsX64I64Pair);
+                Translator translator(rva, function, analysis, bodies, initializers, operands,
+                                      layout, termination);
+                translator.translate(resolver,
+                                     rva == root && request.mode != EntryMode::RegisterState);
             }
 
             return module;
@@ -728,6 +1038,74 @@ namespace forge {
         }
     }
 
+    namespace {
+        std::unique_ptr<llvm::Module> generateGroupIR(const x86::RecoveredFunctionGroup &group,
+                                                      uint64_t guestBase, LiftRequest request,
+                                                      llvm::LLVMContext &context) {
+            auto stage = FailureCode::LiftingInternal;
+
+            try {
+                const bool process = request.output == LiftOutput::ProcessArtifact;
+                const bool checked = process || request.checkedMemory;
+                request.runtime = request.runtime || checked;
+
+                if (process && request.mode == EntryMode::RegisterState) {
+                    throw InspectionError(
+                        "process artifact requires the Windows x64 integer-pair entry contract",
+                        FailureCode::UnsupportedControlFlow);
+                }
+
+                if (!process) {
+                    const auto *site = firstImport(group, [](const auto &binding) {
+                        return binding.requirement == win64::Requirement::Process;
+                    });
+
+                    if (site) {
+                        site->reject(
+                            FailureCode::UnsupportedControlFlow,
+                            "imported service requires a managed process artifact or --executable");
+                    }
+                }
+
+                if (!checked) {
+                    if (const auto *site = firstImport(
+                            group, [](const auto &binding) { return binding.checkedMemory(); })) {
+                        site->reject(FailureCode::UnsupportedControlFlow,
+                                     "imported service requires --checked-memory --signature "
+                                     "'i64(i64,i64)'");
+                    }
+                }
+
+                if (!request.runtime) {
+                    if (const auto *site = firstImport(group, [](const auto &) { return true; })) {
+                        site->reject(
+                            FailureCode::UnsupportedControlFlow,
+                            "imported service requires --runtime --signature 'i64(i64,i64)'");
+                    }
+                } else if (request.mode == EntryMode::RegisterState) {
+                    const std::string option =
+                        request.checkedMemory ? "--checked-memory" : "--runtime";
+                    throw InspectionError(option + " requires --signature 'i64(i64,i64)'",
+                                          FailureCode::UnsupportedControlFlow);
+                }
+
+                const auto prepared = x86::analyzeGroup(group, guestBase, request.mode,
+                                                        request.checkedMemory, request.output);
+                auto module = emitGroup(group, prepared, request, context);
+                stage = FailureCode::VerificationInternal;
+                verifyLiftedIR(*module, group.image().module().path, group.root());
+                return module;
+            } catch (InspectionError &failure) {
+                group.annotateFailure(failure);
+                throw;
+            } catch (const std::exception &error) {
+                InspectionError failure(error.what(), stage);
+                group.annotateFailure(failure);
+                throw failure;
+            }
+        }
+    } // namespace
+
     std::unique_ptr<llvm::Module> generateIR(const AnalyzedImage &analysis, LiftRequest request,
                                              llvm::LLVMContext &context) {
         return generateIR(analysis, request, context, win64::services);
@@ -736,54 +1114,64 @@ namespace forge {
     std::unique_ptr<llvm::Module> generateIR(const AnalyzedImage &analysis, LiftRequest request,
                                              llvm::LLVMContext &context,
                                              std::span<const win64::ServiceBinding> services) {
+        if (request.mode == EntryMode::PeEntry) {
+            throw InspectionError("PE entry compilation requires generateExecutableIR",
+                                  FailureCode::ExecutableStartup);
+        }
+
         const auto entry = x86::validateEntry(analysis, request.startRva);
         const auto guestBase = x86::validateGuestBase(entry, request.guestLoadBase);
-        const x86::RecoveredFunctionGroup group(entry, services);
-        auto stage = FailureCode::LiftingInternal;
+        const auto recovery = request.output == LiftOutput::Function
+                                  ? x86::RecoveryMode::FunctionLift
+                                  : x86::RecoveryMode::CompleteGroup;
+        const x86::RecoveredFunctionGroup group(entry, services, nullptr, recovery);
+        return generateGroupIR(group, guestBase, request, context);
+    }
+
+    std::unique_ptr<llvm::Module> generateExecutableIR(const AnalyzedImage &analysis,
+                                                       std::optional<uint64_t> guestLoadBase,
+                                                       llvm::LLVMContext &context,
+                                                       ExecutableReadiness &readiness) {
+        const auto rva = analysis.module().entryPoint;
+        readiness = {};
+        readiness.architecture = analysis.module().architecture();
+        readiness.entryRva = rva;
 
         try {
-            const bool process = request.output == LiftOutput::ProcessArtifact;
-            const bool checked = process || request.checkedMemory;
-            request.runtime = request.runtime || checked;
+            x86::recordExecutableRequirements(analysis, readiness);
+            if (!rva) {
+                throw InspectionError("PE header has no executable entry point",
+                                      FailureCode::InvalidEntry);
+            }
 
-            if (process && request.mode != EntryMode::WindowsX64I64Pair) {
+            const auto &unwind = analysis.module().exceptions;
+
+            if (unwind && unwind->trailingBytes()) {
                 throw InspectionError(
-                    "process artifact requires the Windows x64 integer-pair entry contract",
-                    FailureCode::UnsupportedControlFlow);
+                    "partial PE runtime function record in the exception directory",
+                    FailureCode::ExecutableStartup);
             }
 
-            if (!checked) {
-                if (const auto *site = firstImport(group, true)) {
-                    site->reject(
-                        FailureCode::UnsupportedControlFlow,
-                        "imported service requires --checked-memory --signature 'i64(i64,i64)'");
-                }
-            }
-
-            if (!request.runtime) {
-                if (const auto *site = firstImport(group, false)) {
-                    site->reject(FailureCode::UnsupportedControlFlow,
-                                 "imported service requires --runtime --signature 'i64(i64,i64)'");
-                }
-            } else if (request.mode != EntryMode::WindowsX64I64Pair) {
-                const std::string option = request.checkedMemory ? "--checked-memory" : "--runtime";
-                throw InspectionError(option + " requires --signature 'i64(i64,i64)'",
-                                      FailureCode::UnsupportedControlFlow);
-            }
-
-            const auto prepared = x86::analyzeGroup(group, guestBase, request.mode,
-                                                    request.checkedMemory, request.output);
-            auto module = emitGroup(group, prepared, request, context);
-            stage = FailureCode::VerificationInternal;
-            verifyLiftedIR(*module, analysis.module().path, group.root());
-            return module;
+            const auto entry = x86::validateEntry(analysis, rva);
+            readiness.entryRecovered = true;
+            const auto guestBase = x86::validateGuestBase(entry, guestLoadBase);
+            const x86::RecoveredFunctionGroup group(
+                entry, win64::services,
+                [&](const auto &partial, const auto &error) {
+                    x86::recordExecutableRecovery(readiness, partial, &error);
+                },
+                x86::RecoveryMode::PeEntry);
+            x86::recordExecutableRecovery(readiness, group);
+            x86::validateExecutableStartup(entry, group, guestBase, readiness);
+            return generateGroupIR(
+                group, guestBase,
+                {rva, EntryMode::PeEntry, guestLoadBase, true, true, LiftOutput::ProcessArtifact},
+                context);
         } catch (InspectionError &failure) {
-            group.annotateFailure(failure);
+            failure.context.input = analysis.module().path;
+            failure.context.entryRva = rva;
+            failure.context.architecture = readiness.architecture;
             throw;
-        } catch (const std::exception &error) {
-            InspectionError failure(error.what(), stage);
-            group.annotateFailure(failure);
-            throw failure;
         }
     }
 } // namespace forge

@@ -72,6 +72,20 @@ namespace forge::x86 {
         onFailure(condition, [&] { recordFault(fault); });
     }
 
+    void ExecutionChecks::recordUnsupported(forge_rt_status status) {
+        ir.CreateStore(ir.getInt32(FORGE_RT_UNSUPPORTED), field(0));
+        ir.CreateStore(ir.getInt32(status), field(1));
+    }
+
+    void ExecutionChecks::requireSupported(Value *condition, forge_rt_status status) {
+        onFailure(condition, [&] { recordUnsupported(status); });
+    }
+
+    void ExecutionChecks::unsupported(forge_rt_status status) {
+        recordUnsupported(status);
+        returnFailure();
+    }
+
     void ExecutionChecks::scalarBoundary(Value *condition, Value *address, unsigned size,
                                          uint32_t access, bool stack) {
         onFailure(condition, [&] {
@@ -106,6 +120,29 @@ namespace forge::x86 {
         });
     }
 
+    Value *ExecutionChecks::processScalar(Value *imageBytes, Value *address, unsigned size,
+                                          uint32_t access) {
+        auto *image = ir.GetInsertBlock();
+        auto *function = image->getParent();
+        auto *mapped = BasicBlock::Create(ir.getContext(), "process.mapping", function);
+        auto *join = BasicBlock::Create(ir.getContext(), "process.scalar", function);
+        ir.CreateCondBr(ir.CreateIsNull(imageBytes), mapped, join);
+        ir.SetInsertPoint(mapped);
+        auto resolve = function->getParent()->getOrInsertFunction(
+            "forge_rt_resolve_process_scalar", ir.getPtrTy(), ir.getPtrTy(), ir.getInt64Ty(),
+            ir.getInt32Ty(), ir.getInt32Ty());
+        auto *bytes = ir.CreateCall(
+            resolve, {function->getArg(0), address, ir.getInt32(size), ir.getInt32(access)});
+        propagate(ir.CreateIsNotNull(bytes));
+        auto *resolved = ir.GetInsertBlock();
+        ir.CreateBr(join);
+        ir.SetInsertPoint(join);
+        auto *pointer = ir.CreatePHI(ir.getPtrTy(), 2);
+        pointer->addIncoming(imageBytes, image);
+        pointer->addIncoming(bytes, resolved);
+        return pointer;
+    }
+
     void ExecutionChecks::service(Value *status, Value *detail) {
         onFailure(ir.CreateIsNull(status), [&] {
             if (detail) {
@@ -121,7 +158,11 @@ namespace forge::x86 {
                 ir.SetInsertPoint(native);
             }
 
-            ir.CreateStore(ir.getInt32(FORGE_RT_RUNTIME_FAILURE), field(0));
+            auto *unsupported = ir.CreateIsNotNull(
+                ir.CreateAnd(status, ir.getInt32(FORGE_RT_UNSUPPORTED_SERVICE_FLAG)));
+            ir.CreateStore(ir.CreateSelect(unsupported, ir.getInt32(FORGE_RT_UNSUPPORTED),
+                                           ir.getInt32(FORGE_RT_RUNTIME_FAILURE)),
+                           field(0));
             ir.CreateStore(status, field(1));
         });
     }
@@ -130,6 +171,10 @@ namespace forge::x86 {
         if (managed()) {
             onFailure(returned, [] {});
         }
+    }
+
+    void ExecutionChecks::propagatePending() {
+        propagate(ir.CreateIsNull(ir.CreateLoad(ir.getInt32Ty(), field(0))));
     }
 
     void ExecutionChecks::complete(Value *rax) {

@@ -1,0 +1,13 @@
+{
+  "schema_version": 1,
+  "id": "startup/puts",
+  "description": "Write through MSVCRT puts using the default Windows text mode and return from main.",
+  "source": "fixtures/startup/puts.c",
+  "binary": "crt_puts.exe",
+  "args": [],
+  "expected": {
+    "exit_code": 0,
+    "stdout": "Hello from C!\r\n",
+    "stderr": ""
+  }
+}

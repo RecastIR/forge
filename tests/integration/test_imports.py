@@ -95,6 +95,107 @@ class Imports(Case):
         self.assertNotIn("@forge_rt_", ir)
         self.assertIn("@forge_lifted_with_runtime(", ir)
 
+    def test_direct_import_thunk_proofs(self):
+        # The section contains file padding after its final recorded function. Expose
+        # 16 bytes before an ordinary six-byte linker thunk for independent leaf tests.
+        text = self.layout.section_header(self.root)
+        end = self.layout.u32(text + 12) + self.layout.u32(text + 8)
+        thunk = end + 16
+        slot = self.slots["GetLastError"]
+
+        def image(*calls):
+            data = self.patch("48 83 ec 28", *(("e8", callee) for callee in calls), "48 83 c4 28 c3")
+            struct.pack_into("<I", data, text + 8, self.layout.u32(text + 8) + 22)
+            offset = Layout(data).file_offset(thunk)
+            data[offset:offset + 6] = b"\xff\x25" + struct.pack("<i", slot - thunk - 6)
+            return data
+
+        ir = self.invoke_lift(image(thunk, thunk))
+        self.assertEqual(ir.count("call i32 @forge_rt_get_last_error"), 2)
+
+        # An existing record ends immediately before the unused bytes. Extending
+        # it one byte into the thunk forbids inference even when that body is uncalled.
+        data = image(thunk)
+        table, size = self.layout.directory(3)
+        final_end = self.layout.file_offset(table + size - 12) + 4
+        self.assertEqual(self.layout.u32(final_end), end)
+        struct.pack_into("<I", data, final_end, thunk + 1)
+        self.invoke_lift(data, reason="recorded", code="LIFT_UNSUPPORTED_CONTROL_FLOW")
+
+        # MOV EAX, imm32 starts outside the thunk but consumes four thunk bytes.
+        for calls in ((thunk - 1, thunk), (thunk, thunk - 1)):
+            data = image(*calls)
+            data[Layout(data).file_offset(thunk - 1)] = 0xb8
+            self.invoke_lift(data, reason="overlaps a proven import thunk",
+                             code="LIFT_UNSUPPORTED_CONTROL_FLOW")
+
+        data = image(thunk)
+        struct.pack_into("<I", data, text + 36, self.layout.u32(text + 36) | 0x80000000)
+        self.invoke_lift(data, reason="mutable", code="LIFT_UNSUPPORTED_CONTROL_FLOW")
+
+    def test_process_services_require_managed_entry(self):
+        slot = self.slots["GetLastError"]
+        hint = self.layout.u32(self.layout.file_offset(self.lookup) + slot - self.iat)
+        start = self.layout.file_offset(hint) + 2
+        for name in ("GetStdHandle", "WriteFile", "ExitProcess"):
+            with self.subTest(name=name):
+                data = self.patch(("ff15", slot), "c3")
+                replacement = name.encode() + b"\0"
+                data[start:start+len(replacement)] = replacement
+                ctx = self.invoke_lift(data, "--signature", "i64(i64,i64)", "--checked-memory",
+                                       reason="managed process artifact", code="LIFT_UNSUPPORTED_CONTROL_FLOW",
+                                       symbol=name, name="KERNEL32.dll")
+                self.assertEqual(int(ctx["iat_slot_rva"], 16), slot)
+                self.assertEqual(int(ctx["instruction_rva"], 16), self.root)
+
+    def test_partial_executable_recovery_keeps_calls_before_bad_import(self):
+        data = self.patch(("e8", self.helper), ("ff15", self.slots["GetLastError"]),
+                          ("ff15", self.slots["SwitchToThread"]), "c3")
+        struct.pack_into("<I", data, self.layout.opt + 16, self.root)
+        source = self.dir / "partial.exe"
+        source.write_bytes(data)
+        result = self.invoke("lift", source, "--executable", "--output", self.dir / "program",
+                             "--diagnostics-format", "json", code=1)
+        ctx = json.loads(result.stderr)["context"]
+        self.assertFalse(ctx["recovery_complete"])
+        self.assertEqual(ctx["import_symbol"], "SwitchToThread")
+        self.assertIn({"dll": "kernel32.dll", "name": "GetLastError"}, ctx["imports"])
+        self.assertIn({"caller_rva": hex(self.root), "instruction_rva": hex(self.root),
+                       "target_rva": hex(self.helper)}, ctx["unresolved_calls"])
+
+    def test_executable_rejects_unproved_import_register(self):
+        get = self.slots["GetLastError"]
+        load = ("4c8b25", get)  # mov r12, [rip + GetLastError slot]
+        other = ("4c8b25", self.slots["SetLastError"])
+        # Each conditional edge tests the preceding service result. In the last
+        # case only the backedge carries the modified low byte back into CALL.
+        cases = (
+            ("bypass", "41ffd4", "7407", load, "41ffd4 c3"),
+            ("partial write", "41ffd4", load, "7403 41fec4 41ffd4 c3"),
+            ("different slots", "41ffd4", load, "7407", other, "41ffd4 c3"),
+            ("backedge clobber", "41ffd4", load, "41ffd4 41fec4 85c0 75f6 c3"),
+            # LAHF defines AH. A completed Windows call clobbers volatile R10.
+            ("implicit AH write", "ffd0", ("488b05", get), "9f ffd0 c3"),
+            ("volatile across call", "41ffd2", ("4c8b15", get), ("ff15", get), "41ffd2 c3"),
+        )
+        for label, call, *body in cases:
+            with self.subTest(label=label):
+                data = self.patch(("ff15", get), "85c0", *body)
+                struct.pack_into("<I", data, self.layout.opt + 16, self.root)
+                source = self.dir / "unproved.exe"
+                source.write_bytes(data)
+                self.output.write_bytes(b"previous output")
+                result = self.invoke("lift", source, "--executable", "--output", self.output,
+                                     "--diagnostics-format", "json", code=1)
+                diagnostic = json.loads(result.stderr)
+                self.assertEqual(diagnostic["code"], "LIFT_UNSUPPORTED_CONTROL_FLOW", diagnostic)
+                where = diagnostic["context"]
+                site = data.index(bytes.fromhex(call), self.code)
+                self.assertEqual((where["instruction_rva"], where["bytes"], where["opcode"]),
+                                 (hex(self.root + site - self.code), call, "CALL64r"))
+                self.assertFalse(where["recovery_complete"])
+                self.assertEqual(self.output.read_bytes(), b"previous output")
+
     def test_checked_reservation_covers_pe_headers(self):
         # The fixed guest stack occupies only the first page, before the first section.
         self.assertGreaterEqual(min(start for size, start, _, _ in self.layout.sections if size), 0x1000)
@@ -229,9 +330,10 @@ class Imports(Case):
         self.invoke_lift(wrong, reason="unsupported import", code="LIFT_UNSUPPORTED_CONTROL_FLOW", symbol="GetLastError")
         for target in (self.root, slot + 1):
             self.invoke_lift(self.patch(("ff15", target), "c3"), reason="complete validated IAT", code="LIFT_UNSUPPORTED_CONTROL_FLOW")
-        self.invoke_lift(self.patch(("ff15", self.slots["Sleep"]), "c3"), reason="unsupported import",
-                         code="LIFT_UNSUPPORTED_CONTROL_FLOW", symbol="Sleep")
+        self.invoke_lift(self.patch(("ff15", self.slots["SwitchToThread"]), "c3"), reason="unsupported import",
+                         code="LIFT_UNSUPPORTED_CONTROL_FLOW", symbol="SwitchToThread")
         self.invoke_lift(self.patch("ff11 c3"), reason="RIP-relative call", code="LIFT_UNSUPPORTED_CONTROL_FLOW")
+        # Function-wrapper mode has no process loader to provide a stable imported function address.
         self.invoke_lift(self.patch(("488b05", slot), "ffd0 c3"), reason="expected a same-block", code="LIFT_UNSUPPORTED_CONTROL_FLOW")
         self.invoke_lift(self.patch(("488b05", slot), "c3"), reason="loader-written", code="LIFT_IMAGE_MEMORY")
         store = self.patch(("48890d", slot), "89c8 c3")

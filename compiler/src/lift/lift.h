@@ -1,10 +1,15 @@
 #pragma once
 
+#include "analysis/exception_scope.h"
+#include "pe/image.h"
+
 #include <cstdint>
 #include <filesystem>
 #include <memory>
 #include <optional>
 #include <span>
+#include <string>
+#include <vector>
 
 namespace llvm {
     class LLVMContext;
@@ -18,7 +23,7 @@ namespace forge {
         struct ServiceBinding;
     }
 
-    enum class EntryMode { RegisterState, WindowsX64I64Pair };
+    enum class EntryMode { RegisterState, WindowsX64I64Pair, PeEntry };
 
     enum class LiftOutput { Function, ProcessArtifact };
 
@@ -33,6 +38,65 @@ namespace forge {
         // Process artifacts are an explicit compiler output with their own checked entry ABI.
         LiftOutput output = LiftOutput::Function;
     };
+
+    struct ExecutableCall {
+        uint32_t callerRva, instructionRva, targetRva;
+    };
+
+    struct ExecutableUnresolvedCall {
+        uint32_t callerRva, instructionRva;
+        std::optional<int64_t> targetRva;
+    };
+
+    struct ExecutableInitializerTable {
+        uint32_t callerRva, instructionRva, firstRva, lastRva;
+        // Slot evidence is available even when recovery subsequently rejects a body.
+        std::vector<uint32_t> initialTargetRvas;
+    };
+
+    struct ExecutableImport {
+        std::string dll, name;
+    };
+
+    struct ExecutableImportSlot {
+        std::string name;
+        uint32_t iatRva;
+        bool hasService, hasDataExport;
+    };
+
+    struct ExecutableImportDirectory {
+        std::string dll;
+        uint32_t descriptorRva;
+        bool delayed, bound;
+        std::vector<ExecutableImportSlot> slots;
+    };
+
+    // Owned facts, including progress up to the first failing dependency. Entry recovery
+    // identifies an exact function start. Group recovery includes all reachable callees.
+    struct ExecutableReadiness {
+        std::string architecture;
+        std::optional<uint32_t> entryRva;
+        bool entryRecovered = false, recoveryComplete = false;
+        std::vector<ExecutableCall> calls;
+        std::vector<ExecutableInitializerTable> initializerTables;
+        std::vector<ExecutableImport> imports;
+        std::vector<ExecutableUnresolvedCall> unresolvedCalls;
+        // Image declarations are independent of the calls recovered before a failure.
+        std::vector<ExecutableImportDirectory> loadImports;
+        std::string importInventoryError;
+        std::optional<TLS> tls;
+        std::optional<uint32_t> entryHandlerUnwindRva, entryHandlerRva;
+        std::optional<CSpecificHandler> entryCHandler;
+        std::string entryHandlerError;
+    };
+
+    // Selects the PE header entry and emits a checked process artifact. The entry
+    // receives no guest arguments and must return a defined result. Readiness is
+    // populated on success and on an InspectionError.
+    std::unique_ptr<llvm::Module> generateExecutableIR(const AnalyzedImage &analysis,
+                                                       std::optional<uint64_t> guestLoadBase,
+                                                       llvm::LLVMContext &context,
+                                                       ExecutableReadiness &readiness);
 
     // The module is independent of the image after generation. The caller's context
     // must outlive the module and all of its IR.

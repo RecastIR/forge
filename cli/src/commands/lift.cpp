@@ -29,21 +29,25 @@ namespace forge::cli {
     } // namespace
 
     void registerLift(CLI::App &app, LiftOptions &options, int &status) {
-        auto *command = app.add_subcommand("lift", "Lift a discovered function to LLVM IR.");
+        auto *command =
+            app.add_subcommand("lift", "Lift a function to LLVM IR or compile a PE executable.");
         addInput(*command, "exe", options.input);
+        auto *rva = command
+                        ->add_option_function<std::string>(
+                            "--rva",
+                            [&options](const std::string &value) {
+                                options.request.startRva = parseRva(value);
+                            },
+                            "Function start as a decimal or hexadecimal RVA.")
+                        ->type_name("RVA")
+                        ->trigger_on_parse();
+        auto *executable =
+            command->add_flag("--executable", options.executable,
+                              "Compile the PE entry point into a native macOS ARM64 executable.");
+        executable->excludes(rva);
         command
-            ->add_option_function<std::string>(
-                "--rva",
-                [&options](const std::string &value) {
-                    options.request.startRva = parseRva(value);
-                },
-                "Function start as a decimal or hexadecimal RVA.")
-            ->type_name("RVA")
-            ->required()
-            ->trigger_on_parse();
-        command
-            ->add_option<std::filesystem::path, std::string>("--output", options.output,
-                                                             "Destination LLVM IR file.")
+            ->add_option<std::filesystem::path, std::string>(
+                "--output", options.output, "Destination LLVM IR file or executable.")
             ->type_name("FILE")
             ->required()
             ->trigger_on_parse();
@@ -56,6 +60,7 @@ namespace forge::cli {
                     },
                     "Wrap the function with this signature (default: register state).")
                 ->check(CLI::IsMember({"i64(i64,i64)"}))
+                ->excludes(executable)
                 ->trigger_on_parse();
         command
             ->add_flag("--runtime", options.request.runtime,
@@ -68,7 +73,14 @@ namespace forge::cli {
             ->needs(signature);
         addFormat(*command, "--diagnostics-format", options.jsonDiagnostics,
                   "Execution diagnostic format (default: text).");
-        command->final_callback(
-            [&options, &status] { status = executeLift(options, llvm::errs()); });
+        command->final_callback([rva, &options, &status] {
+            if (options.executable) {
+                options.toolchain = executableTools();
+            } else if (!rva->count()) {
+                throw std::invalid_argument("lift requires --rva or --executable");
+            }
+
+            status = executeLift(options, llvm::errs());
+        });
     }
 } // namespace forge::cli

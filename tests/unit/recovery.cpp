@@ -248,8 +248,8 @@ namespace {
         const auto &first = mutual.function(a);
         const auto &second = mutual.function(b);
         const auto *toSecond = first.callAt(a + 4);
-        const auto *toFirst = second.callAt(b + 4);
-        const auto *self = second.callAt(b + 9);
+        const auto *toFirst = second.callAt(b + 8);
+        const auto *self = second.callAt(b + 13);
         check(mutual.root() == b && mutual.functions().size() == 2 && first.incoming.size() == 1 &&
                   second.incoming.size() == 2 && toSecond && toFirst && self &&
                   first.incoming.front() == toFirst && second.incoming[0] == toSecond &&
@@ -257,6 +257,15 @@ namespace {
                   toSecond->caller == a && toSecond->guest().rva == b && toFirst->caller == b &&
                   toFirst->guest().rva == a,
               "mutual recursion lost a function or a cycle edge");
+
+        const auto loop = exportedRva(analysis, "recovery_no_base");
+        const RecoveredFunctionGroup cycle(analysis, loop);
+        const auto &only = cycle.function(loop);
+        const auto *recurse = only.callAt(loop + 4);
+        check(cycle.functions().size() == 1 && only.calls.size() == 1 && recurse &&
+                  recurse->guest().rva == loop &&
+                  !only.instructionContaining(recurse->continuation),
+              "recursion without a base case reached a dead call");
     }
 
     void checkParallelEdges(const AnalyzedImage &analysis) {
@@ -458,6 +467,74 @@ namespace {
               "the recovered groups do not share the image-owned descriptor");
     }
 
+    void checkTerminalGuestCall(const fs::path &path) {
+        const AnalyzedImage analysis(
+            std::make_unique<ParsedImage>(InputFile(path), ParsePolicy::Inspection),
+            DebugInfo::Omit);
+        const RecoveredFunctionGroup group(analysis, analysis.module().entryPoint);
+        const auto &root = group.function(group.root());
+        check(root.calls.size() == 1, "expected one call from the entry to its exit helper");
+        const auto &site = root.calls.begin()->second;
+        const auto *step = root.instructionContaining(site.instruction);
+        check(!site.external() && step && step->next == site.continuation &&
+                  !root.instructionContaining(site.continuation),
+              "terminal guest call must retain its return address and exclude dead instructions");
+        const auto &helper = group.function(site.guest().rva);
+        check(helper.incoming.size() == 1 && helper.incoming.front() == &site,
+              "terminal callee lost its incoming call site");
+    }
+
+    void checkInitializerTables(const fs::path &path) {
+        const AnalyzedImage analysis(
+            std::make_unique<ParsedImage>(InputFile(path), ParsePolicy::Inspection),
+            DebugInfo::Omit);
+        const RecoveredFunctionGroup group(analysis, analysis.module().entryPoint);
+        const auto &caller = group.function(group.root());
+        std::vector<std::pair<uint32_t, size_t>> observed;
+        std::map<uint32_t, const x86::ResolvedCallSite *> initializers;
+        for (const auto &[rva, site] : caller.calls) {
+            const auto *service = site.external();
+            if (!service || !service->initializers) {
+                continue;
+            }
+
+            check(service->binding.callback == win64::Callback::Initializer,
+                  "callback proof attached to an unrelated service");
+            const auto &table = *service->initializers;
+            const auto size = table.last - table.first;
+            observed.emplace_back(size / sizeof(uint64_t), table.targets.size());
+            std::set<uint32_t> slotTargets;
+            for (auto slot = table.first; slot < table.last; slot += sizeof(uint64_t)) {
+                const auto bytes = analysis.image().mapRva(slot, sizeof(uint64_t));
+                check(bytes && bytes->section.writableData(), "expected a writable table slot");
+                const auto va = llvm::support::endian::read64le(bytes->bytes.data());
+                if (va) {
+                    slotTargets.insert(static_cast<uint32_t>(va - analysis.module().imageBase));
+                }
+            }
+            check(std::ranges::equal(table.targets, slotTargets),
+                  "initializer target set differs from the source PE slots");
+            for (const auto target : slotTargets) {
+                initializers.try_emplace(target, &site);
+            }
+        }
+        const std::vector<std::pair<uint32_t, size_t>> expected{{0, 0}, {1, 0}, {1, 1}, {5, 3}};
+        check(observed == expected && initializers.size() == 3, "wrong recovered table ranges");
+
+        bool nestedLeaf = false;
+        for (const auto &[rva, function] : group.functions()) {
+            const auto origin = initializers.find(rva);
+            check(function.callbackSource ==
+                      (origin == initializers.end() ? nullptr : origin->second),
+                  "initializer origin differs from its first admitting table");
+            if (function.callbackSource && function.origin == x86::RecoveryOrigin::InferredLeaf &&
+                !function.incoming.empty()) {
+                nestedLeaf |= initializers.contains(function.incoming.front()->caller);
+            }
+        }
+        check(nestedLeaf, "missing metadata-free initializer shared with an ordinary guest call");
+    }
+
     // Check PE stability for the differential runner's independently disassembled caller.
     // The first interval is code. Each following interval is a relative table.
     void checkDispatchSpans(const fs::path &path, llvm::ArrayRef<char *> bounds) {
@@ -508,9 +585,12 @@ int main(int argc, char **argv) try {
         return 0;
     }
 
-    check(argc == 6, "expected stack.exe, leaves.exe, jump.exe, indirect.exe and last-error.exe");
+    check(argc == 8,
+          "expected stack, leaves, jump, indirect, last-error, noreturn and CRT fixtures");
     checkGuestRanges();
     checkImportSnapshot(argv[5]);
+    checkTerminalGuestCall(argv[6]);
+    checkInitializerTables(argv[7]);
     const AnalyzedImage analysis(
         std::make_unique<ParsedImage>(InputFile(argv[1]), ParsePolicy::Inspection),
         DebugInfo::Omit);

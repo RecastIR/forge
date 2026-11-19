@@ -1,8 +1,10 @@
 #pragma once
 
+#include "forge/msvcrt_process.h"
 #include "forge/runtime.h"
 
 #include <array>
+#include <optional>
 #include <span>
 #include <string_view>
 #include <type_traits>
@@ -23,7 +25,21 @@ namespace forge::win64 {
         Callback
     };
     enum class Access : uint8_t { None, Input, Output, InOut };
-    enum class Extent : uint8_t { None, Fixed, CountArgument, CString };
+    enum class Extent : uint8_t { None, Fixed, CountArgument, CString, InitializerEnd };
+    enum class Callback : uint8_t { None, Initializer, Registration, Cleanup };
+
+    // Match the compiler's per-table indirect dispatch budget.
+    inline constexpr uint64_t maxInitializerEntries = 1024;
+
+    constexpr std::optional<uint64_t> initializerRangeBytes(uint64_t first, uint64_t last) {
+        constexpr auto stride = sizeof(uint64_t);
+        if (first % stride || last % stride || first > last ||
+            last - first > maxInitializerEntries * stride) {
+            return std::nullopt;
+        }
+
+        return last - first;
+    }
 
     constexpr std::string_view unsupportedType(Value type) {
         switch (type) {
@@ -41,7 +57,9 @@ namespace forge::win64 {
     }
 
     enum class Convention : uint8_t { WindowsX64, Variadic, Alternate, Unwinding };
-    enum class LastError : uint8_t { Read, Write, Preserve };
+    enum class Requirement : uint8_t { Instance, Process };
+    enum class Control : uint8_t { Returns, Terminates };
+    enum class LastError : uint8_t { Read, Write, Preserve, OnFailure, CallbackDefined };
 
     constexpr unsigned width(Value type) {
         switch (type) {
@@ -63,7 +81,7 @@ namespace forge::win64 {
         Value type;
         Access access = Access::None;
         Extent extent = Extent::None;
-        // Fixed byte count or zero-based index of the unsigned byte-count argument.
+        // Fixed byte count or zero-based argument index for a count or exclusive endpoint.
         unsigned size = 0;
         bool optional = false;
 
@@ -78,6 +96,10 @@ namespace forge::win64 {
         Value result;
         LastError lastError;
         Convention convention = Convention::WindowsX64;
+        Requirement requirement = Requirement::Instance;
+        Control control = Control::Returns;
+        bool returnsProcessStorage = false;
+        Callback callback = Callback::None;
 
         constexpr bool checkedMemory() const {
             for (auto arg : arguments) {
@@ -107,6 +129,10 @@ namespace forge::win64 {
                 return arg.access == Access::Input && !arg.size;
             case Extent::Fixed:
                 return arg.size != 0;
+            case Extent::InitializerEnd:
+                return arg.access == Access::Input && !arg.optional &&
+                       arg.size < arguments.size() && arguments[arg.size].type == Value::Address &&
+                       arguments[arg.size].access == Access::None;
             case Extent::CountArgument:
                 if (arg.size < arguments.size()) {
                     const auto count = arguments[arg.size].type;
@@ -119,6 +145,30 @@ namespace forge::win64 {
         }
 
         constexpr std::string_view error() const {
+            if (callback == Callback::Initializer &&
+                (result != Value::Void || requirement != Requirement::Process ||
+                 control != Control::Returns || lastError != LastError::CallbackDefined ||
+                 arguments.size() != 2 || arguments[0].extent != Extent::InitializerEnd ||
+                 arguments[0].size != 1)) {
+                return "initializer dispatch requires a managed void service with a pointer range";
+            }
+
+            if (callback != Callback::None && requirement != Requirement::Process) {
+                return "guest callbacks require a managed process";
+            }
+            if (callback == Callback::Cleanup && lastError != LastError::CallbackDefined) {
+                return "CRT cleanup requires callback-defined last error";
+            }
+
+            if (returnsProcessStorage &&
+                (result != Value::Address || requirement != Requirement::Process)) {
+                return "process storage requires a managed service returning a guest address";
+            }
+            if (control == Control::Terminates &&
+                (result != Value::Void || requirement != Requirement::Process)) {
+                return "a terminal service requires a managed process and void result";
+            }
+
             switch (convention) {
             case Convention::Variadic:
                 return "variadic calls are unsupported";
@@ -139,6 +189,10 @@ namespace forge::win64 {
             }
 
             for (auto arg : arguments) {
+                if (arg.extent == Extent::InitializerEnd && callback != Callback::Initializer) {
+                    return "an initializer table requires a generated dispatcher";
+                }
+
                 if (const auto reason = unsupportedType(arg.type); !reason.empty()) {
                     return reason;
                 }
@@ -184,14 +238,29 @@ namespace forge::win64 {
 
     template <Value result, Argument... args, class Function>
     consteval ServiceBinding bind(std::string_view dll, std::string_view name, LastError effect,
-                                  std::string_view nativeSymbol, Function) {
+                                  std::string_view nativeSymbol, Function,
+                                  Requirement requirement = Requirement::Instance,
+                                  Control control = Control::Returns) {
         constexpr ServiceBinding shape{
             {}, {}, {}, parameters<args...>, result, LastError::Preserve};
-        static_assert(shape.error().empty(),
-                      "unsupported Windows x64 service type or memory contract");
         using Out = typename NativeScalar<result>::Type *;
         using Fault = forge_rt_memory_fault *;
-        if constexpr (result == Value::Void && !shape.checkedMemory()) {
+        constexpr bool initializer =
+            std::is_same_v<Function, NativeFunction<typename NativeScalar<args.type>::Type...,
+                                                    Fault, forge_rt_initializer_dispatch>>;
+        constexpr bool registration =
+            std::is_same_v<Function, NativeFunction<uint64_t, uint64_t *, uint64_t>>;
+        constexpr bool cleanup =
+            std::is_same_v<Function, NativeFunction<typename NativeScalar<args.type>::Type...,
+                                                    forge_rt_termination_dispatch>>;
+        if constexpr (registration) {
+            static_assert(result == Value::Address && sizeof...(args) == 1 &&
+                          ((args.type == Value::Address) && ...));
+        } else if constexpr (cleanup) {
+            static_assert(result == Value::Void && !shape.checkedMemory());
+        } else if constexpr (initializer) {
+            static_assert(result == Value::Void && shape.checkedMemory());
+        } else if constexpr (result == Value::Void && !shape.checkedMemory()) {
             static_assert(
                 std::is_same_v<Function,
                                NativeFunction<typename NativeScalar<args.type>::Type...>>);
@@ -209,16 +278,66 @@ namespace forge::win64 {
                                NativeFunction<typename NativeScalar<args.type>::Type..., Out>>);
         }
 
-        return {dll, name, nativeSymbol, parameters<args...>, result, effect};
+        ServiceBinding binding{dll,    name,   nativeSymbol,           parameters<args...>,
+                               result, effect, Convention::WindowsX64, requirement,
+                               control};
+        if constexpr (initializer) {
+            binding.callback = Callback::Initializer;
+        } else if constexpr (registration) {
+            binding.callback = Callback::Registration;
+        } else if constexpr (cleanup) {
+            binding.callback = Callback::Cleanup;
+        }
+
+        if (!binding.error().empty()) {
+            throw "invalid Windows x64 service declaration";
+        }
+
+        return binding;
+    }
+
+    consteval ServiceBinding processPointer(ServiceBinding binding) {
+        binding.returnsProcessStorage = true;
+        if (!binding.error().empty()) {
+            throw "invalid process pointer result";
+        }
+        return binding;
     }
 
     // Keep the linker spelling and the declaration used for the prototype check together.
 #define FORGE_SERVICE_ADAPTER(symbol) #symbol, symbol
 
+    inline constexpr auto getStdHandle = bind<Value::Handle, Argument{Value::U32}>(
+        "kernel32.dll", "GetStdHandle", LastError::OnFailure,
+        FORGE_SERVICE_ADAPTER(forge_rt_get_std_handle), Requirement::Process);
+    inline constexpr auto writeFile =
+        bind<Value::I32, Argument{Value::Handle},
+             Argument{Value::Address, Access::Input, Extent::CountArgument, 2},
+             Argument{Value::U32}, Argument{Value::Address, Access::Output, Extent::Fixed, 4},
+             Argument{Value::Address}>("kernel32.dll", "WriteFile", LastError::OnFailure,
+                                       FORGE_SERVICE_ADAPTER(forge_rt_write_file),
+                                       Requirement::Process);
+
     inline constexpr Argument nullableString{Value::Address, Access::Input, Extent::CString, 0,
                                              true};
     inline constexpr auto stringLength = bind<Value::I32, nullableString>(
         "kernel32.dll", "lstrlenA", LastError::Preserve, FORGE_SERVICE_ADAPTER(forge_rt_lstrlen_a));
+
+    inline constexpr Argument byteString{Value::Address, Access::Input, Extent::CString};
+    inline constexpr Argument inputBytes{Value::Address, Access::Input, Extent::CountArgument, 2};
+    inline constexpr Argument outputBytes{Value::Address, Access::Output, Extent::CountArgument, 2};
+    inline constexpr auto crtStrlen = bind<Value::U64, byteString>(
+        "msvcrt.dll", "strlen", LastError::Preserve, FORGE_SERVICE_ADAPTER(forge_rt_msvcrt_strlen));
+    inline constexpr auto crtStrcmp = bind<Value::I32, byteString, byteString>(
+        "msvcrt.dll", "strcmp", LastError::Preserve, FORGE_SERVICE_ADAPTER(forge_rt_msvcrt_strcmp));
+    inline constexpr auto crtStrncmp =
+        bind<Value::I32, inputBytes, inputBytes, Argument{Value::U64}>(
+            "msvcrt.dll", "strncmp", LastError::Preserve,
+            FORGE_SERVICE_ADAPTER(forge_rt_msvcrt_strncmp));
+    inline constexpr auto crtMemcpy =
+        bind<Value::Address, outputBytes, inputBytes, Argument{Value::U64}>(
+            "msvcrt.dll", "memcpy", LastError::Preserve,
+            FORGE_SERVICE_ADAPTER(forge_rt_msvcrt_memcpy));
 
     inline constexpr auto setLastError =
         bind<Value::Void, Argument{Value::U32}>("kernel32.dll", "SetLastError", LastError::Write,
@@ -226,6 +345,102 @@ namespace forge::win64 {
     inline constexpr auto getLastError =
         bind<Value::U32>("kernel32.dll", "GetLastError", LastError::Read,
                          FORGE_SERVICE_ADAPTER(forge_rt_get_last_error));
+    inline constexpr auto sleep = bind<Value::Void, Argument{Value::U32}>(
+        "kernel32.dll", "Sleep", LastError::Preserve, FORGE_SERVICE_ADAPTER(forge_rt_sleep));
 
-    inline constexpr ServiceBinding services[] = {setLastError, getLastError, stringLength};
+    inline constexpr auto exitProcess = bind<Value::Void, Argument{Value::U32}>(
+        "kernel32.dll", "ExitProcess", LastError::Preserve,
+        FORGE_SERVICE_ADAPTER(forge_rt_exit_process), Requirement::Process, Control::Terminates);
+
+    inline constexpr auto setUnhandledExceptionFilter =
+        bind<Value::Address, Argument{Value::Address}>(
+            "kernel32.dll", "SetUnhandledExceptionFilter", LastError::Preserve,
+            FORGE_SERVICE_ADAPTER(forge_rt_set_unhandled_exception_filter), Requirement::Process);
+
+    inline constexpr Argument startupInfoOutput{Value::Address, Access::Output, Extent::Fixed, 104};
+    inline constexpr auto getStartupInfoA = bind<Value::Void, startupInfoOutput>(
+        "kernel32.dll", "GetStartupInfoA", LastError::Preserve,
+        FORGE_SERVICE_ADAPTER(forge_rt_get_startup_info_a), Requirement::Process);
+    inline constexpr auto getStartupInfoW = bind<Value::Void, startupInfoOutput>(
+        "kernel32.dll", "GetStartupInfoW", LastError::Preserve,
+        FORGE_SERVICE_ADAPTER(forge_rt_get_startup_info_w), Requirement::Process);
+
+    inline constexpr auto getCommandLineA = processPointer(bind<Value::Address>(
+        "kernel32.dll", "GetCommandLineA", LastError::Preserve,
+        FORGE_SERVICE_ADAPTER(forge_rt_get_command_line_a), Requirement::Process));
+    inline constexpr auto getCommandLineW = processPointer(bind<Value::Address>(
+        "kernel32.dll", "GetCommandLineW", LastError::Preserve,
+        FORGE_SERVICE_ADAPTER(forge_rt_get_command_line_w), Requirement::Process));
+
+    inline constexpr auto crtMalloc = processPointer(bind<Value::Address, Argument{Value::U64}>(
+        "msvcrt.dll", "malloc", LastError::Preserve, FORGE_SERVICE_ADAPTER(forge_rt_msvcrt_malloc),
+        Requirement::Process));
+    inline constexpr auto crtCalloc =
+        processPointer(bind<Value::Address, Argument{Value::U64}, Argument{Value::U64}>(
+            "msvcrt.dll", "calloc", LastError::Preserve,
+            FORGE_SERVICE_ADAPTER(forge_rt_msvcrt_calloc), Requirement::Process));
+    inline constexpr auto crtFree = bind<Value::Void, Argument{Value::Address}>(
+        "msvcrt.dll", "free", LastError::Preserve, FORGE_SERVICE_ADAPTER(forge_rt_msvcrt_free),
+        Requirement::Process);
+    inline constexpr auto crtErrno = processPointer(
+        bind<Value::Address>("msvcrt.dll", "_errno", LastError::Preserve,
+                             FORGE_SERVICE_ADAPTER(forge_rt_msvcrt_errno), Requirement::Process));
+
+    inline constexpr auto crtGetMainArgs =
+        bind<Value::I32, Argument{Value::Address, Access::Output, Extent::Fixed, 4},
+             Argument{Value::Address, Access::Output, Extent::Fixed, 8},
+             Argument{Value::Address, Access::Output, Extent::Fixed, 8}, Argument{Value::I32},
+             Argument{Value::Address, Access::Input, Extent::Fixed, 4, true}>(
+            "msvcrt.dll", "__getmainargs", LastError::Preserve,
+            FORGE_SERVICE_ADAPTER(forge_rt_msvcrt_getmainargs), Requirement::Process);
+
+    inline constexpr auto crtAmsgExit =
+        bind<Value::Void, Argument{Value::I32}>("msvcrt.dll", "_amsg_exit", LastError::Preserve,
+                                                FORGE_SERVICE_ADAPTER(forge_rt_msvcrt_amsg_exit),
+                                                Requirement::Process, Control::Terminates);
+
+    inline constexpr auto crtInitterm =
+        bind<Value::Void, Argument{Value::Address, Access::Input, Extent::InitializerEnd, 1},
+             Argument{Value::Address}>("msvcrt.dll", "_initterm", LastError::CallbackDefined,
+                                       FORGE_SERVICE_ADAPTER(forge_rt_msvcrt_initterm),
+                                       Requirement::Process);
+
+    inline constexpr auto crtOnexit = bind<Value::Address, Argument{Value::Address}>(
+        "msvcrt.dll", "_onexit", LastError::OnFailure,
+        FORGE_SERVICE_ADAPTER(forge_rt_msvcrt_onexit), Requirement::Process);
+    inline constexpr auto crtCexit =
+        bind<Value::Void>("msvcrt.dll", "_cexit", LastError::CallbackDefined,
+                          FORGE_SERVICE_ADAPTER(forge_rt_msvcrt_cexit), Requirement::Process);
+    inline constexpr auto crtExit = bind<Value::Void, Argument{Value::I32}>(
+        "msvcrt.dll", "exit", LastError::CallbackDefined,
+        FORGE_SERVICE_ADAPTER(forge_rt_msvcrt_exit), Requirement::Process, Control::Terminates);
+
+    inline constexpr ServiceBinding services[] = {
+        crtGetMainArgs,
+        crtStrlen,
+        crtStrcmp,
+        crtStrncmp,
+        crtMemcpy,
+        crtMalloc,
+        crtCalloc,
+        crtFree,
+        crtErrno,
+        setLastError,
+        getLastError,
+        stringLength,
+        getStdHandle,
+        writeFile,
+        exitProcess,
+        getCommandLineA,
+        getCommandLineW,
+        sleep,
+        setUnhandledExceptionFilter,
+        crtAmsgExit,
+        crtInitterm,
+        getStartupInfoA,
+        getStartupInfoW,
+        crtOnexit,
+        crtCexit,
+        crtExit,
+    };
 } // namespace forge::win64

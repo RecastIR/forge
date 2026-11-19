@@ -19,10 +19,18 @@ namespace forge::x86 {
     struct AddressOperand {
         std::optional<RegisterView> base, index;
         uint64_t displacement, scale;
+        bool gsRelative = false;
+    };
+
+    struct RegisterCallEvidence {
+        int64_t target;
+        uint32_t producer;
     };
 
     inline constexpr RegisterView stackPointer{rspIndex, 64};
     inline constexpr RegisterView framePointer{rspIndex + 1, 64};
+    inline constexpr RegisterView stringDestination{11, 64};
+    inline constexpr RegisterView repeatCount{1, 64};
 
     llvm::StringRef registerName(unsigned index);
     bool nonvolatile(unsigned index);
@@ -48,7 +56,7 @@ namespace forge::x86 {
             : regs(regs), guestBase(guestBase) {}
 
         RegisterView reg(const Step &s, const llvm::MCOperand &op, unsigned width) const;
-        int64_t registerCallRva(const Step &call, const Step *producer) const;
+        RegisterCallEvidence leaCallTarget(const Step &call, const Step *producer) const;
         std::optional<int64_t> ripRva(const Step &s, unsigned first) const;
         std::optional<uint64_t> ripAddress(const Step &s, unsigned first) const;
         AddressOperand decodeAddress(const Step &s, unsigned first, bool access) const;

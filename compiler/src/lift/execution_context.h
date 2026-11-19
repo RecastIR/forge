@@ -21,6 +21,7 @@ namespace forge::x86 {
         ContextView() = default;
         ContextView(llvm::IRBuilder<> &ir, const ContextLayout &layout, llvm::Value *context);
         llvm::Value *registers = nullptr, *marks = nullptr, *flags = nullptr;
+        llvm::Value *directionFlag = nullptr;
         llvm::Value *instance = nullptr, *thread = nullptr;
         llvm::Value *bytes = nullptr, *validity = nullptr;
         llvm::Value *regions = nullptr, *result = nullptr;
@@ -31,11 +32,13 @@ namespace forge::x86 {
                                        RegisterSet modified);
     void checkNonvolatiles(llvm::IRBuilder<> &ir, GuestMemory &memory, const ContextView &context,
                            const SavedRegisters &saved);
+    llvm::Function *emitInitializerThunk(llvm::Function &body, const ContextLayout &layout,
+                                         RegisterSet modified);
 
     // Uses the process-owned execution view and emits its immutable artifact descriptor.
     llvm::Function *emitProcessEntry(llvm::Function &body, const RecoveredFunctionGroup &group,
                                      const ContextLayout &layout, const ImagePlan &image,
-                                     RegisterSet modified);
+                                     RegisterSet modified, EntryMode mode);
 
     // Emits both selected-entry interfaces and the invocation-scoped initialization.
     llvm::Function *emitEntryAdapter(llvm::Function &body, uint32_t rva, EntryMode mode,

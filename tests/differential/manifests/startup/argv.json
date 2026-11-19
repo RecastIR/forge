@@ -1,0 +1,16 @@
+{
+  "schema_version": 1,
+  "id": "startup/argv",
+  "description": "Check spaced arguments, initialized globals and zero-filled data before returning.",
+  "source": "fixtures/startup/argv.c",
+  "binary": "crt_argv.exe",
+  "args": [
+    "hello world",
+    "forge"
+  ],
+  "expected": {
+    "exit_code": 42,
+    "stdout": "",
+    "stderr": ""
+  }
+}

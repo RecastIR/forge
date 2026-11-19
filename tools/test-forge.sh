@@ -4,7 +4,7 @@ set -eu
 repo=$(CDPATH='' cd -- "$(dirname -- "$0")/.." && pwd)
 cd "$repo"
 usage() {
-    echo "usage: $0 --all | --native | --native-dev | --native-sanitize | --native-presets | --references | --differential" >&2
+    echo "usage: $0 --all | --native | --native-dev | --native-sanitize | --native-presets | --references | --executable-reference | --differential" >&2
     exit 2
 }
 test "$#" = 1 || usage
@@ -59,6 +59,8 @@ from xml.etree import ElementTree
 tests = ElementTree.parse(sys.argv[1]).findall(".//testcase")
 for name in ("native", "differential", "guest_stack", "guest_image", "guest_jump", "guest_indirect", "guest_imports",
              "guest_checked_memory", "guest_lstrlen", "guest_service_abi", "guest_process", "runtime_contract",
+             "runtime_process_admission", "runtime_sleep_adapter",
+             "executable_contract", "executable_object", "executable_readiness", "native_executable",
              "runtime_c_smoke", "runtime_ir_smoke", "build_provisioning"):
     found = [t for t in tests if t.get("name") == name]
     if len(found) != 1 or found[0].get("status") != "run" or len(found[0].findall("skipped")):
@@ -102,6 +104,9 @@ case "$1" in
     stage build ./tools/build-windows-fixtures.sh --all
     stage capture ./tools/run-windows-references.sh --all
     stage wine_tests python3 -B "$suite/reference/test_wine.py" ;;
+--executable-reference)
+    stage executable_reference python3 -B "$repo/tests/integration/test_executable.py" reference \
+        "$BUILD_ROOT/dev/fixtures/Debug" ;;
 --differential)
     status=0
     run_differential || status=1
@@ -118,6 +123,9 @@ case "$1" in
     compare=skipped
     "$repo/tools/test-forge.sh" --native || native=failure
     "$repo/tools/test-forge.sh" --references || references=failure
+    if test "$native/$references" = success/success; then
+        "$repo/tools/test-forge.sh" --executable-reference || references=failure
+    fi
     if test "$native/$references" = success/success; then
         compare=success
         run_differential || compare=failure

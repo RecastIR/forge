@@ -168,6 +168,16 @@ namespace forge::x86 {
 
         flows.at(group.root()).entry = initial;
 
+        // Native CRT calls supply no register arguments or arithmetic flags. Meet this
+        // entry with ordinary callers' definitions when one body has both kinds of edge.
+        Definitions initializer{};
+        initializer.registers[rspIndex] = UINT64_MAX;
+        for (const auto &[address, function] : group.functions()) {
+            if (function.callbackSource) {
+                flows.at(address).entry.intersect(initializer);
+            }
+        }
+
         while (!pending.empty()) {
             const auto address = pending.extract(pending.begin()).value();
             const auto &function = flows.at(address);

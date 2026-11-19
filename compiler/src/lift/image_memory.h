@@ -1,6 +1,7 @@
 #pragma once
 
 #include "lift/cfg.h"
+#include "lift/lift.h"
 #include "pe/image.h"
 
 #include "llvm/ADT/SmallVector.h"
@@ -14,6 +15,10 @@ namespace llvm {
     class IRBuilderBase;
     class Module;
 } // namespace llvm
+
+namespace forge::win64 {
+    struct ServiceBinding;
+}
 
 namespace forge::x86 {
     struct Continuation;
@@ -51,18 +56,23 @@ namespace forge::x86 {
         uint64_t loadBase = 0;
         uint32_t sizeOfImage = 0;
         std::vector<Backing> backings;
+        std::map<uint32_t, uint32_t> dataImports;
+        std::map<uint32_t, const win64::ServiceBinding *> functionImports;
     };
 
     // Selection borrows the group's steps for diagnostics and the image for section and
     // relocation data. Finishing resolves the borrows into an independently owned plan.
     class ImageMemory {
       public:
-        ImageMemory(const ParsedImage &image, uint64_t guestLoadBase, bool checkedMemory);
+        ImageMemory(const ParsedImage &image, uint64_t guestLoadBase, bool checkedMemory,
+                    EntryMode mode);
 
         void checkStackMapping(const Step &step) const;
         void addressTaken(const Step &step, uint64_t va);
         void serviceArgument(const Step &step, uint64_t va, bool write,
                              std::optional<uint64_t> size);
+        void initializerTable(const Step &step, uint32_t first, uint32_t last);
+        bool isDataImportPointer(uint64_t va) const;
         void fixedAccess(const Step &step, uint64_t va, unsigned width, bool write);
         void tableRead(const Step &step, const RelativeTable &table);
         void computedAccess(const Step &step, std::optional<uint64_t> va, unsigned width,
@@ -80,7 +90,12 @@ namespace forge::x86 {
         };
 
         const ParsedImage &source;
+        std::map<uint32_t, uint32_t> dataImports;
+        std::map<uint32_t, const win64::ServiceBinding *> functionImports;
+        std::optional<RelocationIndex> importRelocations;
+        std::optional<std::vector<RvaRange>> importWrites;
         uint64_t loadBase;
+        llvm::StringRef executableHeaders;
         const Step *indirectRead = nullptr;
         const Step *indirectWrite = nullptr;
         bool overlapsStack;
@@ -92,7 +107,9 @@ namespace forge::x86 {
         enum class ExecutableSelection : uint8_t { AddressTakenSection, ContinuationBytes };
 
         const ImageInitialization &contents();
+        bool selectFunctionImport(uint64_t rva, unsigned width, bool write);
         void fixedImageAccess(const Step &step, RvaRange access, bool write);
+        void selectServiceSections(const Step &step, uint64_t rva, uint64_t size, bool write);
         void selectComputed(const Step &step, uint64_t va, unsigned width, bool write,
                             ExecutableSelection executableSelection);
         void select(const Step &step, const Section &section, RvaRange access);

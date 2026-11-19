@@ -193,7 +193,7 @@ def validate_context(context, stage, category, code, image, selected, ir, resolv
                 raise ValueError("instruction bytes disagree with the PE snapshot")
 
 
-def parse_diagnostic(raw, image, selected, ir, resolve_callee=None, register_target=None):
+def decode_diagnostic(raw):
     if not raw.endswith(b"\n") or raw.count(b"\n") != 1:
         raise ValueError("expected one newline-terminated JSON record")
     try:
@@ -204,14 +204,22 @@ def parse_diagnostic(raw, image, selected, ir, resolve_callee=None, register_tar
         raise ValueError("unsupported diagnostic schema version")
     if diagnostic.keys() != {"schema_version", "stage", "category", "code", "message", "context"}:
         raise ValueError("unexpected diagnostic fields")
-    kind = field(diagnostic, "stage", str), field(diagnostic, "category", str)
-    if field(diagnostic, "code", str) not in FAILURE_KINDS.get(kind, ()):
-        raise ValueError("unrecognized diagnostic stage, category and code combination")
+    for key in ("stage", "category", "code"):
+        field(diagnostic, key, str)
+    field(diagnostic, "context", dict)
     message = field(diagnostic, "message", str)
     if not message.strip():
         raise ValueError("empty diagnostic message")
     # Escaped unpaired surrogates can survive JSON parsing but cannot be reported as UTF-8.
     message.encode("utf-8")
-    validate_context(field(diagnostic, "context", dict), *kind, diagnostic["code"], image,
+    return diagnostic
+
+
+def parse_diagnostic(raw, image, selected, ir, resolve_callee=None, register_target=None):
+    diagnostic = decode_diagnostic(raw)
+    kind = diagnostic["stage"], diagnostic["category"]
+    if diagnostic["code"] not in FAILURE_KINDS.get(kind, ()):
+        raise ValueError("unrecognized diagnostic stage, category and code combination")
+    validate_context(diagnostic["context"], *kind, diagnostic["code"], image,
                      selected, ir, resolve_callee, register_target)
     return diagnostic
