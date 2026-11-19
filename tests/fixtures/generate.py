@@ -117,8 +117,11 @@ def generate(output, mc, link, dlltool, clang):
         for name, switches in (
             ("cexit", ()), ("exit", ("normal_exit",)), ("nested-exit", ("normal_exit", "terminal")),
             ("register", ("add_during",)), ("recursive", ("add_during", "recurse")),
-            ("recursive-exit", ("add_during", "recursive_exit")), ("fault", ("fault",)),
-            ("return-slot", ("corrupt_return",))):
+            ("recursive-order", ("add_during", "recurse", "trace_recursive_return")),
+            ("recursive-limit", ("recurse_forever",)), ("recursive-exit", ("add_during", "recursive_exit")), ("fault", ("fault",)),
+            ("return-slot", ("corrupt_return",)), ("stack-above", ("stack_above",)),
+            ("wrong-origin", ("changed_target", "needs_evidence")),
+            ("unmapped", ("unmapped_target", "needs_evidence")), ("data", ("data_target", "needs_evidence"))):
             setup = "".join(f"{switch} = 1\n" for switch in switches)
             image(f"crt-term-{name}.exe", setup + termination, link_flags=initializer_flags)
         for name in ("startup", "stream", "stream_exit", "registration", "pressure"):

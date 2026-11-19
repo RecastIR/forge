@@ -7,7 +7,22 @@ entry:
     .seh_stackalloc 40
     .seh_endprologue
     callq _cexit
+.ifdef changed_target
+    leaq second(%rip), %rax
+    movq %rax, evidence(%rip)
+    movq evidence(%rip), %rax
+.else
+.ifdef unmapped_target
+    movq $1, evidence(%rip)
+    movq evidence(%rip), %rax
+.else
+.ifdef data_target
+    leaq evidence(%rip), %rax
+.else
     leaq first(%rip), %rax
+.endif
+.endif
+.endif
     movq %rax, %rcx
     callq register_callback
     testl %eax, %eax
@@ -82,6 +97,15 @@ second:
 .endif
 .ifdef recurse
     callq _cexit
+.ifdef trace_recursive_return
+    movl $68, %ecx
+    callq mark
+.endif
+.endif
+.ifdef recurse_forever
+    leaq second(%rip), %rcx
+    callq _onexit
+    callq _cexit
 .endif
 .ifdef recursive_exit
     movl $67, %ecx
@@ -94,6 +118,12 @@ second:
 .ifdef fault
     movq invalid(%rip), %rcx
     movb (%rcx), %al
+.endif
+.ifdef stack_above
+    leaq 80(%rsp), %rcx
+    movq %rcx, invalid(%rip)
+    movq invalid(%rip), %rax
+    movb (%rax), %al
 .endif
 .ifdef corrupt_return
     movq $1, 40(%rsp)
@@ -132,3 +162,8 @@ mark:
 .seh_endproc
 .data
 invalid: .quad 1
+
+.ifdef needs_evidence
+.p2align 3
+evidence: .quad first
+.endif

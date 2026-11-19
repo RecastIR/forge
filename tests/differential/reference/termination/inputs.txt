@@ -6,6 +6,7 @@ crt-observe-stream_exit.exe
 crt-term-cexit.exe
 crt-term-exit.exe
 crt-term-nested-exit.exe
+crt-term-recursive-order.exe
 crt-term-recursive.exe
 crt-term-recursive-exit.exe
 crt-term-register.exe
