@@ -65,7 +65,7 @@ Argument duplication exposes a later boundary. The compiler accepts `strlen` on 
 
 ## Compatibility boundary
 
-For the primary PE, Forge recognizes 17 of 36 load-time symbols. These are KERNEL32 `GetLastError`, `GetStartupInfoA`, `SetUnhandledExceptionFilter` and `Sleep`, the nine MSVCRT functions `__getmainargs`, `_amsg_exit`, `_initterm`, `calloc`, `free`, `malloc`, `memcpy`, `strlen` and `strncmp`, and the four MSVCRT data exports. Eight KERNEL32 symbols and eleven MSVCRT symbols still lack bindings. The argument fixture’s additional `strcmp` import has a binding.
+For the primary PE, Forge recognizes 20 of 36 load-time symbols. These are KERNEL32 `GetLastError`, `GetStartupInfoA`, `SetUnhandledExceptionFilter` and `Sleep`, the twelve MSVCRT functions `__getmainargs`, `_amsg_exit`, `_cexit`, `_initterm`, `_onexit`, `calloc`, `exit`, `free`, `malloc`, `memcpy`, `strlen` and `strncmp`, and the four MSVCRT data exports. Eight KERNEL32 symbols and eight MSVCRT symbols still lack bindings. The argument fixture’s additional `strcmp` import has a binding.
 
 In `__tmainCRTStartup`, the startup conflict branch loads error 31 at `0x1407`. Forge recovers the terminating call at `0x140c` to **`msvcrt.dll!_amsg_exit`**. In the primary PE the thunk is at `0x26b0` in Debug and `0x2680` in Release, both jumping through IAT slot `0x8208`. Separate focused PEs execute `_amsg_exit(31)` through the same import-thunk shape and exercise an unused import. [Original Windows, Wine and ARM64 observations](amsg-exit/) · [Lifted tests](../../../integration/test_executable.py)
 

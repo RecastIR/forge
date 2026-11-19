@@ -6,6 +6,9 @@ entry:
     subq $40, %rsp
     .seh_stackalloc 40
     .seh_endprologue
+.ifdef crt_stream
+    callq *__imp_fopen(%rip)
+.endif
     callq _cexit
 .ifdef changed_target
     leaq second(%rip), %rax
@@ -139,6 +142,10 @@ late:
     .seh_endprologue
     movl $67, %ecx
     callq mark
+.ifdef nested_fault
+    movq invalid(%rip), %rcx
+    movb (%rcx), %al
+.endif
     addq $40, %rsp
     retq
 .seh_endproc

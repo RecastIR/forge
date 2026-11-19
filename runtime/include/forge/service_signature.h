@@ -406,8 +406,8 @@ namespace forge::win64 {
                                        Requirement::Process);
 
     inline constexpr auto crtOnexit = bind<Value::Address, Argument{Value::Address}>(
-        "msvcrt.dll", "_onexit", LastError::OnFailure, FORGE_SERVICE_ADAPTER(forge_rt_msvcrt_onexit),
-        Requirement::Process);
+        "msvcrt.dll", "_onexit", LastError::OnFailure,
+        FORGE_SERVICE_ADAPTER(forge_rt_msvcrt_onexit), Requirement::Process);
     inline constexpr auto crtCexit =
         bind<Value::Void>("msvcrt.dll", "_cexit", LastError::CallbackDefined,
                           FORGE_SERVICE_ADAPTER(forge_rt_msvcrt_cexit), Requirement::Process);

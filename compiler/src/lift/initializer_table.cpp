@@ -194,11 +194,18 @@ namespace forge::x86 {
                 if (slot && std::in_range<uint32_t>(*slot)) {
                     const auto rva = static_cast<uint32_t>(*slot);
                     proof.operands.decodeAddress(step, 1, step.opcode == "MOV64rm");
-                    if (step.opcode == "LEA64r") {
-                        return rva;
+                    std::optional<uint32_t> target = rva;
+                    if (step.opcode == "MOV64rm") {
+                        init.validateRelocations({rva, uint64_t(rva) + 8});
+                        target = initialTarget(call, rva, image, init);
                     }
-                    init.validateRelocations({rva, uint64_t(rva) + 8});
-                    return initialTarget(call, rva, image, init).value_or(0);
+
+                    if (target && *target == 0) {
+                        call.reject(FailureCode::InvalidCallTarget,
+                                    "termination callback points to the PE header", 0);
+                    }
+
+                    return target.value_or(0);
                 }
             }
 

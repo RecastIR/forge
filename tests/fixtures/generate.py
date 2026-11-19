@@ -118,7 +118,9 @@ def generate(output, mc, link, dlltool, clang):
             ("cexit", ()), ("exit", ("normal_exit",)), ("nested-exit", ("normal_exit", "terminal")),
             ("register", ("add_during",)), ("recursive", ("add_during", "recurse")),
             ("recursive-order", ("add_during", "recurse", "trace_recursive_return")),
-            ("recursive-limit", ("recurse_forever",)), ("recursive-exit", ("add_during", "recursive_exit")), ("fault", ("fault",)),
+            ("recursive-limit", ("recurse_forever",)), ("recursive-exit", ("add_during", "recursive_exit")),
+            ("fault", ("fault",)), ("nested-fault", ("add_during", "recurse", "nested_fault")),
+            ("stdio", ("crt_stream",)),
             ("return-slot", ("corrupt_return",)), ("stack-above", ("stack_above",)),
             ("wrong-origin", ("changed_target", "needs_evidence")),
             ("unmapped", ("unmapped_target", "needs_evidence")), ("data", ("data_target", "needs_evidence"))):

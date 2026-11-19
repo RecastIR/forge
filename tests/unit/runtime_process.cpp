@@ -971,15 +971,17 @@ namespace {
             } while (out);
             REQUIRE(accepted == 4096);
             uint32_t lastError = 0;
-            REQUIRE(forge_rt_get_last_error(instance, thread, &lastError) == FORGE_RT_OK && lastError == 8);
+            REQUIRE(forge_rt_get_last_error(instance, thread, &lastError) == FORGE_RT_OK &&
+                    lastError == 8);
             uint64_t errnoAddress = 0;
             forge_rt_invocation_token token = 0;
             REQUIRE(forge_rt_current_invocation(instance, thread, &token) == FORGE_RT_OK);
             REQUIRE(forge_rt_msvcrt_errno(instance, thread, &errnoAddress) == FORGE_RT_OK);
             int32_t error = 0;
             forge_rt_memory_fault detail{};
-            REQUIRE(forge_rt_read_guest(instance, thread, token, errnoAddress, sizeof(error), &error,
-                                        sizeof(error), &detail) == FORGE_RT_OK && error == 12);
+            REQUIRE(forge_rt_read_guest(instance, thread, token, errnoAddress, sizeof(error),
+                                        &error, sizeof(error), &detail) == FORGE_RT_OK &&
+                    error == 12);
             REQUIRE(forge_rt_msvcrt_cexit(instance, thread, dispatch) == FORGE_RT_OK);
             REQUIRE(execution->rdx == accepted && !execution->result.kind);
             REQUIRE(forge_rt_msvcrt_exit(instance, thread, -2, dispatch) == FORGE_RT_OK);

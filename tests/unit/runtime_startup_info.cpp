@@ -115,10 +115,8 @@ namespace {
         Bytes expected{};
         expected[0] = 104;
 
-        if (!ansi) {
-            std::fill_n(expected.begin() + 4, 4, 0xbc);
-            std::fill_n(expected.begin() + 68, 4, 0xbc);
-        }
+        std::fill_n(expected.begin() + 4, 4, 0xbc);
+        std::fill_n(expected.begin() + 68, 4, 0xbc);
 
         std::fill(expected.begin() + 80, expected.end(), ansi ? 0xff : 0xbc);
 
@@ -193,7 +191,7 @@ namespace {
             call.write(base, sentinel);
             REQUIRE(call.query(ansi, base) == FORGE_RT_OK);
             const auto bytes = call.read<104>(base);
-            const auto padding = ansi ? 0 : field<4>(sentinel, 4);
+            const auto padding = field<4>(sentinel, 4);
             REQUIRE(field<4>(bytes, 0) == 104);
             REQUIRE(field<4>(bytes, 4) == padding);
             REQUIRE(field<4>(bytes, 68) == padding);

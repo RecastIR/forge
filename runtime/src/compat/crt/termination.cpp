@@ -3,8 +3,6 @@
 #include "forge/msvcrt_process.h"
 #include "forge/process.h"
 
-#include <utility>
-
 using namespace forge::runtime;
 
 extern "C" forge_rt_status forge_rt_msvcrt_onexit(forge_rt_instance *instance,
@@ -73,7 +71,6 @@ namespace {
 
         if (!registry.depth) {
             registry.dispatched = 0;
-            registry.completed = false;
         }
 
         ++registry.depth;
@@ -90,9 +87,7 @@ namespace {
             ++registry.dispatched;
             const auto handler = registry.entries.back();
             registry.entries.pop_back();
-            const auto previous = std::exchange(callbackInvocation, executingInvocation);
-            dispatch(instance->managedExecution, handler.site, handler.target);
-            callbackInvocation = previous;
+            dispatchGuestCallback(dispatch, instance->managedExecution, handler.site, handler.target);
 
             if (instance->managedExecution->result.kind) {
                 break;

@@ -2,8 +2,6 @@
 #include "forge/process.h"
 #include "forge/service_memory.h"
 
-#include <utility>
-
 using namespace forge::runtime;
 using namespace forge::win64;
 
@@ -44,9 +42,7 @@ forge_rt_msvcrt_initterm(forge_rt_instance *instance, forge_rt_thread_token thre
             continue;
         }
 
-        const auto previous = std::exchange(callbackInvocation, call.token);
-        dispatch(execution, target);
-        callbackInvocation = previous;
+        dispatchGuestCallback(dispatch, execution, target);
 
         if (execution->result.kind) {
             break;

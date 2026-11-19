@@ -52,6 +52,16 @@ namespace forge::runtime {
     extern thread_local forge_rt_invocation_token executingInvocation;
     // The existing invocation borrowed by the innermost synchronous native-to-guest call.
     extern thread_local forge_rt_invocation_token callbackInvocation;
+
+    // The caller has checked the live managed invocation. Nested callbacks must restore
+    // the previous token so checked service transfers use the innermost guest frame.
+    template <typename Dispatch, typename... Args>
+    void dispatchGuestCallback(Dispatch dispatch, Args... args) noexcept {
+        const auto previous = callbackInvocation;
+        callbackInvocation = executingInvocation;
+        dispatch(args...);
+        callbackInvocation = previous;
+    }
 } // namespace forge::runtime
 
 struct forge_rt_execution;

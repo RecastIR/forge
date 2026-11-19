@@ -16,6 +16,8 @@ Legacy MSVCRT's `_amsg_exit(int)` reports a fatal CRT error through the process'
 
 Managed `msvcrt.dll!_initterm` walks a bounded table in guest memory and calls compiled Windows x64 `void(void)` initializers in order. Each nonzero target must belong to the recovered set for that call site. A callback shares the active thread, stack, heap and last-error state, and its exit or fault reaches the host. The native caller's synthetic return slot is protected against guest inspection. [Initializer callback contract](../docs/runtime-architecture.md#crt-initializer-callback-design)
 
+Managed `_onexit` registers a proved guest callback in process-owned storage. Returning `_cexit` and terminating `exit` share reverse-order dispatch, the active guest thread and the existing terminal-result channel. The supported subset covers programs without CRT-managed buffered streams. [Termination contract and limits](../docs/runtime-architecture.md#legacy-msvcrt-termination-handlers)
+
 ## Current source organization
 
 The public C ABI and shared C++ contracts live in `include/forge/`. Within `forge_runtime`, managed registration stages one process occurrence that owns both the core image and the Windows compatibility state. Core owns the primary execution context, thread records, reservations, private PE backing and heap blocks. Win32 and MSVCRT own the guest-visible parameters, CRT cells, standard handles, filter and service behavior. The instance lends adapters access to that state during execution. The separate `forge_startup` archive builds only `src/startup.cpp`. [Build definition](CMakeLists.txt) · [Ownership diagram](../docs/runtime-architecture.md#resource-ownership-and-borrowing)

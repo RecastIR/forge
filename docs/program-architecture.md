@@ -92,6 +92,12 @@ A recovered call to the catalogue's initializer service adds native-to-guest edg
 
 Function-only lifting reports that the import needs a managed process before following any initializer. The table can be writable. Its initial contents establish the set of guest entry RVAs admitted at that site. Generated code checks both live bound arguments and switches on the full relocated guest VA read by the CRT. A shared body used by ordinary callers and the CRT must meet both entry contracts. A callback may save and restore incoming nonvolatiles, enters with a nested guest frame and receives no argument registers, stack arguments or defined arithmetic flags. Its return value is ignored. A call with admitted callbacks invalidates caller spill facts that could have changed through guest aliases. Empty and all-NULL tables preserve those facts on normal return, apart from the slot overwritten by CALL itself. [Execution and ownership](runtime-architecture.md#crt-initializer-callback-design)
 
+### Retained termination callbacks
+
+Recovery proves RCX at a call to `msvcrt.dll!_onexit` from a bounded local instruction prefix. Supported definitions include a RIP-relative function address, a relocated pointer cell, full-width register copies and a proved null. A shared guest registration wrapper may forward its incoming RCX unchanged. Recovery then proves each direct caller separately and passes that caller’s instruction RVA as a hidden operand of the translated wrapper. An indirect or unresolved origin receives a diagnostic. Callback bodies must satisfy the ordinary executable target, instruction recovery and guest-frame checks. [Proof and scheduling](../compiler/src/lift/recovery.cpp)
+
+The generated lookup matches both the registration instruction and its wrapper origin, then compares the live VA against the target at the selected guest load base. Registration checks this evidence before retaining the guest value. Cleanup checks the same pair again and invokes the corresponding module-owned translated thunk. Only guest values survive a registration call. The initializer service continues to use the table and dispatcher associated with its own import site. [Code generation](../compiler/src/lift/lift.cpp) · [Process-owned handler registry](runtime-architecture.md#legacy-msvcrt-termination-handlers)
+
 ### Bounded indirect branches
 
 An unwind-backed function can dispatch through a table of signed 32-bit offsets. The pinned MinGW GCC emits this contiguous sequence for the seven-case C switch in both fixture configurations.

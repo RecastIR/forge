@@ -77,7 +77,7 @@ namespace forge::runtime {
         using namespace win64;
 
         // Explicit Windows x64 field widths and padding, including the two holes that
-        // a field-wise W call must leave untouched. No host address crosses this boundary.
+        // both system calls must leave untouched. No host address crosses this boundary.
         struct StartupInfo64 {
             uint32_t cb, pad0;
             uint64_t reserved, desktop, title;
@@ -166,11 +166,7 @@ namespace forge::runtime {
             const auto &value = *view;
             const auto bytes = std::bit_cast<std::array<uint8_t, sizeof(value)>>(value);
 
-            if constexpr (ansi) {
-                return output.write(0, bytes);
-            }
-
-            // Validate all 104 bytes even when W will preserve handles and padding.
+            // Validate all 104 bytes before writing the discontiguous named fields.
             // Writing only the named ranges also preserves uninitialized stack marks.
             auto status = output.validate();
 
@@ -186,7 +182,7 @@ namespace forge::runtime {
 
             if (status == FORGE_RT_OK) {
                 constexpr size_t start = offsetof(StartupInfo64, reservedData);
-                const auto end = value.window.flags & StartupInfo::useStdHandles
+                const auto end = ansi || (value.window.flags & StartupInfo::useStdHandles)
                                      ? sizeof(value)
                                      : offsetof(StartupInfo64, handles);
                 status = output.write(start, std::span(bytes).subspan(start, end - start));

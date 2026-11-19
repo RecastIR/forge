@@ -60,6 +60,19 @@ def captured_streams(row):
     return row["exit_code"], bytes.fromhex(row["stdout_hex"]), bytes.fromhex(row["stderr_hex"])
 
 
+def termination_traces(backend):
+    root = Path(__file__).resolve().parents[1] / "differential/fixtures/startup/termination"
+    with ZipFile(root / f"{backend}-raw.zip") as archive:
+        capture = json.loads(archive.read("results.json"))
+    traces = {}
+    for name, digest in capture["pe_sha256"].items():
+        if name.startswith("crt-term-"):
+            if hashlib.sha256((FIXTURES / name).read_bytes()).hexdigest() != digest:
+                raise ValueError(f"{name} differs from the {backend} reference PE")
+            traces[name] = captured_streams(capture["observations"][name[:-4] + "-captured"])
+    return traces
+
+
 def entry(data):
     layout = Layout(data)
     return layout.u32(layout.opt + 16)
@@ -1058,6 +1071,7 @@ class Reference(Workspace):
             console_image("binary_stderr").name: (len(BINARY), b"", BINARY),
             console_image("nested_exit").name: (0xcafe002a, b"", b""),
         }
+        expected.update(termination_traces("wine"))
         for filename, observations in amsg_observations("wine", AMSG_CASES + AMSG_MARKERS).items():
             expected[filename] = captured_streams(observations["pipe"])
         inputs = Path(__file__).resolve().parents[1] / "differential/reference/executable-inputs.txt"
@@ -1358,8 +1372,10 @@ class Native(Workspace):
                 ("wrong-origin", "", "unproven MSVCRT termination callback for registration site"),
                 ("unmapped", "", "unproven MSVCRT termination callback for registration site"),
                 ("fault", "B", "guest memory fault address=0x1 access=1 reason=2"),
+                ("nested-fault", "BC", "guest memory fault address=0x1 access=1 reason=2"),
                 ("return-slot", "B", "unsupported guest access to a native callback return slot"),
-                ("stack-above", "B", "unsupported guest access above the callback home space")):
+                ("stack-above", "B", "unsupported guest access above the callback home space"),
+                ("recursive-limit", "B" * 16, "unsupported recursive MSVCRT cleanup or handler limit")):
             with self.subTest(variant=variant):
                 self.compile(FIXTURES / f"crt-term-{variant}.exe")
                 result = run(self.output)
@@ -1369,6 +1385,11 @@ class Native(Workspace):
         self.assertEqual(diagnostic["code"], "LIFT_INVALID_CALL_TARGET")
         self.assertEqual(diagnostic["context"]["import_symbol"], "_onexit")
         self.assertIn("termination_target_rva", diagnostic["context"])
+
+    def test_termination_requires_crt_stream_support(self):
+        diagnostic = self.compile(FIXTURES / "crt-term-stdio.exe", success=False)
+        self.assertEqual(diagnostic["context"]["import_symbol"], "fopen")
+        self.assertFalse(self.output.exists())
 
     def test_termination_rebased_dword(self):
         pe = FIXTURES / "crt-term-exit.exe"
