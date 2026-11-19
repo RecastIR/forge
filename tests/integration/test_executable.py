@@ -151,6 +151,10 @@ class Workspace(unittest.TestCase):
         self.dir = Path(directory.name).resolve()
         self.output = self.dir / "guest program"
 
+    def program(self, **streams):
+        options = dict(stdout=subprocess.PIPE, stderr=subprocess.PIPE, stdin=subprocess.DEVNULL)
+        return subprocess.run([self.output], timeout=10, **(options | streams))
+
     def compile(self, pe, *, success=True):
         result = run(FORGE, "lift", pe, "--executable", "--output", self.output,
                      "--diagnostics-format", "json")
@@ -1086,10 +1090,6 @@ class Reference(Workspace):
 
 
 class Console(Workspace):
-    def program(self, **streams):
-        options = dict(stdout=subprocess.PIPE, stderr=subprocess.PIPE, stdin=subprocess.DEVNULL)
-        return subprocess.run([self.output], timeout=10, **(options | streams))
-
     def test_crt_fatal_exit(self):
         for filename, observations in amsg_observations("windows").items():
             pe = FIXTURES / filename
