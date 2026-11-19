@@ -53,6 +53,8 @@ jobs:
           overwrite: true
 
       - name: Package focused Windows reference inputs when compatibility changes
+        # Capture the producer's fixtures even when the translated comparison fails.
+        if: ${{ !cancelled() }}
         id: termination
         shell: bash
         env:
@@ -69,7 +71,7 @@ jobs:
           xargs shasum -a 256 < "$list" > "$dest/SHA256SUMS"
           echo "sha256=$(shasum -a 256 "$dest/SHA256SUMS" | cut -d' ' -f1)" >> "$GITHUB_OUTPUT"
       - uses: actions/upload-artifact@v4
-        if: steps.termination.outputs.sha256 != ''
+        if: ${{ !cancelled() && steps.termination.outputs.sha256 != '' }}
         with:
           name: termination-inputs
           path: ${{ runner.temp }}/termination-inputs
@@ -77,7 +79,7 @@ jobs:
 
   legacy-windows-capture:
     needs: macos-dev
-    if: needs.macos-dev.outputs.termination_sha256 != ''
+    if: ${{ !cancelled() && needs.macos-dev.outputs.termination_sha256 != '' }}
     runs-on: windows-2022
     timeout-minutes: 10
     steps:

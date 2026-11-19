@@ -49,9 +49,11 @@ entry:
     cmpq $0, 40(%rsp)
 .ifdef measured_fields
     je .Lwine_fields\@
-    cmpl $0x5a5a5a5a, 36(%rsp)
+    movl 36(%rsp), %edx
+    cmpl $0x5a5a5a5a, %edx
     jne .Lfailure
-    cmpl $0x5a5a5a5a, 100(%rsp)
+    movl 100(%rsp), %edx
+    cmpl $0x5a5a5a5a, %edx
     jne .Lfailure
     jmp .Lhandles\@
 .Lwine_fields\@:
