@@ -62,7 +62,7 @@ def verify_executable(path):
 
 def run_case(forge, manifest, config, work):
     case = manifest.case
-    stages = dict.fromkeys(("reference", "translation", "native_build", "publication",
+    stages = dict.fromkeys(("reference", "recovery", "translation", "native_build", "publication",
                             "artifact", "execution", "comparison"), "not_run")
     report = dict(fixture_id=case["id"], config=config, args=case["args"], stages=stages)
     stage = "reference"
@@ -78,13 +78,18 @@ def run_case(forge, manifest, config, work):
             if os.path.lexists(executable):
                 raise ValueError("expected a fresh executable output path")
             log = work / "compiler.stderr"
-            stages.update(translation="unknown", native_build="unknown", publication="unknown")
+            stages.update(recovery="unknown", translation="unknown", native_build="unknown", publication="unknown")
             with (work / "compiler.stdout").open("wb") as stdout, log.open("wb") as stderr:
                 status = native.command_status([forge, "lift", pe, "--executable", "--output", executable,
                                                 "--diagnostics-format", "json"], stdout, stderr)
             report["compiler_exit_code"] = status
             diagnostic = compiler_diagnostic(log.read_bytes(), status, pe, executable)
             report["compiler_diagnostic"] = diagnostic
+            context = diagnostic["context"]
+            if context.get("recovery_complete") is True:
+                stages["recovery"] = "passed"
+            elif context.get("entry_recovered") is True and context.get("recovery_complete") is False:
+                stages["recovery"] = "failed"
             if status:
                 phase = diagnostic["stage"]
                 if phase in ("optimization", "codegen", "linking"):

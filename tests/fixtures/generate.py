@@ -22,8 +22,9 @@ def generate(output, mc, link, dlltool, clang):
                          "GetStdHandle", "WriteFile", "ExitProcess", "GetCommandLineA", "GetCommandLineW",
                          "SetUnhandledExceptionFilter", "__C_specific_handler"],
         "vcruntime140.dll": ["Runtime"],
-        "msvcrt.dll": ["__getmainargs", "_amsg_exit", "calloc", "free", "strlen", "__C_specific_handler", "_fmode=entry DATA",
-                       "_commode=entry DATA", "__initenv=entry DATA", "_acmdln=entry DATA"],
+        "msvcrt.dll": ["__getmainargs", "_amsg_exit", "_initterm", "calloc", "free", "malloc", "strlen",
+                       "__C_specific_handler", "_fmode=entry DATA", "_commode=entry DATA",
+                       "__initenv=entry DATA", "_acmdln=entry DATA"],
         contract: ["Contract"],
     }
     with tempfile.TemporaryDirectory() as folder:
@@ -93,6 +94,16 @@ def generate(output, mc, link, dlltool, clang):
               [("msvcrt.dll", name) for name in ("__getmainargs", "calloc", "free", "strlen",
                                                  "_fmode", "_commode", "__initenv", "_acmdln")] +
               [("KERNEL32.dll", "GetCommandLineA")])
+        initializer_flags = ["/section:.CRT,RW", "msvcrt.dll.lib", "KERNEL32.dll.lib"]
+        image("crt-initterm.exe", (sources / "crt-initterm.s").read_text(), link_flags=initializer_flags)
+        image("crt-initterm-spill.exe", (sources / "crt-initterm-spill.s").read_text(),
+              link_flags=[*initializer_flags, "/base:0x400000"])
+        initializer_probe = (sources / "crt-initterm-probe.s").read_text()
+        for variant in ("terminal", "guest_fault", "unknown_target", "data_target", "other_function",
+                        "other_initializer", "clobber", "bad_rsp", "read_return", "before_return", "write_return",
+                        "service_return", "register_arg", "nonvolatile_arg", "stack_arg", "stack_alias",
+                        "service_alias", "nested_table", "stack_exhaustion"):
+            image(f"crt-initterm-{variant}.exe", f"{variant} = 1\n" + initializer_probe, link_flags=initializer_flags)
         fatal = (sources / "crt-amsg-exit.s").read_text()
         for number in (31, 8, -1, -2147483648):
             image(f"crt-amsg-exit-{number}.exe", f"error_number = {number}\n" + fatal,

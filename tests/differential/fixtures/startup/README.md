@@ -65,42 +65,38 @@ Argument duplication exposes a later boundary. The compiler accepts `strlen` on 
 
 ## Compatibility boundary
 
-For the primary PE, Forge recognizes 15 of 36 load-time symbols. These are KERNEL32 `GetLastError`, `SetUnhandledExceptionFilter` and `Sleep`, the eight MSVCRT functions `__getmainargs`, `_amsg_exit`, `calloc`, `free`, `malloc`, `memcpy`, `strlen` and `strncmp`, and the four MSVCRT data exports. Nine KERNEL32 symbols and twelve MSVCRT symbols still lack bindings. The argument fixture’s additional `strcmp` import has a binding.
+For the primary PE, Forge recognizes 16 of 36 load-time symbols. These are KERNEL32 `GetLastError`, `SetUnhandledExceptionFilter` and `Sleep`, the nine MSVCRT functions `__getmainargs`, `_amsg_exit`, `_initterm`, `calloc`, `free`, `malloc`, `memcpy`, `strlen` and `strncmp`, and the four MSVCRT data exports. Nine KERNEL32 symbols and eleven MSVCRT symbols still lack bindings. The argument fixture’s additional `strcmp` import has a binding.
 
 In `__tmainCRTStartup`, the startup conflict branch loads error 31 at `0x1407`. Forge recovers the terminating call at `0x140c` to **`msvcrt.dll!_amsg_exit`**. In the primary PE the thunk is at `0x26b0` in Debug and `0x2680` in Release, both jumping through IAT slot `0x8208`. Separate focused PEs execute `_amsg_exit(31)` through the same import-thunk shape and exercise an unused import. [Original Windows, Wine and ARM64 observations](amsg-exit/) · [Lifted tests](../../../integration/test_executable.py)
 
-The first new rejection in the primary PE is **`msvcrt.dll!_initterm`**, a direct call at RVA `0x142a` in `__tmainCRTStartup` through IAT slot `0x8228`. Its thunk is at `0x26c0` in Debug and `0x2690` in Release. RCX and RDX receive the relocated `__xc_a` and `__xc_z` addresses. The Debug table starts at `0x9000` and ends at `0x9010`. Its first entry is null and its second points to guest `pre_cpp_init` at `0x1130`.
+Forge now resolves the direct call to **`msvcrt.dll!_initterm` at `0x142a`**. In the primary PE the Debug thunk at `0x26c0` and Release thunk at `0x2690` both jump through IAT slot `0x8228`. RCX and RDX obtain relocated `__xc_a` and `__xc_z`. The initializer evidence records the range `[0x9000, 0x9010)` and guest target `pre_cpp_init` at `0x1130`. The first qword is null. An isolated copy of the Debug PE follows this initializer to `__getmainargs`. A second isolated copy follows the original call at `0x1494` through the range `[0x9018, 0x9028)` to `pre_c_init` at `0x1010`, where instruction recovery stops at `0x1044`. The diagnostic identifies the callback, the originating import call at `0x1494` and its IAT slot `0x8228`. Both probes validate the original argument setup, import and table. [Conventional PE regressions](../../test_native_differential.py)
 
-The next task belongs to **MSVCRT compatibility**, with compiler/runtime support for calling a lifted guest initializer. Start with a PE that imports `_initterm` and passes a bounded table containing two lifted functions and a null entry. Compare callback order and return to the guest caller at both image bases. The service needs checked reads of guest pointers and a validated route into guest code. [Microsoft initializer-table contract](https://learn.microsoft.com/en-us/cpp/c-runtime-library/reference/initterm-initterm-e) · [Recovery regression](../../test_native_differential.py)
+The focused executable imports the real legacy MSVCRT function. One initializer replaces a later slot in writable `.CRT`, and the caller checks the resulting order (21222), heap value (42), guest stack state and last error (73). Its SHA-256 is `fad082d17485aff8adf965d5168c85c92f748cbe6b0141f3ed5f1da82bd0ba58`. Pinned Wine 8 and standalone ARM64 both return 42 with empty streams. ARM64 also returns 42 at a guest base offset by `0x30000000` and in each of two independent processes registered from one artifact. The nested-table executable returns 42 with stdout `MMM`. The terminal variant exits 57 with empty streams before the next initializer or the caller can write a marker. [Fixture source](../../../fixtures/crt-initterm.s) · [Failure and isolation tests](../../../integration/test_executable.py) · [Initializer calling contract](../../../../docs/runtime-architecture.md#crt-initializer-callback-design)
+
+The spill regression reloads a caller-local string pointer after an empty table and again after an all-NULL table. The test shortens the raw extent of a read-only section so four bytes of its eight-byte endpoint pointer come from the PE loader’s zero fill. That PE returned 2 with empty streams under pinned Wine and on ARM64 at guest bases `0x400000` and `0x180000000`. [Fixture source](../../../fixtures/crt-initterm-spill.s) · [PE layout and execution tests](../../../integration/test_executable.py)
+
+The next unresolved call belongs to **Win32 compatibility**. At `0x1453`, `__tmainCRTStartup` calls `KERNEL32.dll!GetStartupInfoA` through a RIP-relative IAT slot. A binding needs to write the guest’s Windows x64 `STARTUPINFOA` from process startup state using checked guest memory. TLS initialization and CRT termination remain independent requirements.
 
 ### Startup comparison results
 
-Each original PE matched its pinned Wine expectation. All 16 lifts reported `LIFT_UNSUPPORTED_CONTROL_FLOW` at RVA `0x142a` on the direct call to `msvcrt.dll!_initterm`. The table gives the instruction bytes and IAT slot from each compiler diagnostic. Native exit codes and byte streams are unavailable because lifting stopped before Mach-O generation. The comparator exited 1.
+All 16 unmodified PEs passed their pinned Wine reference checks. They recovered the initializer table at `0x142a` and reported `LIFT_UNSUPPORTED_CONTROL_FLOW` at `0x1453` during recovery. Native compilation, Mach-O publication and verification, native execution and byte comparison were unrun for every row. The standalone comparator exited 1. Each cell under Debug and Release gives the actual reference status and recovery result for that input. Wine stderr was empty in all cases.
 
-| Config | Startup case | Wine exit | Wine stdout | Wine stderr | Call bytes at 0x142a | IAT RVA | Mach-O | Native run | Comparison |
-| --- | --- | ---: | --- | --- | --- | --- | --- | --- | --- |
-| Debug | argc | 42 | `""` | `""` | `e891120000` | `0x8228` | None | Not run | Blocked |
-| Debug | argc_none | 1 | `""` | `""` | `e891120000` | `0x8228` | None | Not run | Blocked |
-| Debug | argv | 42 | `""` | `""` | `e801130000` | `0x8230` | None | Not run | Blocked |
-| Debug | argv_edges | 42 | `""` | `""` | `e8b1130000` | `0x8230` | None | Not run | Blocked |
-| Debug | cleanup | 42 | `"IMBA"` | `""` | `e881130000` | `0x8258` | None | Not run | Blocked |
-| Debug | globals | 42 | `""` | `""` | `e8b1120000` | `0x8228` | None | Not run | Blocked |
-| Debug | puts | 0 | `"Hello from C!\r\n"` | `""` | `e891120000` | `0x8230` | None | Not run | Blocked |
-| Debug | return | 42 | `""` | `""` | `e881120000` | `0x8228` | None | Not run | Blocked |
-| Release | argc | 42 | `""` | `""` | `e861120000` | `0x8228` | None | Not run | Blocked |
-| Release | argc_none | 1 | `""` | `""` | `e861120000` | `0x8228` | None | Not run | Blocked |
-| Release | argv | 42 | `""` | `""` | `e861120000` | `0x8230` | None | Not run | Blocked |
-| Release | argv_edges | 42 | `""` | `""` | `e861120000` | `0x8230` | None | Not run | Blocked |
-| Release | cleanup | 42 | `"IMBA"` | `""` | `e801130000` | `0x8258` | None | Not run | Blocked |
-| Release | globals | 42 | `""` | `""` | `e861120000` | `0x8228` | None | Not run | Blocked |
-| Release | puts | 0 | `"Hello from C!\r\n"` | `""` | `e861120000` | `0x8230` | None | Not run | Blocked |
-| Release | return | 42 | `""` | `""` | `e861120000` | `0x8228` | None | Not run | Blocked |
+| Startup case | Debug reference / recovery | Release reference / recovery | Wine stdout in both | Call bytes at 0x1453 | IAT RVA |
+| --- | --- | --- | --- | --- | --- |
+| argc | 42 / failed | 42 / failed | empty | `ff152f6d0000` | `0x8188` |
+| argc_none | 1 / failed | 1 / failed | empty | `ff152f6d0000` | `0x8188` |
+| argv | 42 / failed | 42 / failed | empty | `ff15376d0000` | `0x8190` |
+| argv_edges | 42 / failed | 42 / failed | empty | `ff15376d0000` | `0x8190` |
+| cleanup | 42 / failed | 42 / failed | `IMBA` | `ff154f6d0000` | `0x81a8` |
+| globals | 42 / failed | 42 / failed | empty | `ff152f6d0000` | `0x8188` |
+| puts | 0 / failed | 0 / failed | `Hello from C!\r\n` | `ff15376d0000` | `0x8190` |
+| return | 42 / failed | 42 / failed | empty | `ff152f6d0000` | `0x8188` |
 
 | Responsibility | Current result for the selected configuration |
 | --- | --- |
 | Translate instructions in the executable | Forge lifts the observed repeat store, direction flag operations, aligned 64-bit interlocked operations and primary-thread TIB self read. Recovery also handles a direct linker import thunk and the proved guarded callback load. Managed executable artifacts preserve the imported-function address in R12 and guard its call through the loop. |
 | Initialize the PE and its primary thread | The runtime provides process parameters, guest stack bounds and isolated mappings. The PE additionally needs a TLS template and index, followed by the two process-attach callbacks before entry. The callbacks enter a critical-section lifecycle. A successful dry recovery of a callback target does not execute a loader callback. |
-| Call the external Windows CRT | There are typed adapters for a bounded argument/heap/byte subset and four writable data exports. The startup path also requires calls from MSVCRT back into the guest for initializer tables and termination handlers. Reaching `main` alone would leave that exit path untested. |
+| Call the external Windows CRT | There are typed adapters for a bounded argument/heap/byte subset and four writable data exports. MSVCRT can call recovered guest initializers from bounded tables. The exit path still needs guest termination handlers. Reaching `main` alone would leave that exit path untested. |
 | Deliver guest exceptions | The compiler reports validated entry scope, filter, handler import and continuation evidence. Running the filter on a guest exception requires the guest fault PC, exception context, guest stack unwinding and continuation. The current process fault result terminates the run. |
 | Print through stdio | `puts` remains a required external MSVCRT symbol in its own fixture. The primary fixture already imports `__iob_func`, `fprintf`, `fwrite` and `vfprintf` for CRT paths. These need Windows stream objects, the applicable guest calling conventions and exit-time flushing. |
 
@@ -127,7 +123,7 @@ build/dev/import-register
 test "$?" -eq 42
 ```
 
-To reproduce the filter registration comparison on an ARM64 Mac with the pinned Wine image and the dev build, run the executable reference suite and the native executable tests. The native tests also cover rebasing and fault behavior.
+To reproduce the initializer and filter registration comparisons on an ARM64 Mac with the pinned Wine image and the dev build, run the executable reference suite and the native executable tests. The native tests also cover rebasing and fault behavior.
 
 ```sh
 make fixtures

@@ -484,6 +484,58 @@ namespace {
               "terminal callee lost its incoming call site");
     }
 
+    void checkInitializerTables(const fs::path &path) {
+        const AnalyzedImage analysis(
+            std::make_unique<ParsedImage>(InputFile(path), ParsePolicy::Inspection),
+            DebugInfo::Omit);
+        const RecoveredFunctionGroup group(analysis, analysis.module().entryPoint);
+        const auto &caller = group.function(group.root());
+        std::vector<std::pair<uint32_t, size_t>> observed;
+        std::map<uint32_t, const x86::ResolvedCallSite *> initializers;
+        for (const auto &[rva, site] : caller.calls) {
+            const auto *service = site.external();
+            if (!service || !service->initializers) {
+                continue;
+            }
+
+            check(service->binding.callback == win64::Callback::Initializer,
+                  "callback proof attached to an unrelated service");
+            const auto &table = *service->initializers;
+            const auto size = table.last - table.first;
+            observed.emplace_back(size / sizeof(uint64_t), table.targets.size());
+            std::set<uint32_t> slotTargets;
+            for (auto slot = table.first; slot < table.last; slot += sizeof(uint64_t)) {
+                const auto bytes = analysis.image().mapRva(slot, sizeof(uint64_t));
+                check(bytes && bytes->section.writableData(), "expected a writable table slot");
+                const auto va = llvm::support::endian::read64le(bytes->bytes.data());
+                if (va) {
+                    slotTargets.insert(static_cast<uint32_t>(va - analysis.module().imageBase));
+                }
+            }
+            check(std::ranges::equal(table.targets, slotTargets),
+                  "initializer target set differs from the source PE slots");
+            for (const auto target : slotTargets) {
+                initializers.try_emplace(target, &site);
+            }
+        }
+        const std::vector<std::pair<uint32_t, size_t>> expected{{0, 0}, {1, 0}, {1, 1}, {5, 3}};
+        check(observed == expected && initializers.size() == 3, "wrong recovered table ranges");
+
+        bool nestedLeaf = false;
+        for (const auto &[rva, function] : group.functions()) {
+            const auto origin = initializers.find(rva);
+            check(function.initializerSource ==
+                      (origin == initializers.end() ? nullptr : origin->second),
+                  "initializer origin differs from its first admitting table");
+            if (function.initializerSource &&
+                function.origin == x86::RecoveryOrigin::InferredLeaf &&
+                !function.incoming.empty()) {
+                nestedLeaf |= initializers.contains(function.incoming.front()->caller);
+            }
+        }
+        check(nestedLeaf, "missing metadata-free initializer shared with an ordinary guest call");
+    }
+
     // Check PE stability for the differential runner's independently disassembled caller.
     // The first interval is code. Each following interval is a relative table.
     void checkDispatchSpans(const fs::path &path, llvm::ArrayRef<char *> bounds) {
@@ -534,10 +586,12 @@ int main(int argc, char **argv) try {
         return 0;
     }
 
-    check(argc == 7, "expected stack, leaves, jump, indirect, last-error and noreturn fixtures");
+    check(argc == 8,
+          "expected stack, leaves, jump, indirect, last-error, noreturn and CRT fixtures");
     checkGuestRanges();
     checkImportSnapshot(argv[5]);
     checkTerminalGuestCall(argv[6]);
+    checkInitializerTables(argv[7]);
     const AnalyzedImage analysis(
         std::make_unique<ParsedImage>(InputFile(argv[1]), ParsePolicy::Inspection),
         DebugInfo::Omit);

@@ -23,6 +23,7 @@ namespace forge::runtime {
     }
 
     thread_local forge_rt_invocation_token executingInvocation = 0;
+    thread_local forge_rt_invocation_token callbackInvocation = 0;
 } // namespace forge::runtime
 
 using namespace forge::runtime;

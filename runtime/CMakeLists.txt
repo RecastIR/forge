@@ -5,6 +5,7 @@ add_library(forge_runtime STATIC
   src/core/heap.cpp
   src/compat/process_state.cpp
   src/compat/crt/fatal.cpp
+  src/compat/crt/initterm.cpp
   src/compat/crt/msvcrt.cpp
   src/compat/crt/process_heap.cpp
   src/compat/crt/crt_parameters.cpp

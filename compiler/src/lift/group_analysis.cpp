@@ -250,6 +250,14 @@ namespace forge::x86 {
         void FunctionAnalyzer::planMemoryAccess(const Step &s, unsigned width, bool write,
                                                 const AddressOperand &operand,
                                                 const AddressFact &address) {
+            if (function.initializerSource && address.frameOffset()) {
+                const auto offset = std::bit_cast<int64_t>(*address.frameOffset());
+                if (offset > int64_t{GuestMemory::initializerHomeEnd} - width / 8) {
+                    s.reject(FailureCode::UnsupportedControlFlow,
+                             "initializer has no incoming Windows x64 stack arguments");
+                }
+            }
+
             if (!operand.base && !operand.index) {
                 imageMemory.fixedAccess(s, operand.displacement, width, write);
                 return;
@@ -477,6 +485,12 @@ namespace forge::x86 {
                     continue;
                 }
 
+                if (arg.extent == win64::Extent::InitializerEnd) {
+                    // Recovery proves both bounds, including bounds read through
+                    // immutable pointer cells. The whole table is selected at the site.
+                    continue;
+                }
+
                 std::optional<uint64_t> size;
                 if (arg.extent == win64::Extent::Fixed) {
                     size = arg.size;
@@ -524,6 +538,24 @@ namespace forge::x86 {
                                          CallAddresses &calls, bool collect) const {
             if (site.external()) {
                 traceServiceArguments(site, facts, collect);
+
+                if (const auto &table = site.external()->initializers;
+                    table && !table->targets.empty()) {
+                    if (!collect) {
+                        // Relative to the guest caller's pre-CALL RSP, the imported
+                        // CALL and native callback frame both consume stack space.
+                        const auto rsp = facts.registers[rspIndex]
+                                             .project(entryAddresses)
+                                             .plus(AddressFact(uint64_t(0) - 8 -
+                                                               GuestMemory::initializerFrameSize));
+                        for (auto target : table->targets) {
+                            calls.enter(target, {rsp, {}});
+                        }
+                    }
+
+                    // A callback can change guest storage through aliases.
+                    facts.spills = {};
+                }
 
                 std::fill_n(facts.registers.begin(), callerSlots, AddressFact{});
                 if (site.external()->binding.returnsProcessStorage) {
@@ -654,7 +686,7 @@ namespace forge::x86 {
                 auto &registers = blockAddresses[rva].registers;
                 const auto &arguments = state.entry.arguments;
                 std::copy(arguments.begin(), arguments.end(), registers.begin() + 1);
-                registers[rspIndex] = incoming.empty()
+                registers[rspIndex] = incoming.empty() && !function.initializerSource
                                           ? AddressFact(GuestMemory::entryRsp, AddressFact::Stack)
                                           : AddressFact::frameStack();
             }
@@ -791,6 +823,11 @@ namespace forge::x86 {
                     for (const auto &s : block.steps) {
                         if (const auto *site = function.callAt(s.rva)) {
                             requireMemory(s);
+                            if (const auto *service = site->external();
+                                service && service->initializers) {
+                                const auto &table = *service->initializers;
+                                imageMemory.initializerTable(s, table.first, table.last);
+                            }
                             effects.calls.push_back({site, std::exchange(effects.tail, {})});
                         } else {
                             summarize(s, effects.tail);
@@ -840,6 +877,7 @@ namespace forge::x86 {
             result.stack |= analyzer.accessesMemory;
             result.origins |= analyzer.tracksOrigins;
             result.setsDirection |= analyzer.setsDirection;
+            result.hasInitializers |= function.initializerSource != nullptr;
         }
 
         proveCallFlow(group, result.flows, {entryRegisterDefinitions(mode), {}});

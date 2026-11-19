@@ -202,6 +202,7 @@ class ArtifactTests(ArtifactSetup):
                         patch.object(startup, "verify_executable"):
                     report = startup.run_case(self.forge, self.manifest, self.config, Path(work))
                 self.assertEqual(report["native_exit_code"], status)
+                self.assertEqual(report["stages"]["recovery"], "passed")
                 self.assertEqual(report["stages"]["execution"], "passed")
                 self.assertEqual(report["stages"]["comparison"], "passed" if matches else "failed")
                 self.assertEqual(report["status"], "passed" if matches else "failed")

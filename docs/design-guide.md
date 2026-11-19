@@ -16,6 +16,8 @@ For a runtime change, start with the resource owner, its borrowers and the guest
 
 ### Adding a runtime service
 
+For a service that invokes guest code, define the supported guest signature, the evidence for its targets, and the propagation of a tagged outcome before implementing iteration. Bind a generated dispatcher to the service's native call site. Borrow the current managed invocation and release the instance lock before running guest code. A protected native-to-guest continuation can be consumed only by the checked return path. [Initializer callback contract](runtime-architecture.md#crt-initializer-callback-design)
+
 Start in `runtime/src/compat/win32/` for Win32 services and `runtime/src/compat/crt/` for MSVCRT services. Keep process-scoped Windows data with the loaded occurrence’s `WindowsProcessState`. A synchronous service borrows it through the instance after validating its caller. The core thread record holds the last-error slot for both managed and standalone callers. Win32 defines the rules for reading, setting and preserving it. [Source ownership matrix](runtime-architecture.md#runtime-source-ownership)
 
 When a service needs startup resources, select them during managed registration using the recovered calls and CRT data imports. Bind observed function IAT slots separately so a guest can inspect a function address without initializing that service. Stage new storage in the occurrence before core borrows any descriptors or bytes. Test a late registration failure and a successful retry on the same process handle. [Managed registration](../runtime/src/managed_process.cpp) · [Ownership and teardown order](runtime-architecture.md#resource-ownership-and-borrowing)

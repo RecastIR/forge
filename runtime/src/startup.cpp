@@ -49,6 +49,16 @@ namespace {
                 std::fputs("forge: unsupported MSVCRT __getmainargs wildcard expansion\n", stderr);
             } else if (result.status == FORGE_RT_UNSUPPORTED_CRT_NEW_MODE) {
                 std::fputs("forge: unsupported MSVCRT __getmainargs new-handler mode\n", stderr);
+            } else if (result.status == FORGE_RT_UNSUPPORTED_CALLBACK_RETURN) {
+                std::fputs("forge: unsupported guest access to a native callback return slot\n",
+                           stderr);
+            } else if (result.status == FORGE_RT_UNSUPPORTED_INITIALIZER_TARGET) {
+                std::fputs("forge: unsupported MSVCRT initializer target\n", stderr);
+            } else if (result.status == FORGE_RT_UNSUPPORTED_INITIALIZER_RANGE) {
+                std::fputs("forge: unsupported MSVCRT initializer table range\n", stderr);
+            } else if (result.status == FORGE_RT_UNSUPPORTED_CALLBACK_ARGUMENT) {
+                std::fputs("forge: unsupported guest access above the initializer home space\n",
+                           stderr);
             } else {
                 std::fputs("forge: unsupported guest execution\n", stderr);
             }

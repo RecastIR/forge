@@ -110,7 +110,7 @@ namespace forge::x86 {
             std::string ownerEvidence(uint32_t rva) const;
             MappedRange window(uint32_t rva) const;
             ControlFlowGraph decode(uint32_t target, const MappedRange &code) const;
-            void recover(const ResolvedCallSite &call);
+            void recover(uint32_t target, const ResolvedCallSite &call);
         };
 
         std::string LeafRecovery::ownerEvidence(uint32_t rva) const {
@@ -231,9 +231,7 @@ namespace forge::x86 {
             throw failure;
         }
 
-        void LeafRecovery::recover(const ResolvedCallSite &call) try {
-            const auto target = call.guest().rva;
-
+        void LeafRecovery::recover(uint32_t target, const ResolvedCallSite &call) try {
             if (const auto *span = occupied.overlap(target, uint64_t(target) + 1)) {
                 const auto *step = functions.at(span->owner).instructionContaining(target);
 
@@ -262,7 +260,7 @@ namespace forge::x86 {
             if (error.context.functionRva || localEdge ||
                 (error.kind != FailureCode::InvalidCallTarget &&
                  error.kind != FailureCode::UnsupportedControlFlow)) {
-                error.context.functionRva = call.guest().rva;
+                error.context.functionRva = target;
                 error.context.sourceCall = CallLocation{call.caller, call.instruction};
                 throw;
             }
@@ -270,10 +268,11 @@ namespace forge::x86 {
             // Keep call-target diagnostics anchored to the original CALL, including its bytes.
             const auto *site = functions.at(call.caller).instructionContaining(call.instruction);
             try {
+                const auto destination =
+                    call.external() ? site->directCallTarget() : std::optional<int64_t>{target};
                 site->reject(error.kind,
-                             "cannot recover leaf at " + hex(call.guest().rva) + ": " +
-                                 error.what(),
-                             call.guest().rva);
+                             "cannot recover leaf at " + hex(target) + ": " + error.what(),
+                             destination);
             } catch (InspectionError &failure) {
                 failure.context.blockRva = call.block;
 
@@ -303,7 +302,14 @@ namespace forge::x86 {
         }
 
         for (const auto &[rva, call] : deferred) {
-            recovery.recover(*call);
+            try {
+                recovery.recover(rva, *call);
+            } catch (InspectionError &error) {
+                if (call->external()) {
+                    call->annotateInitializerFailure(error.context, rva);
+                }
+                throw;
+            }
         }
     }
 } // namespace forge::x86

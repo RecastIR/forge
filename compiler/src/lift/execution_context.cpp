@@ -238,6 +238,57 @@ namespace forge::x86 {
         }
     }
 
+    Function *emitInitializerThunk(Function &body, const ContextLayout &layout,
+                                   RegisterSet modified) {
+        auto &module = *body.getParent();
+        IRBuilder<> ir(module.getContext());
+        auto *type = FunctionType::get(ir.getVoidTy(), ir.getPtrTy(), false);
+        auto *thunk = Function::Create(type, Function::InternalLinkage,
+                                       body.getName() + "_initializer", module);
+        ir.SetInsertPoint(BasicBlock::Create(ir.getContext(), "entry", thunk));
+        auto *execution = thunk->getArg(0);
+        const ContextView context(ir, layout, execution);
+        GuestMemory memory(ir);
+        memory.bind(context.bytes, context.validity, nullptr, context.regions);
+        memory.checks.bind(context.result);
+
+        auto *rspSlot = slot(ir, context.registers, rspIndex);
+        auto *serviceRsp = ir.CreateLoad(ir.getInt64Ty(), rspSlot);
+        auto *callbackRsp = memory.pushInitializerReturn(serviceRsp);
+        ir.CreateStore(callbackRsp, rspSlot);
+        std::array<Value *, registerCount> callerMarks{};
+        if (context.marks) {
+            ir.CreateMemSet(context.marks, ir.getInt8(FORGE_RT_MARK_UNINITIALIZED),
+                            callerSlots * sizeof(uint64_t), Align(1));
+            // A nonvolatile can have a concrete caller value. At a no-argument entry
+            // it may be saved and restored, but cannot serve as a supplied parameter.
+            for (unsigned i = rspIndex + 1; i < registerCount; ++i) {
+                auto *mark = slot(ir, context.marks, i);
+                callerMarks[i] = ir.CreateLoad(ir.getInt64Ty(), mark);
+                ir.CreateStore(ir.getInt64(entryMarks(i, {})), mark);
+            }
+        }
+
+        const auto saved = captureNonvolatiles(ir, context, modified);
+        auto *ceiling = ir.CreateAdd(callbackRsp, ir.getInt64(GuestMemory::initializerHomeEnd));
+        memory.checks.propagate(ir.CreateCall(&body, {execution, ceiling}));
+        if (context.marks) {
+            auto *marks = ir.CreateLoad(ir.getInt64Ty(), slot(ir, context.marks, rspIndex));
+            memory.checks.guard(ir.CreateICmpEQ(marks, ir.getInt64(UINT64_MAX)));
+        }
+
+        memory.popInitializerReturn(ir.CreateLoad(ir.getInt64Ty(), rspSlot), callbackRsp);
+        checkNonvolatiles(ir, memory, context, saved);
+        if (context.marks) {
+            for (unsigned i = rspIndex + 1; i < registerCount; ++i) {
+                ir.CreateStore(callerMarks[i], slot(ir, context.marks, i));
+            }
+        }
+        ir.CreateStore(serviceRsp, rspSlot);
+        ir.CreateRetVoid();
+        return thunk;
+    }
+
     Function *emitProcessEntry(Function &body, const RecoveredFunctionGroup &group,
                                const ContextLayout &layout, const ImagePlan &image,
                                RegisterSet modified, EntryMode mode) {
@@ -260,7 +311,11 @@ namespace forge::x86 {
         initializeRegisters(ir, context, nullptr, {rcx, rdx}, mode);
 
         const auto saved = captureNonvolatiles(ir, context, modified);
-        memory.checks.propagate(ir.CreateCall(&body, execution));
+        SmallVector<Value *, 2> bodyArgs{execution};
+        if (body.arg_size() == 2) {
+            bodyArgs.push_back(ir.getInt64(GuestMemory::base + GuestMemory::capacity));
+        }
+        memory.checks.propagate(ir.CreateCall(&body, bodyArgs));
         checkOuterReturn(ir, memory, context, saved, true);
         checkResultRegister(ir, memory, context);
         memory.checks.complete(ir.CreateLoad(ir.getInt64Ty(), context.registers));

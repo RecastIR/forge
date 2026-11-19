@@ -4,6 +4,7 @@
 #include "forge/runtime.h"
 
 #include <array>
+#include <optional>
 #include <span>
 #include <string_view>
 #include <type_traits>
@@ -24,7 +25,21 @@ namespace forge::win64 {
         Callback
     };
     enum class Access : uint8_t { None, Input, Output, InOut };
-    enum class Extent : uint8_t { None, Fixed, CountArgument, CString };
+    enum class Extent : uint8_t { None, Fixed, CountArgument, CString, InitializerEnd };
+    enum class Callback : uint8_t { None, Initializer };
+
+    // Match the compiler's per-table indirect dispatch budget.
+    inline constexpr uint64_t maxInitializerEntries = 1024;
+
+    constexpr std::optional<uint64_t> initializerRangeBytes(uint64_t first, uint64_t last) {
+        constexpr auto stride = sizeof(uint64_t);
+        if (first % stride || last % stride || first > last ||
+            last - first > maxInitializerEntries * stride) {
+            return std::nullopt;
+        }
+
+        return last - first;
+    }
 
     constexpr std::string_view unsupportedType(Value type) {
         switch (type) {
@@ -44,7 +59,7 @@ namespace forge::win64 {
     enum class Convention : uint8_t { WindowsX64, Variadic, Alternate, Unwinding };
     enum class Requirement : uint8_t { Instance, Process };
     enum class Control : uint8_t { Returns, Terminates };
-    enum class LastError : uint8_t { Read, Write, Preserve, OnFailure };
+    enum class LastError : uint8_t { Read, Write, Preserve, OnFailure, CallbackDefined };
 
     constexpr unsigned width(Value type) {
         switch (type) {
@@ -66,7 +81,7 @@ namespace forge::win64 {
         Value type;
         Access access = Access::None;
         Extent extent = Extent::None;
-        // Fixed byte count or zero-based index of the unsigned byte-count argument.
+        // Fixed byte count or zero-based argument index for a count or exclusive endpoint.
         unsigned size = 0;
         bool optional = false;
 
@@ -84,6 +99,7 @@ namespace forge::win64 {
         Requirement requirement = Requirement::Instance;
         Control control = Control::Returns;
         bool returnsProcessStorage = false;
+        Callback callback = Callback::None;
 
         constexpr bool checkedMemory() const {
             for (auto arg : arguments) {
@@ -113,6 +129,10 @@ namespace forge::win64 {
                 return arg.access == Access::Input && !arg.size;
             case Extent::Fixed:
                 return arg.size != 0;
+            case Extent::InitializerEnd:
+                return arg.access == Access::Input && !arg.optional &&
+                       arg.size < arguments.size() && arguments[arg.size].type == Value::Address &&
+                       arguments[arg.size].access == Access::None;
             case Extent::CountArgument:
                 if (arg.size < arguments.size()) {
                     const auto count = arguments[arg.size].type;
@@ -125,6 +145,14 @@ namespace forge::win64 {
         }
 
         constexpr std::string_view error() const {
+            if (callback == Callback::Initializer &&
+                (result != Value::Void || requirement != Requirement::Process ||
+                 control != Control::Returns || lastError != LastError::CallbackDefined ||
+                 arguments.size() != 2 || arguments[0].extent != Extent::InitializerEnd ||
+                 arguments[0].size != 1)) {
+                return "initializer dispatch requires a managed void service with a pointer range";
+            }
+
             if (returnsProcessStorage &&
                 (result != Value::Address || requirement != Requirement::Process)) {
                 return "process storage requires a managed service returning a guest address";
@@ -154,6 +182,10 @@ namespace forge::win64 {
             }
 
             for (auto arg : arguments) {
+                if (arg.extent == Extent::InitializerEnd && callback != Callback::Initializer) {
+                    return "an initializer table requires a generated dispatcher";
+                }
+
                 if (const auto reason = unsupportedType(arg.type); !reason.empty()) {
                     return reason;
                 }
@@ -204,11 +236,14 @@ namespace forge::win64 {
                                   Control control = Control::Returns) {
         constexpr ServiceBinding shape{
             {}, {}, {}, parameters<args...>, result, LastError::Preserve};
-        static_assert(shape.error().empty(),
-                      "unsupported Windows x64 service type or memory contract");
         using Out = typename NativeScalar<result>::Type *;
         using Fault = forge_rt_memory_fault *;
-        if constexpr (result == Value::Void && !shape.checkedMemory()) {
+        constexpr bool initializer =
+            std::is_same_v<Function, NativeFunction<typename NativeScalar<args.type>::Type...,
+                                                    Fault, forge_rt_initializer_dispatch>>;
+        if constexpr (initializer) {
+            static_assert(result == Value::Void && shape.checkedMemory());
+        } else if constexpr (result == Value::Void && !shape.checkedMemory()) {
             static_assert(
                 std::is_same_v<Function,
                                NativeFunction<typename NativeScalar<args.type>::Type...>>);
@@ -226,9 +261,12 @@ namespace forge::win64 {
                                NativeFunction<typename NativeScalar<args.type>::Type..., Out>>);
         }
 
-        const ServiceBinding binding{dll,    name,   nativeSymbol,           parameters<args...>,
-                                     result, effect, Convention::WindowsX64, requirement,
-                                     control};
+        ServiceBinding binding{dll,    name,   nativeSymbol,           parameters<args...>,
+                               result, effect, Convention::WindowsX64, requirement,
+                               control};
+        if constexpr (initializer) {
+            binding.callback = Callback::Initializer;
+        }
 
         if (!binding.error().empty()) {
             throw "invalid Windows x64 service declaration";
@@ -332,6 +370,12 @@ namespace forge::win64 {
                                                 FORGE_SERVICE_ADAPTER(forge_rt_msvcrt_amsg_exit),
                                                 Requirement::Process, Control::Terminates);
 
+    inline constexpr auto crtInitterm =
+        bind<Value::Void, Argument{Value::Address, Access::Input, Extent::InitializerEnd, 1},
+             Argument{Value::Address}>("msvcrt.dll", "_initterm", LastError::CallbackDefined,
+                                       FORGE_SERVICE_ADAPTER(forge_rt_msvcrt_initterm),
+                                       Requirement::Process);
+
     inline constexpr ServiceBinding services[] = {
         crtGetMainArgs,
         crtStrlen,
@@ -353,5 +397,6 @@ namespace forge::win64 {
         sleep,
         setUnhandledExceptionFilter,
         crtAmsgExit,
+        crtInitterm,
     };
 } // namespace forge::win64

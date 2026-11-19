@@ -4,6 +4,7 @@
 #include "forge/guest_range.h"
 #include "lift/asm_info.h"
 #include "lift/guarded_call.h"
+#include "lift/initializer_table.h"
 #include "lift/jump_table.h"
 #include "lift/leaf_recovery.h"
 
@@ -190,10 +191,10 @@ namespace forge::x86 {
                            std::span<const win64::ServiceBinding> services,
                            std::map<uint32_t, RecoveredFunction> &functions,
                            const MCDisassembler &dis, const MCInstrInfo &instructions,
-                           const MCRegisterInfo &regs, bool registerImports)
+                           const MCRegisterInfo &regs, RecoveryMode mode)
                 : entry(entry), services(services), functions(functions), dis(dis),
                   instructions(instructions), regs(regs), tables(entry.analysis.image(), regs),
-                  operands(regs, 0), registerImports(registerImports) {}
+                  operands(regs, 0), mode(mode) {}
 
             const ValidatedEntry &entry;
             std::span<const win64::ServiceBinding> services;
@@ -207,8 +208,10 @@ namespace forge::x86 {
             JumpTableReader tables;
             std::map<uint32_t, FunctionDiscovery> staging;
             std::set<uint32_t> ready, leafCandidates;
+            std::set<uint32_t> publishedReturns;
+            std::map<uint32_t, const ResolvedCallSite *> initializerSources;
             const InstructionOperands operands;
-            bool registerImports;
+            RecoveryMode mode;
             std::optional<std::vector<RvaRange>> loaderWrites;
             std::optional<std::vector<RvaRange>> recordedRanges;
             std::optional<ImageInitialization> pointerInitialization;
@@ -232,8 +235,12 @@ namespace forge::x86 {
             bool advance(uint32_t rva, FunctionDiscovery &active);
             void resumeCallers(FunctionDiscovery &callee);
             void discoverReturns();
+            void publishImport(RecoveredFunction &caller, const GuestBlock &block, const Step &step,
+                               const ExternalCallTarget &service,
+                               InitializerRecovery &initializers);
+            void admitInitializer(const ResolvedCallSite &site, const Step &step, uint32_t rva);
             void scanCalls(RecoveredFunction &caller, const GuestBlock &block,
-                           const CallResolutions &resolutions);
+                           const CallResolutions &resolutions, InitializerRecovery &initializers);
             Flow importFlow(uint32_t rva, FunctionDiscovery &caller, const Step &step);
             void run();
         };
@@ -313,7 +320,8 @@ namespace forge::x86 {
         }
 
         void GroupDiscovery::stage(uint32_t rva, MappedRange code) {
-            staging.try_emplace(rva, rva, code, dis, instructions, tables, registerImports);
+            staging.try_emplace(rva, rva, code, dis, instructions, tables,
+                                mode == RecoveryMode::PeEntry);
             ready.insert(rva);
         }
 
@@ -349,6 +357,12 @@ namespace forge::x86 {
             const auto address = static_cast<uint32_t>(target);
             if (leafCandidates.contains(address)) {
                 return Flow::Fallthrough;
+            }
+
+            // An initializer discovered during publication can call a previously
+            // published body. Its return proof has already reached the fixed point.
+            if (functions.contains(address)) {
+                return publishedReturns.contains(address) ? Flow::Fallthrough : Flow::TerminalCall;
             }
 
             if (address == entry.rva) {
@@ -412,8 +426,6 @@ namespace forge::x86 {
         }
 
         void GroupDiscovery::discoverReturns() {
-            stage(entry.rva, entry.code);
-
             while (!ready.empty()) {
                 std::set<uint32_t> closed;
                 while (!ready.empty()) {
@@ -447,6 +459,70 @@ namespace forge::x86 {
                     }
                 }
             }
+        }
+
+        void GroupDiscovery::publishImport(RecoveredFunction &caller, const GuestBlock &block,
+                                           const Step &step, const ExternalCallTarget &service,
+                                           InitializerRecovery &initializers) try {
+            auto imported = service;
+            if (imported.binding.callback == win64::Callback::Initializer) {
+                if (!pointerInitialization) {
+                    pointerInitialization = entry.analysis.image().imageInitialization();
+                }
+                imported.initializers = recoverInitializerTable(
+                    caller, block, step, imported.binding, entry.analysis.image(),
+                    *pointerInitialization, instructions, regs, initializers);
+            }
+
+            const auto leader = block.steps.front().rva;
+            const auto &site =
+                caller.calls
+                    .emplace(step.rva, ResolvedCallSite{caller.entry, leader, step.rva, step.next,
+                                                        std::move(imported)})
+                    .first->second;
+            if (site.external()->initializers) {
+                for (const auto rva : site.external()->initializers->targets) {
+                    admitInitializer(site, step, rva);
+                }
+            }
+        } catch (InspectionError &error) {
+            if (error.context.instructionRva == step.rva) {
+                error.context.branchTarget = step.directCallTarget();
+            }
+            error.context.importSlot = service.slot;
+            error.context.importDll = service.descriptor.name;
+            error.context.importSymbol = std::string(service.binding.name);
+            throw;
+        }
+
+        void GroupDiscovery::admitInitializer(const ResolvedCallSite &site, const Step &step,
+                                              uint32_t rva) try {
+            const auto *section = entry.analysis.image().sectionAtRva(rva);
+            if (!section || section->permissions[2] != 'x' || !section->immutable()) {
+                step.reject(FailureCode::InvalidCallTarget,
+                            "initializer target requires immutable executable bytes");
+            }
+
+            if (!initializerSources.try_emplace(rva, &site).second || functions.contains(rva)) {
+                return;
+            }
+
+            if (!staging.contains(rva) && !leafCandidates.contains(rva)) {
+                if (const auto code = calleeCode(rva, step)) {
+                    stage(rva, *code);
+                } else {
+                    leafCandidates.insert(rva);
+                }
+            }
+
+            if (leafCandidates.contains(rva)) {
+                deferred.insert_or_assign(rva, &site);
+            } else {
+                pending.insert(rva);
+            }
+        } catch (InspectionError &error) {
+            site.annotateInitializerFailure(error.context, rva);
+            throw;
         }
 
         void GroupDiscovery::validateCallEvidence(uint32_t caller, const MappedRange &code,
@@ -610,7 +686,8 @@ namespace forge::x86 {
         }
 
         void GroupDiscovery::scanCalls(RecoveredFunction &caller, const GuestBlock &block,
-                                       const CallResolutions &resolutions) try {
+                                       const CallResolutions &resolutions,
+                                       InitializerRecovery &initializers) try {
             const auto leader = block.steps.front().rva;
             // Partitioning has already placed every possible entry to the sequence at a leader.
             const Step *previous = nullptr;
@@ -630,18 +707,30 @@ namespace forge::x86 {
                         std::rethrow_exception(*error);
                     }
 
-                    caller.calls.emplace(
-                        step.rva, ResolvedCallSite{caller.entry, leader, step.rva, step.next,
-                                                   std::get<ExternalCallTarget>(resolution)});
+                    const auto &service = std::get<ExternalCallTarget>(resolution);
+                    if (mode == RecoveryMode::FunctionLift &&
+                        service.binding.callback == win64::Callback::Initializer) {
+                        // A direct CALL encodes the thunk RVA. Only the memory CALL
+                        // has an IAT slot as its own operand in a function diagnostic.
+                        const auto slot =
+                            step.isMemoryCall() ? std::optional{service.slot} : std::nullopt;
+                        step.reject(FailureCode::UnsupportedControlFlow,
+                                    service.descriptor.name + "!" +
+                                        std::string(service.binding.name) +
+                                        " requires a managed process artifact or --executable",
+                                    {}, slot);
+                    }
+
+                    publishImport(caller, block, step, service, initializers);
                     continue;
                 }
 
                 CallKind kind;
                 int64_t target;
                 uint32_t evidence;
-                if (step.isDirectCall()) {
+                if (const auto direct = step.directCallTarget()) {
                     kind = CallKind::Direct;
-                    target = int64_t(step.next) + step.inst.getOperand(0).getImm();
+                    target = *direct;
                     evidence = step.rva;
                 } else if (step.isRegisterCall()) {
                     const auto proof = step.guardedPointerCall
@@ -681,13 +770,16 @@ namespace forge::x86 {
         }
 
         void GroupDiscovery::run() {
-            discoverReturns();
-
+            stage(entry.rva, entry.code);
             pending.insert(entry.rva);
             while (!pending.empty()) {
+                discoverReturns();
                 const auto rva = pending.extract(pending.begin()).value();
                 auto staged = staging.extract(rva);
                 auto &state = staged.mapped();
+                if (state.mayReturn) {
+                    publishedReturns.insert(rva);
+                }
                 auto &function =
                     functions.try_emplace(rva, rva, RecoveryOrigin::UnwindBacked, state.code)
                         .first->second;
@@ -698,8 +790,9 @@ namespace forge::x86 {
                     }
 
                     function.graph = state.cfg.finish();
+                    InitializerRecovery initializers;
                     for (const auto &[leader, block] : function.graph) {
-                        scanCalls(function, block, state.resolutions);
+                        scanCalls(function, block, state.resolutions, initializers);
                     }
 
                     // Give a register CALL or table JMP its more specific proof diagnostic first.
@@ -714,6 +807,10 @@ namespace forge::x86 {
                         error.context.functionRva = rva;
                     }
 
+                    const auto source = initializerSources.find(rva);
+                    if (!error.context.sourceCall && source != initializerSources.end()) {
+                        source->second->annotateInitializerFailure(error.context, rva);
+                    }
                     throw;
                 }
             }
@@ -727,6 +824,10 @@ namespace forge::x86 {
                               loaderWrittenRanges(), dis, instructions, regs);
             }
 
+            for (const auto &[rva, site] : initializerSources) {
+                functions.at(rva).initializerSource = site;
+            }
+
             // Incoming indices follow source order even when discovery began at a higher RVA.
             for (const auto &[caller, function] : functions) {
                 for (const auto &[instruction, call] : function.calls) {
@@ -737,6 +838,19 @@ namespace forge::x86 {
             }
         }
     } // namespace
+
+    void ResolvedCallSite::annotateInitializerFailure(FailureContext &context,
+                                                      uint32_t targetRva) const {
+        context.initializerTargetRva = targetRva;
+        context.sourceCall = CallLocation{caller, instruction};
+
+        if (!context.importSlot) {
+            const auto &service = *external();
+            context.importSlot = service.slot;
+            context.importDll = service.descriptor.name;
+            context.importSymbol = std::string(service.binding.name);
+        }
+    }
 
     const win64::ServiceBinding *findService(std::span<const win64::ServiceBinding> services,
                                              const Import &descriptor, const Symbol &symbol) {
@@ -868,13 +982,13 @@ namespace forge::x86 {
     RecoveredFunctionGroup::RecoveredFunctionGroup(
         const ValidatedEntry &entry, std::span<const win64::ServiceBinding> services,
         llvm::function_ref<void(const RecoveredFunctionGroup &, const InspectionError &)> onFailure,
-        bool registerImports)
+        RecoveryMode mode)
         : source(entry.analysis.image()), entryRva(entry.rva) {
         const auto location = entryLocation(source, entryRva, entry.code);
         withLocation(source, location, FailureCode::LiftingInternal, [&] {
             decoder = std::make_unique<Decoder>(entryRva);
             GroupDiscovery discovery(entry, services, recovered, *decoder->dis,
-                                     *decoder->instructions, *decoder->regs, registerImports);
+                                     *decoder->instructions, *decoder->regs, mode);
             try {
                 discovery.run();
             } catch (const InspectionError &failure) {
@@ -929,7 +1043,9 @@ namespace forge::x86 {
 
             failure.context.functionRva = rva;
 
-            if (owner.origin == RecoveryOrigin::InferredLeaf) {
+            if (const auto *sourceSite = owner.initializerSource) {
+                sourceSite->annotateInitializerFailure(failure.context, rva);
+            } else if (owner.origin == RecoveryOrigin::InferredLeaf && !owner.incoming.empty()) {
                 const auto &site = *owner.incoming.front();
                 failure.context.sourceCall = CallLocation{site.caller, site.instruction};
             }

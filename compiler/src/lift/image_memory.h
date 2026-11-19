@@ -71,6 +71,7 @@ namespace forge::x86 {
         void addressTaken(const Step &step, uint64_t va);
         void serviceArgument(const Step &step, uint64_t va, bool write,
                              std::optional<uint64_t> size);
+        void initializerTable(const Step &step, uint32_t first, uint32_t last);
         bool isDataImportPointer(uint64_t va) const;
         void fixedAccess(const Step &step, uint64_t va, unsigned width, bool write);
         void tableRead(const Step &step, const RelativeTable &table);

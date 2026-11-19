@@ -190,6 +190,10 @@ namespace {
                 FORGE_RT_INVALID_INVOCATION);
         REQUIRE(forge_rt_msvcrt_amsg_exit(probe.instance, probe.thread, 31) ==
                 FORGE_RT_INVALID_INVOCATION);
+        REQUIRE(forge_rt_msvcrt_initterm(probe.instance, probe.thread, 0, 0, &fault,
+                                         [](forge_rt_execution *, uint64_t) noexcept {
+                                             std::abort();
+                                         }) == FORGE_RT_INVALID_INVOCATION);
         REQUIRE(forge_rt_sleep(probe.instance, probe.thread, UINT32_MAX) ==
                 FORGE_RT_INVALID_INVOCATION);
         REQUIRE(forge_rt_read_guest(probe.instance, probe.thread, probe.invocation, base, 1,
@@ -227,6 +231,110 @@ namespace {
                 previous == UINT64_MAX);
         REQUIRE(forge_rt_leave(instance, thread, invocation) == FORGE_RT_OK);
         REQUIRE(forge_rt_destroy(instance) == FORGE_RT_OK);
+    }
+
+    void checkInitializerStackBound(forge_rt_execution *view) {
+        constexpr size_t slot = 256;
+        constexpr size_t lastHomeByte = slot + FORGE_RT_INITIALIZER_HOME_END - 1;
+        constexpr auto address = FORGE_RT_STACK_BASE + lastHomeByte;
+        std::memset(view->stackMarks + slot, FORGE_RT_MARK_CALLBACK_RETURN, sizeof(uint64_t));
+        std::memset(view->stackMarks + lastHomeByte, FORGE_RT_MARK_CONCRETE, 2);
+        forge_rt_invocation_token token = 0;
+        REQUIRE(forge_rt_current_invocation(view->instance, view->thread, &token) == FORGE_RT_OK);
+        forge_rt_memory_fault fault{};
+        const uint8_t source[]{31, 32};
+        uint8_t destination[]{41, 42};
+        constexpr auto beforeReturn = FORGE_RT_STACK_BASE + slot - 1;
+        view->stackMarks[slot - 1] = FORGE_RT_MARK_CONCRETE;
+        REQUIRE(forge_rt_write_guest(view->instance, view->thread, token, beforeReturn, 2, source,
+                                     2, &fault) == FORGE_RT_UNSUPPORTED_CALLBACK_RETURN);
+        REQUIRE(view->stackBytes[slot - 1] == 0 &&
+                view->stackMarks[slot] == FORGE_RT_MARK_CALLBACK_RETURN);
+        int32_t length = 17;
+        REQUIRE(forge_rt_lstrlen_a(view->instance, view->thread, beforeReturn, &length, &fault) ==
+                FORGE_RT_OK);
+        REQUIRE(length == 0);
+        view->stackBytes[slot - 1] = 'x';
+        REQUIRE(forge_rt_lstrlen_a(view->instance, view->thread, beforeReturn, &length, &fault) ==
+                FORGE_RT_UNSUPPORTED_CALLBACK_RETURN);
+
+        REQUIRE(forge_rt_write_guest(view->instance, view->thread, token, address, 2, source, 2,
+                                     &fault) == FORGE_RT_UNSUPPORTED_CALLBACK_ARGUMENT);
+        REQUIRE(forge_rt_read_guest(view->instance, view->thread, token, address, 2, destination, 2,
+                                    &fault) == FORGE_RT_UNSUPPORTED_CALLBACK_ARGUMENT);
+        REQUIRE(destination[0] == 41 && destination[1] == 42);
+        REQUIRE(view->stackBytes[lastHomeByte] == 0 && view->stackBytes[lastHomeByte + 1] == 0);
+
+        // The chunked string reader may finish at a NUL in the last accessible byte.
+        REQUIRE(forge_rt_lstrlen_a(view->instance, view->thread, address, &length, &fault) ==
+                FORGE_RT_OK);
+        REQUIRE(length == 0);
+        view->stackBytes[lastHomeByte] = 'x';
+        REQUIRE(forge_rt_lstrlen_a(view->instance, view->thread, address, &length, &fault) ==
+                FORGE_RT_UNSUPPORTED_CALLBACK_ARGUMENT);
+        std::memset(view->stackMarks + slot, FORGE_RT_MARK_UNINITIALIZED, sizeof(uint64_t));
+        REQUIRE(forge_rt_lstrlen_a(view->instance, view->thread, address, &length, &fault) ==
+                FORGE_RT_OK);
+        REQUIRE(length == 1);
+    }
+
+    void checkInitializerTable() {
+        const auto entry = [](forge_rt_execution *execution) {
+            const auto dispatch = [](forge_rt_execution *view, uint64_t target) noexcept {
+                if (target == 1) {
+                    checkInitializerStackBound(view);
+                }
+
+                view->registers[0] = view->registers[0] * 10 + target;
+            };
+            forge_rt_memory_fault fault{17, 18, 19};
+            const auto call = [&](uint64_t first, uint64_t last) {
+                return forge_rt_msvcrt_initterm(execution->instance, execution->thread, first, last,
+                                                &fault, dispatch);
+            };
+            REQUIRE(call(0, 0) == FORGE_RT_OK);
+            REQUIRE(call(base + 32, base + 32) == FORGE_RT_OK);
+            REQUIRE(call(base + 1, base + 1) == FORGE_RT_UNSUPPORTED_INITIALIZER_RANGE);
+            REQUIRE(call(base, base + 7) == FORGE_RT_UNSUPPORTED_INITIALIZER_RANGE);
+            REQUIRE(call(base + 8, base) == FORGE_RT_UNSUPPORTED_INITIALIZER_RANGE);
+            REQUIRE(call(UINT64_MAX - 7, 0) == FORGE_RT_UNSUPPORTED_INITIALIZER_RANGE);
+            REQUIRE(call(base, base + 1025 * 8) == FORGE_RT_UNSUPPORTED_INITIALIZER_RANGE);
+            REQUIRE(fault.address == 17 && fault.access == 18 && fault.reason == 19);
+
+            // The first two callback effects precede the failed read of the fourth slot.
+            REQUIRE(call(base, base + 32) == FORGE_RT_GUEST_FAULT);
+            REQUIRE(execution->registers[0] == 12 && fault.address == base + 24 &&
+                    fault.access == FORGE_RT_READ && fault.reason == FORGE_RT_FAULT_UNMAPPED);
+
+            // A legacy managed entry may use this byte as an opaque save outside dispatch.
+            forge_rt_invocation_token token = 0;
+            REQUIRE(forge_rt_current_invocation(execution->instance, execution->thread, &token) ==
+                    FORGE_RT_OK);
+            execution->stackMarks[0] = FORGE_RT_MARK_CALLBACK_RETURN;
+            constexpr uint8_t byte = 53;
+            REQUIRE(forge_rt_write_guest(execution->instance, execution->thread, token,
+                                         FORGE_RT_STACK_BASE, 1, &byte, 1, &fault) == FORGE_RT_OK);
+            REQUIRE(execution->stackBytes[0] == byte &&
+                    execution->stackMarks[0] == FORGE_RT_MARK_CONCRETE);
+
+            const auto exit = [](forge_rt_execution *view, uint64_t target) noexcept {
+                REQUIRE(target == 1);
+                REQUIRE(forge_rt_exit_process(view->instance, view->thread, 83) == FORGE_RT_OK);
+            };
+            REQUIRE(forge_rt_msvcrt_initterm(execution->instance, execution->thread, base,
+                                             base + 32, &fault, exit) == FORGE_RT_OK);
+            REQUIRE(call(0, 0) == FORGE_RT_INVALID_STATE);
+        };
+        constexpr uint64_t values[]{1, 0, 2};
+        const forge_rt_backing backing{sizeof(values), values, nullptr, 0};
+        const forge_rt_region_template row{base, sizeof(values), 0, 0, FORGE_RT_READ};
+        const forge_rt_artifact artifact{
+            FORGE_RT_ARTIFACT_VERSION, base, 32, 0, 0, &backing, 1, &row, 1, nullptr, 0, entry};
+        const auto process = create();
+        REQUIRE(forge_rt_process_register(process.get(), &artifact) == FORGE_RT_OK);
+        forge_rt_process_result result{};
+        REQUIRE(forge_rt_process_run(process.get(), nullptr, &result) == FORGE_RT_OK);
+        REQUIRE(result.kind == FORGE_RT_EXIT_PROCESS && result.value == 83);
     }
 
     void checkExitProcess() {
@@ -869,6 +977,7 @@ void testRuntimeProcess() {
     checkCrtInputConsumers();
     checkIsolation();
     checkUnmanagedExceptionFilter();
+    checkInitializerTable();
     checkExitProcess();
     checkInvalidExitCode();
     checkScalarBoundaries();

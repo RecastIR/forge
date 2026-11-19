@@ -21,14 +21,17 @@ namespace forge::runtime {
                     length = offset + static_cast<size_t>(end - chunk.begin());
                     return FORGE_RT_OK;
                 }
-            } else if (status == FORGE_RT_GUEST_FAULT) {
-                // A speculative chunk can extend past the NUL into an unmapped byte.
+            } else if (status == FORGE_RT_GUEST_FAULT ||
+                       status == FORGE_RT_UNSUPPORTED_CALLBACK_RETURN ||
+                       status == FORGE_RT_UNSUPPORTED_CALLBACK_ARGUMENT) {
+                // A speculative chunk can extend past the NUL into inaccessible bytes.
                 for (size_t i = 0; i < count; ++i) {
                     uint8_t byte;
                     const auto single = string.readScalar(offset + i, byte);
                     if (single != FORGE_RT_OK) {
                         return single;
                     }
+
                     if (!byte) {
                         length = offset + i;
                         return FORGE_RT_OK;

@@ -361,10 +361,8 @@ namespace forge::x86 {
         void Discovery::recordEdges(Step &s, CallFlow classify) {
             if (s.isRegisterCall()) {
                 s.flow = classify(s, registerTarget(s));
-            } else if (classify && s.isDirectCall()) {
-                s.flow = classify(s, int64_t(s.next) + s.inst.getOperand(0).getImm());
-            } else if (classify && s.isMemoryCall()) {
-                s.flow = classify(s, {});
+            } else if (classify && (s.isDirectCall() || s.isMemoryCall())) {
+                s.flow = classify(s, s.directCallTarget());
             } else if (s.flow == Flow::Return) {
                 returned = true;
             } else if (s.flow == Flow::Indirect) {

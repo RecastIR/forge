@@ -72,8 +72,18 @@ namespace forge::x86 {
         onFailure(condition, [&] { recordFault(fault); });
     }
 
-    void ExecutionChecks::requireSupported(Value *condition) {
-        onFailure(condition, [&] { ir.CreateStore(ir.getInt32(FORGE_RT_UNSUPPORTED), field(0)); });
+    void ExecutionChecks::recordUnsupported(forge_rt_status status) {
+        ir.CreateStore(ir.getInt32(FORGE_RT_UNSUPPORTED), field(0));
+        ir.CreateStore(ir.getInt32(status), field(1));
+    }
+
+    void ExecutionChecks::requireSupported(Value *condition, forge_rt_status status) {
+        onFailure(condition, [&] { recordUnsupported(status); });
+    }
+
+    void ExecutionChecks::unsupported(forge_rt_status status) {
+        recordUnsupported(status);
+        returnFailure();
     }
 
     void ExecutionChecks::scalarBoundary(Value *condition, Value *address, unsigned size,
@@ -161,6 +171,10 @@ namespace forge::x86 {
         if (managed()) {
             onFailure(returned, [] {});
         }
+    }
+
+    void ExecutionChecks::propagatePending() {
+        propagate(ir.CreateIsNull(ir.CreateLoad(ir.getInt32Ty(), field(0))));
     }
 
     void ExecutionChecks::complete(Value *rax) {

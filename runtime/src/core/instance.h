@@ -50,6 +50,8 @@ namespace forge::runtime {
                                  uint64_t alignment, uint64_t hint = 65536) noexcept;
     uint64_t issueToken() noexcept;
     extern thread_local forge_rt_invocation_token executingInvocation;
+    // The existing invocation borrowed by the innermost synchronous native-to-guest call.
+    extern thread_local forge_rt_invocation_token callbackInvocation;
 } // namespace forge::runtime
 
 struct forge_rt_execution;

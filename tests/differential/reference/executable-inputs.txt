@@ -9,6 +9,10 @@ crt-amsg-exit-unused.exe
 crt-amsg-marker-control.exe
 crt-amsg-marker-fatal.exe
 crt-argument-heap.exe
+crt-initterm-nested_table.exe
+crt-initterm-spill.exe
+crt-initterm-terminal.exe
+crt-initterm.exe
 executable-headers.exe
 executable-import-register.exe
 executable-noreturn.exe

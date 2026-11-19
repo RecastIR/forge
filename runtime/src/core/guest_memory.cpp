@@ -112,11 +112,33 @@ namespace {
 
         const bool read = (access & FORGE_RT_READ) != 0;
         const bool write = (access & FORGE_RT_WRITE) != 0;
+        const bool callback = callbackInvocation == active.invocation;
+        auto limit = segment.size;
+        const auto endOffset = address - active.stack.base + segment.size;
 
-        for (size_t i = 0; i < segment.size; ++i) {
+        if (callback && endOffset > FORGE_RT_INITIALIZER_HOME_END) {
+            // The lowest active callback frame has the tightest bound. Only a mark in
+            // this prefix could exclude any requested byte. The managed stack is 4 KiB.
+            const auto *slot = static_cast<const uint8_t *>(
+                std::memchr(active.stack.marks, FORGE_RT_MARK_CALLBACK_RETURN,
+                            endOffset - FORGE_RT_INITIALIZER_HOME_END));
+
+            if (slot) {
+                const auto offset = static_cast<size_t>(slot - active.stack.marks);
+                const auto end = active.stack.base + offset + FORGE_RT_INITIALIZER_HOME_END;
+                limit = end > address ? static_cast<size_t>(end - address) : 0;
+            }
+        }
+
+        for (size_t i = 0; i < limit; ++i) {
             const auto va = address + i;
             const auto mark = segment.marks[i];
             const bool outer = va >= active.stack.outerReturn && va - active.stack.outerReturn < 8;
+
+            if (callback && mark == FORGE_RT_MARK_CALLBACK_RETURN) {
+                return FORGE_RT_UNSUPPORTED_CALLBACK_RETURN;
+            }
+
             const bool readable =
                 readSaved ? mark != FORGE_RT_MARK_UNINITIALIZED
                           : mark == FORGE_RT_MARK_CONCRETE || mark == FORGE_RT_MARK_RETURN;
@@ -126,7 +148,7 @@ namespace {
             }
         }
 
-        return FORGE_RT_OK;
+        return limit == segment.size ? FORGE_RT_OK : FORGE_RT_UNSUPPORTED_CALLBACK_ARGUMENT;
     }
 
     forge_rt_status preflight(Cursor cursor, const Thread &active, uint64_t start, uint64_t count,
@@ -145,9 +167,12 @@ namespace {
                 return report(fault, address, access, FORGE_RT_FAULT_PERMISSION);
             }
 
-            if (segment.stackOwner && checkStack(segment, address, access, active, fault,
-                                                 readSaved) == FORGE_RT_GUEST_FAULT) {
-                return FORGE_RT_GUEST_FAULT;
+            if (segment.stackOwner) {
+                const auto status = checkStack(segment, address, access, active, fault, readSaved);
+
+                if (status != FORGE_RT_OK) {
+                    return status;
+                }
             }
 
             offset += segment.size;
@@ -306,6 +331,9 @@ extern "C" void forge_rt_report_scalar_boundary(forge_rt_execution *execution, u
 
     if (status == FORGE_RT_GUEST_FAULT) {
         execution->result = {FORGE_RT_EXECUTION_FAULT, status, 0, fault, FORGE_RT_FAULT_MEMORY};
+    } else if (status == FORGE_RT_UNSUPPORTED_CALLBACK_RETURN ||
+               status == FORGE_RT_UNSUPPORTED_CALLBACK_ARGUMENT) {
+        execution->result = {FORGE_RT_UNSUPPORTED, status, 0, {}, 0};
     } else if (status == FORGE_RT_OK && !stack) {
         // All bytes were accessible, but one scalar cannot span native rows.
         execution->result = {FORGE_RT_UNSUPPORTED, FORGE_RT_OK, 0, {}, 0};

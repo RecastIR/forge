@@ -155,6 +155,12 @@ namespace {
         static constexpr ServiceBinding binding{
             "test.dll",  "Buffer",           "testBuffer", parameters<buffer, Argument{Value::U32}>,
             Value::Void, LastError::Preserve};
+        constexpr auto missingDispatcher = [] {
+            auto copy = crtInitterm;
+            copy.callback = Callback::None;
+            return copy;
+        }();
+        static_assert(!missingDispatcher.error().empty());
         std::array<uint8_t, 8> bytes{};
         uint64_t claim = 0;
         const forge_rt_image_region row{0x1000, bytes.size(), bytes.data(), readWrite, &claim};
@@ -854,6 +860,15 @@ namespace {
         expectFault(fault, {base + 1, FORGE_RT_READ, FORGE_RT_FAULT_STACK});
         marks[1] = FORGE_RT_MARK_CONCRETE;
         REQUIRE(call(base) == FORGE_RT_OK && length == 1);
+        // Function-level hosts retain the existing opaque-save semantics for this byte.
+        marks[2] = FORGE_RT_MARK_CALLBACK_RETURN;
+        REQUIRE(call(base) == FORGE_RT_OK && length == 1);
+        bytes[1] = 'b';
+        REQUIRE(call(base) == FORGE_RT_GUEST_FAULT && length == 1);
+        expectFault(fault, {base + 2, FORGE_RT_READ, FORGE_RT_FAULT_STACK});
+        const std::array<uint8_t, 2> replacement{0, 0};
+        REQUIRE(active.write(base + 1, replacement, fault) == FORGE_RT_OK);
+        REQUIRE(bytes[1] == 0 && marks[2] == FORGE_RT_MARK_CONCRETE);
         REQUIRE(call(stack.outerReturn) == FORGE_RT_GUEST_FAULT && length == 1);
         expectFault(fault, {stack.outerReturn, FORGE_RT_READ, FORGE_RT_FAULT_STACK});
         std::thread foreign(

@@ -495,6 +495,16 @@ namespace forge::x86 {
         }
     }
 
+    void ImageMemory::initializerTable(const Step &step, uint32_t first, uint32_t last) {
+        if (last > UINT64_MAX - loadBase) {
+            step.reject(FailureCode::ImageMemory,
+                        "initializer table endpoint overflows the selected guest address space");
+        }
+        if (first != last) {
+            serviceArgument(step, loadBase + first, false, last - first);
+        }
+    }
+
     void ImageMemory::serviceArgument(const Step &step, uint64_t va, bool write,
                                       std::optional<uint64_t> size) {
         if (va == 0 || va - GuestMemory::base < GuestMemory::capacity) {

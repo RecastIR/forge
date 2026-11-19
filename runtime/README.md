@@ -14,6 +14,8 @@ A managed guest can set, replace, or clear its process-wide top-level exception 
 
 Legacy MSVCRT's `_amsg_exit(int)` reports a fatal CRT error through the process's captured stderr and returns a tagged guest exit with code 255 to the host. The standalone executable exits with the same status. [Fatal CRT diagnostics](../docs/runtime-architecture.md#fatal-crt-diagnostics)
 
+Managed `msvcrt.dll!_initterm` walks a bounded table in guest memory and calls compiled Windows x64 `void(void)` initializers in order. Each nonzero target must belong to the recovered set for that call site. A callback shares the active thread, stack, heap and last-error state, and its exit or fault reaches the host. The native caller's synthetic return slot is protected against guest inspection. [Initializer callback contract](../docs/runtime-architecture.md#crt-initializer-callback-design)
+
 ## Current source organization
 
 The public C ABI and shared C++ contracts live in `include/forge/`. Within `forge_runtime`, managed registration stages one process occurrence that owns both the core image and the Windows compatibility state. Core owns the primary execution context, thread records, reservations, private PE backing and heap blocks. Win32 and MSVCRT own the guest-visible parameters, CRT cells, standard handles, filter and service behavior. The instance lends adapters access to that state during execution. The separate `forge_startup` archive builds only `src/startup.cpp`. [Build definition](CMakeLists.txt) · [Ownership diagram](../docs/runtime-architecture.md#resource-ownership-and-borrowing)

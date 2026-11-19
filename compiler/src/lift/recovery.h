@@ -45,10 +45,17 @@ namespace forge::x86 {
         uint32_t evidenceRva;
     };
 
+    struct InitializerTable {
+        uint32_t first, last;
+        // Sorted, unique RVAs admitted for this call. The runtime reads the live table.
+        std::vector<uint32_t> targets;
+    };
+
     struct ExternalCallTarget {
         uint32_t slot;
         const Import &descriptor;
         const win64::ServiceBinding &binding;
+        std::optional<InitializerTable> initializers = {};
     };
 
     const win64::ServiceBinding *findService(std::span<const win64::ServiceBinding> services,
@@ -59,6 +66,8 @@ namespace forge::x86 {
         uint32_t caller, block, instruction, continuation;
         std::variant<GuestCallTarget, ExternalCallTarget> target;
 
+        void annotateInitializerFailure(FailureContext &context, uint32_t targetRva) const;
+
         const GuestCallTarget &guest() const { return std::get<GuestCallTarget>(target); }
 
         const ExternalCallTarget *external() const {
@@ -67,6 +76,9 @@ namespace forge::x86 {
     };
 
     enum class RecoveryOrigin { UnwindBacked, InferredLeaf };
+    // A complete group includes table-discovered entries. A PE entry additionally
+    // admits register-held imports; a standalone function cannot call managed initializers.
+    enum class RecoveryMode { CompleteGroup, FunctionLift, PeEntry };
 
     struct RecoveredFunction {
         RecoveredFunction(uint32_t entry, RecoveryOrigin origin, MappedRange code)
@@ -77,6 +89,8 @@ namespace forge::x86 {
 
         const uint32_t entry;
         const RecoveryOrigin origin;
+        // Borrows the first admitting initializer call in a group-owned caller.
+        const ResolvedCallSite *initializerSource = nullptr;
         // For an inferred leaf this is the bounded decode window. Only graph steps claim bytes.
         MappedRange code;
         ControlFlowGraph graph;
@@ -99,7 +113,7 @@ namespace forge::x86 {
             std::span<const win64::ServiceBinding> services = win64::services,
             llvm::function_ref<void(const RecoveredFunctionGroup &, const InspectionError &)>
                 onFailure = nullptr,
-            bool registerImports = false);
+            RecoveryMode mode = RecoveryMode::CompleteGroup);
         ~RecoveredFunctionGroup();
         RecoveredFunctionGroup(const RecoveredFunctionGroup &) = delete;
         RecoveredFunctionGroup &operator=(const RecoveredFunctionGroup &) = delete;

@@ -84,6 +84,53 @@ def direct_call(data):
     return {"caller_rva": hex(root), "instruction_rva": hex(site), "target_rva": hex(target)}
 
 
+def initializer_calls_at_image_end(counts, cross_block=False):
+    """Run repeated _initterm calls over a zero-filled final PE section."""
+    data = bytearray((FIXTURES / "crt-initterm.exe").read_bytes())
+    layout = Layout(data)
+    root = entry(data)
+    offset = layout.file_offset(root)
+    first_lea = data.index(bytes.fromhex("488d0d"), offset)
+    site = root + first_lea - offset + 14
+    assert data[first_lea + 14] == 0xe8
+    thunk = site + 5 + struct.unpack_from("<i", data, first_lea + 15)[0]
+
+    start = layout.u32(layout.opt + 56)
+    end = (start // 65536 + 1) * 65536
+    section = layout.section_table + len(layout.sections) * 40
+    assert section + 40 <= layout.u32(layout.opt + 60)
+    struct.pack_into("<H", data, layout.pe + 6, len(layout.sections) + 1)
+    struct.pack_into("<8sIIIIIIHHI", data, section, b".zero", end - start, start, 0, 0, 0, 0,
+                     0, 0, 0xc0000080)
+    struct.pack_into("<I", data, layout.opt + 56, end)
+
+    assert data.startswith(bytes.fromhex("534883ec30"), offset)
+    code = bytearray(data[offset:offset + 5])
+    for count in counts:
+        assert 8 * count <= end - start
+        for opcode, dest in (("488d0d", end - 8 * count), ("488d15", end), ("e8", thunk)):
+            if cross_block and opcode == "e8":
+                # Both sides of this diamond reach the CALL with the same two LEAs.
+                code.extend(bytes.fromhex("31c0 7401 90"))
+            code.extend(bytes.fromhex(opcode))
+            code.extend(struct.pack("<i", dest - (root + len(code) + 4)))
+    code.extend(bytes.fromhex("31c04883c4305bc3"))
+    pdata = layout.file_offset(layout.directory(3)[0])
+    assert layout.u32(pdata) == root and root + len(code) <= layout.u32(pdata + 4)
+    data[offset:offset + len(code)] = code
+    return data, end
+
+
+def initializer_zero_tail():
+    data = bytearray((FIXTURES / "crt-initterm-spill.exe").read_bytes())
+    layout = Layout(data)
+    headers = (layout.section_table + 40 * i for i in range(len(layout.sections)))
+    refs = next(h for h in headers if data[h:h + 8].rstrip(b"\0") == b".refs")
+    assert (layout.u32(refs + 8), layout.u32(refs + 16)) == (516, 1024)
+    struct.pack_into("<I", data, refs + 16, 512)
+    return data, refs
+
+
 class Workspace(unittest.TestCase):
     def setUp(self):
         directory = tempfile.TemporaryDirectory()
@@ -100,6 +147,22 @@ class Workspace(unittest.TestCase):
 
 
 class Portable(Workspace):
+    def test_empty_initializer_refptrs_can_name_image_end(self):
+        data = bytearray((FIXTURES / "crt-initterm.exe").read_bytes())
+        layout = Layout(data)
+        root = entry(data)
+        start = layout.file_offset(root)
+        first = data.index(bytes.fromhex("488b0d"), start)
+        self.assertEqual(data[first + 7:first + 10], bytes.fromhex("488b15"))
+        base, = struct.unpack_from("<Q", data, layout.opt + 24)
+        image_end = base + layout.u32(layout.opt + 56)
+        for load in (first, first + 7):
+            cell = root + load - start + 7 + struct.unpack_from("<i", data, load + 3)[0]
+            struct.pack_into("<Q", data, layout.file_offset(cell), image_end)
+        source = self.dir / "empty-at-end.exe"
+        source.write_bytes(data)
+        self.assertIn("call i32 @forge_rt_msvcrt_initterm", run(CONTRACT, source, check=True).stdout)
+
     def test_crt_fatal_call_lowering(self):
         for variant, service, skipped in (("fatal", "msvcrt_amsg_exit", "write_file"),
                                           ("control", "write_file", "msvcrt_amsg_exit")):
@@ -159,6 +222,12 @@ class Object(Workspace):
 
 
 class StartupAdmission(Workspace):
+    def test_initializer_endpoint_at_rebased_address_limit(self):
+        data, end = initializer_calls_at_image_end([1])
+        # Every actual image byte, including the last table slot, fits at this base.
+        # The exclusive endpoint would be 2**64 and cannot be passed to MSVCRT.
+        self.reject(data, "LIFT_IMAGE_MEMORY", "initializer", guest_base=(1 << 64) - end)
+
     def test_fixed_header_access(self):
         data = bytearray(image("headers").read_bytes())
         layout = Layout(data)
@@ -307,6 +376,171 @@ class StartupAdmission(Workspace):
 
 
 class Readiness(Workspace):
+    def test_function_lift_rejects_initializer_before_callback_recovery(self):
+        sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "differential"))
+        from lift_diagnostics import SelectedFunction, parse_diagnostic
+        sys.path.pop(0)
+        data = bytearray((FIXTURES / "crt-initterm-terminal.exe").read_bytes())
+        layout = Layout(data)
+        root = entry(data)
+        offset = layout.file_offset(root)
+        records = layout.file_offset(layout.directory(3)[0])
+        self.assertEqual(layout.u32(records), root)
+        selected = SelectedFunction(root, layout.u32(records + 4), offset, "exe", False)
+        first = root + 11 + struct.unpack_from("<i", data, offset + 7)[0]
+        base, = struct.unpack_from("<Q", data, layout.opt + 24)
+        struct.pack_into("<Q", data, layout.file_offset(first), base + first)
+        site = root + 18
+        thunk = site + 5 + struct.unpack_from("<i", data, offset + 19)[0]
+        iat = thunk + 6 + struct.unpack_from("<i", data, layout.file_offset(thunk) + 2)[0]
+
+        for opcode, call in (("CALL64pcrel32", data[offset + 18:offset + 23]),
+                             ("CALL64m", b"\xff\x15" + struct.pack("<i", iat - site - 6))):
+            with self.subTest(opcode=opcode):
+                edited = data.copy()
+                replacement = call + bytes.fromhex("31c04883c428c3")
+                edited[offset + 18:offset + 18 + len(replacement)] = replacement
+                source = self.dir / "function.exe"
+                source.write_bytes(edited)
+                ir = self.dir / "function.ll"
+                result = run(FORGE, "lift", source, "--rva", hex(root), "--signature", "i64(i64,i64)",
+                             "--checked-memory", "--output", ir, "--diagnostics-format", "json")
+                self.assertEqual(result.returncode, 1, result.stderr)
+                diagnostic = parse_diagnostic(result.stderr.encode(), source, selected, ir)
+                self.assertEqual(diagnostic["code"], "LIFT_UNSUPPORTED_CONTROL_FLOW")
+                self.assertIn("_initterm requires a managed process artifact", diagnostic["message"])
+                context = diagnostic["context"]
+                self.assertEqual((context["instruction_rva"], context["opcode"]), (hex(site), opcode))
+                self.assertFalse(ir.exists())
+                failure = self.reject(edited)
+                self.assertEqual(failure["code"], "LIFT_INVALID_CALL_TARGET")
+                evidence = failure["context"]
+                self.assertEqual(evidence["initializer_target_rva"], hex(first))
+                if opcode == "CALL64pcrel32":
+                    self.assertEqual(evidence["branch_target"], thunk)
+                else:
+                    self.assertNotIn("branch_target", evidence)
+                self.assertEqual(evidence["unresolved_calls"], [
+                    {"caller_rva": hex(root), "instruction_rva": hex(site), "target_rva": hex(first)}])
+
+        # PE-entry recovery also accepts a proven IAT load followed by a register CALL.
+        call = bytes.fromhex("4c8b1d") + struct.pack("<i", iat - site - 7) + bytes.fromhex("41ffd3")
+        replacement = call + bytes.fromhex("31c04883c428c3")
+        data[offset + 18:offset + 18 + len(replacement)] = replacement
+        evidence = self.reject(data)["context"]
+        self.assertEqual((evidence["opcode"], evidence["initializer_target_rva"]), ("CALL64r", hex(first)))
+        self.assertNotIn("branch_target", evidence)
+        self.assertEqual(evidence["unresolved_calls"], [
+            {"caller_rva": hex(root), "instruction_rva": hex(site + 7), "target_rva": hex(first)}])
+
+    def test_initializer_spill_with_reachable_callback(self):
+        data = bytearray((FIXTURES / "crt-initterm-spill.exe").read_bytes())
+        layout = Layout(data)
+        offset = data.index(bytes.fromhex("488d15"), layout.file_offset(entry(data)))
+        # Extend the first empty range over the NULL and the relocated callback.
+        struct.pack_into("<i", data, offset + 3, struct.unpack_from("<i", data, offset + 3)[0] + 16)
+        diagnostic = self.reject(data)
+        self.assertEqual(diagnostic["code"], "LIFT_IMAGE_MEMORY")
+        self.assertIn("argument 1 to strlen requires proven", diagnostic["message"])
+
+    def test_initializer_refptr_requires_complete_virtual_qword(self):
+        data, refs = initializer_zero_tail()
+        struct.pack_into("<I", data, refs + 8, 512)
+        diagnostic = self.reject(data)
+        self.assertIn("relocation target outside a single mapped section", diagnostic["message"])
+
+    def test_initializer_budget_counts_overlapping_ranges(self):
+        data, _ = initializer_calls_at_image_end([1024, 1024, 1024, 1024, 1])
+        diagnostic = self.reject(data)
+        self.assertEqual(diagnostic["code"], "LIFT_UNSUPPORTED_CONTROL_FLOW")
+        self.assertIn("function initializer table recovery budget", diagnostic["message"])
+        self.assertEqual(len(diagnostic["context"]["initializer_tables"]), 4)
+
+    def test_initializer_exclusive_end_above_preferred_address_space(self):
+        data, end = initializer_calls_at_image_end([0])
+        layout = Layout(data)
+        struct.pack_into("<Q", data, layout.opt + 24, (1 << 64) - end)
+        diagnostic = self.reject(data)
+        self.assertEqual(diagnostic["code"], "LIFT_IMAGE_MEMORY")
+        self.assertIn("initializer table range", diagnostic["message"])
+
+    def test_initializer_range_and_relocation_proof(self):
+        data = bytearray((FIXTURES / "crt-initterm-terminal.exe").read_bytes())
+        layout = Layout(data)
+        root = entry(data)
+        offset = layout.file_offset(root)
+        # Two RIP-relative LEAs followed by the linker-thunk call.
+        self.assertEqual((data[offset + 4:offset + 7], data[offset + 11:offset + 14], data[offset + 18]),
+                         (bytes.fromhex("48 8d 0d"), bytes.fromhex("48 8d 15"), 0xe8))
+        first = root + 11 + struct.unpack_from("<i", data, offset + 7)[0]
+        last = root + 18 + struct.unpack_from("<i", data, offset + 14)[0]
+        self.assertEqual(last - first, 16)
+        thunk = root + 23 + struct.unpack_from("<i", data, offset + 19)[0]
+        for begin, end, reason in ((first + 1, last, "range"), (first, last - 1, "range"),
+                                   (last, first, "range"), (first, first + 8200, "range"),
+                                   (first, last + 16, "outside readable PE data")):
+            with self.subTest(begin=begin, end=end):
+                edited = data.copy()
+                struct.pack_into("<i", edited, offset + 7, begin - root - 11)
+                struct.pack_into("<i", edited, offset + 14, end - root - 18)
+                diagnostic = self.reject(edited)
+                self.assertEqual(diagnostic["code"], "LIFT_IMAGE_MEMORY")
+                self.assertIn(reason, diagnostic["message"])
+                self.assertEqual(diagnostic["context"]["branch_target"], thunk)
+                self.assertNotIn("initializer_target_rva", diagnostic["context"])
+
+        slot = layout.file_offset(first)
+        base, = struct.unpack_from("<Q", data, layout.opt + 24)
+        for address, reason in ((base + first, "executable"), (1, "outside the image")):
+            with self.subTest(address=address):
+                edited = data.copy()
+                struct.pack_into("<Q", edited, slot, address)
+                diagnostic = self.reject(edited)
+                self.assertIn(reason, diagnostic["message"])
+
+        # This fixture has exactly one relocation block, containing both callback pointers.
+        reloc = layout.file_offset(layout.directory(5)[0])
+        page, size = struct.unpack_from("<II", data, reloc)
+        records = struct.unpack_from(f"<{(size - 8) // 2}H", data, reloc + 8)
+        index = records.index(0xa000 | (first - page))
+        edited = data.copy()
+        struct.pack_into("<H", edited, reloc + 8 + 2 * index, 0)
+        diagnostic = self.reject(edited)
+        self.assertIn("DIR64", diagnostic["message"])
+
+        other = records.index(0xa000 | (first + 8 - page))
+        edited = data.copy()
+        struct.pack_into("<H", edited, reloc + 8 + 2 * other, records[index])
+        diagnostic = self.reject(edited)
+        self.assertEqual(diagnostic["code"], "INVALID_PE")
+        self.assertIn("overlapping base relocations", diagnostic["message"])
+        self.assertEqual(diagnostic["context"]["import_symbol"], "_initterm")
+
+        # Zero bits with a live DIR64 are not a stable NULL after rebasing.
+        edited = data.copy()
+        struct.pack_into("<Q", edited, slot, 0)
+        self.assertIn("outside the image", self.reject(edited)["message"])
+
+        edited = data.copy()
+        edited[offset + 4:offset + 11] = bytes.fromhex("b9 00 00 00 00 90 90")
+        diagnostic = self.reject(edited)
+        self.assertIn("endpoint", diagnostic["message"])
+
+        # An alternate predecessor enters after the RCX producer. Its linear
+        # proximity to the CALL does not establish a value on this path.
+        bypass = data.copy()
+        bypass[offset:offset + 4] = bytes.fromhex("31 c0 74 07")
+        diagnostic = self.reject(bypass)
+        self.assertEqual(diagnostic["code"], "LIFT_UNSUPPORTED_CONTROL_FLOW")
+        self.assertIn("unproven incoming value", diagnostic["message"])
+
+        # Redirect the RCX endpoint load to a writable, relocated table slot.
+        # Its initial contents cannot prove a stable bound for this call site.
+        edited = data.copy()
+        edited[offset + 5] = 0x8b  # lea rcx, [rip+disp32] -> mov rcx, [rip+disp32]
+        diagnostic = self.reject(edited)
+        self.assertIn("read-only pointer", diagnostic["message"])
+
     def test_owned_c_specific_handler(self):
         for dll in ("KERNEL32.dll", "msvcrt.dll"):
             with self.subTest(dll=dll):
@@ -470,6 +704,78 @@ class Readiness(Workspace):
                 diagnostic = self.reject(data)
                 self.assertEqual(diagnostic["context"]["entry_rva"], hex(root))
                 self.assertFalse(diagnostic["context"]["entry_recovered"])
+
+    def test_initializer_leaf_failure_retains_import_and_target(self):
+        data = bytearray((FIXTURES / "crt-initterm.exe").read_bytes())
+        layout = Layout(data)
+        root = entry(data)
+        offset = layout.file_offset(root)
+        # The third pair of LEAs selects the singleton metadata-free initializer.
+        pair = bytes.fromhex("48 8d 0d")
+        first_load = data.index(pair, offset)
+        second_load = data.index(pair, first_load + 7)
+        third_load = data.index(pair, second_load + 7)
+        caller_pc = root + third_load - offset
+        slot = caller_pc + 7 + struct.unpack_from("<i", data, third_load + 3)[0]
+        base, = struct.unpack_from("<Q", data, layout.opt + 24)
+        leaf_va, = struct.unpack_from("<Q", data, layout.file_offset(slot))
+        target = leaf_va - base
+        site = caller_pc + 14
+        self.assertEqual(data[third_load + 14], 0xe8)
+        thunk = site + 5 + struct.unpack_from("<i", data, third_load + 15)[0]
+        thunk_offset = layout.file_offset(thunk)
+        self.assertEqual(data[thunk_offset:thunk_offset + 2], bytes.fromhex("ff25"))
+        iat = thunk + 6 + struct.unpack_from("<i", data, thunk_offset + 2)[0]
+
+        patch = layout.file_offset(target)
+        data[patch:patch + 2] = bytes.fromhex("0fa2")  # CPUID has no supported leaf effects.
+        diagnostic = self.reject(data)
+        self.assertEqual(diagnostic["code"], "LIFT_UNSUPPORTED_INSTRUCTION")
+        context = diagnostic["context"]
+        self.assertEqual((context["function_rva"], context["caller_rva"], context["call_site_rva"]),
+                         (hex(target), hex(root), hex(site)))
+        self.assertEqual((context["import_symbol"], context["iat_slot_rva"]), ("_initterm", hex(iat)))
+        self.assertEqual(context["initializer_target_rva"], hex(target))
+        self.assertNotIn("branch_target", context)
+        self.assertIn({"caller_rva": hex(root), "instruction_rva": hex(site), "target_rva": hex(target)},
+                      context["unresolved_calls"])
+        tables = [t for t in context["initializer_tables"] if t["instruction_rva"] == hex(site)]
+        self.assertEqual(tables[0]["initial_target_rvas"], [hex(target)])
+
+        # A leaf that modifies RSP fails admission at the originating CALL.
+        data[patch:patch + 2] = bytes.fromhex("535b")
+        failure = self.reject(data)
+        context = failure["context"]
+        self.assertEqual((failure["code"], context["instruction_rva"], context["branch_target"]),
+                         ("LIFT_UNSUPPORTED_CONTROL_FLOW", hex(site), thunk))
+        self.assertEqual(context["initializer_target_rva"], hex(target))
+        self.assertIn({"caller_rva": hex(root), "instruction_rva": hex(site), "target_rva": hex(target)},
+                      context["unresolved_calls"])
+
+    def test_initializer_nested_import_failure(self):
+        data = bytearray((FIXTURES / "crt-initterm-terminal.exe").read_bytes())
+        name = data.index(b"ExitProcess\0")
+        data[name:name + 11] = b"MissingCall"
+        ctx = self.reject(data)["context"]
+        layout = Layout(data)
+        root = entry(data)
+        site = root + 18
+        slot = root + 11 + struct.unpack_from("<i", data, layout.file_offset(root) + 7)[0]
+        base, = struct.unpack_from("<Q", data, layout.opt + 24)
+        target = struct.unpack_from("<Q", data, layout.file_offset(slot))[0] - base
+        # The callback reserves home space, sets ECX and calls through the ExitProcess IAT.
+        inner = target + 9
+        offset = layout.file_offset(inner)
+        self.assertEqual(data[offset:offset + 2], b"\xff\x15")
+        iat = inner + 6 + struct.unpack_from("<i", data, offset + 2)[0]
+        self.assertEqual((ctx["function_rva"], ctx["instruction_rva"], ctx["import_symbol"],
+                          ctx["iat_slot_rva"]), (hex(target), hex(inner), "MissingCall", hex(iat)))
+        self.assertEqual((ctx["initializer_target_rva"], ctx["caller_rva"], ctx["call_site_rva"]),
+                         (hex(target), hex(root), hex(site)))
+        self.assertEqual(ctx["unresolved_calls"][0],
+                         {"caller_rva": hex(target), "instruction_rva": hex(inner)})
+        self.assertNotIn({"caller_rva": hex(root), "instruction_rva": hex(site),
+                          "target_rva": hex(target)}, ctx["unresolved_calls"])
 
     def test_partial_runtime_function_directory(self):
         data = bytearray(image("return").read_bytes())
@@ -738,6 +1044,10 @@ class Reference(Workspace):
         expected = {
             headers.name: (header_result(headers.read_bytes()), b"", b""),
             "crt-argument-heap.exe": (41, b"", b""),
+            "crt-initterm.exe": (42, b"", b""),
+            "crt-initterm-spill.exe": (2, b"", b""),
+            "crt-initterm-nested_table.exe": (42, b"MMM", b""),
+            "crt-initterm-terminal.exe": (57, b"", b""),
             image("import-register").name: (42, b"", b""),
             image("noreturn").name: (42, b"", b""),
             image("tib").name: (42, b"", b""),
@@ -960,6 +1270,88 @@ class Console(Workspace):
 
 
 class Native(Workspace):
+    def test_repeated_cross_block_initializer_ranges(self):
+        count = 6
+        data, end = initializer_calls_at_image_end([0] * count, cross_block=True)
+        pe = self.dir / "cross-block.exe"
+        pe.write_bytes(data)
+        tables = self.compile(pe)["context"]["initializer_tables"]
+        self.assertEqual(len(tables), count)
+        self.assertEqual(len({row["instruction_rva"] for row in tables}), count)
+        for row in tables:
+            self.assertEqual((row["first_rva"], row["last_rva"], row["initial_target_rvas"]),
+                             (hex(end), hex(end), []))
+        self.assertEqual(run(self.output).returncode, 0)
+
+    def test_initializer_spill_and_zero_filled_endpoint(self):
+        data, _ = initializer_zero_tail()
+        pe = self.dir / "zero-tail.exe"
+        pe.write_bytes(data)
+        for base in (0x400000, 0x180000000):
+            with self.subTest(base=hex(base)):
+                run(CONTRACT, "--guest-base", hex(base), pe, self.output,
+                    OPT, LLC, "/usr/bin/xcrun", *LINK, check=True)
+                result = run(self.output)
+                self.assertEqual((result.returncode, result.stdout, result.stderr), (2, "", ""))
+
+    def test_initializer_order_rebasing_and_isolation(self):
+        pe = FIXTURES / "crt-initterm.exe"
+        diagnostic = self.compile(pe)
+        self.assertIn({"dll": "msvcrt.dll", "name": "_initterm"}, diagnostic["context"]["imports"])
+        result = run(self.output)
+        self.assertEqual((result.returncode, result.stdout, result.stderr), (42, "", ""))
+
+        data = pe.read_bytes()
+        preferred, = struct.unpack_from("<Q", data, Layout(data).opt + 24)
+        run(CONTRACT, "--guest-base", hex(preferred + 0x30000000), pe, self.output,
+            OPT, LLC, "/usr/bin/xcrun", *LINK, check=True)
+        rebased = run(self.output)
+        self.assertEqual((rebased.returncode, rebased.stdout, rebased.stderr), (42, "", ""))
+
+        # The first process overwrites both a writable table entry and the decimal accumulator.
+        # The second process must start from the same PE's original slot and zero state.
+        obj = self.dir / "initializers.o"
+        run(CONTRACT, pe, "--object", obj, OPT, LLC, check=True)
+        _, runtime, sdk, *flags = LINK
+        run("/usr/bin/xcrun", "--sdk", sdk, "clang++", "-arch", "arm64", *flags,
+            PROCESS_HARNESS, obj, runtime, "-o", self.output, check=True)
+        result = run(self.output, "run", "0", "0", "0", "0", check=True)
+        self.assertEqual(result.stderr, "")
+        self.assertEqual(result.stdout.splitlines()[-2:], ["return 42"] * 2)
+
+    def test_initializer_outcomes(self):
+        opaque = "forge: unsupported guest access to a native callback return slot\n"
+        unknown = "forge: unsupported MSVCRT initializer target\n"
+        argument = "forge: unsupported guest access above the initializer home space\n"
+        for variant, status, stdout, stderr in (
+                ("nested_table", 42, "MMM", ""), ("terminal", 57, "", ""),
+                ("guest_fault", 125, "", "forge: guest memory fault address=0x1 access=1 reason=2\n"),
+                ("stack_exhaustion", 125, "", "forge: guest memory fault address=0x6fffffe8 access=2 reason=4\n"),
+                ("unknown_target", 125, "", unknown), ("data_target", 125, "", unknown),
+                ("other_function", 125, "", unknown), ("other_initializer", 125, "", unknown),
+                ("bad_rsp", 125, "", "forge: guest control fault\n"),
+                ("clobber", 125, "", "forge: guest ABI fault\n"),
+                ("nonvolatile_arg", 125, "", "forge: guest ABI fault\n"),
+                ("stack_alias", 125, "", argument), ("service_alias", 125, "", argument),
+                ("before_return", 125, "", "forge: guest memory fault address=0x70000f77 access=1 reason=4\n"),
+                ("read_return", 125, "", opaque),
+                ("write_return", 125, "", opaque), ("service_return", 125, "", opaque)):
+            with self.subTest(variant=variant):
+                self.compile(FIXTURES / f"crt-initterm-{variant}.exe")
+                result = run(self.output)
+                self.assertEqual((result.returncode, result.stdout, result.stderr), (status, stdout, stderr))
+
+    def test_initializer_unsupplied_arguments(self):
+        for variant, code, reason in (
+                ("register_arg", "LIFT_UNDEFINED_REGISTER", "undefined incoming RCX"),
+                ("stack_arg", "LIFT_UNSUPPORTED_CONTROL_FLOW", "no incoming Windows x64 stack arguments")):
+            with self.subTest(variant=variant):
+                diagnostic = self.compile(FIXTURES / f"crt-initterm-{variant}.exe", success=False)
+                self.assertEqual((diagnostic["stage"], diagnostic["category"], diagnostic["code"]),
+                                 ("lifting", "unsupported", code))
+                self.assertIn(reason, diagnostic["message"])
+                self.assertFalse(self.output.exists())
+
     def test_top_level_filter_registration(self):
         pe = image("top-level-filter")
         self.compile(pe)

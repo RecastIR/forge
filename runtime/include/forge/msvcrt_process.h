@@ -32,6 +32,16 @@ forge_rt_status forge_rt_msvcrt_getmainargs(forge_rt_instance *instance,
  * publish guest exit code 255 for the active managed invocation. */
 forge_rt_status forge_rt_msvcrt_amsg_exit(forge_rt_instance *instance, forge_rt_thread_token thread,
                                           int32_t errorNumber) FORGE_CRT_NOEXCEPT;
+
+/* Compiler-to-CRT linkage. The generated call site supplies its own trusted dispatcher.
+ * Guest code supplies only the two table addresses. The borrow expires on return. */
+struct forge_rt_execution;
+typedef void (*forge_rt_initializer_dispatch)(struct forge_rt_execution *,
+                                              uint64_t) FORGE_CRT_NOEXCEPT;
+forge_rt_status forge_rt_msvcrt_initterm(forge_rt_instance *instance, forge_rt_thread_token thread,
+                                         uint64_t first, uint64_t last,
+                                         forge_rt_memory_fault *fault,
+                                         forge_rt_initializer_dispatch dispatch) FORGE_CRT_NOEXCEPT;
 #ifdef __cplusplus
 }
 #endif

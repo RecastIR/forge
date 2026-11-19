@@ -19,9 +19,13 @@ namespace forge {
         err << prefix << ": " << error.what();
 
         const auto callee = error.context.functionRva;
-        if (const auto site = error.context.sourceCall; site && callee) {
-            err << " (leaf " << hex(*callee) << " called at " << hex(site->instruction) << " in "
-                << hex(site->caller) << ")";
+        const auto site = error.context.sourceCall;
+        if (site && error.context.initializerTargetRva) {
+            err << " (initializer " << hex(*error.context.initializerTargetRva) << " from call at "
+                << hex(site->instruction) << " in " << hex(site->caller) << ")";
+        } else if (site && callee) {
+            err << " (function " << hex(*callee) << " reached from call at "
+                << hex(site->instruction) << " in " << hex(site->caller) << ")";
         }
 
         err << '\n';
@@ -43,6 +47,10 @@ namespace forge {
             if (const auto site = context.sourceCall) {
                 fields["caller_rva"] = hex(site->caller);
                 fields["call_site_rva"] = hex(site->instruction);
+            }
+
+            if (context.initializerTargetRva) {
+                fields["initializer_target_rva"] = hex(*context.initializerTargetRva);
             }
 
             if (context.branchTarget) {
@@ -217,6 +225,23 @@ namespace forge {
             fields["calls"] = std::move(calls);
             fields["imports"] = std::move(imports);
             fields["unresolved_calls"] = std::move(unresolved);
+
+            if (!readiness.initializerTables.empty()) {
+                llvm::json::Array tables;
+                for (const auto &table : readiness.initializerTables) {
+                    llvm::json::Array targets;
+                    for (const auto rva : table.initialTargetRvas) {
+                        targets.emplace_back(hex(rva));
+                    }
+                    tables.emplace_back(
+                        llvm::json::Object{{"caller_rva", hex(table.callerRva)},
+                                           {"instruction_rva", hex(table.instructionRva)},
+                                           {"first_rva", hex(table.firstRva)},
+                                           {"last_rva", hex(table.lastRva)},
+                                           {"initial_target_rvas", std::move(targets)}});
+                }
+                fields["initializer_tables"] = std::move(tables);
+            }
         }
 
         void printEntryHandler(const ExecutableReadiness &readiness, llvm::raw_ostream &out) {
@@ -335,6 +360,12 @@ namespace forge {
         for (const auto &call : readiness.calls) {
             out << "  " << hex(call.callerRva) << " calls " << hex(call.targetRva) << " at "
                 << hex(call.instructionRva) << '\n';
+        }
+
+        for (const auto &table : readiness.initializerTables) {
+            out << "  initializer table [" << hex(table.firstRva) << ", " << hex(table.lastRva)
+                << ") at call " << hex(table.instructionRva) << " in " << hex(table.callerRva)
+                << " with " << table.initialTargetRvas.size() << " distinct initial targets\n";
         }
 
         for (const auto &service : readiness.imports) {

@@ -29,8 +29,17 @@ namespace forge::x86 {
             if (context.sourceCall) {
                 const auto &source = *context.sourceCall;
                 const auto &call = group.function(source.caller).calls.at(source.instruction);
-                return ExecutableUnresolvedCall{source.caller, source.instruction,
-                                                call.guest().rva};
+                if (!call.external()) {
+                    return ExecutableUnresolvedCall{source.caller, source.instruction,
+                                                    call.guest().rva};
+                }
+
+                // A failed CALL inside the initializer has its own unresolved edge.
+                if (context.instructionRva == source.instruction ||
+                    !llvm::StringRef(context.opcode).starts_with("CALL")) {
+                    return ExecutableUnresolvedCall{source.caller, source.instruction,
+                                                    context.initializerTargetRva};
+                }
             }
 
             if (context.instructionRva && llvm::StringRef(context.opcode).starts_with("CALL")) {
@@ -45,8 +54,17 @@ namespace forge::x86 {
                                const RecoveredFunction &function,
                                const std::optional<ExecutableUnresolvedCall> &failed) {
             for (const auto &[instruction, call] : function.calls) {
-                if (call.external() || (failed && failed->callerRva == function.entry &&
-                                        failed->instructionRva == instruction)) {
+                if (const auto *external = call.external()) {
+                    if (const auto &table = external->initializers) {
+                        readiness.initializerTables.push_back({function.entry, instruction,
+                                                               table->first, table->last,
+                                                               table->targets});
+                    }
+                    continue;
+                }
+
+                if (failed && failed->callerRva == function.entry &&
+                    failed->instructionRva == instruction) {
                     continue;
                 }
 

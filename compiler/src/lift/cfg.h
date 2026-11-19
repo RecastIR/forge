@@ -45,6 +45,13 @@ namespace forge::x86 {
 
         bool isDirectCall() const { return opcode == "CALL64pcrel32"; }
 
+        std::optional<int64_t> directCallTarget() const {
+            if (!isDirectCall()) {
+                return {};
+            }
+            return int64_t(next) + inst.getOperand(0).getImm();
+        }
+
         bool isMemoryCall() const { return opcode == "CALL64m"; }
 
         bool isRegisterCall() const { return opcode == "CALL64r"; }

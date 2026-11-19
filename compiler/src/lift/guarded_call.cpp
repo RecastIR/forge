@@ -4,7 +4,6 @@
 #include "llvm/ADT/DenseSet.h"
 #include "llvm/MC/MCInstrInfo.h"
 #include "llvm/MC/MCRegisterInfo.h"
-#include "llvm/Support/Endian.h"
 
 #include <algorithm>
 #include <utility>
@@ -38,32 +37,6 @@ namespace forge::x86 {
                                [&](const auto &edge) { return matches(decoded.at(edge.second)); });
         }
 
-        bool clobbers(const Step &s, MCRegister reg, RegisterView view, const MCInstrInfo &info,
-                      const MCRegisterInfo &registers) {
-            const auto &desc = info.get(s.inst.getOpcode());
-            if ((desc.isCall() && !nonvolatile(view.index)) ||
-                (s.isRepeatedQwordStore() && view.index == repeatCount.index)) {
-                return true;
-            }
-
-            const auto overlaps = [&](MCRegister dest) {
-                return dest && registers.regsOverlap(dest, reg);
-            };
-            if (llvm::any_of(desc.implicit_defs(), overlaps) || desc.variadicOpsAreDefs() ||
-                desc.getNumDefs() > s.inst.getNumOperands()) {
-                return true;
-            }
-
-            for (unsigned i = 0; i < desc.getNumDefs(); ++i) {
-                const auto &dest = s.inst.getOperand(i);
-                if (dest.isReg() && overlaps(dest.getReg())) {
-                    return true;
-                }
-            }
-
-            return false;
-        }
-
         bool mergeImportLoad(const Step &load, const InstructionOperands &operands,
                              std::optional<uint32_t> &slot) {
             const auto rva = operands.ripRva(load, 1);
@@ -87,37 +60,73 @@ namespace forge::x86 {
                    dest <= ServiceLocation{3}.registerIndex();
         }
 
-        uint32_t readImagePointer(const Step &call, const ParsedImage &image,
-                                  const ImageInitialization &init, uint32_t slot) {
-            const auto bytes = image.mapRva(slot, 8);
-            const RvaRange field{slot, uint64_t(slot) + 8};
-            try {
-                init.validateRelocations(field);
-            } catch (const InspectionError &error) {
-                call.reject(error.kind, error.what());
-            }
-            if (!bytes || !bytes->section.immutable() || bytes->section.permissions[2] == 'x' ||
-                !init.exclusionsIn(field).empty()) {
-                call.reject(FailureCode::UnsupportedControlFlow,
-                            "indirect call requires a stable read-only pointer at " + hex(slot));
-            }
-
-            const auto fixups = init.relocationsIn(field);
-            if (fixups.size() != 1 || fixups.front()->rva != slot ||
-                fixups.front()->type != COFF::IMAGE_REL_BASED_DIR64) {
-                call.reject(FailureCode::UnsupportedControlFlow,
-                            "indirect call pointer requires an exact DIR64 relocation at " +
-                                hex(slot));
-            }
-            const auto address = support::endian::read64le(bytes->bytes.data());
-            const auto base = image.module().imageBase;
-            if (address < base || address - base >= image.module().sizeOfImage) {
-                call.reject(FailureCode::UnsupportedControlFlow,
-                            "indirect call pointer outside the image at " + hex(slot));
-            }
-            return static_cast<uint32_t>(address - base);
-        }
     } // namespace
+
+    bool clobbersRegister(const Step &s, MCRegister reg, RegisterView view, const MCInstrInfo &info,
+                          const MCRegisterInfo &registers) {
+        const auto &desc = info.get(s.inst.getOpcode());
+        if ((desc.isCall() && !nonvolatile(view.index)) ||
+            (s.isRepeatedQwordStore() && view.index == repeatCount.index)) {
+            return true;
+        }
+
+        const auto overlaps = [&](MCRegister dest) {
+            return dest && registers.regsOverlap(dest, reg);
+        };
+        if (llvm::any_of(desc.implicit_defs(), overlaps) || desc.variadicOpsAreDefs() ||
+            desc.getNumDefs() > s.inst.getNumOperands()) {
+            return true;
+        }
+
+        for (unsigned i = 0; i < desc.getNumDefs(); ++i) {
+            const auto &dest = s.inst.getOperand(i);
+            if (dest.isReg() && overlaps(dest.getReg())) {
+                return true;
+            }
+        }
+
+        return false;
+    }
+
+    uint32_t relocatedPointerRva(const Step &call, const Module &module,
+                                 const ImageInitialization &init, uint32_t slot, uint64_t address,
+                                 bool allowImageEnd) {
+        const RvaRange field{slot, uint64_t(slot) + 8};
+        const auto fixups = init.relocationsIn(field);
+        if (fixups.size() != 1 || fixups.front()->rva != slot ||
+            fixups.front()->type != COFF::IMAGE_REL_BASED_DIR64) {
+            call.reject(FailureCode::UnsupportedControlFlow,
+                        "indirect call pointer requires an exact DIR64 relocation at " + hex(slot));
+        }
+        const auto base = module.imageBase;
+        if (address < base || address - base > module.sizeOfImage ||
+            (!allowImageEnd && address - base == module.sizeOfImage)) {
+            call.reject(FailureCode::UnsupportedControlFlow,
+                        "indirect call pointer outside the image at " + hex(slot));
+        }
+        return static_cast<uint32_t>(address - base);
+    }
+
+    uint32_t readImmutableImagePointer(const Step &call, const ParsedImage &image,
+                                       const ImageInitialization &init, uint32_t slot,
+                                       bool allowImageEnd) {
+        const auto *section = image.sectionAtRva(slot);
+        const RvaRange field{slot, uint64_t(slot) + 8};
+        try {
+            init.validateRelocations(field);
+        } catch (const InspectionError &error) {
+            call.reject(error.kind, error.what());
+        }
+        if (!section || !section->immutable() || section->permissions[2] == 'x' ||
+            field.end > uint64_t(section->rva) + section->virtualSize ||
+            !init.exclusionsIn(field).empty()) {
+            call.reject(FailureCode::UnsupportedControlFlow,
+                        "indirect call requires a stable read-only pointer at " + hex(slot));
+        }
+
+        return relocatedPointerRva(call, image.module(), init, slot, image.initialQword(slot),
+                                   allowImageEnd);
+    }
 
     std::optional<uint32_t>
     reachingImportSlot(const std::map<uint32_t, Step> &decoded,
@@ -138,7 +147,7 @@ namespace forge::x86 {
                 return mergeImportLoad(s, operands, slot);
             }
 
-            if (clobbers(s, reg, view, info, registers)) {
+            if (clobbersRegister(s, reg, view, info, registers)) {
                 return false;
             }
 
@@ -222,7 +231,7 @@ namespace forge::x86 {
 
     uint32_t guardedCallTarget(const Step &call, uint32_t slot, const ParsedImage &image,
                                const ImageInitialization &init) {
-        const auto cell = readImagePointer(call, image, init, slot);
-        return readImagePointer(call, image, init, cell);
+        const auto cell = readImmutableImagePointer(call, image, init, slot);
+        return readImmutableImagePointer(call, image, init, cell);
     }
 } // namespace forge::x86

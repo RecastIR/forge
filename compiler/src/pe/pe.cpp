@@ -1462,6 +1462,13 @@ namespace forge {
         return result;
     }
 
+    uint64_t ParsedImage::initialQword(uint32_t rva) const {
+        char bytes[sizeof(uint64_t)]{};
+        const auto raw = initializedBytes({rva, uint64_t(rva) + sizeof(bytes)});
+        std::copy(raw.begin(), raw.end(), bytes);
+        return llvm::support::endian::read64le(bytes);
+    }
+
     ImageBytes ParsedImage::imageBytes(RvaRange range, const ImageInitialization &init,
                                        uint64_t guestLoadBase) const {
         // The backing can extend beyond the access that selected it. Conflicting fields
@@ -1484,10 +1491,8 @@ namespace forge {
 
             // Decode the complete field even when a fixed image read selects only part of it.
             // Its last bytes may be loader-provided zeros beyond the PE raw extent.
-            char bytes[sizeof(uint64_t)]{};
-            const auto raw = initializedBytes(field);
-            std::copy(raw.begin(), raw.end(), bytes);
-            const uint64_t relocated = llvm::support::endian::read64le(bytes) + delta;
+            char bytes[sizeof(uint64_t)];
+            const uint64_t relocated = initialQword(rel->rva) + delta;
             llvm::support::endian::write64le(bytes, relocated);
 
             const auto begin = std::max(field.begin, range.begin);

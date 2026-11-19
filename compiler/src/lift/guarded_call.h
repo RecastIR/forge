@@ -4,6 +4,14 @@
 #include "pe/image.h"
 
 namespace forge::x86 {
+    bool clobbersRegister(const Step &step, llvm::MCRegister reg, RegisterView view,
+                          const llvm::MCInstrInfo &info, const llvm::MCRegisterInfo &registers);
+    uint32_t relocatedPointerRva(const Step &call, const Module &module,
+                                 const ImageInitialization &init, uint32_t slot, uint64_t value,
+                                 bool allowImageEnd = false);
+    uint32_t readImmutableImagePointer(const Step &call, const ParsedImage &image,
+                                       const ImageInitialization &init, uint32_t slot,
+                                       bool allowImageEnd = false);
     // Explicit branch/table edges are indexed by destination. Sequential predecessors
     // are derived from the decoded extents and their current return behavior.
     std::optional<uint32_t>

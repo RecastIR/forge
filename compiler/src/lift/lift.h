@@ -48,6 +48,12 @@ namespace forge {
         std::optional<int64_t> targetRva;
     };
 
+    struct ExecutableInitializerTable {
+        uint32_t callerRva, instructionRva, firstRva, lastRva;
+        // Slot evidence is available even when recovery subsequently rejects a body.
+        std::vector<uint32_t> initialTargetRvas;
+    };
+
     struct ExecutableImport {
         std::string dll, name;
     };
@@ -72,6 +78,7 @@ namespace forge {
         std::optional<uint32_t> entryRva;
         bool entryRecovered = false, recoveryComplete = false;
         std::vector<ExecutableCall> calls;
+        std::vector<ExecutableInitializerTable> initializerTables;
         std::vector<ExecutableImport> imports;
         std::vector<ExecutableUnresolvedCall> unresolvedCalls;
         // Image declarations are independent of the calls recovered before a failure.

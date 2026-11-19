@@ -208,6 +208,7 @@ namespace forge {
         // Borrow the initialized prefix of a virtual interval inside a single section.
         // The remaining bytes in the interval are zero-filled by the PE loader.
         llvm::StringRef initializedBytes(RvaRange range) const;
+        uint64_t initialQword(uint32_t rva) const;
         bool advertisesDynamicRelocations() const;
         // Checks the PE loader requirements for a standalone native executable.
         void validateExecutableLayout(uint64_t guestBase) const;

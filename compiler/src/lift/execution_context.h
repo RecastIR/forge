@@ -32,6 +32,8 @@ namespace forge::x86 {
                                        RegisterSet modified);
     void checkNonvolatiles(llvm::IRBuilder<> &ir, GuestMemory &memory, const ContextView &context,
                            const SavedRegisters &saved);
+    llvm::Function *emitInitializerThunk(llvm::Function &body, const ContextLayout &layout,
+                                         RegisterSet modified);
 
     // Uses the process-owned execution view and emits its immutable artifact descriptor.
     llvm::Function *emitProcessEntry(llvm::Function &body, const RecoveredFunctionGroup &group,

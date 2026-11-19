@@ -19,7 +19,7 @@ namespace forge::x86 {
     struct GroupAnalysis {
         FunctionFlows flows;
         std::map<uint32_t, FunctionPlan> functions;
-        bool stack = false, origins = false, setsDirection = false;
+        bool stack = false, origins = false, setsDirection = false, hasInitializers = false;
         ImagePlan image;
     };
 

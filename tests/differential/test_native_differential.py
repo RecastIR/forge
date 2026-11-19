@@ -52,6 +52,7 @@ class NativeDifferentialTests(unittest.TestCase):
                 self.assertEqual(report.get("failure_stage"), "translation", report.get("diagnostic"))
                 self.assertEqual(report["binary_sha256"], digest)
                 self.assertEqual(report["stages"]["reference"], "passed")
+                self.assertEqual(report["stages"]["recovery"], "failed")
                 self.assertEqual(report["stages"]["execution"], "not_run")
                 self.assertFalse(os.path.lexists(work / "translated"))
                 record = report["compiler_diagnostic"]
@@ -60,23 +61,26 @@ class NativeDifferentialTests(unittest.TestCase):
                 context = record["context"]
                 self.assertIs(context["entry_recovered"], True)
                 self.assertIs(context["recovery_complete"], False)
-                call_bytes = "e891120000" if config == "debug" else "e861120000"
-                thunk = "0x26c0" if config == "debug" else "0x2690"
                 self.assertEqual((context["entry_rva"], context["function_rva"], context["instruction_rva"],
                                   context["opcode"], context["bytes"]),
-                                 ("0x14d0", "0x1180", "0x142a", "CALL64pcrel32", call_bytes))
+                                 ("0x14d0", "0x1180", "0x1453", "CALL64m", "ff152f6d0000"))
                 self.assertEqual((context["import_dll"], context["import_symbol"], context["iat_slot_rva"]),
-                                 ("msvcrt.dll", "_initterm", "0x8228"))
+                                 ("KERNEL32.dll", "GetStartupInfoA", "0x8188"))
+                self.assertIn({"caller_rva": "0x1180", "instruction_rva": "0x142a",
+                               "first_rva": "0x9000", "last_rva": "0x9010",
+                               "initial_target_rvas": ["0x1130"]}, context["initializer_tables"])
                 unresolved = context["unresolved_calls"]
-                self.assertIn({"caller_rva": "0x1180", "instruction_rva": "0x142a", "target_rva": thunk},
-                              unresolved)
+                self.assertIn({"caller_rva": "0x1180", "instruction_rva": "0x1453"}, unresolved)
                 for dll, symbol, site in (("kernel32.dll", "Sleep", "0x11e6"),
                                           ("kernel32.dll", "SetUnhandledExceptionFilter", "0x1258"),
-                                          ("msvcrt.dll", "_amsg_exit", "0x140c")):
+                                          ("msvcrt.dll", "_amsg_exit", "0x140c"),
+                                          ("msvcrt.dll", "_initterm", "0x142a")):
                     self.assertIn({"dll": dll, "name": symbol}, context["imports"])
                     self.assertNotIn(site, [c["instruction_rva"] for c in unresolved])
                 pe = diff.BINARIES / config / manifest.case["binary"]
                 data = pe.read_bytes()
+                call_bytes = "e891120000" if config == "debug" else "e861120000"
+                self.assertEqual(data[0xa2a:0xa2f], bytes.fromhex(call_bytes))
                 # llvm-objdump and llvm-readobj place the original R12 load and register CALL
                 # in the pinned .text section at file offsets 0x7c8 and 0x7e6.
                 self.assertEqual(data[0x7c8:0x7cf], bytes.fromhex("4c8b25d96f0000"))
@@ -99,11 +103,63 @@ class NativeDifferentialTests(unittest.TestCase):
                 fatal = next(s for s in crt["symbols"] if s["name"] == "_amsg_exit")
                 self.assertEqual(fatal["iat_slot_rva"], "0x8208")
                 self.assertIs(fatal["catalogued_service"], True)
+                initializer = next(s for s in crt["symbols"] if s["name"] == "_initterm")
+                self.assertEqual(initializer["iat_slot_rva"], "0x8228")
+                self.assertIs(initializer["catalogued_service"], True)
                 self.assertCountEqual([d["dll"].lower() for d in directories], imports)
                 for directory in directories:
                     self.assertIs(directory["delayed"], False)
                     self.assertCountEqual([s["name"] for s in directory["symbols"]],
                                           imports[directory["dll"].lower()].split())
+
+    def test_both_conventional_initializer_tables(self):
+        sys.path.insert(0, str(diff.SUITE.parent / "integration"))
+        from pe_layout import Layout
+        sys.path.pop(0)
+
+        original = (diff.BINARIES / "debug/crt_argc.exe").read_bytes()
+        # Isolate each original argument sequence, import call and table. The startup
+        # comparison above uses the untouched PE and stops before the second call site.
+        with tempfile.TemporaryDirectory(dir=self.tmp) as tmp:
+            pe, output = Path(tmp) / "probe.exe", Path(tmp) / "translated"
+            for start, site, slot in ((0x141c, 0x142a, 0x9008), (0x1480, 0x1494, 0x9020)):
+                for invalid in (False, True):
+                    with self.subTest(site=hex(site), invalid=invalid):
+                        data = bytearray(original)
+                        layout = Layout(data)
+                        entry = layout.file_offset(0x1180)
+                        data[entry:entry+5] = b"\xe9" + struct.pack("<i", start - 0x1185)
+                        data[layout.file_offset(site + 5)] = 0xc3
+                        if invalid:
+                            struct.pack_into("<Q", data, layout.file_offset(slot), 0x140009000)
+                        pe.write_bytes(data)
+                        result = subprocess.run([self.forge, "lift", pe, "--executable", "--output", output,
+                                                 "--diagnostics-format", "json"], capture_output=True, timeout=30)
+                        record = startup.compiler_diagnostic(result.stderr, result.returncode, pe, output)
+                        ctx = record["context"]
+                        if not invalid:
+                            first, last, target = ((0x9000, 0x9010, 0x1130) if site == 0x142a
+                                                   else (0x9018, 0x9028, 0x1010))
+                            self.assertIn({"caller_rva": "0x1180", "instruction_rva": hex(site),
+                                           "first_rva": hex(first), "last_rva": hex(last),
+                                           "initial_target_rvas": [hex(target)]},
+                                          ctx["initializer_tables"])
+                        if invalid:
+                            self.assertEqual((record["code"], ctx["instruction_rva"]),
+                                             ("LIFT_INVALID_CALL_TARGET", hex(site)))
+                        elif site == 0x142a:
+                            self.assertIs(ctx["recovery_complete"], True)
+                            self.assertIn({"dll": "msvcrt.dll", "name": "__getmainargs"}, ctx["imports"])
+                        else:
+                            # Recovery followed __xi_a's pre_c_init into its PE-header test.
+                            self.assertEqual((ctx["function_rva"], ctx["instruction_rva"]),
+                                             ("0x1010", "0x1044"))
+                            self.assertEqual((ctx["initializer_target_rva"], ctx["caller_rva"],
+                                              ctx["call_site_rva"], ctx["import_symbol"], ctx["iat_slot_rva"]),
+                                             ("0x1010", "0x1180", hex(site), "_initterm", "0x8228"))
+                            self.assertEqual(ctx["unresolved_calls"], [
+                                {"caller_rva": "0x1180", "instruction_rva": hex(site),
+                                 "target_rva": "0x1010"}])
 
     def test_lstrlen_rebased_reference(self):
         fixture = "imports/lstrlen"
