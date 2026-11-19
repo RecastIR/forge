@@ -9,6 +9,7 @@ add_library(forge_runtime STATIC
   src/compat/crt/msvcrt.cpp
   src/compat/crt/process_heap.cpp
   src/compat/crt/crt_parameters.cpp
+  src/compat/win32/startup_info.cpp
   src/compat/win32/services.cpp
   src/compat/win32/console.cpp
   src/compat/win32/standard_handles.cpp

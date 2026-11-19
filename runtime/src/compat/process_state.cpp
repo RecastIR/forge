@@ -30,6 +30,20 @@ namespace forge::runtime {
             }
         }
 
+        size_t payloadSize = 0;
+        const auto prepared = parameters.startupInfo.prepare(
+            standardHandles ? &*standardHandles : nullptr, payloadSize);
+
+        if (prepared != FORGE_RT_OK) {
+            return prepared;
+        }
+
+        return mapParameters(instance, artifact, osCommandLine, payloadSize);
+    }
+
+    forge_rt_status WindowsProcessState::mapParameters(forge_rt_instance &instance,
+                                                       const forge_rt_artifact &artifact,
+                                                       bool osCommandLine, size_t payloadSize) {
         // Keep all unimplemented TEB fields in a reserved hole. The CRT data and
         // strings live beyond the TEB, not at unimplemented Windows structure offsets.
         constexpr uint64_t parameterOffset = 65536;
@@ -39,7 +53,10 @@ namespace forge::runtime {
         const auto wideOffset = (narrowSize + 1) & ~size_t{1};
         const auto stringEnd = stringOffset + (osCommandLine ? wideOffset + wideSize : 0);
         const auto crtOffset = (stringEnd + 7) & ~uint64_t{7};
-        const auto size = crt ? crtOffset + crt->bytes.size() : stringEnd;
+        const auto parameterEnd = crt ? crtOffset + crt->bytes.size() : stringEnd;
+
+        const auto payloadOffset = (parameterEnd + 1) & ~uint64_t{1};
+        const auto size = payloadSize ? payloadOffset + payloadSize : parameterEnd;
         std::array<Reservation, 2> occupied{
             {{artifact.base, artifact.size, nullptr, nullptr},
              {FORGE_RT_STACK_BASE, FORGE_RT_STACK_SIZE, nullptr, nullptr}}};
@@ -76,6 +93,12 @@ namespace forge::runtime {
             crt->relocate(crtBase);
             rows[rowCount++] = {crtBase, crt->bytes.size(), crt->bytes.data(), permissions,
                                 &crt->claim};
+        }
+
+        if (payloadSize) {
+            rowCount += parameters.startupInfo.map(
+                base + payloadOffset,
+                std::span(rows).subspan(rowCount).first<StartupInfo::maxRows>());
         }
 
         mapping = {base, size, rows.data(), rowCount};

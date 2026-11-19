@@ -21,6 +21,11 @@ namespace forge::runtime {
 
         // Called once on an unpublished process. Destruction also releases a partial capture.
         forge_rt_status capture() noexcept;
+
+        std::array<uint64_t, 3> values() const {
+            return {streams[0].handle, streams[1].handle, streams[2].handle};
+        }
+
         std::array<StandardStream, 3> streams{};
         bool hostHandlesOutputSignals = false;
     };

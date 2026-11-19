@@ -15,6 +15,7 @@ void testRuntimeMemory();
 void testRuntimeProcess();
 void testRuntimeConsoleProcess(const char *fatalObservations);
 void testRuntimeWrite();
+void testRuntimeStartupInfo();
 
 namespace {
     volatile std::sig_atomic_t caughtAlarm = 0;
@@ -209,6 +210,7 @@ int main(int argc, char **argv) {
     testRuntimeProcess();
     testRuntimeConsoleProcess(argv[1]);
     testRuntimeWrite();
+    testRuntimeStartupInfo();
 
     for (unsigned trial = 0; trial < 64 && passed; ++trial) {
         passed = raceDestruction(runtime);

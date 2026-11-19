@@ -336,6 +336,14 @@ namespace forge::win64 {
             "kernel32.dll", "SetUnhandledExceptionFilter", LastError::Preserve,
             FORGE_SERVICE_ADAPTER(forge_rt_set_unhandled_exception_filter), Requirement::Process);
 
+    inline constexpr Argument startupInfoOutput{Value::Address, Access::Output, Extent::Fixed, 104};
+    inline constexpr auto getStartupInfoA = bind<Value::Void, startupInfoOutput>(
+        "kernel32.dll", "GetStartupInfoA", LastError::Preserve,
+        FORGE_SERVICE_ADAPTER(forge_rt_get_startup_info_a), Requirement::Process);
+    inline constexpr auto getStartupInfoW = bind<Value::Void, startupInfoOutput>(
+        "kernel32.dll", "GetStartupInfoW", LastError::Preserve,
+        FORGE_SERVICE_ADAPTER(forge_rt_get_startup_info_w), Requirement::Process);
+
     inline constexpr auto getCommandLineA = processPointer(bind<Value::Address>(
         "kernel32.dll", "GetCommandLineA", LastError::Preserve,
         FORGE_SERVICE_ADAPTER(forge_rt_get_command_line_a), Requirement::Process));
@@ -398,5 +406,7 @@ namespace forge::win64 {
         setUnhandledExceptionFilter,
         crtAmsgExit,
         crtInitterm,
+        getStartupInfoA,
+        getStartupInfoW,
     };
 } // namespace forge::win64

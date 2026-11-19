@@ -20,12 +20,17 @@ namespace forge::runtime {
         size_t heapUsage = 0;
 
         static constexpr size_t errnoRow = 2, narrowCommandRow = 3, wideCommandRow = 4;
-        std::array<forge_rt_image_region, 6> rows{};
+        std::array<forge_rt_image_region, 6 + StartupInfo::maxRows> rows{};
         forge_rt_image mapping{};
 
         forge_rt_status initializeParameters(forge_rt_instance &instance,
                                              const forge_rt_artifact &artifact,
                                              const forge_rt_process_startup &startup,
                                              bool osCommandLine, CrtImports imports);
+
+      private:
+        forge_rt_status mapParameters(forge_rt_instance &instance,
+                                      const forge_rt_artifact &artifact, bool osCommandLine,
+                                      size_t startupPayloadSize);
     };
 } // namespace forge::runtime

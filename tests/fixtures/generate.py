@@ -20,7 +20,7 @@ def generate(output, mc, link, dlltool, clang):
         "MissingLeaf.dll": ["Leaf"],
         "KERNEL32.dll": ["Sleep", "SwitchToThread", "SetLastError", "GetLastError", "lstrlenA",
                          "GetStdHandle", "WriteFile", "ExitProcess", "GetCommandLineA", "GetCommandLineW",
-                         "SetUnhandledExceptionFilter", "__C_specific_handler"],
+                         "SetUnhandledExceptionFilter", "__C_specific_handler", "GetStartupInfoA", "GetStartupInfoW"],
         "vcruntime140.dll": ["Runtime"],
         "msvcrt.dll": ["__getmainargs", "_amsg_exit", "_initterm", "calloc", "free", "malloc", "strlen",
                        "__C_specific_handler", "_fmode=entry DATA", "_commode=entry DATA",
@@ -78,6 +78,13 @@ def generate(output, mc, link, dlltool, clang):
               [("KERNEL32.dll", name) for name in ("SetLastError", "GetLastError", "ExitProcess")])
         image("executable-import-register.exe", (sources / "executable-import-register.s").read_text(),
               [("KERNEL32.dll", name) for name in ("SetLastError", "GetLastError", "Sleep")])
+        startup_info = (sources / "executable-startup-info.s").read_text()
+        for variants in ("a", "w", "aw"):
+            setup = "".join(f"probe_{variant} = 1\n" for variant in variants)
+            image(f"executable-startup-info-{variants}.exe", setup + startup_info,
+                  link_flags=["KERNEL32.dll.lib"])
+        image("executable-startup-info-w-fault.exe", "probe_w = 1\nfault = 1\n" + startup_info,
+              link_flags=["KERNEL32.dll.lib"])
         filter_source = (sources / "executable-top-level-filter.s").read_text()
         filter_imports = [("KERNEL32.dll", name) for name in ("SetUnhandledExceptionFilter", "ExitProcess")]
         image("executable-top-level-filter.exe", filter_source, filter_imports)

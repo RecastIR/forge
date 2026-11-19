@@ -1052,6 +1052,7 @@ class Reference(Workspace):
             image("noreturn").name: (42, b"", b""),
             image("tib").name: (42, b"", b""),
             image("top-level-filter").name: (42, b"", b""),
+            **{image(f"startup-info-{v}").name: (43, b"", b"") for v in ("a", "w", "aw")},
             console_image("hello").name: (0, GREETING, b""),
             console_image("binary_stdout").name: (len(BINARY), BINARY, b""),
             console_image("binary_stderr").name: (len(BINARY), b"", BINARY),
@@ -1351,6 +1352,21 @@ class Native(Workspace):
                                  ("lifting", "unsupported", code))
                 self.assertIn(reason, diagnostic["message"])
                 self.assertFalse(self.output.exists())
+
+    def test_startup_info(self):
+        for variants in ("a", "w", "aw"):
+            with self.subTest(variants=variants):
+                diagnostic = self.compile(image(f"startup-info-{variants}"))
+                imports = {row["name"] for row in diagnostic["context"]["imports"]}
+                self.assertEqual({name for name in imports if name.startswith("GetStartupInfo")},
+                                 {"GetStartupInfo" + v.upper() for v in variants})
+                result = run(self.output)
+                self.assertEqual((result.returncode, result.stdout, result.stderr), (42, "", ""))
+
+        self.compile(image("startup-info-w-fault"))
+        result = run(self.output)
+        self.assertEqual((result.returncode, result.stdout, result.stderr),
+                         (125, "", "forge: guest memory fault address=0x70000fd8 access=2 reason=4\n"))
 
     def test_top_level_filter_registration(self):
         pe = image("top-level-filter")

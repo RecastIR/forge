@@ -16,6 +16,9 @@ crt-initterm.exe
 executable-headers.exe
 executable-import-register.exe
 executable-noreturn.exe
+executable-startup-info-a.exe
+executable-startup-info-aw.exe
+executable-startup-info-w.exe
 executable-tib.exe
 executable-top-level-filter.exe
 hello.exe

@@ -65,7 +65,7 @@ Argument duplication exposes a later boundary. The compiler accepts `strlen` on 
 
 ## Compatibility boundary
 
-For the primary PE, Forge recognizes 16 of 36 load-time symbols. These are KERNEL32 `GetLastError`, `SetUnhandledExceptionFilter` and `Sleep`, the nine MSVCRT functions `__getmainargs`, `_amsg_exit`, `_initterm`, `calloc`, `free`, `malloc`, `memcpy`, `strlen` and `strncmp`, and the four MSVCRT data exports. Nine KERNEL32 symbols and eleven MSVCRT symbols still lack bindings. The argument fixture’s additional `strcmp` import has a binding.
+For the primary PE, Forge recognizes 17 of 36 load-time symbols. These are KERNEL32 `GetLastError`, `GetStartupInfoA`, `SetUnhandledExceptionFilter` and `Sleep`, the nine MSVCRT functions `__getmainargs`, `_amsg_exit`, `_initterm`, `calloc`, `free`, `malloc`, `memcpy`, `strlen` and `strncmp`, and the four MSVCRT data exports. Eight KERNEL32 symbols and eleven MSVCRT symbols still lack bindings. The argument fixture’s additional `strcmp` import has a binding.
 
 In `__tmainCRTStartup`, the startup conflict branch loads error 31 at `0x1407`. Forge recovers the terminating call at `0x140c` to **`msvcrt.dll!_amsg_exit`**. In the primary PE the thunk is at `0x26b0` in Debug and `0x2680` in Release, both jumping through IAT slot `0x8208`. Separate focused PEs execute `_amsg_exit(31)` through the same import-thunk shape and exercise an unused import. [Original Windows, Wine and ARM64 observations](amsg-exit/) · [Lifted tests](../../../integration/test_executable.py)
 
@@ -75,22 +75,39 @@ The focused executable imports the real legacy MSVCRT function. One initializer 
 
 The spill regression reloads a caller-local string pointer after an empty table and again after an all-NULL table. The test shortens the raw extent of a read-only section so four bytes of its eight-byte endpoint pointer come from the PE loader’s zero fill. That PE returned 2 with empty streams under pinned Wine and on ARM64 at guest bases `0x400000` and `0x180000000`. [Fixture source](../../../fixtures/crt-initterm-spill.s) · [PE layout and execution tests](../../../integration/test_executable.py)
 
-The next unresolved call belongs to **Win32 compatibility**. At `0x1453`, `__tmainCRTStartup` calls `KERNEL32.dll!GetStartupInfoA` through a RIP-relative IAT slot. A binding needs to write the guest’s Windows x64 `STARTUPINFOA` from process startup state using checked guest memory. TLS initialization and CRT termination remain independent requirements.
+Forge resolves the RIP-relative IAT call to **`KERNEL32.dll!GetStartupInfoA` at `0x1453`** in every original input. At `0x1460` in `__tmainCRTStartup`, recovery stops at a direct call to the **`msvcrt.dll!_cexit`** import thunk. In the Debug argc PE, after the call to `main` at `0x13a9`, MinGW tests its `managedapp` and `has_cctor` variables. The `managedapp != 0 && has_cctor == 0` branch calls `_cexit` and returns `mainret`. With `managedapp == 0`, the branch calls `exit` at `0x14a8`. All 16 comparisons stopped before native compilation, so the recovery diagnostic supplies no execution evidence for either cleanup path. [Forge startup-info contract](../../../../docs/runtime-architecture.md#win32-startup-information)
+
+Microsoft documents `_cexit` as running registered exit callbacks in reverse registration order, flushing I/O buffers, closing open streams and returning to the caller. Pinned Wine 8 invokes the exit callbacks and returns without an explicit stream flush or close in its `_cexit` path. Establishing what the legacy Windows DLL does to an open stream requires a direct observation. [Microsoft CRT contract](https://learn.microsoft.com/en-us/cpp/c-runtime-library/reference/cexit-c-exit) · [Wine 8 exit callbacks](https://github.com/wine-mirror/wine/blob/wine-8.0/dlls/msvcrt/exit.c#L135-L140) · [Wine 8 `_cexit`](https://github.com/wine-mirror/wine/blob/wine-8.0/dlls/msvcrt/exit.c#L313-L321)
+
+Three SDK-free PEs exercise A alone, W alone, and both calls from one entry. Each checks the structure size, reserved pointer, last error and all three handle fields. On ARM64 all three returned 42 with the flag clear. The pinned Wine capture parent supplies `STARTF_USESTDHANDLES`; all three PEs verified the current guest handles and returned 43. Starting the same PEs directly under pinned Wine 8 left the flag clear and returned 44 after checking all three cached handle values. All three probes produced empty stdout and stderr. Native Windows observations for these PEs are pending. The ARM64 fault variant places the last output byte on the protected outer return address and reports a write fault at `0x70000fd8`, even though W would leave that handle untouched. [Probe source](../../../fixtures/executable-startup-info.s) · [Executable tests](../../../integration/test_executable.py)
+
+Run `./tools/test-forge.sh --executable-reference` for the captured case. To reproduce the direct Wine 8 observation after `make fixtures`, run from the repository root:
+
+```sh
+reference=$(python3 -B tests/differential/fixture_images.py --id reference)
+docker run --rm --platform linux/amd64 --network none --cap-drop ALL \
+    --security-opt no-new-privileges -v "$PWD/build/dev/fixtures/Debug:/input:ro" \
+    --entrypoint /bin/sh "$reference" -c '
+        for variant in a w aw; do
+            /usr/lib/wine/wine64 "/input/executable-startup-info-$variant.exe"
+            test "$?" -eq 44 || exit 1
+        done'
+```
 
 ### Startup comparison results
 
-All 16 unmodified PEs passed their pinned Wine reference checks. They recovered the initializer table at `0x142a` and reported `LIFT_UNSUPPORTED_CONTROL_FLOW` at `0x1453` during recovery. Native compilation, Mach-O publication and verification, native execution and byte comparison were unrun for every row. The standalone comparator exited 1. Each cell under Debug and Release gives the actual reference status and recovery result for that input. Wine stderr was empty in all cases.
+**16/16 resolved the startup-info call, 0/16 reached native compilation, 0/16 ran, and 0/16 completed native byte comparison.** All 16 passed reference validation. Every Debug and Release cell below stopped in recovery with `LIFT_UNSUPPORTED_CONTROL_FLOW`, opcode `CALL64pcrel32`, at RVA `0x1460` in function `0x1180`. The standalone comparator exited 1. The columns show each original PE’s call bytes and its resolved thunk’s IAT slot. The [fixture table](#conventional-windows-c-startup-fixtures) gives the corresponding Wine exit status and output.
 
-| Startup case | Debug reference / recovery | Release reference / recovery | Wine stdout in both | Call bytes at 0x1453 | IAT RVA |
-| --- | --- | --- | --- | --- | --- |
-| argc | 42 / failed | 42 / failed | empty | `ff152f6d0000` | `0x8188` |
-| argc_none | 1 / failed | 1 / failed | empty | `ff152f6d0000` | `0x8188` |
-| argv | 42 / failed | 42 / failed | empty | `ff15376d0000` | `0x8190` |
-| argv_edges | 42 / failed | 42 / failed | empty | `ff15376d0000` | `0x8190` |
-| cleanup | 42 / failed | 42 / failed | `IMBA` | `ff154f6d0000` | `0x81a8` |
-| globals | 42 / failed | 42 / failed | empty | `ff152f6d0000` | `0x8188` |
-| puts | 0 / failed | 0 / failed | `Hello from C!\r\n` | `ff15376d0000` | `0x8190` |
-| return | 42 / failed | 42 / failed | empty | `ff152f6d0000` | `0x8188` |
+| Startup case | Debug call bytes | Release call bytes | `_cexit` IAT RVA (both) |
+| --- | --- | --- | --- |
+| argc | `e853120000` | `e823120000` | `0x8210` |
+| argc_none | `e853120000` | `e823120000` | `0x8210` |
+| argv | `e8c3120000` | `e823120000` | `0x8218` |
+| argv_edges | `e873130000` | `e823120000` | `0x8218` |
+| cleanup | `e843130000` | `e8c3120000` | `0x8240` |
+| globals | `e873120000` | `e823120000` | `0x8210` |
+| puts | `e853120000` | `e823120000` | `0x8218` |
+| return | `e843120000` | `e823120000` | `0x8210` |
 
 | Responsibility | Current result for the selected configuration |
 | --- | --- |

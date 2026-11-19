@@ -153,6 +153,15 @@ forge_rt_status forge_rt_get_command_line_w(forge_rt_instance *instance,
                                             forge_rt_thread_token thread,
                                             uint64_t *outAddress) FORGE_RT_NOEXCEPT;
 
+/* Windows x64 STARTUPINFO output in checked, writable guest memory (104 bytes).
+ * Both variants require a managed invocation and preserve the guest thread's last error. */
+forge_rt_status forge_rt_get_startup_info_a(forge_rt_instance *instance,
+                                            forge_rt_thread_token thread, uint64_t address,
+                                            forge_rt_memory_fault *fault) FORGE_RT_NOEXCEPT;
+forge_rt_status forge_rt_get_startup_info_w(forge_rt_instance *instance,
+                                            forge_rt_thread_token thread, uint64_t address,
+                                            forge_rt_memory_fault *fault) FORGE_RT_NOEXCEPT;
+
 /* Console services require the current managed process and a declared console dependency.
  * An active invocation without captured standard handles reports FORGE_RT_INVALID_STATE.
  * Guest handles and addresses are integer bits. Only the native outs are host pointers. A Win32
