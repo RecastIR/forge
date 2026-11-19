@@ -5,6 +5,21 @@
 
 using namespace forge::runtime;
 
+bool TerminationRegistry::append(Handler handler) noexcept {
+    if (entries.size() >= limit) {
+        return false;
+    }
+
+    try {
+        entries.push_back(handler);
+    } catch (const std::bad_alloc &) {
+        return false;
+    }
+
+    completed = false;
+    return true;
+}
+
 extern "C" forge_rt_status forge_rt_msvcrt_onexit(forge_rt_instance *instance,
                                                   forge_rt_thread_token thread, uint64_t target,
                                                   uint64_t *out, uint64_t site) noexcept {
@@ -20,22 +35,15 @@ extern "C" forge_rt_status forge_rt_msvcrt_onexit(forge_rt_instance *instance,
         }
 
         auto &windows = *owner.windows;
-        auto &registry = windows.termination;
         *out = 0;
 
         if (!target) {
             return FORGE_RT_OK;
         }
 
-        if (registry.entries.size() < TerminationRegistry::limit) {
-            try {
-                registry.entries.push_back({site, target});
-                registry.completed = false;
-                *out = target;
-                return FORGE_RT_OK;
-            } catch (const std::bad_alloc &) {
-                // The failed append leaves every earlier registration intact.
-            }
+        if (windows.termination.append({site, target})) {
+            *out = target;
+            return FORGE_RT_OK;
         }
 
         // ERROR_NOT_ENOUGH_MEMORY and ENOMEM from the legacy Windows DLL.

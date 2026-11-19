@@ -118,7 +118,7 @@ namespace forge::runtime {
         }
 
         shell.emplace();
-        desktop.emplace();
+        desktop.emplace().narrow = "winsta0\\default";
         title.emplace().narrow = std::move(*identity);
         return FORGE_RT_OK;
     }

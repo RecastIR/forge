@@ -948,14 +948,37 @@ namespace {
         const auto artifact = artifactWith([](forge_rt_execution *execution) {
             const auto instance = execution->instance;
             const auto thread = execution->thread;
+            uint64_t errnoAddress = 0;
+            forge_rt_invocation_token token = 0;
+            forge_rt_memory_fault detail{};
+            REQUIRE(forge_rt_current_invocation(instance, thread, &token) == FORGE_RT_OK);
+            REQUIRE(forge_rt_msvcrt_errno(instance, thread, &errnoAddress) == FORGE_RT_OK);
+            int32_t error = 37;
+            REQUIRE(forge_rt_write_guest(instance, thread, token, errnoAddress, sizeof(error),
+                                         &error, sizeof(error), &detail) == FORGE_RT_OK);
+            REQUIRE(forge_rt_set_last_error(instance, thread, 91) == FORGE_RT_OK);
+            REQUIRE(forge_rt_msvcrt_cexit(instance, thread, dispatch) == FORGE_RT_OK);
+
             uint64_t out = 99;
             REQUIRE(forge_rt_msvcrt_onexit(instance, thread, 0, &out, execution->rcx) ==
                         FORGE_RT_OK &&
                     !out);
+            uint32_t lastError = 0;
+            REQUIRE(forge_rt_get_last_error(instance, thread, &lastError) == FORGE_RT_OK &&
+                    lastError == 91);
+            REQUIRE(forge_rt_read_guest(instance, thread, token, errnoAddress, sizeof(error),
+                                        &error, sizeof(error), &detail) == FORGE_RT_OK &&
+                    error == 37);
+
             if (execution->rcx == 1) {
                 REQUIRE(forge_rt_msvcrt_onexit(instance, thread, base + 14, &out, 1) ==
                             FORGE_RT_OK &&
                         out == base + 14);
+                REQUIRE(forge_rt_get_last_error(instance, thread, &lastError) == FORGE_RT_OK &&
+                        lastError == 91);
+                REQUIRE(forge_rt_read_guest(instance, thread, token, errnoAddress, sizeof(error),
+                                            &error, sizeof(error), &detail) == FORGE_RT_OK &&
+                        error == 37);
                 execution->result = {FORGE_RT_RETURNED, FORGE_RT_OK, 1, {}, 0};
                 return;
             }
@@ -970,22 +993,18 @@ namespace {
                 }
             } while (out);
             REQUIRE(accepted == 4096);
-            uint32_t lastError = 0;
             REQUIRE(forge_rt_get_last_error(instance, thread, &lastError) == FORGE_RT_OK &&
                     lastError == 8);
-            uint64_t errnoAddress = 0;
-            forge_rt_invocation_token token = 0;
-            REQUIRE(forge_rt_current_invocation(instance, thread, &token) == FORGE_RT_OK);
-            REQUIRE(forge_rt_msvcrt_errno(instance, thread, &errnoAddress) == FORGE_RT_OK);
-            int32_t error = 0;
-            forge_rt_memory_fault detail{};
             REQUIRE(forge_rt_read_guest(instance, thread, token, errnoAddress, sizeof(error),
                                         &error, sizeof(error), &detail) == FORGE_RT_OK &&
                     error == 12);
             REQUIRE(forge_rt_msvcrt_cexit(instance, thread, dispatch) == FORGE_RT_OK);
             REQUIRE(execution->rdx == accepted && !execution->result.kind);
+            REQUIRE(forge_rt_msvcrt_onexit(instance, thread, base + 14, &out, execution->rcx) ==
+                        FORGE_RT_OK &&
+                    out == base + 14);
             REQUIRE(forge_rt_msvcrt_exit(instance, thread, -2, dispatch) == FORGE_RT_OK);
-            REQUIRE(execution->rdx == accepted);
+            REQUIRE(execution->rdx == accepted + 1);
             REQUIRE(forge_rt_msvcrt_onexit(instance, thread, base + 14, &out, 1) ==
                     FORGE_RT_INVALID_STATE);
         });

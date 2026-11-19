@@ -60,17 +60,17 @@ def captured_streams(row):
     return row["exit_code"], bytes.fromhex(row["stdout_hex"]), bytes.fromhex(row["stderr_hex"])
 
 
-def termination_traces(backend):
-    root = Path(__file__).resolve().parents[1] / "differential/fixtures/startup/termination"
-    with ZipFile(root / f"{backend}-raw.zip") as archive:
-        capture = json.loads(archive.read("results.json"))
-    traces = {}
-    for name, digest in capture["pe_sha256"].items():
-        if name.startswith("crt-term-"):
-            if hashlib.sha256((FIXTURES / name).read_bytes()).hexdigest() != digest:
+def legacy_observations(backend, prefix, mode="captured"):
+    suite = Path(__file__).resolve().parents[1] / "differential"
+    with ZipFile(suite / f"fixtures/startup/termination/{backend}-raw.zip") as archive:
+        evidence = json.loads(archive.read("results.json"))
+    cases = {}
+    for name in (suite / "reference/termination/inputs.txt").read_text().splitlines():
+        if name.startswith(prefix):
+            if hashlib.sha256((FIXTURES / name).read_bytes()).hexdigest() != evidence["pe_sha256"][name]:
                 raise ValueError(f"{name} differs from the {backend} reference PE")
-            traces[name] = captured_streams(capture["observations"][name[:-4] + "-captured"])
-    return traces
+            cases[name] = evidence["observations"][name[:-4] + "-" + mode]
+    return cases
 
 
 def entry(data):
@@ -1065,14 +1065,14 @@ class Reference(Workspace):
             image("noreturn").name: (42, b"", b""),
             image("tib").name: (42, b"", b""),
             image("top-level-filter").name: (42, b"", b""),
-            image("startup-info-fields").name: (43, b"", b""),
-            **{image(f"startup-info-{v}").name: (43, b"", b"") for v in ("a", "w", "aw")},
             console_image("hello").name: (0, GREETING, b""),
             console_image("binary_stdout").name: (len(BINARY), BINARY, b""),
             console_image("binary_stderr").name: (len(BINARY), b"", BINARY),
             console_image("nested_exit").name: (0xcafe002a, b"", b""),
         }
-        expected.update(termination_traces("wine"))
+        for prefix in ("crt-term-", "executable-startup-info-"):
+            for name, observation in legacy_observations("wine", prefix).items():
+                expected[name] = captured_streams(observation)
         for filename, observations in amsg_observations("wine", AMSG_CASES + AMSG_MARKERS).items():
             expected[filename] = captured_streams(observations["pipe"])
         inputs = Path(__file__).resolve().parents[1] / "differential/reference/executable-inputs.txt"
@@ -1368,6 +1368,15 @@ class Native(Workspace):
                 self.assertIn(reason, diagnostic["message"])
                 self.assertFalse(self.output.exists())
 
+    def test_termination_matches_windows(self):
+        for name, row in legacy_observations("windows", "crt-term-").items():
+            with self.subTest(pe=name):
+                self.compile(FIXTURES / name)
+                result = self.program()
+                code, stdout, stderr = captured_streams(row)
+                self.assertEqual((result.returncode, result.stdout, result.stderr),
+                                 (code & 255, stdout, stderr))
+
     def test_termination_callback_guards(self):
         for variant, marker, detail in (
                 ("wrong-origin", "", "unproven MSVCRT termination callback for registration site"),
@@ -1386,6 +1395,18 @@ class Native(Workspace):
         self.assertEqual(diagnostic["code"], "LIFT_INVALID_CALL_TARGET")
         self.assertEqual(diagnostic["context"]["import_symbol"], "_onexit")
         self.assertIn("termination_target_rva", diagnostic["context"])
+
+    def test_termination_rejects_image_base_callback(self):
+        data = bytearray((FIXTURES / "crt-term-data.exe").read_bytes())
+        root = entry(data)
+        offset = Layout(data).file_offset(root)
+        self.assertEqual(data[offset + 9:offset + 12], bytes.fromhex("488d05"))
+        struct.pack_into("<i", data, offset + 12, -(root + 16))
+        image_base_callback = self.dir / "image-base.exe"
+        image_base_callback.write_bytes(data)
+        diagnostic = self.compile(image_base_callback, success=False)
+        self.assertEqual(diagnostic["code"], "LIFT_INVALID_CALL_TARGET")
+        self.assertIn("PE header", diagnostic["message"])
 
     def test_termination_requires_crt_stream_support(self):
         diagnostic = self.compile(FIXTURES / "crt-term-stdio.exe", success=False)
@@ -1411,18 +1432,16 @@ class Native(Workspace):
         self.assertEqual(output.count("BAA"), 2)
 
     def test_startup_info(self):
-        for variants in ("a", "w", "aw"):
-            with self.subTest(variants=variants):
-                diagnostic = self.compile(image(f"startup-info-{variants}"))
-                imports = {row["name"] for row in diagnostic["context"]["imports"]}
-                self.assertEqual({name for name in imports if name.startswith("GetStartupInfo")},
-                                 {"GetStartupInfo" + v.upper() for v in variants})
-                result = run(self.output)
-                self.assertEqual((result.returncode, result.stdout, result.stderr), (1, "", ""))
-
-        self.compile(image("startup-info-fields"))
-        result = run(self.output)
-        self.assertEqual((result.returncode, result.stdout, result.stderr), (42, "", ""))
+        for name, row in legacy_observations("windows", "executable-startup-info-", "clear").items():
+            with self.subTest(pe=name):
+                diagnostic = self.compile(FIXTURES / name)
+                variants = name.removesuffix(".exe").split("-")[-1]
+                imports = {item["name"] for item in diagnostic["context"]["imports"]}
+                self.assertEqual({symbol for symbol in imports if symbol.startswith("GetStartupInfo")},
+                                 {"GetStartupInfo" + v.upper() for v in ("aw" if variants == "fields" else variants)})
+                result = self.program()
+                self.assertEqual((result.returncode, result.stdout, result.stderr),
+                                 (row["exit_code"], b"", b""))
 
         self.compile(image("startup-info-w-fault"))
         result = run(self.output)

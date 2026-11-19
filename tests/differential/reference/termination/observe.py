@@ -1,13 +1,15 @@
 """Capture the focused, producer-hashed legacy CRT PEs on Windows or pinned Wine."""
 import argparse
+from copy import deepcopy
 import hashlib
 import json
 import os
-from pathlib import Path
+from pathlib import Path, PureWindowsPath
 import platform
 import shutil
 import struct
 import subprocess
+from zipfile import ZipFile
 
 
 def digest(path):
@@ -15,8 +17,11 @@ def digest(path):
 
 
 def startup_fields(data):
+    record_size = 104 + 3 * 8 + 4 + 3 * 260 * 2
+    if len(data) != 4 * record_size:
+        raise ValueError("incomplete before/after A/W records")
     rows = []
-    for offset in range(0, len(data), 1692):
+    for offset in range(0, len(data), record_size):
         info = data[offset:offset + 104]
         handles = struct.unpack_from("<3Q", info, 80)
         original = struct.unpack_from("<3Q", data, offset + 104)
@@ -28,8 +33,6 @@ def startup_fields(data):
                                   for h in handles], last_error=struct.unpack_from("<I", data, offset + 128)[0],
                          text=[data[offset + 132 + n * 520:offset + 132 + (n + 1) * 520]
                                .decode("utf-16le", errors="replace").split("\0", 1)[0] for n in range(3)]))
-    if len(rows) != 4:
-        raise ValueError("incomplete before/after A/W records")
     return rows
 
 
@@ -72,11 +75,48 @@ def observe(pe, work, clear, wine):
     return row
 
 
+def comparable(rows):
+    observations = deepcopy(rows)
+    # Job limits constrain memory, while the exact number of successful allocations
+    # also depends on heap layout. The number of callbacks must equal that count.
+    pressure = observations["crt-observe-pressure-captured"]["registration"]
+    accepted = pressure.pop("accepted")
+    executed = pressure.pop("executed")
+    if not 0 < accepted <= 4_000_000 or accepted != executed:
+        raise ValueError(f"pressure probe accepted {accepted} handlers and ran {executed}")
+    if not pressure["failure"] and accepted != 4_000_000:
+        raise ValueError("pressure probe stopped before allocation failure or its limit")
+
+    for mode in ("clear", "captured"):
+        for row in observations[f"crt-observe-startup-{mode}"]["startup"]:
+            # A runner work directory is part of the process title on these launches.
+            path = PureWindowsPath(row["text"][2])
+            if not path.is_absolute():
+                raise ValueError(f"unexpected startup title {path}")
+            row["text"][2] = path.name
+    return observations
+
+
+def verify(results, reference):
+    with ZipFile(reference) as archive:
+        reviewed = json.loads(archive.read("results.json"))
+    if reviewed["pe_sha256"] != results["pe_sha256"]:
+        raise ValueError("the captured PEs differ from the reviewed reference")
+    expected = comparable(reviewed["observations"])
+    actual = comparable(results["observations"])
+    if set(actual) != set(expected):
+        raise ValueError("incomplete capture inventory")
+    for case, observation in expected.items():
+        if actual[case] != observation:
+            raise ValueError(f"{case} differs from the reviewed reference: {actual[case]!r}")
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("inputs", type=Path)
     parser.add_argument("output", type=Path)
     parser.add_argument("--wine")
+    parser.add_argument("--reference", type=Path, help="reviewed raw capture archive to compare")
     parser.add_argument("--manifest-sha256", required=True)
     args = parser.parse_args()
     manifest = args.inputs / "SHA256SUMS"
@@ -105,6 +145,9 @@ def main():
             results["observations"][key] = observe((args.inputs / name).resolve(), args.output / key,
                                                    mode == "clear", args.wine)
             (args.output / "results.json").write_text(json.dumps(results, indent=2) + "\n")
+
+    if args.reference:
+        verify(results, args.reference)
 
 
 if __name__ == "__main__":

@@ -318,6 +318,10 @@ def hosted_report(raw_needs, current_run, revision, **paths):
     if not matching_inputs:
         errors.append("standalone PE input checksums missing or different across macOS and Wine jobs")
 
+    if outputs["macos-dev"].get("termination_sha256"):
+        capture = needs.get("legacy-windows-capture")
+        jobs["legacy-windows-capture"] = capture.get("result", "missing") if isinstance(capture, dict) else "missing"
+
     # A gate-only rerun can consume the successful differential job's original attempt.
     # Bind its reports to that job output, the current workflow run, and the checked-out revision.
     run_id = outputs["differential"].get("evidence_run_id")

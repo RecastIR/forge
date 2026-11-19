@@ -88,6 +88,16 @@ class CoverageTests(ArtifactSetup):
                     self.assertEqual(report["gate"], "failed")
                     self.assertIn(f"{job}: {outcome}", report["errors"])
 
+    def test_windows_capture_required_when_its_inputs_are_published(self):
+        needs = self.needs()
+        self.assertEqual(self.hosted(needs)["gate"], "passed")
+        needs["macos-dev"]["outputs"]["termination_sha256"] = "a" * 64
+        self.assertEqual(self.hosted(needs)["gate"], "failed")
+        for outcome in ("skipped", "failure", "success"):
+            with self.subTest(outcome=outcome):
+                needs["legacy-windows-capture"] = {"result": outcome, "outputs": {}}
+                self.assertEqual(self.hosted(needs)["gate"], "passed" if outcome == "success" else "failed")
+
     def test_green_jobs_require_complete_stage_outputs(self):
         valid = self.needs()
         for job, required in coverage.JOB_STAGES.items():

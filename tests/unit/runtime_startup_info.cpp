@@ -137,13 +137,15 @@ namespace {
         for (const auto address : {base, FORGE_RT_ENTRY_RSP - 104}) {
             call.write(address, sentinel);
 
-            for (size_t i = 0; i < 2; ++i) {
+            for (size_t attempt = 0; attempt < 2; ++attempt) {
                 REQUIRE(call.query(ansi, address) == FORGE_RT_OK);
                 auto bytes = call.read<104>(address);
-                for (size_t offset : {8, 16, 24}) {
+                const std::array<std::string_view, 3> strings{"", "winsta0\\default", title};
+                for (size_t i = 0; i < strings.size(); ++i) {
+                    const auto offset = 8 + 8 * i;
                     const auto pointer = field<8>(bytes, offset);
-                    checkText(call, pointer, ansi, offset == 24 ? title : std::string_view{});
-                    std::fill_n(bytes.begin() + offset, 8, 0);
+                    checkText(call, pointer, ansi, strings[i]);
+                    std::ranges::fill(std::span(bytes).subspan(offset, 8), 0);
                 }
                 REQUIRE(bytes == expected);
             }

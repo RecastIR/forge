@@ -15,12 +15,13 @@ namespace forge::runtime {
         };
 
         static constexpr size_t limit = 4096;
-
         static constexpr unsigned maxDepth = 16;
         unsigned depth = 0;
         size_t dispatched = 0;
         bool completed = false;
         std::vector<Handler> entries;
+
+        bool append(Handler handler) noexcept;
     };
 
     // Owned at a stable address by the managed occurrence. Its core reservations borrow

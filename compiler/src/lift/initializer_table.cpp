@@ -146,6 +146,31 @@ namespace forge::x86 {
             }
             return relocatedPointerRva(call, image.module(), init, slot, value);
         }
+
+        uint32_t terminationAddress(const RangeProof &proof, const Step &step) {
+            const auto slot = proof.operands.ripRva(step, 1);
+            if (!slot || !std::in_range<uint32_t>(*slot)) {
+                proof.call.reject(FailureCode::UnsupportedControlFlow,
+                                  "unproven MSVCRT termination callback address at " +
+                                      hex(step.rva));
+            }
+
+            const auto rva = static_cast<uint32_t>(*slot);
+            const bool readsPointer = step.opcode == "MOV64rm";
+            proof.operands.decodeAddress(step, 1, readsPointer);
+            std::optional<uint32_t> target = rva;
+            if (readsPointer) {
+                proof.init.validateRelocations({rva, uint64_t(rva) + 8});
+                target = initialTarget(proof.call, rva, proof.image, proof.init);
+            }
+
+            if (target && *target == 0) {
+                proof.call.reject(FailureCode::InvalidCallTarget,
+                                  "termination callback points to the PE header", 0);
+            }
+
+            return target.value_or(0);
+        }
     } // namespace
 
     std::optional<uint32_t>
@@ -167,9 +192,12 @@ namespace forge::x86 {
             ArrayRef(block.steps).take_front(static_cast<size_t>(&call - block.steps.data()));
         unsigned budget = 256;
         for (const auto &step : llvm::reverse(prefix)) {
-            if (!budget--) {
-                break;
+            if (!budget) {
+                call.reject(FailureCode::UnsupportedControlFlow,
+                            "termination callback proof exceeds its instruction budget");
             }
+
+            --budget;
 
             if (!clobbersRegister(step, reg, view, instructions, registers)) {
                 continue;
@@ -190,23 +218,7 @@ namespace forge::x86 {
 
             if ((step.opcode == "LEA64r" || step.opcode == "MOV64rm") && dest.isReg() &&
                 dest.getReg() == reg) {
-                const auto slot = proof.operands.ripRva(step, 1);
-                if (slot && std::in_range<uint32_t>(*slot)) {
-                    const auto rva = static_cast<uint32_t>(*slot);
-                    proof.operands.decodeAddress(step, 1, step.opcode == "MOV64rm");
-                    std::optional<uint32_t> target = rva;
-                    if (step.opcode == "MOV64rm") {
-                        init.validateRelocations({rva, uint64_t(rva) + 8});
-                        target = initialTarget(call, rva, image, init);
-                    }
-
-                    if (target && *target == 0) {
-                        call.reject(FailureCode::InvalidCallTarget,
-                                    "termination callback points to the PE header", 0);
-                    }
-
-                    return target.value_or(0);
-                }
+                return terminationAddress(proof, step);
             }
 
             if (step.opcode == "XOR32rr" &&
@@ -219,7 +231,7 @@ namespace forge::x86 {
                         "unproven MSVCRT termination callback at definition " + hex(step.rva));
         }
 
-        if (prefix.size() <= 256 && block.steps.front().rva == function.entry && view.index == 1 &&
+        if (block.steps.front().rva == function.entry && view.index == 1 &&
             !proof.blockPredecessors().contains(function.entry)) {
             return {};
         }
