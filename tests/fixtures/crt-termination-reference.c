@@ -67,6 +67,12 @@ int entry(void) {
             record(&info, sizeof(info));
             record(original, sizeof(original));
             record(&error, sizeof(error));
+            DWORD firstUnit = 0xffffffff;
+            if (info.words[1]) {
+                firstUnit = wide ? *(const unsigned short *)info.words[1]
+                                 : *(const unsigned char *)info.words[1];
+            }
+            record(&firstUnit, sizeof(firstUnit));
         }
     }
     return 42;
