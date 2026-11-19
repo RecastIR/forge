@@ -60,18 +60,20 @@ class NativeDifferentialTests(unittest.TestCase):
                 context = record["context"]
                 self.assertIs(context["entry_recovered"], True)
                 self.assertIs(context["recovery_complete"], False)
-                call_bytes = "e89f120000" if config == "debug" else "e86f120000"
-                thunk = "0x26b0" if config == "debug" else "0x2680"
+                call_bytes = "e891120000" if config == "debug" else "e861120000"
+                thunk = "0x26c0" if config == "debug" else "0x2690"
                 self.assertEqual((context["entry_rva"], context["function_rva"], context["instruction_rva"],
                                   context["opcode"], context["bytes"]),
-                                 ("0x14d0", "0x1180", "0x140c", "CALL64pcrel32", call_bytes))
+                                 ("0x14d0", "0x1180", "0x142a", "CALL64pcrel32", call_bytes))
                 self.assertEqual((context["import_dll"], context["import_symbol"], context["iat_slot_rva"]),
-                                 ("msvcrt.dll", "_amsg_exit", "0x8208"))
+                                 ("msvcrt.dll", "_initterm", "0x8228"))
                 unresolved = context["unresolved_calls"]
-                self.assertIn({"caller_rva": "0x1180", "instruction_rva": "0x140c", "target_rva": thunk},
+                self.assertIn({"caller_rva": "0x1180", "instruction_rva": "0x142a", "target_rva": thunk},
                               unresolved)
-                for symbol, site in (("Sleep", "0x11e6"), ("SetUnhandledExceptionFilter", "0x1258")):
-                    self.assertIn({"dll": "kernel32.dll", "name": symbol}, context["imports"])
+                for dll, symbol, site in (("kernel32.dll", "Sleep", "0x11e6"),
+                                          ("kernel32.dll", "SetUnhandledExceptionFilter", "0x1258"),
+                                          ("msvcrt.dll", "_amsg_exit", "0x140c")):
+                    self.assertIn({"dll": dll, "name": symbol}, context["imports"])
                     self.assertNotIn(site, [c["instruction_rva"] for c in unresolved])
                 pe = diff.BINARIES / config / manifest.case["binary"]
                 data = pe.read_bytes()
@@ -93,6 +95,10 @@ class NativeDifferentialTests(unittest.TestCase):
                 self.assertEqual(tls["callback_vas"], callbacks)
                 self.assertIn("unsupported", tls["limitation"])
                 directories = context["load_imports"]
+                crt = next(d for d in directories if d["dll"].lower() == "msvcrt.dll")
+                fatal = next(s for s in crt["symbols"] if s["name"] == "_amsg_exit")
+                self.assertEqual(fatal["iat_slot_rva"], "0x8208")
+                self.assertIs(fatal["catalogued_service"], True)
                 self.assertCountEqual([d["dll"].lower() for d in directories], imports)
                 for directory in directories:
                     self.assertIs(directory["delayed"], False)

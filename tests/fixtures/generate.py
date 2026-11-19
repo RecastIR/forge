@@ -22,7 +22,7 @@ def generate(output, mc, link, dlltool, clang):
                          "GetStdHandle", "WriteFile", "ExitProcess", "GetCommandLineA", "GetCommandLineW",
                          "SetUnhandledExceptionFilter", "__C_specific_handler"],
         "vcruntime140.dll": ["Runtime"],
-        "msvcrt.dll": ["__getmainargs", "calloc", "free", "strlen", "__C_specific_handler", "_fmode=entry DATA",
+        "msvcrt.dll": ["__getmainargs", "_amsg_exit", "calloc", "free", "strlen", "__C_specific_handler", "_fmode=entry DATA",
                        "_commode=entry DATA", "__initenv=entry DATA", "_acmdln=entry DATA"],
         contract: ["Contract"],
     }
@@ -93,6 +93,15 @@ def generate(output, mc, link, dlltool, clang):
               [("msvcrt.dll", name) for name in ("__getmainargs", "calloc", "free", "strlen",
                                                  "_fmode", "_commode", "__initenv", "_acmdln")] +
               [("KERNEL32.dll", "GetCommandLineA")])
+        fatal = (sources / "crt-amsg-exit.s").read_text()
+        for number in (31, 8, -1, -2147483648):
+            image(f"crt-amsg-exit-{number}.exe", f"error_number = {number}\n" + fatal,
+                  link_flags=["msvcrt.dll.lib"])
+        image("crt-amsg-exit-unused.exe", fatal, link_flags=["msvcrt.dll.lib"])
+        marker = "observe_continuation = 1\n" + fatal
+        for variant, setup in (("fatal", "error_number = 31\n"), ("control", "")):
+            image(f"crt-amsg-marker-{variant}.exe", setup + marker,
+                  link_flags=["msvcrt.dll.lib", "KERNEL32.dll.lib"])
         # Retain the compiler's instructions after the call to a non-returning guest helper.
         run(clang, "--target=x86_64-pc-windows-msvc", "-O2", "-fno-stack-protector", "-c",
             sources / "executable-noreturn.c", "-o", "noreturn.obj")

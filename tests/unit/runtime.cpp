@@ -13,7 +13,7 @@
 
 void testRuntimeMemory();
 void testRuntimeProcess();
-void testRuntimeConsoleProcess();
+void testRuntimeConsoleProcess(const char *fatalObservations);
 void testRuntimeWrite();
 
 namespace {
@@ -191,7 +191,12 @@ namespace {
     }
 } // namespace
 
-int main() {
+int main(int argc, char **argv) {
+    if (argc > 2) {
+        std::fputs("Usage: runtime_contract [windows-fatal-observations]\n", stderr);
+        return 1;
+    }
+
     forge_rt_instance *runtime = nullptr;
 
     if (forge_rt_create(FORGE_RT_ABI_VERSION, &runtime) != FORGE_RT_OK) {
@@ -202,7 +207,7 @@ int main() {
     bool passed = sleepContract(runtime);
     testRuntimeMemory();
     testRuntimeProcess();
-    testRuntimeConsoleProcess();
+    testRuntimeConsoleProcess(argv[1]);
     testRuntimeWrite();
 
     for (unsigned trial = 0; trial < 64 && passed; ++trial) {

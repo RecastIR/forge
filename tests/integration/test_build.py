@@ -92,6 +92,7 @@ class BuildConfig(BuildCase):
 
         if sys.platform == "darwin":
             self.invoke("/bin/sh", "-c", 'exec "$1" 0<&-', "sh", build / "tests/runtime_contract", env=env)
+            self.invoke("/bin/sh", "-c", 'exec "$1" 2>&-', "sh", build / "tests/runtime_contract", env=env)
 
         if sys.platform == "darwin" and platform.machine() == "arm64":
             # Supply just the two optional tools while LLVM package discovery remains disabled.

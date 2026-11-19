@@ -169,7 +169,8 @@ namespace {
 
             const auto adapter = service->nativeSymbol;
             if (adapter == win64::getStdHandle.nativeSymbol ||
-                adapter == win64::writeFile.nativeSymbol) {
+                adapter == win64::writeFile.nativeSymbol ||
+                adapter == win64::crtAmsgExit.nativeSymbol) {
                 standardHandles = true;
             } else if (adapter == win64::getCommandLineA.nativeSymbol ||
                        adapter == win64::getCommandLineW.nativeSymbol) {

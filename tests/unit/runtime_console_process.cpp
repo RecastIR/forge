@@ -1,4 +1,5 @@
 #include "../../runtime/src/platform/darwin/io.h"
+#include <forge/msvcrt_process.h>
 #include <forge/process.h>
 
 #include <cerrno>
@@ -7,10 +8,14 @@
 #include <cstdlib>
 #include <cstring>
 #include <fcntl.h>
+#include <filesystem>
+#include <fstream>
 #include <iterator>
 #include <memory>
 #include <optional>
 #include <pthread.h>
+#include <string>
+#include <string_view>
 #ifdef __APPLE__
 #include <semaphore.h>
 #endif
@@ -35,6 +40,7 @@ namespace {
     constexpr forge_rt_region_template region{source, 1, 0, 0, FORGE_RT_READ};
     constexpr forge_rt_import imports[]{{"kernel32.dll", "GetStdHandle"},
                                         {"kernel32.dll", "WriteFile"}};
+    constexpr forge_rt_import fatalImport{"msvcrt.dll", "_amsg_exit"};
 
     uint64_t handle(const forge_rt_execution &execution, uint32_t selector) {
         uint64_t value = 0;
@@ -176,6 +182,189 @@ namespace {
     }
 
     void handleOutputSignal(int) {}
+
+    void fatalEntry(forge_rt_execution *execution) {
+        auto *instance = execution->instance;
+        const auto thread = execution->thread;
+        REQUIRE(lastError(*execution) == 0);
+        REQUIRE(forge_rt_set_last_error(instance, thread, initialError) == FORGE_RT_OK);
+        REQUIRE(forge_rt_msvcrt_amsg_exit(instance, 0, 31) == FORGE_RT_INVALID_THREAD);
+        REQUIRE(forge_rt_msvcrt_amsg_exit(instance, thread, static_cast<int32_t>(execution->rcx)) ==
+                FORGE_RT_OK);
+        REQUIRE(forge_rt_msvcrt_amsg_exit(instance, thread, 31) == FORGE_RT_INVALID_STATE);
+        REQUIRE(lastError(*execution) == initialError);
+    }
+
+    constexpr forge_rt_artifact fatalArtifact{FORGE_RT_ARTIFACT_VERSION,
+                                              source,
+                                              16,
+                                              8,
+                                              8,
+                                              nullptr,
+                                              0,
+                                              nullptr,
+                                              0,
+                                              &fatalImport,
+                                              1,
+                                              fatalEntry};
+
+    Process registeredWithStderr(const forge_rt_artifact &artifact, int descriptor) {
+        const int saved = fcntl(STDERR_FILENO, F_DUPFD_CLOEXEC, 3);
+        REQUIRE(saved >= 0 || errno == EBADF);
+
+        if (descriptor >= 0) {
+            REQUIRE(dup2(descriptor, STDERR_FILENO) == STDERR_FILENO);
+        } else if (saved >= 0) {
+            REQUIRE(close(STDERR_FILENO) == 0);
+        }
+
+        auto process = registered(artifact);
+
+        if (saved >= 0) {
+            REQUIRE(dup2(saved, STDERR_FILENO) == STDERR_FILENO && close(saved) == 0);
+        } else if (descriptor >= 0) {
+            REQUIRE(close(STDERR_FILENO) == 0);
+        }
+
+        return process;
+    }
+
+    void expectFatal(const Process &process, int32_t errorNumber) {
+        const auto result = run(process, static_cast<uint32_t>(errorNumber));
+        REQUIRE(result.kind == FORGE_RT_EXIT_PROCESS && result.status == FORGE_RT_OK &&
+                result.value == 255);
+        forge_rt_process_state state = 0;
+        REQUIRE(forge_rt_process_get_state(process.get(), &state) == FORGE_RT_OK &&
+                state == FORGE_RT_PROCESS_EXITED);
+    }
+
+    void checkFatalOutputFailures() {
+        REQUIRE(forge_rt_msvcrt_amsg_exit(nullptr, 0, 31) == FORGE_RT_INVALID_ARGUMENT);
+        expectFatal(registeredWithStderr(fatalArtifact, -1), 31);
+        int ends[2];
+        REQUIRE(pipe(ends) == 0);
+        expectFatal(registeredWithStderr(fatalArtifact, ends[0]), 31);
+
+        // A readable pipe would accept the message. Without signal safety the service must
+        // leave it empty, release its duplicate on exit, and preserve the host disposition.
+        struct sigaction policy{}, previous{}, observed{};
+        REQUIRE(sigemptyset(&policy.sa_mask) == 0);
+        policy.sa_handler = SIG_DFL;
+        REQUIRE(sigaction(SIGPIPE, &policy, &previous) == 0);
+        auto unsafe = registeredWithStderr(fatalArtifact, ends[1]);
+        REQUIRE(close(ends[1]) == 0);
+        expectFatal(unsafe, 31);
+        char byte;
+        REQUIRE(fcntl(ends[0], F_SETFL, O_NONBLOCK) == 0);
+        REQUIRE(read(ends[0], &byte, 1) == 0 && close(ends[0]) == 0);
+        REQUIRE(sigaction(SIGPIPE, nullptr, &observed) == 0 && observed.sa_handler == SIG_DFL);
+
+        // A safely reported EPIPE also leaves the guest exit code intact.
+        policy.sa_handler = SIG_IGN;
+        REQUIRE(sigaction(SIGPIPE, &policy, nullptr) == 0);
+        REQUIRE(pipe(ends) == 0 && close(ends[0]) == 0);
+        expectFatal(registeredWithStderr(fatalArtifact, ends[1]), 31);
+        REQUIRE(close(ends[1]) == 0);
+        REQUIRE(sigaction(SIGPIPE, &previous, &observed) == 0 && observed.sa_handler == SIG_IGN);
+    }
+
+    bool fileContentsEqual(FILE *file, std::string_view expected) {
+        REQUIRE(std::fseek(file, 0, SEEK_SET) == 0);
+
+        for (const char byte : expected) {
+            const int observed = std::fgetc(file);
+            if (observed == EOF || observed != static_cast<unsigned char>(byte)) {
+                return false;
+            }
+        }
+
+        return std::fgetc(file) == EOF && std::feof(file) && !std::ferror(file);
+    }
+
+    std::string readObservation(const std::filesystem::path &path) {
+        std::ifstream input(path, std::ios::binary | std::ios::ate);
+        const std::streamoff size = input.tellg();
+
+        if (size >= 0) {
+            std::string bytes(static_cast<size_t>(size), '\0');
+            if (input.seekg(0) && input.read(bytes.data(), size)) {
+                return bytes;
+            }
+        }
+
+        std::fprintf(stderr, "Cannot read Windows observation %s\n", path.c_str());
+        std::abort();
+    }
+
+    void checkFatalObservation(const std::filesystem::path &observations, int32_t errorNumber) {
+        const std::string prefix = errorNumber < 0 ? "" : "sweep-";
+        const auto directory = observations / (prefix + std::to_string(errorNumber) + "-pipe");
+        std::unique_ptr<FILE, decltype(&std::fclose)> out(std::tmpfile(), std::fclose);
+        std::unique_ptr<FILE, decltype(&std::fclose)> err(std::tmpfile(), std::fclose);
+        REQUIRE(out && err);
+        const int saved = fcntl(STDOUT_FILENO, F_DUPFD_CLOEXEC, 3);
+        REQUIRE(saved >= 0 && dup2(fileno(out.get()), STDOUT_FILENO) == STDOUT_FILENO);
+        auto process = registeredWithStderr(fatalArtifact, fileno(err.get()));
+        const auto result = run(process, static_cast<uint32_t>(errorNumber));
+        REQUIRE(dup2(saved, STDOUT_FILENO) == STDOUT_FILENO && close(saved) == 0);
+
+        const auto compare = [&](const char *field, bool matches) {
+            if (!matches) {
+                std::fprintf(stderr, "_amsg_exit(%d) %s differs from Windows capture %s\n",
+                             errorNumber, field, directory.c_str());
+                std::abort();
+            }
+        };
+        const auto exit = "exit=" + std::to_string(result.value) + "\n";
+        compare("exit", result.kind == FORGE_RT_EXIT_PROCESS && result.status == FORGE_RT_OK &&
+                            result.fault == 0 && result.memory.address == 0 &&
+                            result.memory.access == 0 && result.memory.reason == 0 &&
+                            exit == readObservation(directory / "observation.txt"));
+        compare("stdout", fileContentsEqual(out.get(), readObservation(directory / "stdout.bin")));
+        compare("stderr", fileContentsEqual(err.get(), readObservation(directory / "stderr.bin")));
+    }
+
+    void checkFatalProcessIsolation(int32_t errorNumber, std::string_view message) {
+        std::unique_ptr<FILE, decltype(&std::fclose)> firstFile(std::tmpfile(), std::fclose);
+        std::unique_ptr<FILE, decltype(&std::fclose)> secondFile(std::tmpfile(), std::fclose);
+        REQUIRE(firstFile && secondFile);
+        auto ordinary = fatalArtifact;
+        ordinary.entry = [](forge_rt_execution *execution) {
+            REQUIRE(lastError(*execution) == 0);
+            execution->result = {FORGE_RT_RETURNED, FORGE_RT_OK, 42, {}, 0};
+        };
+
+        auto first = registeredWithStderr(fatalArtifact, fileno(firstFile.get()));
+        auto second = registeredWithStderr(ordinary, fileno(secondFile.get()));
+        expectFatal(first, errorNumber);
+        const auto result = run(second);
+        REQUIRE(result.kind == FORGE_RT_RETURNED && result.status == FORGE_RT_OK &&
+                result.value == 42);
+        REQUIRE(fileContentsEqual(firstFile.get(), message));
+        REQUIRE(fileContentsEqual(secondFile.get(), ""));
+        REQUIRE(write(fileno(secondFile.get()), "H", 1) == 1);
+    }
+
+    void checkFatalPartialWrite(int32_t errorNumber, std::string_view message) {
+        constexpr size_t prefixLength = 3;
+        REQUIRE(message.size() > prefixLength);
+        std::unique_ptr<FILE, decltype(&std::fclose)> file(std::tmpfile(), std::fclose);
+        REQUIRE(file != nullptr);
+        auto process = registeredWithStderr(fatalArtifact, fileno(file.get()));
+
+        struct rlimit previousLimit{};
+        REQUIRE(getrlimit(RLIMIT_FSIZE, &previousLimit) == 0);
+        struct sigaction policy{}, previousAction{};
+        REQUIRE(sigemptyset(&policy.sa_mask) == 0);
+        policy.sa_handler = SIG_IGN;
+        REQUIRE(sigaction(SIGXFSZ, &policy, &previousAction) == 0);
+        const struct rlimit limit{prefixLength, previousLimit.rlim_max};
+        REQUIRE(setrlimit(RLIMIT_FSIZE, &limit) == 0);
+        expectFatal(process, errorNumber);
+        REQUIRE(setrlimit(RLIMIT_FSIZE, &previousLimit) == 0);
+        REQUIRE(sigaction(SIGXFSZ, &previousAction, nullptr) == 0);
+        REQUIRE(fileContentsEqual(file.get(), message.substr(0, prefixLength)));
+    }
 
     constexpr forge_rt_process_result completions[] = {
         {FORGE_RT_RETURNED, FORGE_RT_OK, 17, {}, 0},
@@ -333,6 +522,7 @@ namespace {
     }
 
     void expectMissingConsole(forge_rt_instance *instance, forge_rt_thread_token thread) {
+        REQUIRE(forge_rt_msvcrt_amsg_exit(instance, thread, 31) == FORGE_RT_INVALID_STATE);
         uint64_t bits = 0xabcd;
         REQUIRE(forge_rt_get_std_handle(instance, thread, stdOutput, &bits) ==
                 FORGE_RT_INVALID_STATE);
@@ -357,12 +547,13 @@ namespace {
             forge_rt_invocation_token token = 0;
             REQUIRE(forge_rt_current_invocation(execution->instance, execution->thread, &token) ==
                     FORGE_RT_OK);
-            uint64_t addresses[2]{};
+            uint64_t addresses[3]{};
             forge_rt_memory_fault fault{};
             REQUIRE(forge_rt_read_guest(execution->instance, execution->thread, token, source,
                                         sizeof(addresses), addresses, sizeof(addresses),
                                         &fault) == FORGE_RT_OK);
-            REQUIRE(addresses[0] && addresses[1] && addresses[0] != addresses[1]);
+            REQUIRE(addresses[0] && addresses[1] && addresses[2] && addresses[0] != addresses[1] &&
+                    addresses[0] != addresses[2] && addresses[1] != addresses[2]);
 
             for (const auto address : addresses) {
                 REQUIRE(forge_rt_validate_guest(execution->instance, execution->thread, token,
@@ -373,11 +564,12 @@ namespace {
 
             runWithoutConsole(execution);
         };
-        const forge_rt_backing storage{16, nullptr, nullptr, 0};
-        const forge_rt_region_template slots{source, 16, 0, 0, FORGE_RT_READ};
-        const forge_rt_function_import functions[]{{0, imports[0]}, {8, imports[1]}};
+        const forge_rt_backing storage{24, nullptr, nullptr, 0};
+        const forge_rt_region_template slots{source, 24, 0, 0, FORGE_RT_READ};
+        const forge_rt_function_import functions[]{
+            {0, imports[0]}, {8, imports[1]}, {16, fatalImport}};
         const forge_rt_function_import_artifact descriptor{
-            {{{FORGE_RT_FUNCTION_IMPORT_ARTIFACT_VERSION, source, 32, 16, 16, &storage, 1, &slots,
+            {{{FORGE_RT_FUNCTION_IMPORT_ARTIFACT_VERSION, source, 32, 24, 24, &storage, 1, &slots,
                1, nullptr, 0, checkSlots},
               "console.exe"},
              nullptr,
@@ -433,8 +625,8 @@ namespace {
         REQUIRE(forge_rt_leave(instance, thread, invocation) == FORGE_RT_OK);
         REQUIRE(forge_rt_destroy(instance) == FORGE_RT_OK);
 
-        constexpr forge_rt_import console[]{{"KeRneL32.DLL", "WriteFile"},
-                                            {"KERNEL32.dll", "GetStdHandle"}};
+        constexpr forge_rt_import console[]{
+            {"KeRneL32.DLL", "WriteFile"}, {"KERNEL32.dll", "GetStdHandle"}, fatalImport};
         artifact = consoleArtifact(finishCapture);
         artifact.importCount = 1;
         forge_rt_process *raw = nullptr;
@@ -597,7 +789,23 @@ namespace {
     }
 } // namespace
 
-void testRuntimeConsoleProcess() {
+void testRuntimeConsoleProcess(const char *fatalObservations) {
+    constexpr std::string_view fatal31 =
+        "\r\nruntime error R6031\r\n- Attempt to initialize the CRT more than once.\n"
+        "This indicates a bug in your application.\r\n";
+    checkFatalProcessIsolation(31, fatal31);
+    if (fatalObservations) {
+        for (int32_t number = 0; number <= 256; ++number) {
+            checkFatalObservation(fatalObservations, number);
+        }
+
+        for (const int32_t number : {32767, INT32_MAX, -1, INT32_MIN}) {
+            checkFatalObservation(fatalObservations, number);
+        }
+    }
+
+    checkFatalPartialWrite(31, fatal31);
+    checkFatalOutputFailures();
     checkRedirection();
     checkRegistrationRetry();
     checkCaptureCleanup(false);

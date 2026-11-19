@@ -27,6 +27,11 @@ forge_rt_status forge_rt_msvcrt_getmainargs(forge_rt_instance *instance,
                                             int32_t expandWildcards, uint64_t startupInfo,
                                             int32_t *outResult,
                                             forge_rt_memory_fault *fault) FORGE_CRT_NOEXCEPT;
+
+/* Attempt the fatal console diagnostic on the process's captured stderr, then
+ * publish guest exit code 255 for the active managed invocation. */
+forge_rt_status forge_rt_msvcrt_amsg_exit(forge_rt_instance *instance, forge_rt_thread_token thread,
+                                          int32_t errorNumber) FORGE_CRT_NOEXCEPT;
 #ifdef __cplusplus
 }
 #endif

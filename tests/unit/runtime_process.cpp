@@ -188,6 +188,8 @@ namespace {
                 previous == UINT64_MAX);
         REQUIRE(forge_rt_exit_process(probe.instance, probe.thread, 17) ==
                 FORGE_RT_INVALID_INVOCATION);
+        REQUIRE(forge_rt_msvcrt_amsg_exit(probe.instance, probe.thread, 31) ==
+                FORGE_RT_INVALID_INVOCATION);
         REQUIRE(forge_rt_sleep(probe.instance, probe.thread, UINT32_MAX) ==
                 FORGE_RT_INVALID_INVOCATION);
         REQUIRE(forge_rt_read_guest(probe.instance, probe.thread, probe.invocation, base, 1,

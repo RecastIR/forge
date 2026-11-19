@@ -1,6 +1,13 @@
 console-binary_stderr.exe
 console-binary_stdout.exe
 console-nested_exit.exe
+crt-amsg-exit--1.exe
+crt-amsg-exit--2147483648.exe
+crt-amsg-exit-31.exe
+crt-amsg-exit-8.exe
+crt-amsg-exit-unused.exe
+crt-amsg-marker-control.exe
+crt-amsg-marker-fatal.exe
 crt-argument-heap.exe
 executable-headers.exe
 executable-import-register.exe

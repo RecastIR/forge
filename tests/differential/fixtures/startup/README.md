@@ -65,11 +65,36 @@ Argument duplication exposes a later boundary. The compiler accepts `strlen` on 
 
 ## Compatibility boundary
 
-For the primary PE, Forge recognizes 14 of 36 load-time symbols. These are KERNEL32 `GetLastError`, `SetUnhandledExceptionFilter` and `Sleep`, the seven MSVCRT functions `__getmainargs`, `calloc`, `free`, `malloc`, `memcpy`, `strlen` and `strncmp`, and the four MSVCRT data exports. Nine KERNEL32 symbols and thirteen MSVCRT symbols still lack bindings. The argument fixture’s additional `strcmp` import has a binding.
+For the primary PE, Forge recognizes 15 of 36 load-time symbols. These are KERNEL32 `GetLastError`, `SetUnhandledExceptionFilter` and `Sleep`, the eight MSVCRT functions `__getmainargs`, `_amsg_exit`, `calloc`, `free`, `malloc`, `memcpy`, `strlen` and `strncmp`, and the four MSVCRT data exports. Nine KERNEL32 symbols and twelve MSVCRT symbols still lack bindings. The argument fixture’s additional `strcmp` import has a binding.
 
-All eight Debug and eight Release cases matched the pinned Wine expectations. On ARM64 macOS, every comparison then reported `LIFT_UNSUPPORTED_CONTROL_FLOW` at RVA `0x140c` in `__tmainCRTStartup`. The direct call reaches a linker thunk for **`msvcrt.dll!_amsg_exit`**. In the primary PE the thunk is at `0x26b0` in Debug and `0x2680` in Release, both jumping through IAT slot `0x8208`. A branch on CRT initialization state reaches `mov ecx, 31` at `0x1407`. Recovery requires a binding for this error path. All 16 reports record native build and execution as `not_run`.
+In `__tmainCRTStartup`, the startup conflict branch loads error 31 at `0x1407`. Forge recovers the terminating call at `0x140c` to **`msvcrt.dll!_amsg_exit`**. In the primary PE the thunk is at `0x26b0` in Debug and `0x2680` in Release, both jumping through IAT slot `0x8208`. Separate focused PEs execute `_amsg_exit(31)` through the same import-thunk shape and exercise an unused import. [Original Windows, Wine and ARM64 observations](amsg-exit/) · [Lifted tests](../../../integration/test_executable.py)
 
-The missing behavior belongs to **Windows compatibility (MSVCRT)**. For a console application, `_amsg_exit(int)` reports the specified CRT error to stderr and terminates the process. The next focused task is to capture the legacy MSVCRT reference's bytes and exit status for error 31 and implement that terminal service. [Microsoft CRT contract](https://learn.microsoft.com/en-us/cpp/c-runtime-library/reference/amsg-exit)
+The first new rejection in the primary PE is **`msvcrt.dll!_initterm`**, a direct call at RVA `0x142a` in `__tmainCRTStartup` through IAT slot `0x8228`. Its thunk is at `0x26c0` in Debug and `0x2690` in Release. RCX and RDX receive the relocated `__xc_a` and `__xc_z` addresses. The Debug table starts at `0x9000` and ends at `0x9010`. Its first entry is null and its second points to guest `pre_cpp_init` at `0x1130`.
+
+The next task belongs to **MSVCRT compatibility**, with compiler/runtime support for calling a lifted guest initializer. Start with a PE that imports `_initterm` and passes a bounded table containing two lifted functions and a null entry. Compare callback order and return to the guest caller at both image bases. The service needs checked reads of guest pointers and a validated route into guest code. [Microsoft initializer-table contract](https://learn.microsoft.com/en-us/cpp/c-runtime-library/reference/initterm-initterm-e) · [Recovery regression](../../test_native_differential.py)
+
+### Startup comparison results
+
+Each original PE matched its pinned Wine expectation. All 16 lifts reported `LIFT_UNSUPPORTED_CONTROL_FLOW` at RVA `0x142a` on the direct call to `msvcrt.dll!_initterm`. The table gives the instruction bytes and IAT slot from each compiler diagnostic. Native exit codes and byte streams are unavailable because lifting stopped before Mach-O generation. The comparator exited 1.
+
+| Config | Startup case | Wine exit | Wine stdout | Wine stderr | Call bytes at 0x142a | IAT RVA | Mach-O | Native run | Comparison |
+| --- | --- | ---: | --- | --- | --- | --- | --- | --- | --- |
+| Debug | argc | 42 | `""` | `""` | `e891120000` | `0x8228` | None | Not run | Blocked |
+| Debug | argc_none | 1 | `""` | `""` | `e891120000` | `0x8228` | None | Not run | Blocked |
+| Debug | argv | 42 | `""` | `""` | `e801130000` | `0x8230` | None | Not run | Blocked |
+| Debug | argv_edges | 42 | `""` | `""` | `e8b1130000` | `0x8230` | None | Not run | Blocked |
+| Debug | cleanup | 42 | `"IMBA"` | `""` | `e881130000` | `0x8258` | None | Not run | Blocked |
+| Debug | globals | 42 | `""` | `""` | `e8b1120000` | `0x8228` | None | Not run | Blocked |
+| Debug | puts | 0 | `"Hello from C!\r\n"` | `""` | `e891120000` | `0x8230` | None | Not run | Blocked |
+| Debug | return | 42 | `""` | `""` | `e881120000` | `0x8228` | None | Not run | Blocked |
+| Release | argc | 42 | `""` | `""` | `e861120000` | `0x8228` | None | Not run | Blocked |
+| Release | argc_none | 1 | `""` | `""` | `e861120000` | `0x8228` | None | Not run | Blocked |
+| Release | argv | 42 | `""` | `""` | `e861120000` | `0x8230` | None | Not run | Blocked |
+| Release | argv_edges | 42 | `""` | `""` | `e861120000` | `0x8230` | None | Not run | Blocked |
+| Release | cleanup | 42 | `"IMBA"` | `""` | `e801130000` | `0x8258` | None | Not run | Blocked |
+| Release | globals | 42 | `""` | `""` | `e861120000` | `0x8228` | None | Not run | Blocked |
+| Release | puts | 0 | `"Hello from C!\r\n"` | `""` | `e861120000` | `0x8230` | None | Not run | Blocked |
+| Release | return | 42 | `""` | `""` | `e861120000` | `0x8228` | None | Not run | Blocked |
 
 | Responsibility | Current result for the selected configuration |
 | --- | --- |

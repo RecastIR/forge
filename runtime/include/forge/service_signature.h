@@ -327,6 +327,11 @@ namespace forge::win64 {
             "msvcrt.dll", "__getmainargs", LastError::Preserve,
             FORGE_SERVICE_ADAPTER(forge_rt_msvcrt_getmainargs), Requirement::Process);
 
+    inline constexpr auto crtAmsgExit =
+        bind<Value::Void, Argument{Value::I32}>("msvcrt.dll", "_amsg_exit", LastError::Preserve,
+                                                FORGE_SERVICE_ADAPTER(forge_rt_msvcrt_amsg_exit),
+                                                Requirement::Process, Control::Terminates);
+
     inline constexpr ServiceBinding services[] = {
         crtGetMainArgs,
         crtStrlen,
@@ -347,5 +352,6 @@ namespace forge::win64 {
         getCommandLineW,
         sleep,
         setUnhandledExceptionFilter,
+        crtAmsgExit,
     };
 } // namespace forge::win64

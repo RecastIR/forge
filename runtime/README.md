@@ -12,6 +12,8 @@ Process artifacts can publish read-only function IAT slots containing stable gue
 
 A managed guest can set, replace, or clear its process-wide top-level exception filter and retrieve the previous guest address. A guest fault still terminates execution. [Top-level exception filter registration](../docs/runtime-architecture.md#top-level-exception-filter-registration)
 
+Legacy MSVCRT's `_amsg_exit(int)` reports a fatal CRT error through the process's captured stderr and returns a tagged guest exit with code 255 to the host. The standalone executable exits with the same status. [Fatal CRT diagnostics](../docs/runtime-architecture.md#fatal-crt-diagnostics)
+
 ## Current source organization
 
 The public C ABI and shared C++ contracts live in `include/forge/`. Within `forge_runtime`, managed registration stages one process occurrence that owns both the core image and the Windows compatibility state. Core owns the primary execution context, thread records, reservations, private PE backing and heap blocks. Win32 and MSVCRT own the guest-visible parameters, CRT cells, standard handles, filter and service behavior. The instance lends adapters access to that state during execution. The separate `forge_startup` archive builds only `src/startup.cpp`. [Build definition](CMakeLists.txt) · [Ownership diagram](../docs/runtime-architecture.md#resource-ownership-and-borrowing)

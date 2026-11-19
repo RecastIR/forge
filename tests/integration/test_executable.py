@@ -1,4 +1,5 @@
 """Compile a PE header entry and execute the linked program as its own native process."""
+import hashlib
 import json
 import os
 from pathlib import Path
@@ -9,6 +10,7 @@ import subprocess
 import sys
 import tempfile
 import unittest
+from zipfile import ZipFile
 
 from pe_layout import Layout
 
@@ -25,6 +27,8 @@ FIXTURES = Path(fixture_dir)
 NAMES = ("return", "call", "data", "fault", "last-error")
 GREETING = b"Hello from Windows!\n"
 BINARY = b"A\x00\xff\n"
+AMSG_CASES = ("31", "8", "-1", "-2147483648", "unused")
+AMSG_MARKERS = ("marker-control", "marker-fatal")
 
 
 def run(*args, **options):
@@ -37,6 +41,23 @@ def image(name):
 
 def console_image(name):
     return FIXTURES / ("hello.exe" if name == "hello" else f"console-{name}.exe")
+
+
+def amsg_observations(reference, cases=AMSG_CASES):
+    directory = Path(__file__).resolve().parents[1] / "differential/fixtures/startup/amsg-exit"
+    with ZipFile(directory / f"{reference}-raw.zip") as archive:
+        evidence = json.loads(archive.read("results.json"))
+    observations = {}
+    for case in cases:
+        filename = f"crt-amsg-{case}.exe" if case in AMSG_MARKERS else f"crt-amsg-exit-{case}.exe"
+        if hashlib.sha256((FIXTURES / filename).read_bytes()).hexdigest() != evidence["pe_sha256"][filename]:
+            raise ValueError(f"{filename} differs from the {reference} reference PE")
+        observations[filename] = evidence["cases"][case]
+    return observations
+
+
+def captured_streams(row):
+    return row["exit_code"], bytes.fromhex(row["stdout_hex"]), bytes.fromhex(row["stderr_hex"])
 
 
 def entry(data):
@@ -79,6 +100,16 @@ class Workspace(unittest.TestCase):
 
 
 class Portable(Workspace):
+    def test_crt_fatal_call_lowering(self):
+        for variant, service, skipped in (("fatal", "msvcrt_amsg_exit", "write_file"),
+                                          ("control", "write_file", "msvcrt_amsg_exit")):
+            with self.subTest(variant=variant):
+                ir = run(CONTRACT, FIXTURES / f"crt-amsg-marker-{variant}.exe", check=True).stdout
+                self.assertIn(f"call i32 @forge_rt_{service}(", ir)
+                self.assertNotIn(f"call i32 @forge_rt_{skipped}(", ir)
+                if variant == "fatal":
+                    self.assertIn("declare i32 @forge_rt_msvcrt_amsg_exit(ptr, i64, i32)", ir)
+
     def test_artifact_ir(self):
         for name in (*NAMES, "headers"):
             with self.subTest(name=name):
@@ -610,15 +641,17 @@ class Readiness(Workspace):
         load = data.index(bytes.fromhex("48 8b 4a 08 ff 15"), start)
         self.assertEqual(diagnostic["context"]["instruction_rva"], hex(root + load - start + 4))
 
-    def test_top_level_filter_requires_managed_process(self):
-        pe = image("top-level-filter")
-        result = run(FORGE, "lift", pe, "--rva", hex(entry(pe.read_bytes())), "--checked-memory",
-                     "--signature", "i64(i64,i64)", "--diagnostics-format", "json", "--output", self.output)
-        self.assertEqual(result.returncode, 1)
-        diagnostic = json.loads(result.stderr)
-        self.assertEqual(diagnostic["code"], "LIFT_UNSUPPORTED_CONTROL_FLOW")
-        self.assertEqual(diagnostic["context"]["import_symbol"], "SetUnhandledExceptionFilter")
-        self.assertIn("requires a managed process artifact", diagnostic["message"])
+    def test_managed_services_require_process(self):
+        for pe, name in ((image("top-level-filter"), "SetUnhandledExceptionFilter"),
+                         (FIXTURES / "crt-amsg-exit-31.exe", "_amsg_exit")):
+            with self.subTest(name=name):
+                result = run(FORGE, "lift", pe, "--rva", hex(entry(pe.read_bytes())), "--checked-memory",
+                             "--signature", "i64(i64,i64)", "--diagnostics-format", "json", "--output", self.output)
+                self.assertEqual(result.returncode, 1)
+                diagnostic = json.loads(result.stderr)
+                self.assertEqual(diagnostic["code"], "LIFT_UNSUPPORTED_CONTROL_FLOW")
+                self.assertEqual(diagnostic["context"]["import_symbol"], name)
+                self.assertIn("requires a managed process artifact", diagnostic["message"])
 
     def test_gs_requires_process_and_supported_offset(self):
         pe = image("tib")
@@ -714,6 +747,8 @@ class Reference(Workspace):
             console_image("binary_stderr").name: (len(BINARY), b"", BINARY),
             console_image("nested_exit").name: (0xcafe002a, b"", b""),
         }
+        for filename, observations in amsg_observations("wine", AMSG_CASES + AMSG_MARKERS).items():
+            expected[filename] = captured_streams(observations["pipe"])
         inputs = Path(__file__).resolve().parents[1] / "differential/reference/executable-inputs.txt"
         filenames = inputs.read_text().splitlines()
         self.assertCountEqual(filenames, expected.keys())
@@ -728,6 +763,58 @@ class Console(Workspace):
     def program(self, **streams):
         options = dict(stdout=subprocess.PIPE, stderr=subprocess.PIPE, stdin=subprocess.DEVNULL)
         return subprocess.run([self.output], timeout=10, **(options | streams))
+
+    def test_crt_fatal_exit(self):
+        for filename, observations in amsg_observations("windows").items():
+            pe = FIXTURES / filename
+            data = pe.read_bytes()
+            preferred, = struct.unpack_from("<Q", data, Layout(data).opt + 24)
+            for base in (preferred, preferred + 0x30000000):
+                with self.subTest(pe=filename, base=hex(base)):
+                    if base == preferred:
+                        diagnostic = self.compile(pe)
+                        directory, = diagnostic["context"]["load_imports"]
+                        slot, = directory["symbols"]
+                        self.assertEqual((directory["dll"].lower(), slot["name"], slot["catalogued_service"]),
+                                         ("msvcrt.dll", "_amsg_exit", True))
+                    else:
+                        run(CONTRACT, "--guest-base", hex(base), pe, self.output, OPT, LLC,
+                            "/usr/bin/xcrun", *LINK, check=True)
+                    result = self.program()
+                    self.assertEqual((result.returncode, result.stdout, result.stderr),
+                                     captured_streams(observations["pipe"]))
+
+    def test_crt_fatal_exit_skips_marker(self):
+        for filename, observations in amsg_observations("windows", AMSG_MARKERS).items():
+            with self.subTest(pe=filename):
+                self.compile(FIXTURES / filename)
+                result = self.program()
+                self.assertEqual((result.returncode, result.stdout, result.stderr),
+                                 captured_streams(observations["pipe"]))
+                self.assertEqual(result.stdout, b"M" if filename.endswith("-control.exe") else b"")
+
+    def test_crt_fatal_exit_redirected_handles(self):
+        (filename, observations), = amsg_observations("windows", ("31",)).items()
+        self.compile(FIXTURES / filename)
+        out, err = self.dir / "stdout.bin", self.dir / "stderr.bin"
+        with out.open("wb") as stdout, err.open("wb") as stderr:
+            result = self.program(stdout=stdout, stderr=stderr)
+        self.assertEqual((result.returncode, out.read_bytes(), err.read_bytes()),
+                         captured_streams(observations["file"]))
+
+        def close_outputs():
+            os.close(1)
+            os.close(2)
+
+        result = self.program(preexec_fn=close_outputs)
+        self.assertEqual((result.returncode, result.stdout, result.stderr),
+                         (observations["invalid"]["exit_code"], b"", b""))
+
+        reader, writer = os.pipe()
+        os.close(reader)
+        with os.fdopen(writer, "wb") as broken:
+            result = self.program(stdout=broken, stderr=broken)
+        self.assertEqual(result.returncode, observations["broken-pipe"]["exit_code"])
 
     def test_hello(self):
         diagnostic = self.compile(console_image("hello"))
