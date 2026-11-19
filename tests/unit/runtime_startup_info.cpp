@@ -7,6 +7,7 @@
 #include <cstdio>
 #include <cstdlib>
 #include <memory>
+#include <string_view>
 
 namespace {
     using namespace forge::runtime;
@@ -109,7 +110,20 @@ namespace {
         REQUIRE(call.read<4>(base + 106) == std::array<uint8_t, 4>{});
     }
 
-    void checkDefaultView(Caller &call, bool ansi) {
+    void checkText(Caller &call, uint64_t pointer, bool ansi, std::string_view expected) {
+        REQUIRE(pointer != 0);
+        REQUIRE(ansi || pointer % 2 == 0);
+        for (size_t i = 0; i <= expected.size(); ++i) {
+            const auto byte = i == expected.size() ? uint8_t{0} : static_cast<uint8_t>(expected[i]);
+            if (ansi) {
+                REQUIRE(call.read<1>(pointer + i)[0] == byte);
+            } else {
+                REQUIRE(call.read<2>(pointer + 2 * i) == (std::array<uint8_t, 2>{byte, 0}));
+            }
+        }
+    }
+
+    void checkDefaultView(Caller &call, bool ansi, std::string_view title) {
         Bytes sentinel;
         sentinel.fill(0xbc);
         Bytes expected{};
@@ -128,13 +142,7 @@ namespace {
                 auto bytes = call.read<104>(address);
                 for (size_t offset : {8, 16, 24}) {
                     const auto pointer = field<8>(bytes, offset);
-                    REQUIRE(pointer != 0);
-                    if (ansi) {
-                        REQUIRE(call.read<1>(pointer)[0] == 0);
-                    } else {
-                        REQUIRE(pointer % 2 == 0 &&
-                                call.read<2>(pointer) == std::array<uint8_t, 2>{});
-                    }
+                    checkText(call, pointer, ansi, offset == 24 ? title : std::string_view{});
                     std::fill_n(bytes.begin() + offset, 8, 0);
                 }
                 REQUIRE(bytes == expected);
@@ -149,8 +157,9 @@ namespace {
         REQUIRE(!call.instance->windows->standardHandles);
         REQUIRE(forge_rt_set_last_error(call.instance, call.thread, 73) == FORGE_RT_OK);
 
-        checkDefaultView(call, true);
-        checkDefaultView(call, false);
+        const std::string_view title = execution->rcx ? "C:\\Guest App.exe" : "";
+        checkDefaultView(call, true, title);
+        checkDefaultView(call, false, title);
 
         // W must accept uninitialized stack storage and preserve marks on omitted bytes.
         const auto uninitialized = FORGE_RT_STACK_BASE + 200;
@@ -305,6 +314,16 @@ void testRuntimeStartupInfo() {
     REQUIRE(forge_rt_process_register(raw, &artifact) == FORGE_RT_OK);
     forge_rt_process_result result{};
     REQUIRE(forge_rt_process_run(raw, nullptr, &result) == FORGE_RT_OK &&
+            result.kind == FORGE_RT_RETURNED && result.value == 42);
+
+    forge_rt_process *named = nullptr;
+    REQUIRE(forge_rt_process_create(FORGE_RT_ABI_VERSION, &named) == FORGE_RT_OK);
+    std::unique_ptr<forge_rt_process, decltype(&forge_rt_process_destroy)> namedOwner(
+        named, forge_rt_process_destroy);
+    const forge_rt_process_startup launch{"C:\\Guest App.exe", 0, nullptr, 0, nullptr};
+    const forge_rt_entry_inputs inputs{1, 0};
+    REQUIRE(forge_rt_process_register_with_startup(named, &artifact, &launch) == FORGE_RT_OK);
+    REQUIRE(forge_rt_process_run(named, &inputs, &result) == FORGE_RT_OK &&
             result.kind == FORGE_RT_RETURNED && result.value == 42);
 
     auto seeded = artifact;
