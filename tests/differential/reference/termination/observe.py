@@ -16,7 +16,7 @@ def digest(path):
 
 def startup_fields(data):
     rows = []
-    for offset in range(0, len(data), 136):
+    for offset in range(0, len(data), 1692):
         info = data[offset:offset + 104]
         handles = struct.unpack_from("<3Q", info, 80)
         original = struct.unpack_from("<3Q", data, offset + 104)
@@ -26,7 +26,8 @@ def startup_fields(data):
                          handles=[dict(original=[i for i, value in enumerate(original) if h == value],
                                        sentinel=h == 0xbcbcbcbcbcbcbcbc, invalid=h == 2**64-1, null=h == 0)
                                   for h in handles], last_error=struct.unpack_from("<I", data, offset + 128)[0],
-                         reserved_first_unit=struct.unpack_from("<I", data, offset + 132)[0]))
+                         text=[data[offset + 132 + n * 520:offset + 132 + (n + 1) * 520]
+                               .decode("utf-16le", errors="replace").split("\0", 1)[0] for n in range(3)]))
     if len(rows) != 4:
         raise ValueError("incomplete before/after A/W records")
     return rows

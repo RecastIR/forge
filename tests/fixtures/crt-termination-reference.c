@@ -67,12 +67,21 @@ int entry(void) {
             record(&info, sizeof(info));
             record(original, sizeof(original));
             record(&error, sizeof(error));
-            DWORD firstUnit = 0xffffffff;
-            if (info.words[1]) {
-                firstUnit = wide ? *(const unsigned short *)info.words[1]
-                                 : *(const unsigned char *)info.words[1];
+            /* Record creation strings by value, including the terminator when it fits. */
+            for (int field = 1; field <= 3; ++field) {
+                unsigned short text[260] = {0};
+                if (info.words[field]) {
+                    for (unsigned int i = 0; i < 260; ++i) {
+                        text[i] = wide ? ((const unsigned short *)info.words[field])[i]
+                                       : ((const unsigned char *)info.words[field])[i];
+                        if (!text[i]) {
+                            break;
+                        }
+                    }
+                }
+
+                record(text, sizeof(text));
             }
-            record(&firstUnit, sizeof(firstUnit));
         }
     }
     return 42;
