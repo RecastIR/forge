@@ -159,7 +159,7 @@ namespace {
 
     forge_rt_status LoadedProcess::initialize(const forge_rt_process_startup &startup) {
         const auto &artifact = image.artifact;
-        bool standardHandles = false, commandLine = false;
+        bool standardHandles = false, commandLine = false, startupInfo = false;
         CrtImports crt{dataImports(artifact), false};
         for (const auto &import : tableRows(artifact.imports, artifact.importCount)) {
             const auto *service = findService(import);
@@ -175,8 +175,18 @@ namespace {
             } else if (adapter == win64::getCommandLineA.nativeSymbol ||
                        adapter == win64::getCommandLineW.nativeSymbol) {
                 commandLine = true;
+            } else if (adapter == win64::getStartupInfoA.nativeSymbol ||
+                       adapter == win64::getStartupInfoW.nativeSymbol) {
+                startupInfo = true;
             } else if (adapter == win64::crtGetMainArgs.nativeSymbol) {
                 crt.mainArgs = true;
+            }
+        }
+
+        if (startupInfo) {
+            const auto status = windows.parameters.startupInfo.setDefaultStrings(artifact, startup);
+            if (status != FORGE_RT_OK) {
+                return status;
             }
         }
 

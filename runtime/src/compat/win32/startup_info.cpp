@@ -27,7 +27,7 @@ namespace forge::runtime {
 
         size = reserved.size();
 
-        for (auto *field : {&desktop, &title}) {
+        for (auto *field : {&shell, &desktop, &title}) {
             if (!*field) {
                 continue;
             }
@@ -49,7 +49,7 @@ namespace forge::runtime {
     size_t StartupInfo::map(uint64_t base, std::span<forge_rt_image_region, maxRows> rows) {
         size_t count = 0;
 
-        for (auto *field : {&desktop, &title}) {
+        for (auto *field : {&shell, &desktop, &title}) {
             if (!*field) {
                 continue;
             }
@@ -113,6 +113,7 @@ namespace forge::runtime {
 
             StartupInfo64 value{};
             value.cb = sizeof(value);
+            value.reserved = stringAddress(info.shell);
             value.desktop = stringAddress(info.desktop);
             value.title = stringAddress(info.title);
             value.window = info.window;

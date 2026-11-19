@@ -25,15 +25,17 @@ namespace forge::runtime {
     // Creation metadata belongs to the occurrence. Registration derives the UTF-16
     // views and maps only supplied data. Standard stream descriptors have a separate owner.
     struct StartupInfo {
-        static constexpr size_t maxRows = 5; // A/W desktop, A/W title, reserved bytes.
+        static constexpr size_t maxRows = 7; // Three A/W strings and the reserved byte buffer.
         static constexpr uint32_t useStdHandles = 0x100;
         StartupWindow window;
         uint16_t show = 0;
         std::array<uint64_t, 3> creationHandles{};
-        std::optional<StartupText> desktop, title;
+        std::optional<StartupText> shell, desktop, title;
         std::vector<uint8_t> reserved;
         uint64_t reservedAddress = 0;
 
+        forge_rt_status setDefaultStrings(const forge_rt_artifact &artifact,
+                                          const forge_rt_process_startup &startup);
         forge_rt_status prepare(const StandardHandles *handles, size_t &size);
         size_t map(uint64_t base, std::span<forge_rt_image_region, maxRows> rows);
     };

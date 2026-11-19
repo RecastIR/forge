@@ -87,7 +87,8 @@ namespace {
             ++registry.dispatched;
             const auto handler = registry.entries.back();
             registry.entries.pop_back();
-            dispatchGuestCallback(dispatch, instance->managedExecution, handler.site, handler.target);
+            dispatchGuestCallback(dispatch, instance->managedExecution, handler.site,
+                                  handler.target);
 
             if (instance->managedExecution->result.kind) {
                 break;

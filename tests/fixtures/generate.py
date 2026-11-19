@@ -85,6 +85,9 @@ def generate(output, mc, link, dlltool, clang):
             setup = "".join(f"probe_{variant} = 1\n" for variant in variants)
             image(f"executable-startup-info-{variants}.exe", setup + startup_info,
                   link_flags=["KERNEL32.dll.lib"])
+        image("executable-startup-info-fields.exe",
+              "probe_a = 1\nprobe_w = 1\nmeasured_fields = 1\n" + startup_info,
+              link_flags=["KERNEL32.dll.lib"])
         image("executable-startup-info-w-fault.exe", "probe_w = 1\nfault = 1\n" + startup_info,
               link_flags=["KERNEL32.dll.lib"])
         filter_source = (sources / "executable-top-level-filter.s").read_text()

@@ -25,6 +25,10 @@ entry:
 .endm
 
 .macro probe variant
+.ifdef measured_fields
+    movl $0x5a5a5a5a, 36(%rsp)
+    movl $0x5a5a5a5a, 100(%rsp)
+.endif
     movq $17, 112(%rsp)
     movq $34, 120(%rsp)
     movq $51, 128(%rsp)
@@ -43,7 +47,25 @@ entry:
     cmpl $104, 32(%rsp)
     jne .Lfailure
     cmpq $0, 40(%rsp)
+.ifdef measured_fields
+    je .Lwine_fields\@
+    cmpl $0x5a5a5a5a, 36(%rsp)
     jne .Lfailure
+    cmpl $0x5a5a5a5a, 100(%rsp)
+    jne .Lfailure
+    jmp .Lhandles\@
+.Lwine_fields\@:
+    cmpl $0, 36(%rsp)
+    jne .Lfailure
+    cmpl $0, 100(%rsp)
+    jne .Lfailure
+.Lhandles\@:
+    cmpq $0, 104(%rsp)
+    jne .Lfailure
+.else
+    # Original Task 13.3H probe retained byte-for-byte for reference comparison.
+    jne .Lfailure
+.endif
     movl 92(%rsp), %eax
     andl $256, %eax
     jnz .Lcurrent\@

@@ -1065,6 +1065,7 @@ class Reference(Workspace):
             image("noreturn").name: (42, b"", b""),
             image("tib").name: (42, b"", b""),
             image("top-level-filter").name: (42, b"", b""),
+            image("startup-info-fields").name: (43, b"", b""),
             **{image(f"startup-info-{v}").name: (43, b"", b"") for v in ("a", "w", "aw")},
             console_image("hello").name: (0, GREETING, b""),
             console_image("binary_stdout").name: (len(BINARY), BINARY, b""),
@@ -1417,7 +1418,11 @@ class Native(Workspace):
                 self.assertEqual({name for name in imports if name.startswith("GetStartupInfo")},
                                  {"GetStartupInfo" + v.upper() for v in variants})
                 result = run(self.output)
-                self.assertEqual((result.returncode, result.stdout, result.stderr), (42, "", ""))
+                self.assertEqual((result.returncode, result.stdout, result.stderr), (1, "", ""))
+
+        self.compile(image("startup-info-fields"))
+        result = run(self.output)
+        self.assertEqual((result.returncode, result.stdout, result.stderr), (42, "", ""))
 
         self.compile(image("startup-info-w-fault"))
         result = run(self.output)

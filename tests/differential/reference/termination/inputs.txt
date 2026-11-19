@@ -12,4 +12,5 @@ crt-term-recursive-exit.exe
 crt-term-register.exe
 executable-startup-info-a.exe
 executable-startup-info-aw.exe
+executable-startup-info-fields.exe
 executable-startup-info-w.exe

@@ -12,6 +12,32 @@ namespace forge::runtime {
     namespace {
         constexpr size_t characterLimit = 32766;
 
+        std::optional<std::string> executableIdentity(const forge_rt_artifact &artifact,
+                                                      const forge_rt_process_startup &startup) {
+            if (startup.executablePath) {
+                const auto length = strnlen(startup.executablePath, characterLimit + 1);
+                const std::string_view text(startup.executablePath, length);
+                if (length > characterLimit || text.empty() || text.find('"') != text.npos) {
+                    return {};
+                }
+
+                return std::string(text);
+            }
+
+            if (artifact.version < FORGE_RT_NAMED_ARTIFACT_VERSION) {
+                return std::string{};
+            }
+
+            const auto *name =
+                reinterpret_cast<const forge_rt_named_artifact *>(&artifact)->executableName;
+            if (!name || !*name || strnlen(name, characterLimit) == characterLimit ||
+                std::string_view(name).find_first_of("\\/") != std::string_view::npos) {
+                return {};
+            }
+
+            return std::string("C:\\") + name;
+        }
+
         // argv[0] has a separate CRT grammar. Surround a spaced executable path with quotes,
         // without doubling backslashes. Embedded quotes cannot be part of a Windows filename.
         forge_rt_status appendArgument(std::string &line, const char *argument, bool identity) {
@@ -84,6 +110,19 @@ namespace forge::runtime {
         }
     } // namespace
 
+    forge_rt_status StartupInfo::setDefaultStrings(const forge_rt_artifact &artifact,
+                                                   const forge_rt_process_startup &startup) {
+        auto identity = executableIdentity(artifact, startup);
+        if (!identity) {
+            return FORGE_RT_INVALID_ARGUMENT;
+        }
+
+        shell.emplace();
+        desktop.emplace();
+        title.emplace().narrow = std::move(*identity);
+        return FORGE_RT_OK;
+    }
+
     forge_rt_status ProcessParameters::buildCommandLine(const forge_rt_artifact &artifact,
                                                         const forge_rt_process_startup &startup) {
         if ((startup.argumentCount && !startup.arguments) ||
@@ -91,23 +130,12 @@ namespace forge::runtime {
             return FORGE_RT_INVALID_ARGUMENT;
         }
 
-        std::string defaultPath;
-        const char *identity = startup.executablePath;
-
-        if (!identity && artifact.version >= FORGE_RT_NAMED_ARTIFACT_VERSION) {
-            const auto *name =
-                reinterpret_cast<const forge_rt_named_artifact *>(&artifact)->executableName;
-
-            if (!name || !*name || strnlen(name, characterLimit) == characterLimit ||
-                std::string_view(name).find_first_of("\\/") != std::string_view::npos) {
-                return FORGE_RT_INVALID_ARGUMENT;
-            }
-
-            defaultPath = std::string("C:\\") + name;
-            identity = defaultPath.c_str();
+        const auto identity = executableIdentity(artifact, startup);
+        if (!identity) {
+            return FORGE_RT_INVALID_ARGUMENT;
         }
 
-        const auto first = appendArgument(narrow, identity, true);
+        const auto first = appendArgument(narrow, identity->c_str(), true);
 
         if (first != FORGE_RT_OK) {
             return first;

@@ -125,7 +125,19 @@ namespace {
 
             for (size_t i = 0; i < 2; ++i) {
                 REQUIRE(call.query(ansi, address) == FORGE_RT_OK);
-                REQUIRE(call.read<104>(address) == expected);
+                auto bytes = call.read<104>(address);
+                for (size_t offset : {8, 16, 24}) {
+                    const auto pointer = field<8>(bytes, offset);
+                    REQUIRE(pointer != 0);
+                    if (ansi) {
+                        REQUIRE(call.read<1>(pointer)[0] == 0);
+                    } else {
+                        REQUIRE(pointer % 2 == 0 &&
+                                call.read<2>(pointer) == std::array<uint8_t, 2>{});
+                    }
+                    std::fill_n(bytes.begin() + offset, 8, 0);
+                }
+                REQUIRE(bytes == expected);
             }
         }
 
@@ -201,7 +213,7 @@ namespace {
             }
 
             REQUIRE(field<4>(bytes, 60) == 0x100 && field<2>(bytes, 64) == 0x1234);
-            REQUIRE(field<2>(bytes, 66) == 3 && field<8>(bytes, 8) == 0);
+            REQUIRE(field<2>(bytes, 66) == 3 && call.read<1>(field<8>(bytes, 8))[0] == 0);
             const auto desktop = field<8>(bytes, 16), title = field<8>(bytes, 24);
             REQUIRE(call.read<3>(field<8>(bytes, 72)) == (std::array<uint8_t, 3>{tag, 0, 0xff}));
 
@@ -214,7 +226,7 @@ namespace {
                 REQUIRE(call.read<4>(title) == (std::array<uint8_t, 4>{tag, 0, 0, 0}));
             }
 
-            for (const auto address : {desktop, title, field<8>(bytes, 72)}) {
+            for (const auto address : {field<8>(bytes, 8), desktop, title, field<8>(bytes, 72)}) {
                 const uint8_t overwrite = 0;
                 REQUIRE(forge_rt_write_guest(call.instance, call.thread, call.token, address, 1,
                                              &overwrite, 1, &call.fault) == FORGE_RT_GUEST_FAULT);
@@ -249,6 +261,7 @@ namespace {
             const uint32_t n = tag;
             info.window = {n, n + 1, n + 2, n + 3, n + 4, n + 5, n + 6, StartupInfo::useStdHandles};
             info.show = 0x1234;
+            info.shell.emplace();
             info.desktop.emplace().narrow = {'D', static_cast<char>(tag)};
             info.title.emplace().narrow = {static_cast<char>(tag)};
             info.reserved = {tag, 0, 0xff};
