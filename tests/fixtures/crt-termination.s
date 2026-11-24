@@ -6,6 +6,16 @@ entry:
     subq $40, %rsp
     .seh_stackalloc 40
     .seh_endprologue
+.ifdef finite_depth
+    .rept finite_depth
+    leaq second(%rip), %rcx
+    callq _onexit
+    .endr
+    callq _cexit
+    movl $42, %eax
+    addq $40, %rsp
+    retq
+.endif
 .ifdef crt_stream
     callq *__imp_fopen(%rip)
 .endif
@@ -94,6 +104,9 @@ second:
     .seh_endprologue
     movl $66, %ecx
     callq mark
+.ifdef finite_depth
+    callq _cexit
+.endif
 .ifdef add_during
     leaq late(%rip), %rcx
     callq _onexit

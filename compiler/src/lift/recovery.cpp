@@ -244,6 +244,8 @@ namespace forge::x86 {
             Flow importFlow(uint32_t rva, FunctionDiscovery &caller, const Step &step);
             std::vector<ResolvedCallSite *> forwardedRegistrations;
 
+            void resolveRegistrationOrigin(ResolvedCallSite &site,
+                                           const ResolvedCallSite &incoming);
             void resolveForwardedRegistrations();
             void run();
         };
@@ -796,6 +798,43 @@ namespace forge::x86 {
             throw;
         }
 
+        void GroupDiscovery::resolveRegistrationOrigin(ResolvedCallSite &site,
+                                                       const ResolvedCallSite &incoming) try {
+            auto &proof = *std::get<ExternalCallTarget>(site.target).registration;
+            if (proof.targets.contains(incoming.instruction)) {
+                return;
+            }
+
+            const auto &caller = functions.at(incoming.caller);
+            const auto &step = *caller.instructionContaining(incoming.instruction);
+            if (incoming.guest().kind != CallKind::Direct || proof.targets.size() >= 4096) {
+                step.reject(FailureCode::UnsupportedControlFlow,
+                            "unsupported CRT registration wrapper origin");
+            }
+
+            const auto target = terminationTarget(caller, caller.graph.at(incoming.block), step,
+                                                  entry.analysis.image(), *pointerInitialization,
+                                                  instructions, regs);
+            if (!target) {
+                step.reject(FailureCode::UnsupportedControlFlow,
+                            "unproven callback at caller of CRT registration wrapper");
+            }
+
+            proof.targets.emplace(incoming.instruction, *target);
+            if (*target) {
+                admitCallback(site, step, *target);
+            }
+        } catch (InspectionError &error) {
+            auto &context = error.context;
+            context.functionRva = incoming.caller;
+            context.blockRva = incoming.block;
+            context.branchTarget = incoming.guest().rva;
+            if (!context.sourceCall) {
+                site.annotateCallbackFailure(context, {});
+            }
+            throw;
+        }
+
         void GroupDiscovery::resolveForwardedRegistrations() {
             if (forwardedRegistrations.empty()) {
                 return;
@@ -811,32 +850,8 @@ namespace forge::x86 {
             }
 
             for (auto *site : forwardedRegistrations) {
-                auto &proof = *std::get<ExternalCallTarget>(site->target).registration;
                 for (const auto *incoming : callers[site->caller]) {
-                    if (proof.targets.contains(incoming->instruction)) {
-                        continue;
-                    }
-
-                    const auto &caller = functions.at(incoming->caller);
-                    const auto &step = *caller.instructionContaining(incoming->instruction);
-                    if (incoming->guest().kind != CallKind::Direct ||
-                        proof.targets.size() >= 4096) {
-                        step.reject(FailureCode::UnsupportedControlFlow,
-                                    "unsupported CRT registration wrapper origin");
-                    }
-
-                    const auto target = terminationTarget(
-                        caller, caller.graph.at(incoming->block), step, entry.analysis.image(),
-                        *pointerInitialization, instructions, regs);
-                    if (!target) {
-                        step.reject(FailureCode::UnsupportedControlFlow,
-                                    "unproven callback at caller of CRT registration wrapper");
-                    }
-
-                    proof.targets.emplace(incoming->instruction, *target);
-                    if (*target) {
-                        admitCallback(*site, step, *target);
-                    }
+                    resolveRegistrationOrigin(*site, *incoming);
                 }
             }
         }
@@ -925,7 +940,7 @@ namespace forge::x86 {
     } // namespace
 
     void ResolvedCallSite::annotateCallbackFailure(FailureContext &context,
-                                                   uint32_t targetRva) const {
+                                                   std::optional<uint32_t> targetRva) const {
         if (external()->registration) {
             context.terminationTargetRva = targetRva;
         } else {

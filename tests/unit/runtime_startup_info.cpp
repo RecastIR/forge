@@ -189,6 +189,47 @@ namespace {
         FORGE_RT_ARTIFACT_VERSION, base,    128, 0,           0, &backing, 1, regions,
         std::size(regions),        imports, 2,   defaultEntry};
 
+    void unsupportedTitleEntry(forge_rt_execution *execution) {
+        Caller call(*execution);
+        REQUIRE(call.instance->windows->parameters.startupInfo.title->narrow == "C:\\café.exe");
+        REQUIRE(forge_rt_set_last_error(call.instance, call.thread, 73) == FORGE_RT_OK);
+        Bytes sentinel;
+        sentinel.fill(0xbc);
+        for (bool ansi : {false, true}) {
+            call.write(base, sentinel);
+            REQUIRE(call.query(ansi, base) == FORGE_RT_UNSUPPORTED_STARTUP_TITLE);
+            REQUIRE(call.read<104>(base) == sentinel);
+            REQUIRE(call.query(ansi, FORGE_RT_STACK_BASE + 200) ==
+                    FORGE_RT_UNSUPPORTED_STARTUP_TITLE);
+            REQUIRE(std::all_of(execution->stackMarks + 200, execution->stackMarks + 304,
+                                [](auto mark) { return mark == FORGE_RT_MARK_UNINITIALIZED; }));
+            checkFaults(call, ansi);
+        }
+
+        uint32_t error = 0;
+        REQUIRE(forge_rt_get_last_error(call.instance, call.thread, &error) == FORGE_RT_OK &&
+                error == 73);
+        execution->result = {FORGE_RT_RETURNED, FORGE_RT_OK, 42, {}, 0};
+    }
+
+    void testUnsupportedTitle() {
+        forge_rt_process *raw = nullptr;
+        REQUIRE(forge_rt_process_create(FORGE_RT_ABI_VERSION, &raw) == FORGE_RT_OK);
+        std::unique_ptr<forge_rt_process, decltype(&forge_rt_process_destroy)> owner(
+            raw, forge_rt_process_destroy);
+        auto guest = artifact;
+        guest.entry = unsupportedTitleEntry;
+        {
+            std::string path = "C:\\café.exe";
+            const forge_rt_process_startup launch{path.c_str(), 0, nullptr, 0, nullptr};
+            REQUIRE(forge_rt_process_register_with_startup(raw, &guest, &launch) == FORGE_RT_OK);
+        }
+
+        forge_rt_process_result result{};
+        REQUIRE(forge_rt_process_run(raw, nullptr, &result) == FORGE_RT_OK);
+        REQUIRE(result.kind == FORGE_RT_RETURNED && result.value == 42);
+    }
+
     void populatedEntry(forge_rt_execution *execution) {
         Caller call(*execution);
         uint64_t command = 0;
@@ -295,6 +336,7 @@ namespace {
 } // namespace
 
 void testRuntimeStartupInfo() {
+    testUnsupportedTitle();
     using namespace forge::win64;
     static_assert(getStartupInfoA.result == Value::Void &&
                   getStartupInfoW.arguments[0].size == 104);

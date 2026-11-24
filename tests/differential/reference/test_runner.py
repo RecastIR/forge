@@ -7,14 +7,32 @@ import sys
 import tempfile
 import unittest
 from unittest.mock import patch
+from zipfile import ZipFile
 
 import docker_wine
 from protocol import Capture, READY, STREAM_LIMIT, decode
 import run
 import fixture_images
+from termination import observe
 
 
 class CaptureTests(unittest.TestCase):
+    def test_full_startup_title(self):
+        archives = Path(__file__).resolve().parents[1] / "fixtures/startup/termination"
+        for backend, root in (("windows", "D:\\a\\forge\\forge\\inputs"), ("wine", "Z:\\inputs")):
+            archive = archives / f"{backend}-raw.zip"
+            with ZipFile(archive) as raw:
+                capture = json.loads(raw.read("results.json"))
+            title = root + "\\crt-observe-startup.exe"
+            observe.verify(capture, archive, title)
+            for mode in ("clear", "captured"):
+                for row in capture["observations"][f"crt-observe-startup-{mode}"]["startup"]:
+                    with self.subTest(backend=backend, mode=mode):
+                        row["text"][2] = "C:\\Unexpected\\crt-observe-startup.exe"
+                        with self.assertRaisesRegex(ValueError, "differs from launch path"):
+                            observe.verify(capture, archive, title)
+                        row["text"][2] = title
+
     def test_prepared_image_is_local_and_matches_inputs(self):
         def inspect(args, **kwargs):
             self.assertEqual(args[:3], ["docker", "image", "inspect"])

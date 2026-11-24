@@ -227,6 +227,13 @@ namespace forge::x86 {
                 return 0;
             }
 
+            if (const auto op = integerInstruction(step.opcode);
+                op && op->op == Op::Mov && op->form == Form::Immediate && op->width >= 32 &&
+                proof.operands.reg(step, dest, op->width).index == view.index &&
+                step.inst.getOperand(1).getImm() == 0) {
+                return 0;
+            }
+
             call.reject(FailureCode::UnsupportedControlFlow,
                         "unproven MSVCRT termination callback at definition " + hex(step.rva));
         }

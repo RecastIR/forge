@@ -1396,6 +1396,49 @@ class Native(Workspace):
         self.assertEqual(diagnostic["context"]["import_symbol"], "_onexit")
         self.assertIn("termination_target_rva", diagnostic["context"])
 
+    def test_null_registration_and_wrapper_diagnostics(self):
+        pe = FIXTURES / "crt-term-null.exe"
+        self.compile(pe)
+        result = self.program()
+        self.assertEqual((result.returncode, result.stdout, result.stderr), (91, b"", b""))
+
+        # Read helper and wrapper extents from the fixture's unwind records.
+        data = pe.read_bytes()
+        layout = Layout(data)
+        pdata = layout.file_offset(layout.directory(3)[0])
+        helper, wrapper = layout.u32(pdata + 12), layout.u32(pdata + 24)
+        mov = layout.file_offset(helper) + 4
+        self.assertEqual(data[mov:mov + 6], bytes.fromhex("b900000000e8"))
+        call, registration = helper + 9, wrapper + 4
+        iat = registration + 6 + struct.unpack_from("<i", data, layout.file_offset(registration) + 2)[0]
+        # Replace the full zero with a nonzero immediate or a partial zero write.
+        for instruction in ("b901000000", "66b9000090"):
+            with self.subTest(instruction=instruction):
+                bad = self.dir / "unknown.exe"
+                bad.write_bytes(data[:mov] + bytes.fromhex(instruction) + data[mov + 5:])
+                diagnostic = self.compile(bad, success=False)
+                self.assertEqual(diagnostic["code"], "LIFT_UNSUPPORTED_CONTROL_FLOW")
+                ctx = diagnostic["context"]
+                self.assertEqual((ctx["function_rva"], ctx["block_rva"], ctx["instruction_rva"]),
+                                 (hex(helper), hex(helper), hex(call)))
+                self.assertEqual((ctx["caller_rva"], ctx["call_site_rva"], ctx["branch_target"]),
+                                 (hex(wrapper), hex(registration), wrapper))
+                self.assertEqual((ctx["import_dll"], ctx["import_symbol"], ctx["iat_slot_rva"]),
+                                 ("msvcrt.dll", "_onexit", hex(iat)))
+                self.assertEqual(ctx["unresolved_calls"], [
+                    dict(caller_rva=hex(helper), instruction_rva=hex(call), target_rva=hex(wrapper))])
+                plain = run(FORGE, "lift", bad, "--executable", "--output", self.output)
+                self.assertIn(f"function {hex(helper)} calls {hex(wrapper)}, "
+                              f"import msvcrt.dll!_onexit at {hex(registration)}", plain.stderr)
+
+    def test_finite_cleanup_depth(self):
+        for count, code, message in (
+                (16, 42, b""), (17, 125, b"forge: unsupported recursive MSVCRT cleanup or handler limit\n")):
+            with self.subTest(count=count):
+                self.compile(FIXTURES / f"crt-term-depth-{count}.exe")
+                result = self.program()
+                self.assertEqual((result.returncode, result.stdout, result.stderr), (code, b"B" * 16, message))
+
     def test_termination_rejects_image_base_callback(self):
         data = bytearray((FIXTURES / "crt-term-data.exe").read_bytes())
         root = entry(data)
@@ -1447,6 +1490,24 @@ class Native(Workspace):
         result = run(self.output)
         self.assertEqual((result.returncode, result.stdout, result.stderr),
                          (125, "", "forge: guest memory fault address=0x70000fd8 access=2 reason=4\n"))
+
+    def test_startup_title_encoding_at_call(self):
+        pe = self.dir / "café.exe"
+        for variant in ("a", "w"):
+            with self.subTest(variant=variant):
+                shutil.copyfile(image("startup-title-" + variant), pe)
+                self.compile(pe)
+                called = self.program()
+                self.assertEqual((called.returncode, called.stdout, called.stderr),
+                                 (125, b"", b"forge: GetStartupInfoA/W requires an ASCII startup title\n"))
+                skipped = self.program(preexec_fn=lambda: os.close(1))
+                self.assertEqual((skipped.returncode, skipped.stdout, skipped.stderr), (41, b"", b""))
+
+        shutil.copyfile(FIXTURES / "command-line.exe", pe)
+        self.compile(pe)
+        result = self.program()
+        self.assertEqual((result.returncode, result.stdout, result.stderr),
+                         (125, b"", b"forge: runtime failure stage=register status=1\n"))
 
     def test_top_level_filter_registration(self):
         pe = image("top-level-filter")

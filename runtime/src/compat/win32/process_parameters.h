@@ -18,7 +18,8 @@ namespace forge::runtime {
 
     struct StartupText {
         std::string narrow;
-        std::u16string wide;
+        // A missing wide view after preparation means the source title cannot be encoded.
+        std::optional<std::u16string> wide;
         uint64_t narrowAddress = 0, wideAddress = 0;
     };
 

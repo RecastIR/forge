@@ -34,7 +34,10 @@ The three original Task 13.3H PEs returned 1 on native Windows in both launch mo
 | Flag set, after changing stdout to stderr | A reported creation stdout, W reported current stdout | Both continued to report creation stdout |
 | Flag clear | A wrote INVALID_HANDLE_VALUE in all three slots, W left all three untouched | A and W returned cached handles |
 | String pointers | All three present in both views, with an empty shell string, `winsta0\default`, full guest PE path | Null reserved pointer, launch-dependent desktop, title identified the PE |
+| `wShowWindow`, before and after changing stdout | 0 in both modes | 0 in captured mode, 1 in flag-clear mode |
 | Reserved byte buffer | Zero size and null pointer | Zero size and null pointer |
+
+The observer compares all four A/W title strings in each mode with the full guest path used for that launch. Only after this check does archive comparison normalize the runner-specific directory.
 
 Forge validates the entire output before writing the named fields. Unit tests compare all 104 bytes with sentinels, read the guest strings through checked memory, exercise seeded flags and handle changes, and check that an invalid final byte leaves the writable prefix untouched. The public launcher supplies zero flags. Its defined creation metadata is described in the runtime contract. [Win32 state and deferred launcher work (P3)](../../../../../docs/runtime-architecture.md#win32-startup-information) · [Runtime tests](../../../../unit/runtime_startup_info.cpp)
 

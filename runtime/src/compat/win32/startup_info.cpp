@@ -34,13 +34,21 @@ namespace forge::runtime {
 
             auto &text = **field;
             // The internal launcher string repertoire is ASCII, shared by the A and W views.
-            if (text.narrow.size() > 32766 ||
-                std::ranges::any_of(text.narrow, [](unsigned char c) { return !c || c > 127; })) {
+            if (text.narrow.size() > 32766 || text.narrow.find('\0') != std::string::npos) {
                 return FORGE_RT_INVALID_ARGUMENT;
             }
 
-            text.wide.assign(text.narrow.begin(), text.narrow.end());
-            size += wideOffset(text) + (text.wide.size() + 1) * sizeof(char16_t);
+            if (std::ranges::any_of(text.narrow, [](unsigned char c) { return c > 127; })) {
+                if (field != &title) {
+                    return FORGE_RT_INVALID_ARGUMENT;
+                }
+
+                text.wide.reset();
+                continue;
+            }
+
+            text.wide.emplace(text.narrow.begin(), text.narrow.end());
+            size += wideOffset(text) + (text.wide->size() + 1) * sizeof(char16_t);
         }
 
         return FORGE_RT_OK;
@@ -50,7 +58,7 @@ namespace forge::runtime {
         size_t count = 0;
 
         for (auto *field : {&shell, &desktop, &title}) {
-            if (!*field) {
+            if (!*field || !(**field).wide) {
                 continue;
             }
 
@@ -60,8 +68,8 @@ namespace forge::runtime {
                              nullptr};
             base += wideOffset(text);
             text.wideAddress = base;
-            const auto wideBytes = (text.wide.size() + 1) * sizeof(char16_t);
-            rows[count++] = {base, wideBytes, text.wide.c_str(), FORGE_RT_READ, nullptr};
+            const auto wideBytes = (text.wide->size() + 1) * sizeof(char16_t);
+            rows[count++] = {base, wideBytes, text.wide->c_str(), FORGE_RT_READ, nullptr};
             base += wideBytes;
         }
 
@@ -157,6 +165,16 @@ namespace forge::runtime {
             // The current synchronous invocation pins all mappings throughout this call.
             ServiceInvocation call{instance, thread, *fault, executingInvocation};
             const auto output = guestBuffer<binding, 0>(call, std::tie(address.value));
+            const auto valid = output.validate();
+            if (valid != FORGE_RT_OK) {
+                return valid;
+            }
+
+            const auto &title = instance->windows->parameters.startupInfo.title;
+            if (title && !title->wide) {
+                return FORGE_RT_UNSUPPORTED_STARTUP_TITLE;
+            }
+
             constexpr bool ansi = &binding == &getStartupInfoA;
             const auto view = startupView(*instance->windows, ansi);
 
@@ -167,13 +185,8 @@ namespace forge::runtime {
             const auto &value = *view;
             const auto bytes = std::bit_cast<std::array<uint8_t, sizeof(value)>>(value);
 
-            // Validate all 104 bytes before writing the discontiguous named fields.
             // Writing only the named ranges also preserves uninitialized stack marks.
-            auto status = output.validate();
-
-            if (status == FORGE_RT_OK) {
-                status = output.writeScalar(0, value.cb);
-            }
+            auto status = output.writeScalar(0, value.cb);
 
             if (status == FORGE_RT_OK) {
                 constexpr size_t start = offsetof(StartupInfo64, reserved);

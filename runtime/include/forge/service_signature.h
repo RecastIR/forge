@@ -156,8 +156,17 @@ namespace forge::win64 {
             if (callback != Callback::None && requirement != Requirement::Process) {
                 return "guest callbacks require a managed process";
             }
-            if (callback == Callback::Cleanup && lastError != LastError::CallbackDefined) {
-                return "CRT cleanup requires callback-defined last error";
+            if (callback == Callback::Registration &&
+                (result != Value::Address || arguments.size() != 1 ||
+                 arguments.front().type != Value::Address || checkedMemory())) {
+                return "CRT registration requires one unchecked guest address and an address "
+                       "result";
+            }
+
+            if (callback == Callback::Cleanup && (lastError != LastError::CallbackDefined ||
+                                                  result != Value::Void || checkedMemory())) {
+                return "CRT cleanup requires an unchecked void service with callback-defined last "
+                       "error";
             }
 
             if (returnsProcessStorage &&

@@ -36,11 +36,15 @@ def startup_fields(data):
     return rows
 
 
+def guest_path(pe, wine):
+    return "Z:" + str(pe).replace("/", "\\") if wine else str(pe)
+
+
 def observe(pe, work, clear, wine):
     work.mkdir()
     if wine and not clear:
         shared = Path(os.environ["WINEPREFIX"]) / "drive_c/work"
-        app = "Z:" + str(pe).replace("/", "\\")
+        app = guest_path(pe, wine)
         (work / "command.bin").write_bytes((app + "\0").encode("utf-16le"))
         subprocess.run([wine, r"Z:\opt\forge\capture.exe", app, "65536"], cwd=work,
                        check=True, timeout=150, stdout=subprocess.DEVNULL)
@@ -75,7 +79,7 @@ def observe(pe, work, clear, wine):
     return row
 
 
-def comparable(rows):
+def comparable(rows, *, launch_path):
     observations = deepcopy(rows)
     # Job limits constrain memory, while the exact number of successful allocations
     # also depends on heap layout. The number of callbacks must equal that count.
@@ -90,20 +94,22 @@ def comparable(rows):
     for mode in ("clear", "captured"):
         for row in observations[f"crt-observe-startup-{mode}"]["startup"]:
             # A runner work directory is part of the process title on these launches.
-            path = PureWindowsPath(row["text"][2])
-            if not path.is_absolute():
-                raise ValueError(f"unexpected startup title {path}")
+            title = row["text"][2]
+            path = PureWindowsPath(title)
+            if not path.is_absolute() or (launch_path is not None and title != launch_path):
+                raise ValueError(f"{mode} startup title {title!r} differs from launch path {launch_path!r}")
             row["text"][2] = path.name
     return observations
 
 
-def verify(results, reference):
+def verify(results, reference, launch_path):
     with ZipFile(reference) as archive:
         reviewed = json.loads(archive.read("results.json"))
     if reviewed["pe_sha256"] != results["pe_sha256"]:
         raise ValueError("the captured PEs differ from the reviewed reference")
-    expected = comparable(reviewed["observations"])
-    actual = comparable(results["observations"])
+    # Old reviewed captures predate launch-path metadata. Their raw titles remain in the archive.
+    expected = comparable(reviewed["observations"], launch_path=reviewed["environment"].get("startup_probe_path"))
+    actual = comparable(results["observations"], launch_path=launch_path)
     if set(actual) != set(expected):
         raise ValueError("incomplete capture inventory")
     for case, observation in expected.items():
@@ -136,6 +142,8 @@ def main():
         env["crt_version"] = subprocess.check_output(
             ["powershell", "-NoProfile", "-Command", "(Get-Item $env:SystemRoot/System32/msvcrt.dll).VersionInfo.FileVersion"],
             text=True).strip()
+    launch_path = guest_path((args.inputs / "crt-observe-startup.exe").resolve(), args.wine)
+    env["startup_probe_path"] = launch_path
     args.output.mkdir(parents=True, exist_ok=False)
     results = {"environment": env, "pe_sha256": hashes, "observations": {}}
     for name in expected:
@@ -147,7 +155,9 @@ def main():
             (args.output / "results.json").write_text(json.dumps(results, indent=2) + "\n")
 
     if args.reference:
-        verify(results, args.reference)
+        verify(results, args.reference, launch_path)
+    else:
+        comparable(results["observations"], launch_path=launch_path)
 
 
 if __name__ == "__main__":

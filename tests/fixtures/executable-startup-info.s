@@ -5,6 +5,13 @@ entry:
     subq $136, %rsp
     .seh_stackalloc 136
     .seh_endprologue
+.ifdef conditional_title
+    movl $-11, %ecx
+    callq *__imp_GetStdHandle(%rip)
+    testq %rax, %rax
+    movl $41, %eax
+    jz .Lreturn
+.endif
 
 # The capture parent supplies three real handles. The Forge launcher leaves the flag clear.
 # Return separate observations for these launch modes and for older Wine's cached handles.

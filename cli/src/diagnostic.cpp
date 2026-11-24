@@ -27,6 +27,11 @@ namespace forge {
             err << " (termination callback " << hex(*error.context.terminationTargetRva)
                 << " from registration at " << hex(site->instruction) << " in " << hex(site->caller)
                 << ")";
+        } else if (site && callee && error.context.branchTarget == site->caller &&
+                   error.context.importSlot) {
+            err << " (function " << hex(*callee) << " calls " << hex(site->caller) << ", import "
+                << error.context.importDll << "!" << error.context.importSymbol << " at "
+                << hex(site->instruction) << ")";
         } else if (site && callee) {
             err << " (function " << hex(*callee) << " reached from call at "
                 << hex(site->instruction) << " in " << hex(site->caller) << ")";

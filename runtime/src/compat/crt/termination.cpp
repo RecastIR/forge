@@ -69,7 +69,7 @@ namespace {
 
         auto &registry = instance->windows->termination;
 
-        if (registry.completed) {
+        if (registry.completed || (registry.depth && registry.entries.empty())) {
             return FORGE_RT_OK;
         }
 

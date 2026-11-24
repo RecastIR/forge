@@ -74,7 +74,8 @@ namespace forge::x86 {
         uint32_t caller, block, instruction, continuation;
         std::variant<GuestCallTarget, ExternalCallTarget> target;
 
-        void annotateCallbackFailure(FailureContext &context, uint32_t targetRva) const;
+        void annotateCallbackFailure(FailureContext &context,
+                                     std::optional<uint32_t> targetRva) const;
 
         const GuestCallTarget &guest() const { return std::get<GuestCallTarget>(target); }
 

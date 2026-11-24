@@ -45,7 +45,9 @@ namespace {
 
             return failureExit;
         case FORGE_RT_UNSUPPORTED:
-            if (result.status == FORGE_RT_UNSUPPORTED_CRT_WILDCARDS) {
+            if (result.status == FORGE_RT_UNSUPPORTED_STARTUP_TITLE) {
+                std::fputs("forge: GetStartupInfoA/W requires an ASCII startup title\n", stderr);
+            } else if (result.status == FORGE_RT_UNSUPPORTED_CRT_WILDCARDS) {
                 std::fputs("forge: unsupported MSVCRT __getmainargs wildcard expansion\n", stderr);
             } else if (result.status == FORGE_RT_UNSUPPORTED_CRT_NEW_MODE) {
                 std::fputs("forge: unsupported MSVCRT __getmainargs new-handler mode\n", stderr);

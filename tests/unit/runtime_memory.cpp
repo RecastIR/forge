@@ -161,6 +161,24 @@ namespace {
             return copy;
         }();
         static_assert(!missingDispatcher.error().empty());
+        static_assert(crtOnexit.error().empty() && crtCexit.error().empty() &&
+                      crtExit.error().empty());
+        static_assert([] {
+            auto registration = crtOnexit;
+            registration.arguments =
+                parameters<Argument{Value::Address, Access::Input, Extent::Fixed, 8}>;
+            return !registration.error().empty();
+        }());
+        static_assert([] {
+            auto cleanup = crtCexit;
+            cleanup.arguments = fixed.arguments;
+            if (cleanup.error().empty()) {
+                return false;
+            }
+            cleanup = crtCexit;
+            cleanup.result = Value::Address;
+            return !cleanup.error().empty();
+        }());
         std::array<uint8_t, 8> bytes{};
         uint64_t claim = 0;
         const forge_rt_image_region row{0x1000, bytes.size(), bytes.data(), readWrite, &claim};

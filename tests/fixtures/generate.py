@@ -81,6 +81,10 @@ def generate(output, mc, link, dlltool, clang):
         image("executable-import-register.exe", (sources / "executable-import-register.s").read_text(),
               [("KERNEL32.dll", name) for name in ("SetLastError", "GetLastError", "Sleep")])
         startup_info = (sources / "executable-startup-info.s").read_text()
+        for variant in ("a", "w"):
+            setup = f"conditional_title = 1\nmeasured_fields = 1\nprobe_{variant} = 1\n"
+            image(f"executable-startup-title-{variant}.exe", setup + startup_info,
+                  link_flags=["KERNEL32.dll.lib"])
         for variants in ("a", "w", "aw"):
             setup = "".join(f"probe_{variant} = 1\n" for variant in variants)
             image(f"executable-startup-info-{variants}.exe", setup + startup_info,
@@ -117,6 +121,11 @@ def generate(output, mc, link, dlltool, clang):
                         "service_alias", "nested_table", "stack_exhaustion"):
             image(f"crt-initterm-{variant}.exe", f"{variant} = 1\n" + initializer_probe, link_flags=initializer_flags)
         termination = (sources / "crt-termination.s").read_text()
+        null_registration = (sources / "crt-termination-null.s").read_text()
+        image("crt-term-null.exe", null_registration, link_flags=initializer_flags)
+        for count in (16, 17):
+            image(f"crt-term-depth-{count}.exe", f"finite_depth = {count}\n" + termination,
+                  link_flags=initializer_flags)
         for name, switches in (
             ("cexit", ()), ("exit", ("normal_exit",)), ("nested-exit", ("normal_exit", "terminal")),
             ("register", ("add_during",)), ("recursive", ("add_during", "recurse")),

@@ -94,7 +94,7 @@ docker run --rm --platform linux/amd64 --network none --cap-drop ALL \
 
 ### Startup comparison results
 
-All eight original fixtures in both configurations validated their pinned Wine reference and resolved the two termination imports. Each run stopped during recovery in function `0x1010`, reached by the `_initterm` call at `0x1494`. The diagnostic was `LIFT_UNSUPPORTED_PREFIX`, opcode `CMP16mi`, RVA `0x1044`, bytes `66 81 38 4d 5a`. The comparator exited 1. No case produced a Mach-O, native exit status, stdout or stderr.
+The Task 13.3J rerun of all eight original fixtures in both configurations validated their pinned Wine reference and resolved the two termination imports. Each run stopped during recovery in function `0x1010`, reached by the `_initterm` call at `0x1494`. The diagnostic was `LIFT_UNSUPPORTED_PREFIX`, opcode `CMP16mi`, RVA `0x1044`, bytes `66 81 38 4d 5a`. The comparator exited 1. No case produced a Mach-O, native exit status, stdout or stderr.
 
 | Original case | Debug | Release | Native execution and stream comparison |
 | --- | --- | --- | --- |
