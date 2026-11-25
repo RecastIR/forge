@@ -201,12 +201,16 @@ jobs:
         with:
           name: executable-reference-inputs
           path: executables
-      - name: Observe CMP16mi flags and branches on Windows x64
+      - name: Observe CMP16mi flags and legacy CRT application type on Windows x64
         id: verify
         shell: bash
         run: |
           python -B tests/integration/test_executable.py windows-cmp16mi executables
           echo "cmp16mi=success" >> "$GITHUB_OUTPUT"
+          python -B tests/integration/test_executable.py windows-app-type executables
+          echo "app_type=success" >> "$GITHUB_OUTPUT"
+        env:
+          PE_MANIFEST_SHA256: ${{ needs.macos-dev.outputs.executable_inputs_sha256 }}
 
   windows-executable-reference:
     needs: macos-dev

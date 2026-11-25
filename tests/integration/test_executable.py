@@ -29,6 +29,9 @@ GREETING = b"Hello from Windows!\n"
 BINARY = b"A\x00\xff\n"
 # SETO and LAHF byte pairs for the five memory comparisons in the linked PE.
 CMP16MI = (42, bytes.fromhex("00 46 01 12 01 87 00 12 00 86"), b"")
+# Pairs of (GetLastError, *_errno()) captured after six returning setter calls.
+APP_TYPE_RECORD = b"".join(struct.pack("<II", 700 + offset, 100 + offset) for offset in range(0, 48, 8))
+APP_TYPE_RETURN = (42, APP_TYPE_RECORD, b"")
 AMSG_CASES = ("31", "8", "-1", "-2147483648", "unused")
 AMSG_MARKERS = ("marker-control", "marker-fatal")
 
@@ -1063,6 +1066,9 @@ class Reference(Workspace):
         expected = {
             headers.name: (header_result(headers.read_bytes()), b"", b""),
             image("cmp16mi").name: CMP16MI,
+            "crt-app-type-console.exe": APP_TYPE_RETURN,
+            "crt-app-type-gui.exe": APP_TYPE_RETURN,
+            **{f"crt-app-type-fatal-{mode}.exe": (255, b"", b"") for mode in ("console", "conflict", "gui")},
             "crt-argument-heap.exe": (41, b"", b""),
             "crt-initterm.exe": (42, b"", b""),
             "crt-initterm-spill.exe": (2, b"", b""),
@@ -1101,6 +1107,32 @@ class WindowsComparison(unittest.TestCase):
         print(f"{platform.platform()} {digest} exit={result.returncode} "
               f"stdout={result.stdout.hex()} stderr={result.stderr.hex()}", flush=True)
         self.assertEqual((result.returncode, result.stdout, result.stderr), CMP16MI)
+
+
+class WindowsAppType(unittest.TestCase):
+    def test_system_crt(self):
+        dll = Path(os.environ["SystemRoot"]) / "System32/msvcrt.dll"
+        data = dll.read_bytes()
+        layout = Layout(data)
+        print(f"{platform.platform()} {dll.name} sha256={hashlib.sha256(data).hexdigest()} "
+              f"timestamp={layout.u32(layout.pe + 8):08X} size={layout.u32(layout.opt + 56):x}", flush=True)
+        manifest = FIXTURES / "SHA256SUMS"
+        self.assertEqual(hashlib.sha256(manifest.read_bytes()).hexdigest(), os.environ["PE_MANIFEST_SHA256"])
+        hashes = {name: sha for sha, name in (line.split() for line in manifest.read_text().splitlines())}
+        fatal = captured_streams(amsg_observations("windows", ("8",))["crt-amsg-exit-8.exe"]["pipe"])
+        for name, expected in (("crt-app-type-console", APP_TYPE_RETURN), ("crt-app-type-gui", APP_TYPE_RETURN),
+                               ("crt-amsg-exit-8", fatal), ("crt-app-type-fatal-console", fatal),
+                               ("crt-app-type-fatal-conflict", fatal)):
+            with self.subTest(name=name):
+                pe = (FIXTURES / (name + ".exe")).resolve()
+                digest = hashlib.sha256(pe.read_bytes()).hexdigest()
+                self.assertEqual(digest, hashes[pe.name])
+                # GUI-subsystem children only execute returning setters. Bound every child,
+                # including the console image whose final explicit argument is GUI.
+                result = subprocess.run([pe], capture_output=True, timeout=8)
+                print(f"{name} {digest} exit={result.returncode} stdout={result.stdout.hex()} "
+                      f"stderr={result.stderr.hex()}", flush=True)
+                self.assertEqual((result.returncode, result.stdout, result.stderr), expected)
 
 
 class Console(Workspace):
@@ -1844,5 +1876,5 @@ if __name__ == "__main__":
         sys.exit(77)
     suites = {"compiler": ("Portable", "StartupAdmission"), "object": ("Object",),
               "readiness": ("Readiness",), "native": ("Native", "Console"), "reference": ("Reference",),
-              "windows-cmp16mi": ("WindowsComparison",)}
+              "windows-cmp16mi": ("WindowsComparison",), "windows-app-type": ("WindowsAppType",)}
     unittest.main(argv=[__file__, *suites[MODE]], verbosity=2)

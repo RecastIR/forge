@@ -8,6 +8,11 @@ crt-amsg-exit-8.exe
 crt-amsg-exit-unused.exe
 crt-amsg-marker-control.exe
 crt-amsg-marker-fatal.exe
+crt-app-type-console.exe
+crt-app-type-fatal-conflict.exe
+crt-app-type-fatal-console.exe
+crt-app-type-fatal-gui.exe
+crt-app-type-gui.exe
 crt-argument-heap.exe
 crt-initterm-nested_table.exe
 crt-initterm-spill.exe

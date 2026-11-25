@@ -24,7 +24,7 @@ def generate(output, mc, link, dlltool, clang):
                          "SetUnhandledExceptionFilter", "__C_specific_handler", "GetStartupInfoA", "GetStartupInfoW"],
         "vcruntime140.dll": ["Runtime"],
         "msvcrt.dll": ["_cexit", "_onexit", "exit", "_errno", "fopen", "fclose", "fputc", "setvbuf",
-                       "_fileno", "_get_osfhandle", "memset", "fwrite", "__getmainargs", "_amsg_exit", "_initterm", "calloc", "free", "malloc", "strlen",
+                       "__set_app_type", "_fileno", "_get_osfhandle", "memset", "fwrite", "__getmainargs", "_amsg_exit", "_initterm", "calloc", "free", "malloc", "strlen",
                        "__C_specific_handler", "_fmode=entry DATA", "_commode=entry DATA",
                        "__initenv=entry DATA", "_acmdln=entry DATA"],
         contract: ["Contract"],
@@ -114,6 +114,13 @@ def generate(output, mc, link, dlltool, clang):
                                                  "_fmode", "_commode", "__initenv", "_acmdln")] +
               [("KERNEL32.dll", "GetCommandLineA")])
         initializer_flags = ["/section:.CRT,RW", "msvcrt.dll.lib", "KERNEL32.dll.lib"]
+        app_type = (sources / "crt-app-type.s").read_text()
+        for name, setup, subsystem in (("console", "", "console"), ("gui", "", "windows"),
+                                       ("fatal-console", "fatal_type = 1", "console"),
+                                       ("fatal-conflict", "fatal_type = 2", "console"),
+                                       ("fatal-gui", "fatal_type = 1", "windows")):
+            image(f"crt-app-type-{name}.exe", setup + "\n" + app_type,
+                  link_flags=[*initializer_flags, "/subsystem:" + subsystem])
         image("crt-initterm.exe", (sources / "crt-initterm.s").read_text(), link_flags=initializer_flags)
         image("crt-initterm-spill.exe", (sources / "crt-initterm-spill.s").read_text(),
               link_flags=[*initializer_flags, "/base:0x400000"])
