@@ -53,6 +53,19 @@ namespace forge::x86 {
             return IntegerInstruction{op, form, width, width};
         }
 
+        std::optional<Form> compareMemoryForm(unsigned width, StringRef suffix) {
+            if (width == 32 && suffix == "rm") {
+                return Form::Load;
+            }
+
+            if ((width == 16 && suffix == "mi") ||
+                ((width == 32 || width == 64) && suffix == "mi8")) {
+                return Form::MemoryImmediate;
+            }
+
+            return std::nullopt;
+        }
+
         std::optional<Form> arithmeticMemoryForm(Op op, unsigned width, StringRef suffix) {
             if ((op == Op::Inc || op == Op::Dec) && suffix == "m") {
                 return Form::MemoryUnary;
@@ -73,13 +86,12 @@ namespace forge::x86 {
                 }
             }
 
-            if (op == Op::Cmp && ((width == 16 && suffix == "mi") ||
-                                  ((width == 32 || width == 64) && suffix == "mi8"))) {
-                return Form::MemoryImmediate;
+            if (op == Op::Cmp) {
+                return compareMemoryForm(width, suffix);
             }
 
-            if (suffix == "rm" && (((op == Op::Cmp || op == Op::Xor) && width == 32) ||
-                                   (op == Op::Imul && width == 64))) {
+            if (suffix == "rm" &&
+                ((op == Op::Xor && width == 32) || (op == Op::Imul && width == 64))) {
                 return Form::Load;
             }
 
