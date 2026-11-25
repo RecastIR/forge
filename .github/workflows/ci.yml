@@ -190,6 +190,24 @@ jobs:
           retention-days: 7
           overwrite: true
 
+  windows-integer-reference:
+    needs: macos-dev
+    runs-on: windows-2022
+    outputs:
+      stages: ${{ toJSON(steps.verify.outputs) }}
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/download-artifact@v4
+        with:
+          name: executable-reference-inputs
+          path: executables
+      - name: Observe CMP16mi flags and branches on Windows x64
+        id: verify
+        shell: bash
+        run: |
+          python -B tests/integration/test_executable.py windows-cmp16mi executables
+          echo "cmp16mi=success" >> "$GITHUB_OUTPUT"
+
   windows-executable-reference:
     needs: macos-dev
     runs-on: ubuntu-24.04
@@ -286,7 +304,7 @@ jobs:
 
   regression-gate:
     if: ${{ always() }}
-    needs: [macos-dev, macos-sanitize, macos-presets, windows-fixtures, windows-executable-reference, legacy-windows-capture, differential]
+    needs: [macos-dev, macos-sanitize, macos-presets, windows-fixtures, windows-executable-reference, windows-integer-reference, legacy-windows-capture, differential]
     runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v6

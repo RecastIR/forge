@@ -126,6 +126,7 @@ namespace {
         }
 
         for (const auto &[opcode, form] : {std::pair{"CMP32rm", Form::Load},
+                                           {"CMP16mi", Form::MemoryImmediate},
                                            {"CMP32mi8", Form::MemoryImmediate},
                                            {"CMP64mi8", Form::MemoryImmediate},
                                            {"ADD64rm", Form::Load},
@@ -171,8 +172,9 @@ namespace {
             throw std::runtime_error("incorrect two-operand memory multiply");
         }
 
-        for (StringRef opcode : {"ADD64mi", "SUB8mi8", "INC64mr", "MOVZX64rm32", "MOVSX16rm16",
-                                 "MOVSX16rm32", "MOV64mi", "MOV8ao64"}) {
+        for (StringRef opcode :
+             {"CMP16mi8", "CMP32mi", "ADD64mi", "SUB8mi8", "INC64mr", "MOVZX64rm32", "MOVSX16rm16",
+              "MOVSX16rm32", "MOV64mi", "MOV8ao64"}) {
             if (integerInstruction(opcode)) {
                 throw std::runtime_error("accepted unsupported form " + opcode.str());
             }

@@ -80,6 +80,9 @@ def generate(output, mc, link, dlltool, clang):
               [("KERNEL32.dll", name) for name in ("SetLastError", "GetLastError", "ExitProcess")])
         image("executable-import-register.exe", (sources / "executable-import-register.s").read_text(),
               [("KERNEL32.dll", name) for name in ("SetLastError", "GetLastError", "Sleep")])
+        image("executable-cmp16mi.exe", (sources / "executable-cmp16mi.s").read_text(),
+              [("KERNEL32.dll", name) for name in ("GetLastError", "GetStdHandle", "WriteFile")],
+              exports=["compare_at"])
         startup_info = (sources / "executable-startup-info.s").read_text()
         for variant in ("a", "w"):
             setup = f"conditional_title = 1\nmeasured_fields = 1\nprobe_{variant} = 1\n"

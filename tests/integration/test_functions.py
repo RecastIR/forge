@@ -522,6 +522,7 @@ class Lift(Case):
                 lift(code)
 
         lift("68 ff ff", "LIFT_INVALID_ENCODING", category="invalid_input")
+        lift("66 81 38 4d", "LIFT_INVALID_ENCODING", category="invalid_input")
 
         # The RIZ spelling in a SIB with a redundant scale has no index.
         lift("48 89 4c 64 08 48 8b 44 64 08 c3")
@@ -532,6 +533,9 @@ class Lift(Case):
         for code, failure in (
                 ("66 50 c3", "LIFT_UNSUPPORTED_PREFIX"),
                 ("66 c9 c3", "LIFT_UNSUPPORTED_PREFIX"),
+                ("66 83 38 ff c3", "LIFT_UNSUPPORTED_PREFIX"),  # CMP16mi8 sign-extends imm8.
+                ("66 66 81 38 4d 5a c3", "LIFT_UNSUPPORTED_PREFIX"),
+                ("67 66 81 38 4d 5a c3", "LIFT_UNSUPPORTED_PREFIX"),
                 ("f2 48 ab c3", "LIFT_UNSUPPORTED_PREFIX"),
                 ("67 f3 48 ab c3", "LIFT_UNSUPPORTED_PREFIX"),
                 ("f3 ab c3", "LIFT_UNSUPPORTED_PREFIX"),

@@ -69,7 +69,7 @@ For the primary PE, Forge recognizes 20 of 36 load-time symbols. These are KERNE
 
 In `__tmainCRTStartup`, the startup conflict branch loads error 31 at `0x1407`. Forge recovers the terminating call at `0x140c` to **`msvcrt.dll!_amsg_exit`**. In the primary PE the thunk is at `0x26b0` in Debug and `0x2680` in Release, both jumping through IAT slot `0x8208`. Separate focused PEs execute `_amsg_exit(31)` through the same import-thunk shape and exercise an unused import. [Original Windows, Wine and ARM64 observations](amsg-exit/) · [Lifted tests](../../../integration/test_executable.py)
 
-Forge now resolves the direct call to **`msvcrt.dll!_initterm` at `0x142a`**. In the primary PE the Debug thunk at `0x26c0` and Release thunk at `0x2690` both jump through IAT slot `0x8228`. RCX and RDX obtain relocated `__xc_a` and `__xc_z`. The initializer evidence records the range `[0x9000, 0x9010)` and guest target `pre_cpp_init` at `0x1130`. The first qword is null. An isolated copy of the Debug PE follows this initializer to `__getmainargs`. A second isolated copy follows the original call at `0x1494` through the range `[0x9018, 0x9028)` to `pre_c_init` at `0x1010`, where instruction recovery stops at `0x1044`. The diagnostic identifies the callback, the originating import call at `0x1494` and its IAT slot `0x8228`. Both probes validate the original argument setup, import and table. [Conventional PE regressions](../../test_native_differential.py)
+Forge now resolves the direct call to **`msvcrt.dll!_initterm` at `0x142a`**. In the primary PE the Debug thunk at `0x26c0` and Release thunk at `0x2690` both jump through IAT slot `0x8228`. RCX and RDX obtain relocated `__xc_a` and `__xc_z`. The initializer evidence records the range `[0x9000, 0x9010)` and guest target `pre_cpp_init` at `0x1130`. The first qword is null. An isolated copy of the Debug PE follows this initializer to `__getmainargs`. A second isolated copy follows the original call at `0x1494` through the range `[0x9018, 0x9028)` to `pre_c_init` at `0x1010`, where recovery passes the DOS signature comparison at `0x1044` and stops at the application-type call at `0x1072`. The diagnostic identifies the callback and its originating call at `0x1494`. The import fields identify the failing callee’s IAT slot. Both probes validate the original argument setup, import and table. [Conventional PE regressions](../../test_native_differential.py)
 
 The focused executable imports the real legacy MSVCRT function. One initializer replaces a later slot in writable `.CRT`, and the caller checks the resulting order (21222), heap value (42), guest stack state and last error (73). Its SHA-256 is `fad082d17485aff8adf965d5168c85c92f748cbe6b0141f3ed5f1da82bd0ba58`. Pinned Wine 8 and standalone ARM64 both return 42 with empty streams. ARM64 also returns 42 at a guest base offset by `0x30000000` and in each of two independent processes registered from one artifact. The nested-table executable returns 42 with stdout `MMM`. The terminal variant exits 57 with empty streams before the next initializer or the caller can write a marker. [Fixture source](../../../fixtures/crt-initterm.s) · [Failure and isolation tests](../../../integration/test_executable.py) · [Initializer calling contract](../../../../docs/runtime-architecture.md#crt-initializer-callback-design)
 
@@ -94,20 +94,41 @@ docker run --rm --platform linux/amd64 --network none --cap-drop ALL \
 
 ### Startup comparison results
 
-The Task 13.3J rerun of all eight original fixtures in both configurations validated their pinned Wine reference and resolved the two termination imports. Each run stopped during recovery in function `0x1010`, reached by the `_initterm` call at `0x1494`. The diagnostic was `LIFT_UNSUPPORTED_PREFIX`, opcode `CMP16mi`, RVA `0x1044`, bytes `66 81 38 4d 5a`. The comparator exited 1. No case produced a Mach-O, native exit status, stdout or stderr.
+Task 13.3J reran all eight original fixtures in Debug and Release. Every pinned Wine reference passed validation. Every recovery reached the `_initterm` initializer from `0x1494`, passed `CMP16mi` at `0x1044` and stopped in `pre_c_init` (function RVA `0x1010`) at instruction RVA `0x1072`. The diagnostic in all 16 cases was `LIFT_UNSUPPORTED_CONTROL_FLOW` for `CALL64pcrel32` to the unbound `msvcrt.dll!__set_app_type` import. The table gives the complete instruction bytes in each original PE.
 
-| Original case | Debug | Release | Native execution and stream comparison |
+| Fixture | Debug bytes | Release bytes | IAT slot RVA (both) |
 | --- | --- | --- | --- |
-| argc | CMP16mi at 0x1044 | CMP16mi at 0x1044 | Not reached |
-| argc_none | CMP16mi at 0x1044 | CMP16mi at 0x1044 | Not reached |
-| argv | CMP16mi at 0x1044 | CMP16mi at 0x1044 | Not reached |
-| argv_edges | CMP16mi at 0x1044 | CMP16mi at 0x1044 | Not reached |
-| cleanup | CMP16mi at 0x1044 | CMP16mi at 0x1044 | Not reached |
-| globals | CMP16mi at 0x1044 | CMP16mi at 0x1044 | Not reached |
-| puts | CMP16mi at 0x1044 | CMP16mi at 0x1044 | Not reached |
-| return | CMP16mi at 0x1044 | CMP16mi at 0x1044 | Not reached |
+| argc | `e8 29 16 00 00` | `e8 f9 15 00 00` | `0x81f0` |
+| argc_none | `e8 29 16 00 00` | `e8 f9 15 00 00` | `0x81f0` |
+| argv | `e8 99 16 00 00` | `e8 f9 15 00 00` | `0x81f8` |
+| argv_edges | `e8 49 17 00 00` | `e8 f9 15 00 00` | `0x81f8` |
+| cleanup | `e8 19 17 00 00` | `e8 99 16 00 00` | `0x8220` |
+| globals | `e8 49 16 00 00` | `e8 f9 15 00 00` | `0x81f0` |
+| puts | `e8 29 16 00 00` | `e8 f9 15 00 00` | `0x81f8` |
+| return | `e8 19 16 00 00` | `e8 f9 15 00 00` | `0x81f0` |
 
-The next startup task is the 16-bit memory/immediate comparison in the DOS signature check. The `startup/cleanup` reference still produces `IMBA`, empty stderr and status 42. Its native behavior remains unobserved.
+For each table cell the comparator exited 1. Recovery and translation failed. Native compilation, publication, execution and byte comparison were never reached, so native exit status and streams are unavailable. The next startup task is to measure and implement the legacy MSVCRT application-type service. Recovery can encounter that dependency before lifting the later module. The PE also contains a full-width `CMP32mi` at `0x1052`.
+
+### CMP16mi acceptance and remaining compatibility work
+
+The SDK-free executable reads the DOS header via a relocated pointer, an unaligned writable word through an indexed address, an unaligned stack word and two immutable words. Its branches consume comparison flags. Stdout records five pairs of SETO and LAHF bytes, including AF, and status 42 requires the register and memory sentinels to survive. The standalone native test repeats the run at an alternate base. Windows Server 2022 and the pinned Linux amd64 Wine job exercise the macOS producer’s PE. [Assembly](../../../fixtures/executable-cmp16mi.s) · [Executable regression](../../../integration/test_executable.py)
+
+The ARM64 observations were `00 46 01 12 01 87 00 12 00 86`, empty stderr and exit 42. Running the same PE under pinned Wine 8 on Apple Silicon Docker returned `00 46 01 02 01 87 00 02 00 86`. The differing bit is AF for `0x8000 - 0x7fff` and `0x1330 - 0x1201`. Keep this host result distinct in reference reports and use the native Linux amd64 Wine producer for the regression gate. [Wine reference environments](../../README.md#troubleshooting-and-ci)
+
+A successful scalar read requires both bytes to fit one readable mapping. Two readable adjacent mappings yield terminal `FORGE_RT_UNSUPPORTED`, status `FORGE_RT_OK` and an empty fault payload. An inaccessible second byte yields a read fault at that guest address. The managed test observes a service marker on each successful branch and its absence on both terminal paths. Successful cross-mapping access belongs in the shared guest-memory implementation for all applicable scalar operations. [Memory contract](../../../../docs/runtime-architecture.md) · [Boundary regression](../../../integration/test_process.py)
+
+| Outstanding item | Disposition |
+| --- | --- |
+| Startup metadata triggering standard-handle capture (P3) | Defer until the launcher exposes richer configuration. |
+| Full Unicode startup titles and Windows ANSI code pages | Defer conversion support and retain call-time rejection of unsupported input. |
+| CRT-managed buffered streams and flushing | Defer. |
+| Wine `_onexit` allocation exhaustion | Parity remains unverified. |
+| PE TLS initialization and callbacks | Separate loader task. |
+| Missing Windows and CRT services | Separate compatibility tasks, beginning with `__set_app_type`. |
+| Guest exception delivery and SEH | Separate exception-delivery task. |
+| Scalar reads across adjacent readable mappings | Separate shared guest-memory task. |
+
+### Conventional startup responsibilities
 
 | Responsibility | Current result for the selected configuration |
 | --- | --- |

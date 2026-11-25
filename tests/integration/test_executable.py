@@ -27,6 +27,8 @@ FIXTURES = Path(fixture_dir)
 NAMES = ("return", "call", "data", "fault", "last-error")
 GREETING = b"Hello from Windows!\n"
 BINARY = b"A\x00\xff\n"
+# SETO and LAHF byte pairs for the five memory comparisons in the linked PE.
+CMP16MI = (42, bytes.fromhex("00 46 01 12 01 87 00 12 00 86"), b"")
 AMSG_CASES = ("31", "8", "-1", "-2147483648", "unused")
 AMSG_MARKERS = ("marker-control", "marker-fatal")
 
@@ -1060,6 +1062,7 @@ class Reference(Workspace):
         headers = image("headers")
         expected = {
             headers.name: (header_result(headers.read_bytes()), b"", b""),
+            image("cmp16mi").name: CMP16MI,
             "crt-argument-heap.exe": (41, b"", b""),
             "crt-initterm.exe": (42, b"", b""),
             "crt-initterm-spill.exe": (2, b"", b""),
@@ -1089,7 +1092,35 @@ class Reference(Workspace):
                          (42, b"", b""))
 
 
+class WindowsComparison(unittest.TestCase):
+    def test_cmp16mi(self):
+        pe = image("cmp16mi").resolve()
+        digest = hashlib.sha256(pe.read_bytes()).hexdigest()
+        self.assertEqual(digest, "19b6cdda1cf0f07807fdec86cb31247511628b7913406331de987291de553829")
+        result = subprocess.run([pe], capture_output=True, timeout=10)
+        print(f"{platform.platform()} {digest} exit={result.returncode} "
+              f"stdout={result.stdout.hex()} stderr={result.stderr.hex()}", flush=True)
+        self.assertEqual((result.returncode, result.stdout, result.stderr), CMP16MI)
+
+
 class Console(Workspace):
+    def test_cmp16mi(self):
+        pe = image("cmp16mi")
+        data = pe.read_bytes()
+        layout = Layout(data)
+        start = layout.file_offset(entry(data))
+        self.assertEqual(data[start + 11:start + 16], bytes.fromhex("66 81 38 4d 5a"))
+        self.assertIn(bytes.fromhex("66 43 81 3c 08 ff 7f"), data[start:start + 0x100])
+        self.compile(pe)
+        result = self.program()
+        self.assertEqual((result.returncode, result.stdout, result.stderr), CMP16MI)
+
+        preferred, = struct.unpack_from("<Q", data, layout.opt + 24)
+        run(CONTRACT, "--guest-base", hex(preferred + 0x30000000), pe, self.output,
+            OPT, LLC, "/usr/bin/xcrun", *LINK, check=True)
+        rebased = self.program()
+        self.assertEqual((rebased.returncode, rebased.stdout, rebased.stderr), CMP16MI)
+
     def test_crt_fatal_exit(self):
         for filename, observations in amsg_observations("windows").items():
             pe = FIXTURES / filename
@@ -1812,5 +1843,6 @@ if __name__ == "__main__":
     if MODE == "native" and (platform.system(), platform.machine()) != ("Darwin", "arm64"):
         sys.exit(77)
     suites = {"compiler": ("Portable", "StartupAdmission"), "object": ("Object",),
-              "readiness": ("Readiness",), "native": ("Native", "Console"), "reference": ("Reference",)}
+              "readiness": ("Readiness",), "native": ("Native", "Console"), "reference": ("Reference",),
+              "windows-cmp16mi": ("WindowsComparison",)}
     unittest.main(argv=[__file__, *suites[MODE]], verbosity=2)

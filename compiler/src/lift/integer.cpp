@@ -73,7 +73,8 @@ namespace forge::x86 {
                 }
             }
 
-            if (op == Op::Cmp && (width == 32 || width == 64) && suffix == "mi8") {
+            if (op == Op::Cmp && ((width == 16 && suffix == "mi") ||
+                                  ((width == 32 || width == 64) && suffix == "mi8"))) {
                 return Form::MemoryImmediate;
             }
 

@@ -161,6 +161,26 @@ class ProcessExecution(unittest.TestCase):
                       [(0, 0, "return 17"), (0, 1, "guard 3")],
                       imports=[("kernel32.dll", "SetLastError")])
 
+    def test_cmp16mi_read_boundaries(self):
+        source = Path(FIXTURES) / "executable-cmp16mi.exe"
+        module = json.loads(run(FORGE, "inspect", source, "--format", "json"))["modules"][0]
+        sections = {s["name"]: s for s in module["sections"]}
+        left, right = (int(sections[name]["rva"], 16) for name in (".worda", ".wordb"))
+        base = int(module["image_base_va"], 16)
+        boundary = base + right
+        end = boundary + sections[".wordb"]["virtual_size"]
+        data = bytearray(source.read_bytes())
+        Layout(data).abut_writable_sections(left, right)
+        with tempfile.TemporaryDirectory() as tmp:
+            pe = Path(tmp) / "adjacent.exe"
+            pe.write_bytes(data)
+            self.exercise(pe, "compare_at", [
+                (boundary - 2, 0, "Greturn 1"), (boundary + 1, 0, "Greturn 2"),
+                (end - 2, 0, "Greturn 1"), (boundary - 1, 0, "unsupported"),
+                (end - 1, 0, memory(end, READ, UNMAPPED)),
+                (ENTRY_RSP - 1, 0, memory(ENTRY_RSP, READ, STACK)),
+            ], imports=[("kernel32.dll", "GetLastError")], probe=True)
+
     def test_stack_guard_and_service_failures(self):
         getter = [("kernel32.dll", "GetLastError")]
         self.exercise("checked-memory", "guard_then_service",
