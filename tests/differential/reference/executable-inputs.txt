@@ -12,6 +12,7 @@ crt-app-type-console.exe
 crt-app-type-fatal-conflict.exe
 crt-app-type-fatal-console.exe
 crt-app-type-fatal-gui.exe
+crt-app-type-fatal-unusual.exe
 crt-app-type-gui.exe
 crt-argument-heap.exe
 crt-initterm-nested_table.exe

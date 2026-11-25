@@ -24,6 +24,15 @@ namespace forge::runtime {
         bool append(Handler handler) noexcept;
     };
 
+    struct CrtApplicationType {
+        static constexpr int32_t console = 1, gui = 2;
+        enum class Origin { Default, PeSubsystem, Setter };
+        int32_t value = 0;
+        Origin origin = Origin::Default;
+
+        void initialize(uint64_t imageBase, std::span<const forge_rt_image_region> rows) noexcept;
+    };
+
     // Owned at a stable address by the managed occurrence. Its core reservations borrow
     // the combined parameter mapping until registration rollback or process close.
     struct WindowsProcessState {
@@ -32,6 +41,7 @@ namespace forge::runtime {
         uint64_t topLevelExceptionFilter = 0;
 
         std::optional<CrtParameters> crt;
+        CrtApplicationType appType;
         int32_t crtErrno = 0;
         size_t heapUsage = 0;
         TerminationRegistry termination;

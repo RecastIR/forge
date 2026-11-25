@@ -65,6 +65,14 @@ class ProcessExecution(unittest.TestCase):
                     self.assertCountEqual(actual_imports, imports)
                     self.assertEqual(lines[1 + len(imports):], [answer for _, _, answer in cases])
 
+    def test_app_type_argument(self):
+        # Function-entry artifacts omit PE headers. The differing low DWORDs select
+        # distinct fatal routes there, exposing RCX lowering and the embedded result.
+        self.exercise("crt-app-type-argument", None,
+                      [(0x100000001, 2, "exit 255"), (0x100000002, 1, "unsupported CRT routing"),
+                       (-7, 1, "unsupported CRT routing")],
+                      imports=[("msvcrt.dll", "__set_app_type"), ("msvcrt.dll", "_amsg_exit")])
+
     def test_header_entry(self):
         self.exercise("add", None, [(23, 47, "return 70"), (0, 0, "return 0"),
                                     (-1, 0, f"return {2**64-1}")])

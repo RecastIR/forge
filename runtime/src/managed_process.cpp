@@ -208,6 +208,8 @@ namespace {
             return prepared;
         }
 
+        windows.appType.initialize(artifact.base,
+                                   tableRows(image.execution.view.regions, artifact.regionCount));
         const auto functions = functionImports(artifact);
         if (!functions.empty()) {
             const auto reserved = image.reserveImportAddresses(

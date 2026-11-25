@@ -403,6 +403,10 @@ namespace forge::win64 {
             "msvcrt.dll", "__getmainargs", LastError::Preserve,
             FORGE_SERVICE_ADAPTER(forge_rt_msvcrt_getmainargs), Requirement::Process);
 
+    inline constexpr auto crtSetAppType = bind<Value::Void, Argument{Value::I32}>(
+        "msvcrt.dll", "__set_app_type", LastError::Preserve,
+        FORGE_SERVICE_ADAPTER(forge_rt_msvcrt_set_app_type), Requirement::Process);
+
     inline constexpr auto crtAmsgExit =
         bind<Value::Void, Argument{Value::I32}>("msvcrt.dll", "_amsg_exit", LastError::Preserve,
                                                 FORGE_SERVICE_ADAPTER(forge_rt_msvcrt_amsg_exit),
@@ -451,5 +455,6 @@ namespace forge::win64 {
         crtOnexit,
         crtCexit,
         crtExit,
+        crtSetAppType,
     };
 } // namespace forge::win64

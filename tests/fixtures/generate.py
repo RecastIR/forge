@@ -118,9 +118,12 @@ def generate(output, mc, link, dlltool, clang):
         for name, setup, subsystem in (("console", "", "console"), ("gui", "", "windows"),
                                        ("fatal-console", "fatal_type = 1", "console"),
                                        ("fatal-conflict", "fatal_type = 2", "console"),
+                                       ("fatal-unusual", "fatal_type = -7", "console"),
                                        ("fatal-gui", "fatal_type = 1", "windows")):
             image(f"crt-app-type-{name}.exe", setup + "\n" + app_type,
                   link_flags=[*initializer_flags, "/subsystem:" + subsystem])
+        image("crt-app-type-argument.exe", "caller_argument = 1\nfatal_type = 0\n" + app_type,
+              link_flags=initializer_flags)
         image("crt-initterm.exe", (sources / "crt-initterm.s").read_text(), link_flags=initializer_flags)
         image("crt-initterm-spill.exe", (sources / "crt-initterm-spill.s").read_text(),
               link_flags=[*initializer_flags, "/base:0x400000"])

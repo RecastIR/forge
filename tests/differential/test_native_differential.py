@@ -40,20 +40,39 @@ class NativeDifferentialTests(unittest.TestCase):
         ctx = record["context"]
         self.assertIs(ctx["entry_recovered"], True)
         self.assertIs(ctx["recovery_complete"], False)
-        self.assertEqual((ctx["entry_rva"], ctx["function_rva"], ctx["instruction_rva"], ctx["opcode"]),
-                         ("0x14d0", "0x1010", "0x1072", "CALL64pcrel32"))
-        self.assertEqual((ctx["caller_rva"], ctx["call_site_rva"], ctx["initializer_target_rva"]),
-                         ("0x1180", "0x1494", "0x1010"))
-        self.assertEqual((ctx["import_dll"], ctx["import_symbol"], ctx["iat_slot_rva"]),
-                         ("msvcrt.dll", "__set_app_type", slot))
-        # The original .text starts at file offset 0x600 and RVA 0x1000 in both builds.
+        self.assertEqual(ctx["entry_rva"], "0x14d0")
+        self.assertIn({"dll": "msvcrt.dll", "name": "__set_app_type"}, ctx["imports"])
+        crt = next(d for d in ctx["load_imports"] if d["dll"].lower() == "msvcrt.dll")
+        setter = next(s for s in crt["symbols"] if s["name"] == "__set_app_type")
+        self.assertEqual((setter["iat_slot_rva"], setter["catalogued_service"]), (slot, True))
+
+        # Check the original setter thunk against its IAT slot independently of the
+        # later blocker. All eight PEs place .text at RVA 0x1000, file offset 0x600.
         data = (diff.BINARIES / config / manifest.case["binary"]).read_bytes()
         self.assertEqual(data[0x644:0x649], bytes.fromhex("66 81 38 4d 5a"))
-        call = data[0x672:0x677]
-        self.assertEqual((call[0], ctx["bytes"]), (0xe8, call.hex()))
-        thunk = 0x1077 + struct.unpack_from("<i", call, 1)[0]
-        self.assertIn({"caller_rva": "0x1010", "instruction_rva": "0x1072", "target_rva": hex(thunk)},
-                      ctx["unresolved_calls"])
+        self.assertEqual(data[0x672], 0xe8)
+        thunk = 0x1077 + struct.unpack_from("<i", data, 0x673)[0]
+        offset = thunk - 0x1000 + 0x600
+        self.assertEqual(data[offset:offset + 2], b"\xff\x25")
+        self.assertEqual(thunk + 6 + struct.unpack_from("<i", data, offset + 2)[0], int(slot, 16))
+        self.assertNotIn({"caller_rva": "0x1010", "instruction_rva": "0x1072", "target_rva": hex(thunk)},
+                         ctx["unresolved_calls"])
+
+        name = manifest.case["id"].split("/")[1]
+        if name == "puts" and config == "debug":
+            self.assertEqual((ctx["function_rva"], ctx["instruction_rva"], ctx["opcode"], ctx["bytes"]),
+                             ("0x1530", "0x1547", "CALL64pcrel32", "e8c4110000"))
+            self.assertEqual((ctx["import_dll"], ctx["import_symbol"], ctx["iat_slot_rva"]),
+                             ("msvcrt.dll", "puts", "0x8280"))
+            self.assertEqual(ctx["branch_target"], 0x2710)
+        else:
+            debug = {"argc": 0x1630, "argc_none": 0x1630, "argv": 0x16a0, "argv_edges": 0x1750,
+                     "cleanup": 0x1720, "globals": 0x1650, "return": 0x1620}
+            root = debug[name] if config == "debug" else (0x16a0 if name == "cleanup" else 0x1600)
+            self.assertEqual((ctx["function_rva"], ctx["instruction_rva"], ctx["opcode"], ctx["bytes"],
+                              ctx["branch_target"]), (hex(root), hex(root + 0x1a), "JMP_4", "e971ffffff", root - 0x70))
+        offset = ctx["file_offset"]
+        self.assertEqual(data[offset:offset + 5].hex(), ctx["bytes"])
         return report
 
     def test_other_conventional_startup_blockers(self):
@@ -182,14 +201,12 @@ class NativeDifferentialTests(unittest.TestCase):
                         else:
                             self.assertEqual((record["code"], ctx["function_rva"], ctx["instruction_rva"],
                                               ctx["opcode"], ctx["bytes"]),
-                                             ("LIFT_UNSUPPORTED_CONTROL_FLOW", "0x1010", "0x1072",
-                                              "CALL64pcrel32", "e829160000"))
-                            self.assertEqual((ctx["initializer_target_rva"], ctx["caller_rva"],
-                                              ctx["call_site_rva"], ctx["import_symbol"], ctx["iat_slot_rva"]),
-                                             ("0x1010", "0x1180", hex(site), "__set_app_type", "0x81f0"))
-                            self.assertEqual(ctx["unresolved_calls"], [
-                                {"caller_rva": "0x1010", "instruction_rva": "0x1072",
-                                 "target_rva": "0x26a0"}])
+                                             ("LIFT_UNSUPPORTED_CONTROL_FLOW", "0x1dc0", "0x1dc7",
+                                              "JMP_4", "e9dc080000"))
+                            self.assertIn({"dll": "msvcrt.dll", "name": "__set_app_type"}, ctx["imports"])
+                            self.assertEqual(ctx["branch_target"], 0x26a8)
+                            self.assertIn({"caller_rva": "0x1010", "instruction_rva": "0x10ff",
+                                           "target_rva": "0x1dc0"}, ctx["unresolved_calls"])
 
     def test_lstrlen_rebased_reference(self):
         fixture = "imports/lstrlen"

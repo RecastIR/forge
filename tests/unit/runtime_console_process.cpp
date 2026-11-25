@@ -1,3 +1,5 @@
+#include "../../runtime/src/compat/process_state.h"
+#include "../../runtime/src/core/instance.h"
 #include "../../runtime/src/platform/darwin/io.h"
 #include <forge/msvcrt_process.h>
 #include <forge/process.h>
@@ -21,6 +23,7 @@
 #endif
 #include <sys/resource.h>
 #include <sys/socket.h>
+#include <thread>
 #include <unistd.h>
 
 namespace {
@@ -589,6 +592,86 @@ namespace {
         REQUIRE(!owner);
     }
 
+    void checkApplicationTypeHeader() {
+        using forge::runtime::CrtApplicationType;
+        constexpr size_t nt = 64, optional = nt + 24, subsystem = optional + 68;
+        std::array<uint8_t, subsystem + 2> header{};
+        header[0] = 'M';
+        header[1] = 'Z';
+        header[0x3c] = nt;
+        header[nt] = 'P';
+        header[nt + 1] = 'E';
+        header[nt + 20] = 70;
+        header[optional] = 0x0b;
+        header[optional + 1] = 2;
+        header[subsystem] = 2;
+        forge_rt_image_region row{source, header.size(), header.data(), FORGE_RT_READ, nullptr};
+        const auto selected = [&] {
+            CrtApplicationType type;
+            type.initialize(source, {&row, 1});
+            return type.value;
+        };
+        REQUIRE(selected() == CrtApplicationType::gui);
+        header[subsystem] = 3;
+        REQUIRE(selected() == CrtApplicationType::console);
+        --row.size;
+        REQUIRE(selected() == 0);
+        ++row.size;
+        header[nt + 20] = 68;
+        REQUIRE(selected() == 0);
+        header[nt + 20] = 70;
+        uint64_t writableClaim = 1;
+        row.claim = &writableClaim;
+        REQUIRE(selected() == 0);
+        row.claim = nullptr;
+        header[0x3f] = 0xff;
+        REQUIRE(selected() == 0);
+    }
+
+    void setApplicationTypes(forge_rt_execution *execution) {
+        const auto instance = execution->instance;
+        const auto thread = execution->thread;
+        const auto &windows = *instance->windows;
+        using Origin = forge::runtime::CrtApplicationType::Origin;
+        REQUIRE(windows.appType.origin == Origin::Default && windows.appType.value == 0);
+        REQUIRE(!windows.standardHandles && !windows.crt);
+        REQUIRE(forge_rt_msvcrt_set_app_type(instance, 0, 2) == FORGE_RT_INVALID_THREAD);
+        REQUIRE(windows.appType.origin == Origin::Default && windows.appType.value == 0);
+        REQUIRE(forge_rt_set_last_error(instance, thread, initialError) == FORGE_RT_OK);
+        instance->windows->crtErrno = 91;
+
+        for (const int32_t value : {2, 0, INT32_MIN, -7, 1, 2}) {
+            REQUIRE(forge_rt_msvcrt_set_app_type(instance, thread, value) == FORGE_RT_OK);
+            REQUIRE(windows.appType.value == value && windows.crtErrno == 91);
+            REQUIRE(lastError(*execution) == initialError);
+        }
+
+        std::thread foreign([&] {
+            REQUIRE(forge_rt_msvcrt_set_app_type(instance, thread, 1) ==
+                    FORGE_RT_INVALID_INVOCATION);
+        });
+        foreign.join();
+        REQUIRE(windows.appType.value == 2 && !windows.standardHandles);
+
+        REQUIRE(forge_rt_exit_process(instance, thread, 57) == FORGE_RT_OK);
+        REQUIRE(forge_rt_msvcrt_set_app_type(instance, thread, 1) == FORGE_RT_INVALID_STATE);
+        REQUIRE(windows.appType.value == 2 && execution->result.value == 57);
+    }
+
+    void checkApplicationTypeIsolation() {
+        constexpr forge_rt_import setter{"msvcrt.dll", "__set_app_type"};
+        auto artifact = consoleArtifact(setApplicationTypes);
+        artifact.imports = &setter;
+        artifact.importCount = 1;
+        auto first = registered(artifact);
+        auto second = registered(artifact);
+        REQUIRE(run(first).value == 57);
+        REQUIRE(run(second).value == 57);
+        first.reset();
+        second.reset();
+        REQUIRE(run(registered(artifact)).value == 57);
+    }
+
     void checkNoDescriptorBudget() {
         struct rlimit previous{};
         REQUIRE(getrlimit(RLIMIT_NOFILE, &previous) == 0);
@@ -596,6 +679,7 @@ namespace {
         REQUIRE(setrlimit(RLIMIT_NOFILE, &none) == 0);
         expectCaptureExhaustion(EINVAL);
         checkAddressOnlyConsoleImports();
+        checkApplicationTypeIsolation();
         constexpr forge_rt_import unrelated[]{{"kernel32.dll", "ExitProcess"},
                                               {"kernel32.dll", "GetLastError"},
                                               {"other.dll", "GetStdHandle"},
@@ -621,6 +705,8 @@ namespace {
         REQUIRE(forge_rt_create(FORGE_RT_ABI_VERSION, &instance) == FORGE_RT_OK);
         REQUIRE(forge_rt_thread_create(instance, &thread) == FORGE_RT_OK);
         REQUIRE(forge_rt_enter(instance, thread, &image, nullptr, &invocation) == FORGE_RT_OK);
+        REQUIRE(forge_rt_msvcrt_set_app_type(nullptr, thread, 2) == FORGE_RT_INVALID_ARGUMENT);
+        REQUIRE(forge_rt_msvcrt_set_app_type(instance, thread, 2) == FORGE_RT_INVALID_STATE);
         expectMissingConsole(instance, thread);
         REQUIRE(forge_rt_leave(instance, thread, invocation) == FORGE_RT_OK);
         REQUIRE(forge_rt_destroy(instance) == FORGE_RT_OK);
@@ -815,6 +901,7 @@ void testRuntimeConsoleProcess(const char *fatalObservations) {
         checkCaptureCleanup(false, i);
     }
 
+    checkApplicationTypeHeader();
     checkNoDescriptorBudget();
     checkCaptureExhaustion();
 #ifdef __APPLE__

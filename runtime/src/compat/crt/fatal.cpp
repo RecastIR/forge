@@ -2,6 +2,7 @@
 #include "../process_state.h"
 #include "forge/msvcrt_process.h"
 
+#include <cstring>
 #include <string_view>
 
 using namespace forge::runtime;
@@ -95,11 +96,82 @@ namespace {
     }
 } // namespace
 
+// Legacy MSVCRT consults the main module's immutable PE header on attach and on
+// every setter call. Forge can select the same subsystem once during registration.
+void CrtApplicationType::initialize(uint64_t imageBase,
+                                    std::span<const forge_rt_image_region> rows) noexcept {
+    if (rows.empty() || rows.front().start != imageBase ||
+        rows.front().permissions != FORGE_RT_READ || rows.front().claim) {
+        return;
+    }
+
+    const std::span headers(static_cast<const uint8_t *>(rows.front().bytes), rows.front().size);
+    constexpr size_t ntOffsetField = 0x3c, optionalHeader = 24, subsystem = optionalHeader + 68;
+    if (headers.size() < ntOffsetField + 4 || headers[0] != 'M' || headers[1] != 'Z') {
+        return;
+    }
+
+    uint32_t offset;
+    std::memcpy(&offset, headers.data() + ntOffsetField, sizeof(offset));
+    if (offset < ntOffsetField + 4 || offset > headers.size() ||
+        headers.size() - offset < subsystem + 2) {
+        return;
+    }
+
+    const auto *nt = headers.data() + offset;
+    uint16_t optionalSize;
+    std::memcpy(&optionalSize, nt + 20, sizeof(optionalSize));
+    if (std::memcmp(nt, "PE\0\0", 4) != 0 || optionalSize < subsystem + 2 - optionalHeader ||
+        optionalSize > headers.size() - offset - optionalHeader || nt[optionalHeader] != 0x0b ||
+        nt[optionalHeader + 1] != 2) {
+        return;
+    }
+
+    uint16_t peSubsystem;
+    std::memcpy(&peSubsystem, nt + subsystem, sizeof(peSubsystem));
+    if (peSubsystem == 2 || peSubsystem == 3) {
+        value = peSubsystem == 2 ? gui : console;
+        origin = Origin::PeSubsystem;
+    }
+}
+
+extern "C" forge_rt_status forge_rt_msvcrt_set_app_type(forge_rt_instance *instance,
+                                                        forge_rt_thread_token thread,
+                                                        int32_t appType) noexcept {
+    return withInstance(instance, [&](auto &owner) {
+        const auto status = checkPendingExecution(owner, thread);
+        if (status != FORGE_RT_OK) {
+            return status;
+        }
+
+        auto &type = owner.windows->appType;
+        if (type.origin != CrtApplicationType::Origin::PeSubsystem) {
+            type.value = appType;
+            type.origin = CrtApplicationType::Origin::Setter;
+        }
+
+        return FORGE_RT_OK;
+    });
+}
+
 extern "C" forge_rt_status forge_rt_msvcrt_amsg_exit(forge_rt_instance *instance,
                                                      forge_rt_thread_token thread,
                                                      int32_t errorNumber) noexcept {
-    const auto status = withInstance(
-        instance, [thread](auto &owner) { return checkPendingExecution(owner, thread); });
+    const auto status = withInstance(instance, [thread](const auto &owner) {
+        const auto admitted = checkPendingExecution(owner, thread);
+        if (admitted != FORGE_RT_OK) {
+            return admitted;
+        }
+
+        // Headerless host entries historically use console routing before any setter.
+        const auto &type = owner.windows->appType;
+        if (type.origin == CrtApplicationType::Origin::Default ||
+            type.value == CrtApplicationType::console) {
+            return FORGE_RT_OK;
+        }
+
+        return FORGE_RT_UNSUPPORTED_CRT_ERROR_ROUTING;
+    });
 
     if (status != FORGE_RT_OK) {
         return status;

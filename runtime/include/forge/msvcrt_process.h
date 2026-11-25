@@ -28,8 +28,13 @@ forge_rt_status forge_rt_msvcrt_getmainargs(forge_rt_instance *instance,
                                             int32_t *outResult,
                                             forge_rt_memory_fault *fault) FORGE_CRT_NOEXCEPT;
 
-/* Attempt the fatal console diagnostic on the process's captured stderr, then
- * publish guest exit code 255 for the active managed invocation. */
+/* Set the effective legacy CRT application type for the active process. */
+forge_rt_status forge_rt_msvcrt_set_app_type(forge_rt_instance *instance,
+                                             forge_rt_thread_token thread,
+                                             int32_t appType) FORGE_CRT_NOEXCEPT;
+
+/* Console routing writes to captured stderr and publishes guest exit code 255.
+ * A required GUI diagnostic returns an unsupported-service status before output. */
 forge_rt_status forge_rt_msvcrt_amsg_exit(forge_rt_instance *instance, forge_rt_thread_token thread,
                                           int32_t errorNumber) FORGE_CRT_NOEXCEPT;
 

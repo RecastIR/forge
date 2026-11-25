@@ -971,7 +971,8 @@ class Readiness(Workspace):
 
     def test_managed_services_require_process(self):
         for pe, name in ((image("top-level-filter"), "SetUnhandledExceptionFilter"),
-                         (FIXTURES / "crt-amsg-exit-31.exe", "_amsg_exit")):
+                         (FIXTURES / "crt-amsg-exit-31.exe", "_amsg_exit"),
+                         (FIXTURES / "crt-app-type-fatal-console.exe", "__set_app_type")):
             with self.subTest(name=name):
                 result = run(FORGE, "lift", pe, "--rva", hex(entry(pe.read_bytes())), "--checked-memory",
                              "--signature", "i64(i64,i64)", "--diagnostics-format", "json", "--output", self.output)
@@ -1068,7 +1069,7 @@ class Reference(Workspace):
             image("cmp16mi").name: CMP16MI,
             "crt-app-type-console.exe": APP_TYPE_RETURN,
             "crt-app-type-gui.exe": APP_TYPE_RETURN,
-            **{f"crt-app-type-fatal-{mode}.exe": (255, b"", b"") for mode in ("console", "conflict", "gui")},
+            **{f"crt-app-type-fatal-{mode}.exe": (255, b"", b"") for mode in ("console", "conflict", "gui", "unusual")},
             "crt-argument-heap.exe": (41, b"", b""),
             "crt-initterm.exe": (42, b"", b""),
             "crt-initterm-spill.exe": (2, b"", b""),
@@ -1122,7 +1123,7 @@ class WindowsAppType(unittest.TestCase):
         fatal = captured_streams(amsg_observations("windows", ("8",))["crt-amsg-exit-8.exe"]["pipe"])
         for name, expected in (("crt-app-type-console", APP_TYPE_RETURN), ("crt-app-type-gui", APP_TYPE_RETURN),
                                ("crt-amsg-exit-8", fatal), ("crt-app-type-fatal-console", fatal),
-                               ("crt-app-type-fatal-conflict", fatal)):
+                               ("crt-app-type-fatal-conflict", fatal), ("crt-app-type-fatal-unusual", fatal)):
             with self.subTest(name=name):
                 pe = (FIXTURES / (name + ".exe")).resolve()
                 digest = hashlib.sha256(pe.read_bytes()).hexdigest()
@@ -1152,6 +1153,30 @@ class Console(Workspace):
             OPT, LLC, "/usr/bin/xcrun", *LINK, check=True)
         rebased = self.program()
         self.assertEqual((rebased.returncode, rebased.stdout, rebased.stderr), CMP16MI)
+
+    def test_crt_app_type(self):
+        fatal = captured_streams(amsg_observations("windows", ("8",))["crt-amsg-exit-8.exe"]["pipe"])
+        for mode, expected in (("console", APP_TYPE_RETURN), ("gui", APP_TYPE_RETURN), ("fatal-console", fatal),
+                               ("fatal-conflict", fatal), ("fatal-unusual", fatal), ("fatal-gui", (125, b"",
+                                    b"forge: unsupported MSVCRT _amsg_exit GUI diagnostic routing\n"))):
+            with self.subTest(mode=mode):
+                self.compile(FIXTURES / f"crt-app-type-{mode}.exe")
+                result = self.program()
+                self.assertEqual((result.returncode, result.stdout, result.stderr), expected)
+
+    def test_gui_subsystem_before_setter(self):
+        # The checked Windows control calls only _amsg_exit. Change its PE subsystem
+        # to exercise initial GUI classification without launching a Windows dialog.
+        data = bytearray((FIXTURES / "crt-amsg-exit-8.exe").read_bytes())
+        subsystem = Layout(data).opt + 68
+        self.assertEqual(struct.unpack_from("<H", data, subsystem), (3,))
+        struct.pack_into("<H", data, subsystem, 2)
+        pe = self.dir / "gui.exe"
+        pe.write_bytes(data)
+        self.compile(pe)
+        result = self.program()
+        self.assertEqual((result.returncode, result.stdout, result.stderr),
+                         (125, b"", b"forge: unsupported MSVCRT _amsg_exit GUI diagnostic routing\n"))
 
     def test_crt_fatal_exit(self):
         for filename, observations in amsg_observations("windows").items():

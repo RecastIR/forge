@@ -12,7 +12,7 @@ Process artifacts can publish read-only function IAT slots containing stable gue
 
 A managed guest can set, replace, or clear its process-wide top-level exception filter and retrieve the previous guest address. A guest fault still terminates execution. [Top-level exception filter registration](../docs/runtime-architecture.md#top-level-exception-filter-registration)
 
-Legacy MSVCRT's `_amsg_exit(int)` reports a fatal CRT error through the process's captured stderr and returns a tagged guest exit with code 255 to the host. The standalone executable exits with the same status. [Fatal CRT diagnostics](../docs/runtime-architecture.md#fatal-crt-diagnostics)
+Legacy MSVCRT's `__set_app_type(int)` selects the effective application type in the managed process. With console routing, `_amsg_exit(int)` reports a fatal CRT error through the process's captured stderr and returns a tagged guest exit with code 255 to the host. The standalone executable exits with the same status. A required GUI diagnostic produces a tagged unsupported result. [Fatal CRT diagnostics](../docs/runtime-architecture.md#fatal-crt-diagnostics)
 
 Managed `msvcrt.dll!_initterm` walks a bounded table in guest memory and calls compiled Windows x64 `void(void)` initializers in order. Each nonzero target must belong to the recovered set for that call site. A callback shares the active thread, stack, heap and last-error state, and its exit or fault reaches the host. The native caller's synthetic return slot is protected against guest inspection. [Initializer callback contract](../docs/runtime-architecture.md#crt-initializer-callback-design)
 

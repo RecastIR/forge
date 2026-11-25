@@ -49,11 +49,12 @@ namespace {
             std::printf("runtime %u\n", result.status);
             break;
         case FORGE_RT_UNSUPPORTED:
-            require(result.status == FORGE_RT_OK && result.value == 0 && result.fault == 0 &&
-                        result.memory.address == 0 && result.memory.access == 0 &&
-                        result.memory.reason == 0,
+            require((result.status == FORGE_RT_OK ||
+                     result.status == FORGE_RT_UNSUPPORTED_CRT_ERROR_ROUTING) &&
+                        result.value == 0 && result.fault == 0 && result.memory.address == 0 &&
+                        result.memory.access == 0 && result.memory.reason == 0,
                     "unsupported result");
-            std::puts("unsupported");
+            std::puts(result.status == FORGE_RT_OK ? "unsupported" : "unsupported CRT routing");
             break;
         default:
             require(false, "unexpected outcome");
