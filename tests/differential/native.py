@@ -103,8 +103,9 @@ def command(args, log, stdout=None, *, timeout=180):
 def configure(tree, config, args):
     if (platform.system(), platform.machine()) != ("Darwin", "arm64"):
         raise ValueError("native differential execution requires macOS arm64")
-    return ["cmake", "-S", SUITE.parents[1], "-B", tree, "-DBUILD_TESTING=OFF", "-DFORGE_BUILD_CLI=OFF",
-            "-DCMAKE_TOOLCHAIN_FILE:FILEPATH=", f"-DCMAKE_BUILD_TYPE={config.capitalize()}", *args]
+    # The standalone harness and CMake's nested compiler probes both use the host toolchain.
+    return ["cmake", "-E", "env", "--unset=CMAKE_TOOLCHAIN_FILE", "cmake", "-S", SUITE.parents[1], "-B", tree,
+            "-DBUILD_TESTING=OFF", "-DFORGE_BUILD_CLI=OFF", f"-DCMAKE_BUILD_TYPE={config.capitalize()}", *args]
 
 
 def phase(name, args, log, timings=None):
