@@ -214,7 +214,6 @@ namespace forge::x86 {
             JumpTableReader tables;
             std::map<uint32_t, FunctionDiscovery> staging;
             std::set<uint32_t> ready, leafCandidates;
-            std::set<uint32_t> publishedReturns;
             std::map<uint32_t, const ResolvedCallSite *> callbackSources;
             const InstructionOperands operands;
             RecoveryMode mode;
@@ -384,8 +383,8 @@ namespace forge::x86 {
 
             // An initializer discovered during publication can call a previously
             // published body. Its return proof has already reached the fixed point.
-            if (functions.contains(address)) {
-                return publishedReturns.contains(address) ? Flow::Fallthrough : Flow::TerminalCall;
+            if (const auto published = functions.find(address); published != functions.end()) {
+                return published->second.mayReturn ? Flow::Fallthrough : Flow::TerminalCall;
             }
 
             if (address == entry.rva) {
@@ -968,9 +967,6 @@ namespace forge::x86 {
                 const auto rva = pending.extract(pending.begin()).value();
                 auto staged = staging.extract(rva);
                 auto &state = staged.mapped();
-                if (state.mayReturn) {
-                    publishedReturns.insert(rva);
-                }
                 auto &function =
                     functions.try_emplace(rva, rva, RecoveryOrigin::UnwindBacked, state.code)
                         .first->second;

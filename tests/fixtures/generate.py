@@ -85,7 +85,7 @@ def generate(output, mc, link, dlltool, clang):
               exports=["compare_at"])
         image("executable-tail-jump.exe", (sources / "executable-tail-jump.s").read_text(),
               [("KERNEL32.dll", name) for name in ("SetLastError", "GetLastError", "ExitProcess")],
-              exports=["bad_register", "bad_stack", "bad_memory", "terminal", "pivot"])
+              exports=["bad_register", "nested_clobber", "bad_stack", "bad_memory", "terminal", "pivot"])
         startup_info = (sources / "executable-startup-info.s").read_text()
         for variant in ("a", "w"):
             setup = f"conditional_title = 1\nmeasured_fields = 1\nprobe_{variant} = 1\n"

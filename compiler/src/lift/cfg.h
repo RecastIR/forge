@@ -50,7 +50,7 @@ namespace forge::x86 {
             if (!isDirectCall()) {
                 return {};
             }
-            return int64_t(next) + inst.getOperand(0).getImm();
+            return relativeTarget();
         }
 
         int64_t relativeTarget() const { return int64_t(next) + inst.getOperand(0).getImm(); }

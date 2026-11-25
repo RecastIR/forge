@@ -42,7 +42,7 @@ namespace forge::x86 {
         };
 
         struct CallInputs {
-            // All frame-relative facts use the RSP at the architectural CALL.
+            // Frame offsets use the original return slot, including across tail transfers.
             AddressFact frameRsp, continuation;
             bool callbackFrame = false;
             AddressFacts facts;

@@ -557,8 +557,7 @@ namespace forge::x86 {
                     auto &step = block.steps.emplace_back(std::move(it->second));
                     block.exit = step.flow;
                     if (block.exit == Flow::Jump || block.exit == Flow::Conditional) {
-                        block.successors.push_back(static_cast<uint32_t>(
-                            int64_t(step.next) + step.inst.getOperand(0).getImm()));
+                        block.successors.push_back(static_cast<uint32_t>(step.relativeTarget()));
                     }
 
                     if (block.exit == Flow::Indirect) {

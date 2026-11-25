@@ -80,7 +80,16 @@ compute:
 .seh_endproc
 
 # Each export below isolates a checked outcome in the managed-process harness.
-.globl bad_register, bad_stack, terminal, pivot
+.globl bad_register, nested_clobber, bad_stack, terminal, pivot
+.seh_proc nested_clobber
+nested_clobber:
+    subq $40, %rsp
+    .seh_stackalloc 40
+    .seh_endprologue
+    call bad_register
+    addq $40, %rsp
+    retq
+.seh_endproc
 .seh_proc bad_register
 bad_register:
     .seh_endprologue

@@ -683,6 +683,14 @@ class Lift(Case):
         self.invoke(*args)
         self.assertIn(f"musttail call void @forge_guest_{helper:x}(", output.read_text())
 
+        for code, detail in (("c3", "undefined RAX"), ("74 00 89 c8 c3", "flags"),
+                             ("4c 89 c0 c3", "undefined incoming R8")):
+            with self.subTest(target_body=code):
+                write_body(data, helper, bytes.fromhex(code))
+                failure = diagnose(data)
+                self.assertIn(detail, failure["message"])
+        write_body(data, helper, bytes.fromhex("48 89 c8 c3"))
+
         for target, detail in ((helper + 1, "interior"), (helper + 3, "interior"),
                                (layout.directory(3)[0], "outside executable")):
             with self.subTest(tail_target=target):
