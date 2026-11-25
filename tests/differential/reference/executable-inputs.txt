@@ -11,6 +11,8 @@ crt-amsg-marker-fatal.exe
 crt-app-type-console.exe
 crt-app-type-fatal-conflict.exe
 crt-app-type-fatal-console.exe
+crt-app-type-fatal-gui-newline.exe
+crt-app-type-fatal-gui-unknown.exe
 crt-app-type-fatal-gui.exe
 crt-app-type-fatal-unusual.exe
 crt-app-type-gui.exe

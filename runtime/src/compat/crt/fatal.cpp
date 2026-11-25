@@ -9,7 +9,7 @@ using namespace forge::runtime;
 
 namespace {
     // Exact redirected stderr bytes from the legacy Windows MSVCRT. Some messages contain
-    // a bare LF between sentences. Unknown identifiers emit only the common prefix.
+    // a bare LF between sentences. An empty view denotes an unknown identifier.
     constexpr std::string_view fatalMessage(int32_t errorNumber) noexcept {
         switch (errorNumber) {
         case 2:
@@ -67,11 +67,11 @@ namespace {
         case 255:
             return "\r\nruntime error runtime error ";
         default:
-            return "\r\nruntime error ";
+            return {};
         }
     }
 
-    void writeFatalDiagnostic(const StandardHandles &handles, int32_t errorNumber) noexcept {
+    void writeFatalDiagnostic(const StandardHandles &handles, std::string_view message) noexcept {
         const auto &output = handles.streams[2].descriptor;
 
         if (!output || !output->writable() ||
@@ -79,7 +79,6 @@ namespace {
             return;
         }
 
-        const auto message = fatalMessage(errorNumber);
         auto bytes = std::span(reinterpret_cast<const uint8_t *>(message.data()), message.size());
 
         while (!bytes.empty()) {
@@ -157,7 +156,8 @@ extern "C" forge_rt_status forge_rt_msvcrt_set_app_type(forge_rt_instance *insta
 extern "C" forge_rt_status forge_rt_msvcrt_amsg_exit(forge_rt_instance *instance,
                                                      forge_rt_thread_token thread,
                                                      int32_t errorNumber) noexcept {
-    const auto status = withInstance(instance, [thread](const auto &owner) {
+    bool console = false;
+    const auto status = withInstance(instance, [&](const auto &owner) {
         const auto admitted = checkPendingExecution(owner, thread);
         if (admitted != FORGE_RT_OK) {
             return admitted;
@@ -165,26 +165,29 @@ extern "C" forge_rt_status forge_rt_msvcrt_amsg_exit(forge_rt_instance *instance
 
         // Headerless host entries historically use console routing before any setter.
         const auto &type = owner.windows->appType;
-        if (type.origin == CrtApplicationType::Origin::Default ||
-            type.value == CrtApplicationType::console) {
-            return FORGE_RT_OK;
-        }
-
-        return FORGE_RT_UNSUPPORTED_CRT_ERROR_ROUTING;
+        console = type.origin == CrtApplicationType::Origin::Default ||
+                  type.value == CrtApplicationType::console;
+        return FORGE_RT_OK;
     });
 
     if (status != FORGE_RT_OK) {
         return status;
     }
 
-    // The synchronous managed invocation pins its Windows state and descriptors until return.
-    const auto &handles = instance->windows->standardHandles;
+    const auto message = fatalMessage(errorNumber);
+    if (console) {
+        // The synchronous invocation pins the process's descriptors until return.
+        const auto &handles = instance->windows->standardHandles;
+        if (!handles) {
+            return FORGE_RT_INVALID_STATE;
+        }
 
-    if (!handles) {
-        return FORGE_RT_INVALID_STATE;
+        writeFatalDiagnostic(*handles, message.empty() ? "\r\nruntime error " : message);
+    } else if (!message.empty() && errorNumber != 252) {
+        // MSVCRT skips unknown messages and the newline fragment on its GUI route.
+        return FORGE_RT_UNSUPPORTED_CRT_ERROR_ROUTING;
     }
 
-    writeFatalDiagnostic(*handles, errorNumber);
     return publishTerminalResult(instance, thread,
                                  {FORGE_RT_EXIT_PROCESS, FORGE_RT_OK, 255, {}, 0});
 }

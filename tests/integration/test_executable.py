@@ -1069,7 +1069,8 @@ class Reference(Workspace):
             image("cmp16mi").name: CMP16MI,
             "crt-app-type-console.exe": APP_TYPE_RETURN,
             "crt-app-type-gui.exe": APP_TYPE_RETURN,
-            **{f"crt-app-type-fatal-{mode}.exe": (255, b"", b"") for mode in ("console", "conflict", "gui", "unusual")},
+            **{f"crt-app-type-fatal-{mode}.exe": (255, b"", b"")
+               for mode in ("console", "conflict", "gui", "unusual", "gui-unknown", "gui-newline")},
             "crt-argument-heap.exe": (41, b"", b""),
             "crt-initterm.exe": (42, b"", b""),
             "crt-initterm-spill.exe": (2, b"", b""),
@@ -1123,13 +1124,14 @@ class WindowsAppType(unittest.TestCase):
         fatal = captured_streams(amsg_observations("windows", ("8",))["crt-amsg-exit-8.exe"]["pipe"])
         for name, expected in (("crt-app-type-console", APP_TYPE_RETURN), ("crt-app-type-gui", APP_TYPE_RETURN),
                                ("crt-amsg-exit-8", fatal), ("crt-app-type-fatal-console", fatal),
-                               ("crt-app-type-fatal-conflict", fatal), ("crt-app-type-fatal-unusual", fatal)):
+                               ("crt-app-type-fatal-conflict", fatal), ("crt-app-type-fatal-unusual", fatal),
+                               ("crt-app-type-fatal-gui-unknown", (255, b"", b"")),
+                               ("crt-app-type-fatal-gui-newline", (255, b"", b""))):
             with self.subTest(name=name):
                 pe = (FIXTURES / (name + ".exe")).resolve()
                 digest = hashlib.sha256(pe.read_bytes()).hexdigest()
                 self.assertEqual(digest, hashes[pe.name])
-                # GUI-subsystem children only execute returning setters. Bound every child,
-                # including the console image whose final explicit argument is GUI.
+                # GUI children exercise returning setters and fatal IDs that skip the dialog.
                 result = subprocess.run([pe], capture_output=True, timeout=8)
                 print(f"{name} {digest} exit={result.returncode} stdout={result.stdout.hex()} "
                       f"stderr={result.stderr.hex()}", flush=True)
@@ -1157,7 +1159,9 @@ class Console(Workspace):
     def test_crt_app_type(self):
         fatal = captured_streams(amsg_observations("windows", ("8",))["crt-amsg-exit-8.exe"]["pipe"])
         for mode, expected in (("console", APP_TYPE_RETURN), ("gui", APP_TYPE_RETURN), ("fatal-console", fatal),
-                               ("fatal-conflict", fatal), ("fatal-unusual", fatal), ("fatal-gui", (125, b"",
+                               ("fatal-conflict", fatal), ("fatal-unusual", fatal),
+                               ("fatal-gui-unknown", (255, b"", b"")), ("fatal-gui-newline", (255, b"", b"")),
+                               ("fatal-gui", (125, b"",
                                     b"forge: unsupported MSVCRT _amsg_exit GUI diagnostic routing\n"))):
             with self.subTest(mode=mode):
                 self.compile(FIXTURES / f"crt-app-type-{mode}.exe")

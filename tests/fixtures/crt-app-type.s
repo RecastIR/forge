@@ -14,7 +14,10 @@ entry:
     movl $fatal_type, %ecx
 .endif
     callq *__imp___set_app_type(%rip)
-    movl $8, %ecx
+.ifndef fatal_error
+    .set fatal_error, 8
+.endif
+    movl $fatal_error, %ecx
     callq _amsg_exit
 .else
     movl $93, %ebx
