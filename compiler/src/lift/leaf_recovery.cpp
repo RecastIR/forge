@@ -251,6 +251,7 @@ namespace forge::x86 {
             auto graph = decode(target, code);
             auto &leaf = functions.try_emplace(target, target, RecoveryOrigin::InferredLeaf, code)
                              .first->second;
+            leaf.mayReturn = true;
             leaf.graph = std::move(graph);
             occupied.add(leaf);
         } catch (InspectionError &error) {

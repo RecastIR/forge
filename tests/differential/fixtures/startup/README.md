@@ -106,20 +106,22 @@ The hosted Windows test verifies the producer manifest and prints each PE hash, 
 
 ### Startup comparison results
 
-Task 13.3K reran the eight unmodified PEs in both configurations. Each of the 16 Wine references validated. Recovery resolved the `msvcrt.dll!__set_app_type` thunk called at `0x1072` in `pre_c_init` (RVA `0x1010`), reached through the `_initterm` call at `0x1494`. The setter IAT is listed separately from the blocking instruction.
+Task 13.3L reran all eight unmodified PEs in Debug and Release. Fifteen recover the direct jump from `__main` to `__do_global_ctors`. Recovery then reaches `callq *(%rbx)` in the constructor loop (`CALL64m`, bytes `ff 13`). Debug `puts` still reaches its unbound `msvcrt.dll!puts` thunk at `0x2710`, IAT slot `0x8280`. Every row retains the earlier `__set_app_type` binding.
 
-| Fixture | Debug function / instruction → target RVA | Release function / instruction → target RVA | Setter IAT RVA |
+| Fixture | Debug blocking instruction RVA | Release blocking instruction RVA | Reference exit and stdout |
 | --- | --- | --- | --- |
-| argc | `1630 / 164a → 15c0` | `1600 / 161a → 1590` | `81f0` |
-| argc_none | `1630 / 164a → 15c0` | `1600 / 161a → 1590` | `81f0` |
-| argv | `16a0 / 16ba → 1630` | `1600 / 161a → 1590` | `81f8` |
-| argv_edges | `1750 / 176a → 16e0` | `1600 / 161a → 1590` | `81f8` |
-| cleanup | `1720 / 173a → 16b0` | `16a0 / 16ba → 1630` | `8220` |
-| globals | `1650 / 166a → 15e0` | `1600 / 161a → 1590` | `81f0` |
-| puts | `1530 / 1547 → 2710` (puts thunk) | `1600 / 161a → 1590` | `81f8` |
-| return | `1620 / 163a → 15b0` | `1600 / 161a → 1590` | `81f0` |
+| argc | `0x15f0` | `0x15c0` | 42, empty |
+| argc_none | `0x15f0` | `0x15c0` | 1, empty |
+| argv | `0x1660` | `0x15c0` | 42, empty |
+| argv_edges | `0x1710` | `0x15c0` | 42, empty |
+| cleanup | `0x16e0` | `0x1660` | 42, `IMBA` |
+| globals | `0x1610` | `0x15c0` | 42, empty |
+| puts | `0x1547` (puts) | `0x15c0` | 0, `Hello from C!\r\n` |
+| return | `0x15e0` | `0x15c0` | 42, empty |
 
-Every cell has stage `lifting`, category `unsupported` and code `LIFT_UNSUPPORTED_CONTROL_FLOW`. Fifteen report `JMP_4`, bytes `e9 71 ff ff ff`, from `__main` to the entry of `__do_global_ctors` in the same PE. Debug `puts` reports `CALL64pcrel32`, bytes `e8 c4 11 00 00`, in `main` calling the unbound `msvcrt.dll!puts` at IAT RVA `0x8280`. For each case recovery and translation failed, and compilation, publication, native execution and output comparison were not run. The comparator exited 1. Native exit status and output are unavailable. The next common task is recovering the direct cross-function tail jump with its caller’s return and stack semantics. The earlier `CMP32mi` at `0x1052` did not produce the reported failures. [Readiness regressions](../../test_native_differential.py)
+For every cell the pinned Wine reference validated, with empty stderr. Recovery and translation failed with `lifting / unsupported / LIFT_UNSUPPORTED_CONTROL_FLOW`. Native compilation, publication, execution and stream comparison did not run. The comparator exited 1, and no native exit status was observed. The Windows reference job runs each exported PE with its manifest arguments and checks its hash, full exit status and raw streams. The SDK-free tail-transfer PE independently exercises a returning chain on Windows, pinned Wine and ARM64. [Readiness regressions](../../test_native_differential.py) · [Reference checks](../../../integration/test_executable.py)
+
+Schedule bounded constructor-list call recovery separately. Its evidence must identify which target pointers are admissible at the indirect call. The recorded tail jump establishes the entry of the constructor runner only.
 
 ### CMP16mi acceptance and remaining compatibility work
 

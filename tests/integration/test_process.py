@@ -191,6 +191,15 @@ class ProcessExecution(unittest.TestCase):
                       [(0, 0, "return 17"), (0, 1, "guard 3")],
                       imports=[("kernel32.dll", "SetLastError")])
 
+    def test_tail_transfers(self):
+        image = "executable-tail-jump"
+        self.exercise(image, None, [(0, 0, "return 42"), (0, 0, "return 42")], base=0x10000000,
+                      imports=[("kernel32.dll", "SetLastError"), ("kernel32.dll", "GetLastError")])
+        self.exercise(image, "bad_register", [(0, 0, "guard 3")])
+        self.exercise(image, "bad_stack", [(0, 0, "guard 2")])
+        self.exercise(image, "pivot", [(0, 0, "guard 3")])
+        self.exercise(image, "bad_memory", [(1, 0, memory(1, READ, UNMAPPED))])
+
     def test_cmp16mi_read_boundaries(self):
         source = Path(FIXTURES) / "executable-cmp16mi.exe"
         module = json.loads(run(FORGE, "inspect", source, "--format", "json"))["modules"][0]

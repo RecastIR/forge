@@ -37,7 +37,7 @@ namespace forge::x86 {
     ValidatedEntry validateEntry(const AnalyzedImage &&analysis, uint32_t rva) = delete;
     uint64_t validateGuestBase(const ValidatedEntry &entry, std::optional<uint64_t> requested);
 
-    enum class CallKind : uint8_t { Direct, RipRelativeRegister };
+    enum class CallKind : uint8_t { Direct, RipRelativeRegister, TailJump };
 
     struct GuestCallTarget {
         uint32_t rva;
@@ -71,11 +71,14 @@ namespace forge::x86 {
 
     // All RVAs in a recovered group belong to its one immutable source snapshot.
     struct ResolvedCallSite {
-        uint32_t caller, block, instruction, continuation;
+        uint32_t caller, block, instruction;
+        std::optional<uint32_t> continuation; // Only CALL pushes a continuation.
         std::variant<GuestCallTarget, ExternalCallTarget> target;
 
         void annotateCallbackFailure(FailureContext &context,
                                      std::optional<uint32_t> targetRva) const;
+
+        bool isTailJump() const { return !continuation; }
 
         const GuestCallTarget &guest() const { return std::get<GuestCallTarget>(target); }
 
@@ -101,6 +104,7 @@ namespace forge::x86 {
         // Borrows the first admitting callback registration or initializer call in a group-owned
         // caller.
         const ResolvedCallSite *callbackSource = nullptr;
+        bool mayReturn = false;
         bool receivesRegistrationOrigin = false;
         // For an inferred leaf this is the bounded decode window. Only graph steps claim bytes.
         MappedRange code;

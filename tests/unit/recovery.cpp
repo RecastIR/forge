@@ -200,7 +200,7 @@ namespace {
                     site->continuation == step->next && site->continuation > previous &&
                     llvm::any_of(calls, [site](const auto &effect) { return effect.site == site; }),
                 "mixed call proof or continuation does not refer to the recovered site");
-            previous = site->continuation;
+            previous = site->continuation.value();
 
             if (site == incoming.back()) {
                 check(site->guest().kind == x86::CallKind::Direct && step->isDirectCall() &&
@@ -224,6 +224,26 @@ namespace {
                   self.calls.begin()->second.guest().rva == recursive &&
                   self.incoming.back() == &self.calls.begin()->second,
               "recursive register call did not reuse its own function");
+    }
+
+    void checkTailTransfer(const AnalyzedImage &analysis) {
+        const auto root = exportedRva(analysis, "tail_caller");
+        const auto bridge = exportedRva(analysis, "tail_only");
+        const auto reader = exportedRva(analysis, "tail_reader");
+        const RecoveredFunctionGroup group(analysis, root);
+        const auto &source = group.function(bridge);
+        const auto &block = source.graph.at(bridge);
+        const auto *edge = source.callAt(bridge);
+
+        check(block.exit == x86::Flow::TailJump && block.successors.empty() &&
+                  block.steps.size() == 1 && source.mayReturn,
+              "tail-only body requires a returning target and no local successor");
+        check(edge && edge->isTailJump() && edge->guest().kind == x86::CallKind::TailJump &&
+                  edge->guest().evidenceRva == bridge && edge->guest().rva == reader &&
+                  group.function(reader).incoming.front() == edge,
+              "tail transfer lost its location or acquired a continuation");
+        check(source.incoming.front()->continuation && group.function(root).mayReturn,
+              "caller did not resume after transitive return");
     }
 
     void checkSelfRecursion(const AnalyzedImage &analysis) {
@@ -264,7 +284,7 @@ namespace {
         const auto *recurse = only.callAt(loop + 4);
         check(cycle.functions().size() == 1 && only.calls.size() == 1 && recurse &&
                   recurse->guest().rva == loop &&
-                  !only.instructionContaining(recurse->continuation),
+                  !only.instructionContaining(recurse->continuation.value()),
               "recursion without a base case reached a dead call");
     }
 
@@ -477,7 +497,7 @@ namespace {
         const auto &site = root.calls.begin()->second;
         const auto *step = root.instructionContaining(site.instruction);
         check(!site.external() && step && step->next == site.continuation &&
-                  !root.instructionContaining(site.continuation),
+                  !root.instructionContaining(site.continuation.value()),
               "terminal guest call must retain its return address and exclude dead instructions");
         const auto &helper = group.function(site.guest().rva);
         check(helper.incoming.size() == 1 && helper.incoming.front() == &site,
@@ -605,6 +625,7 @@ int main(int argc, char **argv) try {
     // Destruction of an independent decoder must leave the first group's borrows intact.
     checkRepeatedCalls(analysis, first);
     checkEntryContracts(first);
+    checkTailTransfer(analysis);
     checkSelfRecursion(analysis);
     checkMutualRecursion(analysis);
     checkParallelEdges(analysis);

@@ -191,7 +191,7 @@ jobs:
           overwrite: true
 
   windows-integer-reference:
-    needs: macos-dev
+    needs: [macos-dev, windows-fixtures]
     runs-on: windows-2022
     outputs:
       stages: ${{ toJSON(steps.verify.outputs) }}
@@ -201,7 +201,11 @@ jobs:
         with:
           name: executable-reference-inputs
           path: executables
-      - name: Observe CMP16mi flags and legacy CRT application type on Windows x64
+      - uses: actions/download-artifact@v4
+        with:
+          name: windows-x64-inputs
+          path: build
+      - name: Observe integer, CRT, tail-transfer and conventional startup behavior on Windows x64
         id: verify
         shell: bash
         run: |
@@ -209,6 +213,10 @@ jobs:
           echo "cmp16mi=success" >> "$GITHUB_OUTPUT"
           python -B tests/integration/test_executable.py windows-app-type executables
           echo "app_type=success" >> "$GITHUB_OUTPUT"
+          python -B tests/integration/test_executable.py windows-tail-jump executables
+          echo "tail_jump=success" >> "$GITHUB_OUTPUT"
+          python -B tests/integration/test_executable.py windows-startup build/fixtures/windows-x64
+          echo "startup=success" >> "$GITHUB_OUTPUT"
         env:
           PE_MANIFEST_SHA256: ${{ needs.macos-dev.outputs.executable_inputs_sha256 }}
 

@@ -453,7 +453,7 @@ class Lift(Case):
                 ("48 8b 45 00 c3", "undefined incoming RBP"),
                 ("f3 c3", "prefix"), ("48 48 89 c8 c3", "prefix"),
                 ("ff d0 c3", "unsupported"), ("ff e0", "unsupported"),
-                ("b8 01 00 00 00 31 c0", "outside"), ("eb 05", "outside"), ("74 01 48 89 c8 c3", "enters an instruction"),
+                ("b8 01 00 00 00 31 c0", "outside"), ("eb 06", "interior"), ("74 01 48 89 c8 c3", "enters an instruction"),
                 ("75 02 31 c0 c3", "flags"), ("e8 00 00 00 00", "unsupported"),
                 ("4c 89 c0 c3", "undefined incoming R8"), ("c3", "undefined RAX"),
                 ("48 29 c8 c3", "undefined incoming RAX"), ("44 29 c1 c3", "undefined incoming R8"),
@@ -673,12 +673,44 @@ class Lift(Case):
                                      (hex(source), hex(source), hex(source), layout.file_offset(source),
                                       branch.hex(), target))
 
-        # Jumping to the same proven function entry remains an unsupported tail jump.
+        def jump(at, target):
+            return b"\xe9" + struct.pack("<i", target - at - 5)
+
         data = bytearray(original)
-        write_body(data, caller, b"\xe9" + struct.pack("<i", helper - (caller + 5)))
-        jump = diagnose(data)
-        self.assertEqual((jump["code"], jump["context"]["branch_target"], jump["context"]["opcode"]),
-                         ("LIFT_UNSUPPORTED_CONTROL_FLOW", helper, "JMP_4"))
+        write_body(data, helper, bytes.fromhex("48 89 c8 c3"))
+        write_body(data, caller, jump(caller, helper))
+        image.write_bytes(data)
+        self.invoke(*args)
+        self.assertIn(f"musttail call void @forge_guest_{helper:x}(", output.read_text())
+
+        for target, detail in ((helper + 1, "interior"), (helper + 3, "interior"),
+                               (layout.directory(3)[0], "outside executable")):
+            with self.subTest(tail_target=target):
+                write_body(data, caller, jump(caller, target))
+                failure = diagnose(data)
+                self.assertIn(detail, failure["message"])
+                ctx = failure["context"]
+                self.assertEqual((ctx["instruction_rva"], ctx["branch_target"], ctx["bytes"]),
+                                 (hex(caller), target, jump(caller, target).hex()))
+
+        for target_body in (jump(helper, caller), call(helper, caller) + b"\xc3"):
+            write_body(data, helper, target_body)
+            write_body(data, caller, jump(caller, helper))
+            failure = diagnose(data)
+            self.assertIn("recursive cross-function tail transfer", failure["message"])
+            self.assertEqual(failure["context"]["opcode"], "JMP_4")
+
+        for overlap in (True, False):
+            data = bytearray(original)
+            write_body(data, caller, jump(caller, helper))
+            if overlap:
+                struct.pack_into("<III", data, records + 12, helper + 1, helper_end, unwind)
+            else:
+                data[records:records + 12] = data[records + 12:records + 24]
+            failure = diagnose(data)
+            self.assertIn("unambiguous" if overlap else "unwind-backed", failure["message"])
+            self.assertEqual((failure["context"]["instruction_rva"], failure["context"]["branch_target"]),
+                             (hex(caller), helper))
         write_body(data, caller, bytes.fromhex("ff d1"))
         indirect = diagnose(data)
         self.assertEqual((indirect["code"], indirect["context"]["opcode"]),
@@ -1043,19 +1075,39 @@ class Lift(Case):
         reloc = layout.file_offset(layout.directory(5)[0])
         struct.pack_into("<I", data, reloc, witness & ~0xfff)
         struct.pack_into("<H", data, reloc + 8, 0x1000 | (witness & 0xfff))
-        call = b"\xe8" + struct.pack("<i", callee - caller - 5)
         start = layout.file_offset(caller)
-        data[start:start + 6] = call + b"\xc3"
         program = self.dir / "relocated-callee.exe"
+        for opcode in (0xe8, 0xe9):
+            with self.subTest(opcode=opcode):
+                transfer = bytes([opcode]) + struct.pack("<i", callee - caller - 5)
+                data[start:start + 6] = transfer + b"\xc3"
+                program.write_bytes(data)
+                p = self.invoke("lift", program, "--rva", hex(caller), "--output", self.dir / "calls.ll",
+                                "--diagnostics-format", "json", code=1)
+                failure = json.loads(p.stderr)
+                self.assertEqual(failure["code"], "LIFT_UNSUPPORTED_CONTROL_FLOW")
+                self.assertIn(f"base relocation at {witness:#x}", failure["message"])
+                context = failure["context"]
+                self.assertEqual((context["instruction_rva"], context["branch_target"], context["bytes"]),
+                                 (hex(caller), callee, transfer.hex()))
+
+        # Put the TLS directory in file padding and its four-byte index inside the target.
+        data = bytearray((FIXTURES / "image.exe").read_bytes())
+        section = layout.section_header(layout.directory(3)[0])
+        size, rva, raw_size, raw = struct.unpack_from("<IIII", data, section + 8)
+        self.assertGreaterEqual(raw_size - size, 40)
+        struct.pack_into("<I", data, section + 8, size + 40)
+        struct.pack_into("<II", data, layout.directories + 9 * 8, rva + size, 40)
+        base, = struct.unpack_from("<Q", data, layout.opt + 24)
+        struct.pack_into("<QQQQII", data, raw + size, 0, 0, base + callee, 0, 0, 0)
+        data[start:start + 5] = transfer
         program.write_bytes(data)
-        p = self.invoke("lift", program, "--rva", hex(caller), "--output", self.dir / "calls.ll",
-                        "--diagnostics-format", "json", code=1)
-        failure = json.loads(p.stderr)
-        self.assertEqual(failure["code"], "LIFT_UNSUPPORTED_CONTROL_FLOW")
-        self.assertIn(f"base relocation at {witness:#x}", failure["message"])
-        context = failure["context"]
-        self.assertEqual((context["instruction_rva"], context["branch_target"], context["bytes"]),
-                         (hex(caller), callee, call.hex()))
+        result = self.invoke("lift", program, "--rva", hex(caller), "--output", self.dir / "calls.ll",
+                             "--diagnostics-format", "json", code=1)
+        failure = json.loads(result.stderr)
+        self.assertIn("loader-written", failure["message"])
+        self.assertEqual((failure["context"]["instruction_rva"], failure["context"]["branch_target"]),
+                         (hex(caller), callee))
 
 
 if __name__ == "__main__":

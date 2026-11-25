@@ -20,7 +20,7 @@ namespace forge::x86 {
         FunctionFlows flows;
         std::map<uint32_t, FunctionPlan> functions;
         bool stack = false, origins = false, setsDirection = false, hasGuestCallbacks = false;
-        bool usesTermination = false;
+        bool usesTermination = false, hasTailJumps = false;
         ImagePlan image;
     };
 

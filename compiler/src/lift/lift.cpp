@@ -149,6 +149,7 @@ namespace forge {
             void lowerService(const Step &s, const x86::ExternalCallTarget &external,
                               Value *calleeRsp);
             void lowerCall(const Step &s, const x86::ResolvedCallSite &call);
+            void lowerTailJump(const Step &step, const x86::ResolvedCallSite &site);
             void emitReturn(const Step &s);
             void emitDispatch(const x86::GuestBlock &block, const BlockStates &states);
             void lowerStack(const Step &s, StackOp op);
@@ -644,8 +645,7 @@ namespace forge {
             } else if (const auto &proof = external.registration) {
                 Value *site = ir.getInt64(s.rva);
                 if (proof->forwarded) {
-                    site = ir.CreateOr(
-                        site, ir.CreateShl(impl->getArg(analysis.hasGuestCallbacks ? 2 : 1), 32));
+                    site = ir.CreateOr(site, ir.CreateShl(std::prev(impl->arg_end()), 32));
                 }
                 auto *target = arguments[2];
                 auto *thunk = ir.CreateCall(termination.lookup, {site, target});
@@ -700,7 +700,7 @@ namespace forge {
                     FORGE_RT_FAULT_CONTROL);
             }
 
-            const uint64_t nextVA = guestBase + call.continuation;
+            const uint64_t nextVA = guestBase + call.continuation.value();
             auto *calleeRsp = memory.pushReturn(read(s, stackPointer), entryRsp, nextVA);
             write(stackPointer, calleeRsp);
             x86::SavedRegisters saved{};
@@ -714,14 +714,9 @@ namespace forge {
                 }
 
                 storeFlags();
-                SmallVector<Value *, 2> bodyArgs{impl->getArg(0)};
-                if (analysis.hasGuestCallbacks) {
-                    bodyArgs.push_back(impl->getArg(1));
-                }
-                if (bodies.at(target)->arg_size() > bodyArgs.size()) {
-                    bodyArgs.push_back(ir.getInt64(s.rva));
-                }
-                auto *returned = ir.CreateCall(bodies.at(target), bodyArgs);
+                auto *ceiling = layout.callbacks ? impl->getArg(1) : nullptr;
+                auto *returned = layout.callBody(ir, *bodies.at(target), impl->getArg(0), calleeRsp,
+                                                 ceiling, s.rva);
                 if (s.flow != x86::Flow::TerminalCall) {
                     memory.checks.propagate(returned);
                 }
@@ -752,6 +747,26 @@ namespace forge {
                     effect.flags.generated[f] || (effect.flags.carried[f] && semantics.flags[f]);
                 semantics.flags[f] =
                     available ? ir.CreateLoad(ir.getInt1Ty(), flagSlot(f)) : nullptr;
+            }
+        }
+
+        void Translator::lowerTailJump(const Step &step, const x86::ResolvedCallSite &site) {
+            const auto effect = x86::callEffect(site, analysis.flows);
+            if (requiresFullReturn &&
+                effect.apply({defined, provedFlags}).registers[0] != UINT64_MAX) {
+                step.reject(FailureCode::UndefinedRegister, "tail return with undefined RAX",
+                            site.guest().rva);
+            }
+
+            storeFlags();
+            auto *ceiling = layout.callbacks ? impl->getArg(1) : nullptr;
+            auto *transfer = layout.callBody(ir, *bodies.at(site.guest().rva), impl->getArg(0),
+                                             entryRsp, ceiling, step.rva);
+            transfer->setTailCallKind(CallInst::TCK_MustTail);
+            if (memory.checks.managed()) {
+                ir.CreateRet(transfer);
+            } else {
+                ir.CreateRetVoid();
             }
         }
 
@@ -819,6 +834,9 @@ namespace forge {
             }
 
             switch (block.exit) {
+            case x86::Flow::TailJump:
+                lowerTailJump(last, *function.callAt(last.rva));
+                break;
             case x86::Flow::TerminalCall:
                 lowerCall(last, *function.callAt(last.rva));
                 break;
@@ -884,7 +902,8 @@ namespace forge {
             memory.bind(context.bytes, context.validity, resolver, context.regions,
                         analysis.hasGuestCallbacks ? impl->getArg(1) : nullptr);
             memory.checks.bind(context.result);
-            entryRsp = loadView(slot(x86::rspIndex), stackPointer);
+            entryRsp = layout.tailJumps ? impl->getArg(layout.callbacks ? 2 : 1)
+                                        : loadView(slot(x86::rspIndex), stackPointer);
 
             // A shared helper can preserve an incoming flag for one caller while
             // another enters with it undefined. Track the physical bit separately
@@ -974,9 +993,17 @@ namespace forge {
             if (analysis.hasGuestCallbacks) {
                 parameters.push_back(Type::getInt64Ty(context));
             }
+            if (analysis.hasTailJumps) {
+                parameters.push_back(Type::getInt64Ty(context));
+            }
+            const bool commonOrigin =
+                analysis.hasTailJumps && llvm::any_of(group.functions(), [](const auto &row) {
+                    return row.second.receivesRegistrationOrigin;
+                });
+
             for (const auto &[rva, function] : group.functions()) {
                 auto bodyParameters = parameters;
-                if (function.receivesRegistrationOrigin) {
+                if (function.receivesRegistrationOrigin || commonOrigin) {
                     bodyParameters.push_back(Type::getInt64Ty(context));
                 }
                 auto *type = FunctionType::get(returns, bodyParameters, false);
@@ -990,7 +1017,8 @@ namespace forge {
             }
 
             const x86::ContextLayout layout(context, analysis.origins, analysis.stack || process,
-                                            request.runtime, process);
+                                            request.runtime, process, analysis.hasGuestCallbacks,
+                                            analysis.hasTailJumps);
             auto &body = *bodies.at(root);
             const auto modified = analysis.functions.at(root).modified;
             auto *resolver =

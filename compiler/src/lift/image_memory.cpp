@@ -730,7 +730,10 @@ namespace forge::x86 {
         }
 
         for (const auto *site : sites) {
-            selectComputed(step, loadBase + site->continuation + origin.offset, width, write,
+            if (site->isTailJump()) {
+                continue;
+            }
+            selectComputed(step, loadBase + *site->continuation + origin.offset, width, write,
                            ExecutableSelection::ContinuationBytes);
         }
     }

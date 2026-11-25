@@ -21,6 +21,7 @@ namespace forge::x86 {
     enum class Flow : uint8_t {
         Fallthrough,
         Jump,
+        TailJump,
         Conditional,
         Indirect,
         Return,
@@ -51,6 +52,8 @@ namespace forge::x86 {
             }
             return int64_t(next) + inst.getOperand(0).getImm();
         }
+
+        int64_t relativeTarget() const { return int64_t(next) + inst.getOperand(0).getImm(); }
 
         bool isMemoryCall() const { return opcode == "CALL64m"; }
 

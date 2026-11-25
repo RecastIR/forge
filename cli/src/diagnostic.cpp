@@ -209,14 +209,20 @@ namespace forge {
 
             fields["entry_recovered"] = readiness.entryRecovered;
             fields["recovery_complete"] = readiness.recoveryComplete;
-            llvm::json::Array calls, imports, unresolved;
+            llvm::json::Array imports, unresolved;
 
-            for (const auto &call : readiness.calls) {
-                calls.emplace_back(llvm::json::Object{{"caller_rva", hex(call.callerRva)},
-                                                      {"instruction_rva", hex(call.instructionRva)},
-                                                      {"target_rva", hex(call.targetRva)}});
-            }
+            const auto transferRows = [](const std::vector<ExecutableCall> &sites) {
+                llvm::json::Array rows;
+                for (const auto &call : sites) {
+                    rows.emplace_back(
+                        llvm::json::Object{{"caller_rva", hex(call.callerRva)},
+                                           {"instruction_rva", hex(call.instructionRva)},
+                                           {"target_rva", hex(call.targetRva)}});
+                }
+                return rows;
+            };
 
+            fields["tail_transfers"] = transferRows(readiness.tailTransfers);
             for (const auto &service : readiness.imports) {
                 imports.emplace_back(
                     llvm::json::Object{{"dll", service.dll}, {"name", service.name}});
@@ -235,7 +241,7 @@ namespace forge {
                 unresolved.emplace_back(std::move(call));
             }
 
-            fields["calls"] = std::move(calls);
+            fields["calls"] = transferRows(readiness.calls);
             fields["imports"] = std::move(imports);
             fields["unresolved_calls"] = std::move(unresolved);
 
@@ -373,6 +379,11 @@ namespace forge {
         for (const auto &call : readiness.calls) {
             out << "  " << hex(call.callerRva) << " calls " << hex(call.targetRva) << " at "
                 << hex(call.instructionRva) << '\n';
+        }
+
+        for (const auto &edge : readiness.tailTransfers) {
+            out << "  " << hex(edge.callerRva) << " tail-jumps to " << hex(edge.targetRva) << " at "
+                << hex(edge.instructionRva) << '\n';
         }
 
         for (const auto &table : readiness.initializerTables) {

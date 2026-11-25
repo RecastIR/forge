@@ -16,8 +16,9 @@ namespace forge::x86 {
                   offsetof(forge_rt_execution, flags) + FlagCount);
 
     ContextLayout::ContextLayout(LLVMContext &context, bool origins, bool stack, bool runtime,
-                                 bool process)
-        : origins(origins), stack(stack), runtime(runtime), process(process) {
+                                 bool process, bool callbacks, bool tailJumps)
+        : origins(origins), stack(stack), runtime(runtime), process(process), callbacks(callbacks),
+          tailJumps(tailJumps) {
         const auto registers = [&](unsigned count) {
             return ArrayType::get(Type::getInt64Ty(context), count);
         };
@@ -46,6 +47,21 @@ namespace forge::x86 {
         }
 
         type = StructType::get(context, fields);
+    }
+
+    CallInst *ContextLayout::callBody(IRBuilder<> &ir, Function &body, Value *execution,
+                                      Value *frameRsp, Value *ceiling, uint32_t origin) const {
+        SmallVector<Value *, 4> args{execution};
+        if (callbacks) {
+            args.push_back(ceiling);
+        }
+        if (tailJumps) {
+            args.push_back(frameRsp);
+        }
+        if (body.arg_size() > args.size()) {
+            args.push_back(ir.getInt64(origin));
+        }
+        return ir.CreateCall(&body, args);
     }
 
     ContextView::ContextView(IRBuilder<> &ir, const ContextLayout &layout, Value *context) {
@@ -271,7 +287,7 @@ namespace forge::x86 {
 
         const auto saved = captureNonvolatiles(ir, context, modified);
         auto *ceiling = ir.CreateAdd(callbackRsp, ir.getInt64(GuestMemory::initializerHomeEnd));
-        memory.checks.propagate(ir.CreateCall(&body, {execution, ceiling}));
+        memory.checks.propagate(layout.callBody(ir, body, execution, callbackRsp, ceiling));
         if (context.marks) {
             auto *marks = ir.CreateLoad(ir.getInt64Ty(), slot(ir, context.marks, rspIndex));
             memory.checks.guard(ir.CreateICmpEQ(marks, ir.getInt64(UINT64_MAX)));
@@ -311,11 +327,9 @@ namespace forge::x86 {
         initializeRegisters(ir, context, nullptr, {rcx, rdx}, mode);
 
         const auto saved = captureNonvolatiles(ir, context, modified);
-        SmallVector<Value *, 2> bodyArgs{execution};
-        if (body.arg_size() == 2) {
-            bodyArgs.push_back(ir.getInt64(GuestMemory::base + GuestMemory::capacity));
-        }
-        memory.checks.propagate(ir.CreateCall(&body, bodyArgs));
+        auto *ceiling = ir.getInt64(GuestMemory::base + GuestMemory::capacity);
+        memory.checks.propagate(
+            layout.callBody(ir, body, execution, ir.getInt64(GuestMemory::entryRsp), ceiling));
         checkOuterReturn(ir, memory, context, saved, true);
         checkResultRegister(ir, memory, context);
         memory.checks.complete(ir.CreateLoad(ir.getInt64Ty(), context.registers));
@@ -335,7 +349,8 @@ namespace forge::x86 {
             adapter = Function::Create(type, Function::ExternalLinkage, "forge_lifted_with_runtime",
                                        module);
         } else {
-            adapter = Function::Create(body.getFunctionType(), Function::InternalLinkage,
+            auto *type = FunctionType::get(ir.getVoidTy(), ir.getPtrTy(), false);
+            adapter = Function::Create(type, Function::InternalLinkage,
                                        "forge_lifted_" + utohexstr(rva, true), module);
             appendToUsed(module, {adapter});
             state = adapter->getArg(0);
@@ -369,7 +384,7 @@ namespace forge::x86 {
 
         const bool typed = mode == EntryMode::WindowsX64I64Pair;
         const auto saved = captureNonvolatiles(ir, context, typed ? modified : RegisterSet{});
-        ir.CreateCall(&body, invocation);
+        layout.callBody(ir, body, invocation, ir.getInt64(GuestMemory::entryRsp), nullptr);
 
         checkOuterReturn(ir, memory, context, saved, layout.stack || modified[rspIndex]);
 

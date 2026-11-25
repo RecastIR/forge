@@ -71,6 +71,10 @@ namespace forge::x86 {
                 }
 
                 const auto target = call.guest().rva;
+                if (call.isTailJump()) {
+                    readiness.tailTransfers.push_back({function.entry, instruction, target});
+                    continue;
+                }
                 const auto callee = group.functions().find(target);
 
                 if (callee == group.functions().end() || callee->second.graph.empty()) {

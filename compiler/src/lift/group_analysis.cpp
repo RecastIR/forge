@@ -42,18 +42,25 @@ namespace forge::x86 {
         };
 
         struct CallInputs {
-            AddressFact rsp;
-            std::array<AddressFact, 4> arguments;
+            // All frame-relative facts use the RSP at the architectural CALL.
+            AddressFact frameRsp, continuation;
+            bool callbackFrame = false;
+            AddressFacts facts;
+
+            explicit CallInputs(AddressFact frameRsp, AddressFact continuation = {})
+                : frameRsp(std::move(frameRsp)), continuation(std::move(continuation)) {
+                facts.registers[rspIndex] = AddressFact::frameStack();
+            }
 
             bool merge(const CallInputs &other) {
-                const auto before = *this;
-                rsp = rsp.join(other.rsp);
-
-                for (size_t i = 0; i < arguments.size(); ++i) {
-                    arguments[i] = arguments[i].join(other.arguments[i]);
-                }
-
-                return rsp != before.rsp || arguments != before.arguments;
+                const auto rsp = frameRsp.join(other.frameRsp);
+                const auto slot = continuation.join(other.continuation);
+                const bool changed = rsp != frameRsp || slot != continuation ||
+                                     (other.callbackFrame && !callbackFrame);
+                callbackFrame |= other.callbackFrame;
+                frameRsp = rsp;
+                continuation = slot;
+                return facts.merge(other.facts, frameRsp) || changed;
             }
         };
 
@@ -145,7 +152,8 @@ namespace forge::x86 {
             ImageMemory &imageMemory;
             FunctionPlan &plan;
             const std::vector<uint32_t> &terminationTargets;
-            AddressFact entryAddresses;
+            AddressFact entryAddresses, frameContinuation;
+            bool callbackFrame = false;
             std::map<uint32_t, AddressFacts> blockAddresses;
 
             struct AddressCursor {
@@ -251,7 +259,7 @@ namespace forge::x86 {
         void FunctionAnalyzer::planMemoryAccess(const Step &s, unsigned width, bool write,
                                                 const AddressOperand &operand,
                                                 const AddressFact &address) {
-            if (function.callbackSource && address.frameOffset()) {
+            if (callbackFrame && address.frameOffset()) {
                 const auto offset = std::bit_cast<int64_t>(*address.frameOffset());
                 if (offset > int64_t{GuestMemory::initializerHomeEnd} - width / 8) {
                     s.reject(FailureCode::UnsupportedControlFlow,
@@ -303,7 +311,7 @@ namespace forge::x86 {
             if (!function.incoming.empty() && (address.frameOffset() == 0 || absoluteSlot)) {
                 // The current activation protects all eight bytes until its RET.
                 // At the external entry the synthetic slot still faults on access.
-                return AddressFact::continuation(rva);
+                return frameContinuation;
             }
 
             return facts.spills.read(address, entryAddresses).reloaded(entryAddresses);
@@ -556,7 +564,9 @@ namespace forge::x86 {
                                              .plus(AddressFact(uint64_t(0) - 8 -
                                                                GuestMemory::initializerFrameSize));
                         for (auto target : targets) {
-                            calls.enter(target, {rsp, {}});
+                            CallInputs callback(rsp);
+                            callback.callbackFrame = true;
+                            calls.enter(target, callback);
                         }
                     }
 
@@ -575,16 +585,21 @@ namespace forge::x86 {
             }
 
             if (!collect) {
-                CallInputs inputs;
-                inputs.rsp = facts.registers[rspIndex]
-                                 .project(entryAddresses)
-                                 .plus(AddressFact(uint64_t(0) - 8));
-
-                for (size_t i = 0; i < inputs.arguments.size(); ++i) {
-                    inputs.arguments[i] = facts.registers[i + 1].project(entryAddresses);
+                if (site.isTailJump()) {
+                    CallInputs inputs(entryAddresses, frameContinuation);
+                    inputs.callbackFrame = callbackFrame;
+                    inputs.facts = facts;
+                    calls.enter(site.guest().rva, inputs);
+                } else {
+                    const auto rsp = facts.registers[rspIndex]
+                                         .project(entryAddresses)
+                                         .plus(AddressFact(uint64_t(0) - 8));
+                    CallInputs inputs(rsp, AddressFact::continuation(site.guest().rva));
+                    for (size_t i = 1; i <= 4; ++i) {
+                        inputs.facts.registers[i] = facts.registers[i].project(entryAddresses);
+                    }
+                    calls.enter(site.guest().rva, inputs);
                 }
-
-                calls.enter(site.guest().rva, inputs);
             }
 
             auto &callee = calls.functions.at(site.guest().rva);
@@ -689,13 +704,10 @@ namespace forge::x86 {
                 suspendedBlocks.clear();
                 pending = {rva};
 
-                entryAddresses = state.entry.rsp;
-                auto &registers = blockAddresses[rva].registers;
-                const auto &arguments = state.entry.arguments;
-                std::copy(arguments.begin(), arguments.end(), registers.begin() + 1);
-                registers[rspIndex] = incoming.empty() && !function.callbackSource
-                                          ? AddressFact(GuestMemory::entryRsp, AddressFact::Stack)
-                                          : AddressFact::frameStack();
+                entryAddresses = state.entry.frameRsp;
+                frameContinuation = state.entry.continuation;
+                callbackFrame = state.entry.callbackFrame;
+                blockAddresses[rva] = state.entry.facts;
             }
 
             while (!pending.empty()) {
@@ -713,7 +725,7 @@ namespace forge::x86 {
                     continue;
                 }
 
-                if (block.exit == Flow::Return) {
+                if (block.exit == Flow::Return || block.exit == Flow::TailJump) {
                     calls.recordReturn(rva, cursor.facts.registers[0].project(entryAddresses),
                                        incoming);
                 }
@@ -829,7 +841,9 @@ namespace forge::x86 {
                 try {
                     for (const auto &s : block.steps) {
                         if (const auto *site = function.callAt(s.rva)) {
-                            requireMemory(s);
+                            if (!site->isTailJump()) {
+                                requireMemory(s);
+                            }
                             if (const auto *service = site->external();
                                 service && service->initializers) {
                                 const auto &table = *service->initializers;
@@ -843,6 +857,33 @@ namespace forge::x86 {
                 } catch (InspectionError &failure) {
                     failure.context.blockRva = address;
                     throw;
+                }
+            }
+        }
+
+        void propagateTailWrites(const RecoveredFunctionGroup &group, GroupAnalysis &result) {
+            // One real guest frame covers every tail successor. Only writes along such
+            // edges extend its capture set; ordinary callees validate their own returns.
+            std::set<uint32_t> changed;
+            for (const auto &[rva, function] : group.functions()) {
+                if (llvm::any_of(function.incoming,
+                                 [](const auto *site) { return site->isTailJump(); })) {
+                    result.hasTailJumps = true;
+                    changed.insert(rva);
+                }
+            }
+
+            while (!changed.empty()) {
+                const auto rva = changed.extract(changed.begin()).value();
+                for (const auto *site : group.function(rva).incoming) {
+                    if (site->isTailJump()) {
+                        auto &modified = result.functions.at(site->caller).modified;
+                        const auto merged = modified | result.functions.at(rva).modified;
+                        if (modified != merged) {
+                            modified = merged;
+                            changed.insert(site->caller);
+                        }
+                    }
                 }
             }
         }
@@ -908,9 +949,14 @@ namespace forge::x86 {
             result.hasGuestCallbacks |= function.callbackSource != nullptr;
         }
 
+        propagateTailWrites(group, result);
         proveCallFlow(group, result.flows, {entryRegisterDefinitions(mode), {}});
         CallAddresses calls;
-        calls.enter(group.root(), {AddressFact(GuestMemory::entryRsp), {}});
+        CallInputs root{AddressFact(GuestMemory::entryRsp)};
+        if (group.function(group.root()).incoming.empty()) {
+            root.facts.registers[rspIndex] = AddressFact(GuestMemory::entryRsp, AddressFact::Stack);
+        }
+        calls.enter(group.root(), root);
 
         while (!calls.pending.empty()) {
             const auto address = calls.pending.extract(calls.pending.begin()).value();

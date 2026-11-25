@@ -77,7 +77,7 @@ namespace forge {
         std::string architecture;
         std::optional<uint32_t> entryRva;
         bool entryRecovered = false, recoveryComplete = false;
-        std::vector<ExecutableCall> calls;
+        std::vector<ExecutableCall> calls, tailTransfers;
         std::vector<ExecutableInitializerTable> initializerTables;
         std::vector<ExecutableImport> imports;
         std::vector<ExecutableUnresolvedCall> unresolvedCalls;

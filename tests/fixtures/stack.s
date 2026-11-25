@@ -848,3 +848,22 @@ probe atomic_unaligned
     movq %rcx, %rax
     ret
     .seh_endproc
+
+# Only the original CALL continuation authorizes reading these executable bytes.
+probe tail_caller
+    subq $40, %rsp
+    callq tail_only
+    nop
+    addq $40, %rsp
+    ret
+    .seh_endproc
+
+probe tail_only
+    jmp tail_reader
+    .seh_endproc
+
+probe tail_reader
+    movq (%rsp), %r10
+    movzbl (%r10), %eax
+    ret
+    .seh_endproc

@@ -224,13 +224,18 @@ class StackTests(GuestExecution):
         for field in ("bytes", "valid"):
             for state in (False, True):
                 for name, callee, slot in (("restore_rsp", "restore_rsp", RSP),
-                                           ("call_stack_argument", "call_fifth", RSP - 64)):
+                                           ("call_stack_argument", "call_fifth", RSP - 64),
+                                           ("tail_caller", "tail_reader", RSP - 48)):
                     for exe in self.variants(name, state=state, corrupt_return=(field, callee, slot)):
                         self.trap(exe, [(9, 1)])
 
         for state in (False, True):
             for exe in self.variants("opaque_return_rsp", state=state, incoming_bits=RSP):
                 self.trap(exe, [(9, 1)])
+
+    def test_tail_continuation(self):
+        for exe in self.variants("tail_caller"):
+            self.expect(exe, 0, 0, 0x90)
 
     def test_active_call_slots(self):
         for width, suffix in ((1, "b"), (2, "w"), (4, "l"), (8, "q")):

@@ -36,6 +36,7 @@ executable-startup-info-a.exe
 executable-startup-info-aw.exe
 executable-startup-info-fields.exe
 executable-startup-info-w.exe
+executable-tail-jump.exe
 executable-tib.exe
 executable-top-level-filter.exe
 hello.exe

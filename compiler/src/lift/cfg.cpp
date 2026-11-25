@@ -368,7 +368,14 @@ namespace forge::x86 {
             } else if (s.flow == Flow::Indirect) {
                 unresolved.insert(s.rva);
             } else if (s.flow == Flow::Conditional || s.flow == Flow::Jump) {
-                schedule(s, int64_t(s.next) + s.inst.getOperand(0).getImm(), true);
+                const auto target = s.relativeTarget();
+                if (classify && s.flow == Flow::Jump && (target < begin || target >= end)) {
+                    s.flow = Flow::TailJump;
+                    returned |= classify(s, target) == Flow::Fallthrough;
+                    return;
+                }
+
+                schedule(s, target, true);
 
                 if (s.flow == Flow::Conditional) {
                     schedule(s, s.next, false);
@@ -618,6 +625,11 @@ namespace forge::x86 {
 
         void Discovery::resume(uint32_t instruction) {
             auto &call = decoded.at(instruction);
+            if (call.flow == Flow::TailJump) {
+                returned = true;
+                return;
+            }
+
             call.flow = Flow::Fallthrough;
 
             if (call.next < end && !decoded.contains(call.next)) {

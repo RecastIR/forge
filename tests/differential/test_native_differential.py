@@ -69,10 +69,14 @@ class NativeDifferentialTests(unittest.TestCase):
             debug = {"argc": 0x1630, "argc_none": 0x1630, "argv": 0x16a0, "argv_edges": 0x1750,
                      "cleanup": 0x1720, "globals": 0x1650, "return": 0x1620}
             root = debug[name] if config == "debug" else (0x16a0 if name == "cleanup" else 0x1600)
-            self.assertEqual((ctx["function_rva"], ctx["instruction_rva"], ctx["opcode"], ctx["bytes"],
-                              ctx["branch_target"]), (hex(root), hex(root + 0x1a), "JMP_4", "e971ffffff", root - 0x70))
+            target = root - 0x70
+            self.assertIn({"caller_rva": hex(root), "instruction_rva": hex(root + 0x1a),
+                           "target_rva": hex(target)}, ctx["tail_transfers"])
+            self.assertEqual((ctx["function_rva"], ctx["instruction_rva"], ctx["opcode"], ctx["bytes"]),
+                             (hex(target), hex(target + 0x30), "CALL64m", "ff13"))
+            self.assertIn("expected RIP-relative call", record["message"])
         offset = ctx["file_offset"]
-        self.assertEqual(data[offset:offset + 5].hex(), ctx["bytes"])
+        self.assertEqual(data[offset:offset + len(bytes.fromhex(ctx["bytes"]))].hex(), ctx["bytes"])
         return report
 
     def test_other_conventional_startup_blockers(self):
@@ -206,7 +210,10 @@ class NativeDifferentialTests(unittest.TestCase):
                             self.assertIn({"dll": "msvcrt.dll", "name": "__set_app_type"}, ctx["imports"])
                             self.assertEqual(ctx["branch_target"], 0x26a8)
                             self.assertIn({"caller_rva": "0x1010", "instruction_rva": "0x10ff",
-                                           "target_rva": "0x1dc0"}, ctx["unresolved_calls"])
+                                           "target_rva": "0x1dc0"}, ctx["calls"])
+                            self.assertIn("tail jump requires an unwind-backed function entry", record["message"])
+                            self.assertFalse(any(edge["instruction_rva"] == "0x1dc7"
+                                                 for edge in ctx["tail_transfers"]))
 
     def test_lstrlen_rebased_reference(self):
         fixture = "imports/lstrlen"

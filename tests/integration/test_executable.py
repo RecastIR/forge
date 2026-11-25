@@ -1065,6 +1065,7 @@ class Reference(Workspace):
     def test_executables(self):
         headers = image("headers")
         expected = {
+            image("tail-jump").name: (42, b"", b""),
             headers.name: (header_result(headers.read_bytes()), b"", b""),
             image("cmp16mi").name: CMP16MI,
             "crt-app-type-console.exe": APP_TYPE_RETURN,
@@ -1111,6 +1112,41 @@ class WindowsComparison(unittest.TestCase):
         self.assertEqual((result.returncode, result.stdout, result.stderr), CMP16MI)
 
 
+class WindowsTailJump(unittest.TestCase):
+    def test_tail_jump(self):
+        pe = image("tail-jump").resolve()
+        manifest = FIXTURES / "SHA256SUMS"
+        self.assertEqual(hashlib.sha256(manifest.read_bytes()).hexdigest(), os.environ["PE_MANIFEST_SHA256"])
+        digest = hashlib.sha256(pe.read_bytes()).hexdigest()
+        self.assertIn(f"{digest}  {pe.name}", manifest.read_text().splitlines())
+        result = subprocess.run([pe], capture_output=True, timeout=10)
+        print(f"{pe.name} sha256={digest} exit={result.returncode} stdout={result.stdout.hex()} stderr={result.stderr.hex()}")
+        self.assertEqual((result.returncode, result.stdout, result.stderr), (42, b"", b""))
+
+
+class WindowsStartup(unittest.TestCase):
+    def test_startup(self):
+        sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "differential"))
+        from comparison import Observation
+        from manifests import load_catalog
+
+        cases = [manifest.case for manifest in load_catalog() if manifest.case["id"].startswith("startup/")]
+        self.assertEqual(len(cases), 8)
+        for config in ("debug", "release"):
+            directory = FIXTURES / config
+            checksums = (directory / "SHA256SUMS").read_text().splitlines()
+            for case in cases:
+                with self.subTest(config=config, fixture=case["id"]):
+                    pe = (directory / case["binary"]).resolve()
+                    digest = hashlib.sha256(pe.read_bytes()).hexdigest()
+                    self.assertIn(f"{digest}  {pe.name}", checksums)
+                    result = subprocess.run([pe, *case["args"]], capture_output=True, timeout=10)
+                    print(f"{config}/{case['id']} sha256={digest} exit={result.returncode} "
+                          f"stdout={result.stdout.hex()} stderr={result.stderr.hex()}", flush=True)
+                    self.assertEqual(Observation(result.returncode, result.stdout, result.stderr),
+                                     Observation.from_manifest(case["expected"]))
+
+
 class WindowsAppType(unittest.TestCase):
     def test_system_crt(self):
         dll = Path(os.environ["SystemRoot"]) / "System32/msvcrt.dll"
@@ -1139,6 +1175,22 @@ class WindowsAppType(unittest.TestCase):
 
 
 class Console(Workspace):
+    def test_tail_jump(self):
+        pe = image("tail-jump")
+        self.compile(pe)
+        result = self.program()
+        self.assertEqual((result.returncode, result.stdout, result.stderr), (42, b"", b""))
+
+        module = json.loads(run(FORGE, "inspect", pe, "--format", "json", check=True).stdout)["modules"][0]
+        terminal = next(int(row["rva"], 16) for row in module["exports"] if "terminal" in row["names"])
+        data = bytearray(pe.read_bytes())
+        struct.pack_into("<I", data, Layout(data).opt + 16, terminal)
+        probe = self.dir / "terminal.exe"
+        probe.write_bytes(data)
+        self.compile(probe)
+        result = self.program()
+        self.assertEqual((result.returncode, result.stdout, result.stderr), (57, b"", b""))
+
     def test_cmp16mi(self):
         pe = image("cmp16mi")
         data = pe.read_bytes()
@@ -1440,7 +1492,7 @@ class Native(Workspace):
                 ("bad_rsp", 125, "", "forge: guest control fault\n"),
                 ("clobber", 125, "", "forge: guest ABI fault\n"),
                 ("nonvolatile_arg", 125, "", "forge: guest ABI fault\n"),
-                ("stack_alias", 125, "", argument), ("service_alias", 125, "", argument),
+                ("stack_alias", 125, "", argument), ("tail_alias", 125, "", argument), ("service_alias", 125, "", argument),
                 ("before_return", 125, "", "forge: guest memory fault address=0x70000f77 access=1 reason=4\n"),
                 ("read_return", 125, "", opaque),
                 ("write_return", 125, "", opaque), ("service_return", 125, "", opaque)):
@@ -1503,6 +1555,22 @@ class Native(Workspace):
         self.assertEqual(data[mov:mov + 6], bytes.fromhex("b900000000e8"))
         call, registration = helper + 9, wrapper + 4
         iat = registration + 6 + struct.unpack_from("<i", data, layout.file_offset(registration) + 2)[0]
+        # A tail origin supplies the same proven null to the wrapper. Restore the
+        # inherited stack before the jump and retain the original unwind extent.
+        tail = bytearray(data)
+        jump = helper + 13
+        tail[mov + 5:mov + 14] = bytes.fromhex("4883c428e9") + struct.pack("<i", wrapper - jump - 5)
+        probe = self.dir / "tail-registration.exe"
+        probe.write_bytes(tail)
+        self.compile(probe)
+        result = self.program()
+        self.assertEqual((result.returncode, result.stdout, result.stderr), (91, b"", b""))
+        tail[mov + 1] = 1
+        probe.write_bytes(tail)
+        rejected = self.compile(probe, success=False)
+        self.assertEqual(rejected["context"]["instruction_rva"], hex(jump))
+        self.assertEqual(rejected["context"]["branch_target"], wrapper)
+
         # Replace the full zero with a nonzero immediate or a partial zero write.
         for instruction in ("b901000000", "66b9000090"):
             with self.subTest(instruction=instruction):
@@ -1905,5 +1973,6 @@ if __name__ == "__main__":
         sys.exit(77)
     suites = {"compiler": ("Portable", "StartupAdmission"), "object": ("Object",),
               "readiness": ("Readiness",), "native": ("Native", "Console"), "reference": ("Reference",),
-              "windows-cmp16mi": ("WindowsComparison",), "windows-app-type": ("WindowsAppType",)}
+              "windows-cmp16mi": ("WindowsComparison",), "windows-app-type": ("WindowsAppType",),
+              "windows-tail-jump": ("WindowsTailJump",), "windows-startup": ("WindowsStartup",)}
     unittest.main(argv=[__file__, *suites[MODE]], verbosity=2)

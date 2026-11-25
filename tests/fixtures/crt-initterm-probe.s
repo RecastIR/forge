@@ -83,6 +83,10 @@ initializer:
     movq %rbx, %rcx
     callq *__imp_SetLastError(%rip)
 .endif
+.ifdef tail_alias
+    leaq 72(%rsp), %rcx
+    jmp tail_read
+.endif
 .ifdef stack_arg
     movq 80(%rsp), %rax
 .endif
@@ -119,6 +123,20 @@ use_alias:
     addq $40, %rsp
     retq
 .seh_endproc
+
+.ifdef tail_alias
+.seh_proc tail_read
+tail_read:
+    .seh_endprologue
+    movq tail_delta(%rip), %rax
+    movq (%rcx,%rax), %rax
+    addq $40, %rsp
+    retq
+.seh_endproc
+.data
+tail_delta: .quad 16
+.text
+.endif
 
 .ifdef other_initializer
 other_leaf:

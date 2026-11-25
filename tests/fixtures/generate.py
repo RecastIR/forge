@@ -83,6 +83,9 @@ def generate(output, mc, link, dlltool, clang):
         image("executable-cmp16mi.exe", (sources / "executable-cmp16mi.s").read_text(),
               [("KERNEL32.dll", name) for name in ("GetLastError", "GetStdHandle", "WriteFile")],
               exports=["compare_at"])
+        image("executable-tail-jump.exe", (sources / "executable-tail-jump.s").read_text(),
+              [("KERNEL32.dll", name) for name in ("SetLastError", "GetLastError", "ExitProcess")],
+              exports=["bad_register", "bad_stack", "bad_memory", "terminal", "pivot"])
         startup_info = (sources / "executable-startup-info.s").read_text()
         for variant in ("a", "w"):
             setup = f"conditional_title = 1\nmeasured_fields = 1\nprobe_{variant} = 1\n"
@@ -133,7 +136,7 @@ def generate(output, mc, link, dlltool, clang):
         for variant in ("terminal", "guest_fault", "unknown_target", "data_target", "other_function",
                         "other_initializer", "clobber", "bad_rsp", "read_return", "before_return", "write_return",
                         "service_return", "register_arg", "nonvolatile_arg", "stack_arg", "stack_alias",
-                        "service_alias", "nested_table", "stack_exhaustion"):
+                        "service_alias", "tail_alias", "nested_table", "stack_exhaustion"):
             image(f"crt-initterm-{variant}.exe", f"{variant} = 1\n" + initializer_probe, link_flags=initializer_flags)
         termination = (sources / "crt-termination.s").read_text()
         null_registration = (sources / "crt-termination-null.s").read_text()

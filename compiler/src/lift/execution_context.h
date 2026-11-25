@@ -12,9 +12,14 @@ namespace forge::x86 {
     // one instance, and every guest body borrows it through its sole argument.
     struct ContextLayout {
         ContextLayout(llvm::LLVMContext &context, bool origins, bool stack, bool runtime,
-                      bool process = false);
+                      bool process = false, bool callbacks = false, bool tailJumps = false);
         llvm::StructType *type;
         bool origins, stack, runtime, process;
+        // Private guest-body arguments shared by all members of this group.
+        bool callbacks, tailJumps;
+        llvm::CallInst *callBody(llvm::IRBuilder<> &ir, llvm::Function &body,
+                                 llvm::Value *execution, llvm::Value *frameRsp,
+                                 llvm::Value *ceiling, uint32_t origin = 0) const;
     };
 
     struct ContextView {

@@ -151,9 +151,15 @@ namespace forge::x86 {
                                                   const Step &step, uint32_t target) {
             const auto *section = analysis.image().sectionAtRva(target);
 
+            const auto invalid = step.flow == Flow::TailJump ? FailureCode::InvalidBranchTarget
+                                                             : FailureCode::InvalidCallTarget;
             if (!section || section->permissions[2] != 'x') {
-                step.reject(FailureCode::InvalidCallTarget,
-                            "call target outside executable image sections", target);
+                step.reject(invalid, "target outside executable image sections", target);
+            }
+
+            if (step.flow == Flow::TailJump && !section->immutable()) {
+                step.reject(FailureCode::UnsupportedControlFlow,
+                            "tail jump requires immutable target code", target);
             }
 
             FailureContext location;
@@ -161,7 +167,7 @@ namespace forge::x86 {
                 return validateFunction(analysis, target, relocations, location);
             } catch (const InspectionError &error) {
                 const auto kind = failureKind(error.kind).category == "invalid_input"
-                                      ? FailureCode::InvalidCallTarget
+                                      ? invalid
                                       : FailureCode::UnsupportedControlFlow;
                 step.reject(kind, error.what(), target);
             }
@@ -350,16 +356,28 @@ namespace forge::x86 {
             } else {
                 step.reject(FailureCode::LiftingInternal, "guest call lacks target evidence");
             }
-            if (step.isRegisterCall()) {
+            const bool tail = step.flow == Flow::TailJump;
+            if (step.isRegisterCall() || tail) {
                 validateCallEvidence(caller, staging.at(caller).code, step, target);
             }
 
             if (target < 0 || target > UINT32_MAX) {
-                step.reject(FailureCode::InvalidCallTarget,
-                            "call target outside the guest RVA space", target);
+                step.reject(step.flow == Flow::TailJump ? FailureCode::UnsupportedControlFlow
+                                                        : FailureCode::InvalidCallTarget,
+                            "transfer target outside the guest RVA space", target);
             }
 
             const auto address = static_cast<uint32_t>(target);
+            const auto tailCode = tail ? calleeCode(address, step) : std::nullopt;
+            if (tail && !tailCode) {
+                const auto recorded = rangesIn(functionRanges(), {address, uint64_t(address) + 1});
+                step.reject(FailureCode::UnsupportedControlFlow,
+                            recorded.empty()
+                                ? "tail jump requires an unwind-backed function entry"
+                                : "tail jump enters the interior of a recorded function",
+                            target);
+            }
+
             if (leafCandidates.contains(address)) {
                 return Flow::Fallthrough;
             }
@@ -373,7 +391,7 @@ namespace forge::x86 {
             if (address == entry.rva) {
                 checkCalledExtent(address, entry.code, step);
             } else if (!staging.contains(address)) {
-                const auto code = calleeCode(address, step);
+                const auto code = tail ? tailCode : calleeCode(address, step);
                 if (!code) {
                     if (step.isDirectCall()) {
                         if (const auto service = bindImportThunk(caller, step, address)) {
@@ -558,10 +576,11 @@ namespace forge::x86 {
                                                   const Step &call, int64_t target) {
             const auto &image = entry.analysis.image();
             if (image.advertisesDynamicRelocations() || !code.section.immutable()) {
-                call.reject(
-                    FailureCode::UnsupportedControlFlow,
-                    "cannot prove a stable indirect call in mutable or dynamically relocated code",
-                    target);
+                const auto transfer = call.flow == Flow::TailJump ? "tail jump" : "indirect call";
+                call.reject(FailureCode::UnsupportedControlFlow,
+                            Twine("cannot prove a stable ") + transfer +
+                                " in mutable or dynamically relocated code",
+                            target);
             }
 
             // Nested recorded extents have already passed the loader-write check at admission.
@@ -578,7 +597,8 @@ namespace forge::x86 {
 
             if (write) {
                 call.reject(FailureCode::UnsupportedControlFlow,
-                            "indirect call proof depends on loader-written code at " + hex(*write),
+                            Twine(call.flow == Flow::TailJump ? "tail jump" : "indirect call") +
+                                " proof depends on loader-written code at " + hex(*write),
                             target);
             }
         }
@@ -754,6 +774,20 @@ namespace forge::x86 {
                     continue;
                 }
 
+                if (step.flow == Flow::TailJump) {
+                    if (found != resolutions.end()) {
+                        std::rethrow_exception(std::get<std::exception_ptr>(found->second));
+                    }
+
+                    const auto target = static_cast<uint32_t>(step.relativeTarget());
+                    schedule(target, step, resolutions);
+                    caller.calls.emplace(
+                        step.rva,
+                        ResolvedCallSite{caller.entry, leader, step.rva, std::nullopt,
+                                         GuestCallTarget{target, CallKind::TailJump, step.rva}});
+                    continue;
+                }
+
                 CallKind kind;
                 int64_t target;
                 uint32_t evidence;
@@ -807,7 +841,8 @@ namespace forge::x86 {
 
             const auto &caller = functions.at(incoming.caller);
             const auto &step = *caller.instructionContaining(incoming.instruction);
-            if (incoming.guest().kind != CallKind::Direct || proof.targets.size() >= 4096) {
+            if (incoming.guest().kind == CallKind::RipRelativeRegister ||
+                proof.targets.size() >= 4096) {
                 step.reject(FailureCode::UnsupportedControlFlow,
                             "unsupported CRT registration wrapper origin");
             }
@@ -856,6 +891,75 @@ namespace forge::x86 {
             }
         }
 
+        // The two SCC traversals borrow the same transfer records in opposite directions.
+        std::vector<uint32_t>
+        incomingFinishOrder(const std::map<uint32_t, RecoveredFunction> &functions) {
+            std::set<uint32_t> seen;
+            std::vector<uint32_t> order;
+            for (const auto &[entry, function] : functions) {
+                if (!seen.insert(entry).second) {
+                    continue;
+                }
+
+                std::vector<std::pair<uint32_t, size_t>> stack{{entry, 0}};
+                while (!stack.empty()) {
+                    auto &[rva, index] = stack.back();
+                    const auto &incoming = functions.at(rva).incoming;
+                    if (index == incoming.size()) {
+                        order.push_back(rva);
+                        stack.pop_back();
+                        continue;
+                    }
+
+                    const auto source = incoming[index++]->caller;
+                    if (seen.insert(source).second) {
+                        stack.emplace_back(source, 0);
+                    }
+                }
+            }
+
+            return order;
+        }
+
+        void rejectTailCycles(const std::map<uint32_t, RecoveredFunction> &functions) {
+            const auto order = incomingFinishOrder(functions);
+            std::map<uint32_t, uint32_t> components;
+            for (auto start : llvm::reverse(order)) {
+                if (!components.emplace(start, start).second) {
+                    continue;
+                }
+
+                std::vector<uint32_t> pending{start};
+                while (!pending.empty()) {
+                    const auto rva = pending.back();
+                    pending.pop_back();
+                    for (const auto &[site, transfer] : functions.at(rva).calls) {
+                        if (!transfer.external() &&
+                            components.emplace(transfer.guest().rva, start).second) {
+                            pending.push_back(transfer.guest().rva);
+                        }
+                    }
+                }
+            }
+
+            for (const auto &[rva, function] : functions) {
+                for (const auto &[site, transfer] : function.calls) {
+                    if (transfer.isTailJump() &&
+                        components.at(rva) == components.at(transfer.guest().rva)) {
+                        try {
+                            function.instructionContaining(site)->reject(
+                                FailureCode::UnsupportedControlFlow,
+                                "recursive cross-function tail transfer", transfer.guest().rva);
+                        } catch (InspectionError &error) {
+                            error.context.functionRva = rva;
+                            error.context.blockRva = transfer.block;
+                            throw;
+                        }
+                    }
+                }
+            }
+        }
+
         void GroupDiscovery::run() {
             stage(entry.rva, entry.code);
             pending.insert(entry.rva);
@@ -876,6 +980,7 @@ namespace forge::x86 {
                         std::rethrow_exception(state.failure);
                     }
 
+                    function.mayReturn = state.mayReturn;
                     function.graph = state.cfg.finish();
                     InitializerRecovery initializers;
                     for (const auto &[leader, block] : function.graph) {
@@ -928,13 +1033,19 @@ namespace forge::x86 {
                 functions.at(rva).callbackSource = site;
             }
 
+            bool hasTailJump = false;
             // Incoming indices follow source order even when discovery began at a higher RVA.
             for (const auto &[caller, function] : functions) {
                 for (const auto &[instruction, call] : function.calls) {
                     if (!call.external()) {
+                        hasTailJump |= call.isTailJump();
                         functions.at(call.guest().rva).incoming.push_back(&call);
                     }
                 }
+            }
+
+            if (hasTailJump) {
+                rejectTailCycles(functions);
             }
         }
     } // namespace
