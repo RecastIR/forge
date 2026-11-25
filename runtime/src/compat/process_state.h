@@ -30,7 +30,8 @@ namespace forge::runtime {
         int32_t value = 0;
         Origin origin = Origin::Default;
 
-        void initialize(uint64_t imageBase, std::span<const forge_rt_image_region> rows) noexcept;
+        void initialize(const forge_rt_artifact &artifact,
+                        std::span<const forge_rt_image_region> rows) noexcept;
     };
 
     // Owned at a stable address by the managed occurrence. Its core reservations borrow

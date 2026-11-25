@@ -915,6 +915,8 @@ namespace forge {
 
     ParsedImage::~ParsedImage() = default;
 
+    uint16_t ParsedImage::subsystem() const { return coff->getPE32PlusHeader()->Subsystem; }
+
     llvm::StringRef ParsedImage::headerBytes() const & {
         return buffer->getBuffer().take_front(coff->getPE32PlusHeader()->SizeOfHeaders);
     }

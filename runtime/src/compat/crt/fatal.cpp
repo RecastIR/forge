@@ -2,6 +2,7 @@
 #include "../process_state.h"
 #include "forge/msvcrt_process.h"
 
+#include <algorithm>
 #include <cstring>
 #include <string_view>
 
@@ -93,41 +94,71 @@ namespace {
             bytes = bytes.subspan(progress.count);
         }
     }
+
+    // Callers check the entire field against the contiguous immutable prefix first.
+    template <class T> T headerField(std::span<const forge_rt_image_region> rows, uint64_t offset) {
+        T field{};
+        auto out = std::as_writable_bytes(std::span(&field, 1));
+        for (const auto &row : rows) {
+            if (offset >= row.size) {
+                offset -= row.size;
+                continue;
+            }
+
+            const auto count = std::min<uint64_t>(out.size(), row.size - offset);
+            std::memcpy(out.data(), static_cast<const uint8_t *>(row.bytes) + offset, count);
+            out = out.subspan(count);
+            if (out.empty()) {
+                break;
+            }
+
+            offset = 0;
+        }
+
+        return field;
+    }
+
+    uint16_t legacySubsystem(uint64_t base, std::span<const forge_rt_image_region> rows) {
+        // Registered rows are ordered, disjoint and contained in the image. A read-only
+        // row over private backing has a claim, since another guest row may write it.
+        uint64_t extent = 0;
+        for (const auto &row : rows) {
+            if (row.start - base != extent || row.permissions != FORGE_RT_READ || row.claim) {
+                break;
+            }
+
+            extent += row.size;
+        }
+
+        constexpr uint32_t ntOffsetField = 0x3c, dosEnd = ntOffsetField + sizeof(uint32_t);
+        if (extent < dosEnd || headerField<uint16_t>(rows, 0) != 0x5a4d) {
+            return 0;
+        }
+
+        const uint64_t nt = headerField<uint32_t>(rows, ntOffsetField);
+        const auto optional = nt + 24;
+        if (nt < dosEnd || optional > extent || headerField<uint32_t>(rows, nt) != 0x4550) {
+            return 0;
+        }
+
+        constexpr uint32_t subsystemOffset = 68;
+        const auto size = headerField<uint16_t>(rows, nt + 20);
+        if (size < subsystemOffset + sizeof(uint16_t) || size > extent - optional ||
+            headerField<uint16_t>(rows, optional) != 0x20b) {
+            return 0;
+        }
+
+        return headerField<uint16_t>(rows, optional + subsystemOffset);
+    }
 } // namespace
 
-// Legacy MSVCRT consults the main module's immutable PE header on attach and on
-// every setter call. Forge can select the same subsystem once during registration.
-void CrtApplicationType::initialize(uint64_t imageBase,
+void CrtApplicationType::initialize(const forge_rt_artifact &artifact,
                                     std::span<const forge_rt_image_region> rows) noexcept {
-    if (rows.empty() || rows.front().start != imageBase ||
-        rows.front().permissions != FORGE_RT_READ || rows.front().claim) {
-        return;
-    }
-
-    const std::span headers(static_cast<const uint8_t *>(rows.front().bytes), rows.front().size);
-    constexpr size_t ntOffsetField = 0x3c, optionalHeader = 24, subsystem = optionalHeader + 68;
-    if (headers.size() < ntOffsetField + 4 || headers[0] != 'M' || headers[1] != 'Z') {
-        return;
-    }
-
-    uint32_t offset;
-    std::memcpy(&offset, headers.data() + ntOffsetField, sizeof(offset));
-    if (offset < ntOffsetField + 4 || offset > headers.size() ||
-        headers.size() - offset < subsystem + 2) {
-        return;
-    }
-
-    const auto *nt = headers.data() + offset;
-    uint16_t optionalSize;
-    std::memcpy(&optionalSize, nt + 20, sizeof(optionalSize));
-    if (std::memcmp(nt, "PE\0\0", 4) != 0 || optionalSize < subsystem + 2 - optionalHeader ||
-        optionalSize > headers.size() - offset - optionalHeader || nt[optionalHeader] != 0x0b ||
-        nt[optionalHeader + 1] != 2) {
-        return;
-    }
-
-    uint16_t peSubsystem;
-    std::memcpy(&peSubsystem, nt + subsystem, sizeof(peSubsystem));
+    // MSVCRT uses the main module's subsystem even when a setter supplies a different value.
+    const auto peSubsystem =
+        artifact.version >= FORGE_RT_PE_ARTIFACT_VERSION
+            ? reinterpret_cast<const forge_rt_pe_artifact &>(artifact).subsystem
+            : legacySubsystem(artifact.base, rows);
     if (peSubsystem == 2 || peSubsystem == 3) {
         value = peSubsystem == 2 ? gui : console;
         origin = Origin::PeSubsystem;

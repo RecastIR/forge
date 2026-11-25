@@ -15,6 +15,7 @@ STACK_END = 0x70001000
 ENTRY_RSP = STACK_END - 40
 READ, WRITE = 1, 2
 OVERFLOW, UNMAPPED, PERMISSION, STACK = 1, 2, 3, 4
+R6008 = b"\r\nruntime error R6008\r\n- not enough space for arguments\r\n"
 
 
 def run(*args):
@@ -27,7 +28,7 @@ def memory(address, access, reason):
 
 class ProcessExecution(unittest.TestCase):
     def exercise(self, image, entry, cases, *, base=None, imports=(), probe=False, fail_get=False,
-                 partial_store=False):
+                 partial_store=False, probe_app_type=False, expected_stderr=None):
         pe = (Path(FIXTURES) / image).with_suffix(".exe")
         module = json.loads(run(FORGE, "inspect", pe, "--format", "json"))["modules"][0]
         pe_entry = int(module["entry_point_rva"], 16)
@@ -41,6 +42,9 @@ class ProcessExecution(unittest.TestCase):
             if probe:
                 self.assertIn("call i32 @forge_rt_get_last_error(", ir)
                 ir = ir.replace("@forge_rt_get_last_error(", "@probe_process_get(")
+            if probe_app_type:
+                self.assertIn("call i32 @forge_rt_msvcrt_set_app_type(", ir)
+                ir = ir.replace("@forge_rt_msvcrt_set_app_type(", "@probe_process_set_app_type(")
             if partial_store:
                 self.assertIn("call void @forge_rt_report_scalar_boundary(", ir)
                 ir = ir.replace("@forge_rt_report_scalar_boundary(", "@probe_stos_fault(")
@@ -54,7 +58,15 @@ class ProcessExecution(unittest.TestCase):
                     run(LLC, "-filetype=obj", variant, "-o", obj)
                     run(*LINKER, DRIVER, ADAPTERS, obj, RUNTIME, "-o", exe)
                     args = [str(v) for a, b, _ in cases for v in (a, b)]
-                    lines = run(exe, "fail-get" if fail_get else "run", *args).splitlines()
+                    command = [exe, "fail-get" if fail_get else "run", *args]
+                    if expected_stderr is None:
+                        lines = run(*command).splitlines()
+                    else:
+                        # A regular file exercises embedded CRT output under the host's signal policy.
+                        with tempfile.TemporaryFile() as stderr:
+                            lines = subprocess.check_output(command, text=True, stderr=stderr, timeout=30).splitlines()
+                            stderr.seek(0)
+                            self.assertEqual(stderr.read(), expected_stderr)
                     self.assertEqual(lines[0], f"entry {base} {rva} {pe_entry}")
                     actual_imports = []
                     for line in lines[1:]:
@@ -66,12 +78,22 @@ class ProcessExecution(unittest.TestCase):
                     self.assertEqual(lines[1 + len(imports):], [answer for _, _, answer in cases])
 
     def test_app_type_argument(self):
-        # Function-entry artifacts omit PE headers. The differing low DWORDs select
-        # distinct fatal routes there, exposing RCX lowering and the embedded result.
         self.exercise("crt-app-type-argument", None,
-                      [(0x100000001, 2, "exit 255"), (0x100000002, 1, "unsupported CRT routing"),
-                       (-7, 1, "unsupported CRT routing")],
-                      imports=[("msvcrt.dll", "__set_app_type"), ("msvcrt.dll", "_amsg_exit")])
+                      [(0x100000001, 0x1fffffff9, "app_type 1 app_type -7 exit 255"),
+                       (0x180000000, 0x200000002, "app_type -2147483648 app_type 2 exit 255")],
+                      imports=[("msvcrt.dll", "__set_app_type"), ("msvcrt.dll", "_amsg_exit")],
+                      probe_app_type=True, expected_stderr=R6008 * 2)
+
+    def test_app_type_fatal_routes(self):
+        # The standalone executable suite exercises the same PEs at the same RVA.
+        for variant, result, stderr in (("conflict", "exit 255", R6008),
+                                        ("gui", "unsupported CRT routing", b""),
+                                        ("gui-unknown", "exit 255", b""),
+                                        ("gui-newline", "exit 255", b"")):
+            with self.subTest(variant=variant):
+                self.exercise("crt-app-type-fatal-" + variant, None, [(0, 0, result)],
+                              imports=[("msvcrt.dll", "__set_app_type"), ("msvcrt.dll", "_amsg_exit")],
+                              expected_stderr=stderr)
 
     def test_header_entry(self):
         self.exercise("add", None, [(23, 47, "return 70"), (0, 0, "return 0"),

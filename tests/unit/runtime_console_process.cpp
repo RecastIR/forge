@@ -605,27 +605,74 @@ namespace {
         header[optional] = 0x0b;
         header[optional + 1] = 2;
         header[subsystem] = 2;
-        forge_rt_image_region row{source, header.size(), header.data(), FORGE_RT_READ, nullptr};
-        const auto selected = [&] {
-            CrtApplicationType type;
-            type.initialize(source, {&row, 1});
-            return type.value;
+
+        forge_rt_backing storage[]{{header.size(), header.data(), nullptr, 0},
+                                   {header.size(), nullptr, nullptr, 0}};
+        forge_rt_region_template rows[]{{source, header.size(), 0, 0, FORGE_RT_READ},
+                                        {source + header.size(), 1, 1, 0, FORGE_RT_READ},
+                                        {source + header.size() + 1, 1, 1, 0, FORGE_RT_WRITE}};
+        auto artifact = fatalArtifact;
+        artifact.size = header.size() + 2;
+        artifact.backings = storage;
+        artifact.backingCount = std::size(storage);
+        artifact.regions = rows;
+        artifact.regionCount = 1;
+        artifact.entry = [](forge_rt_execution *execution) {
+            const auto &windows = *execution->instance->windows;
+            const auto &type = windows.appType;
+            REQUIRE(windows.standardHandles.has_value() == (type.value != CrtApplicationType::gui));
+            execution->result = {
+                FORGE_RT_RETURNED, FORGE_RT_OK, static_cast<uint32_t>(type.value), {}, 0};
         };
+        const auto selected = [&] { return run(registered(artifact)).value; };
         REQUIRE(selected() == CrtApplicationType::gui);
         header[subsystem] = 3;
         REQUIRE(selected() == CrtApplicationType::console);
-        --row.size;
+        --rows[0].size;
         REQUIRE(selected() == 0);
-        ++row.size;
+        ++rows[0].size;
         header[nt + 20] = 68;
         REQUIRE(selected() == 0);
         header[nt + 20] = 70;
-        uint64_t writableClaim = 1;
-        row.claim = &writableClaim;
-        REQUIRE(selected() == 0);
-        row.claim = nullptr;
         header[0x3f] = 0xff;
         REQUIRE(selected() == 0);
+        header[0x3f] = 0;
+
+        // Put every possible field boundary across independently backed immutable rows.
+        header[subsystem] = 2;
+        std::array<uint8_t, header.size()> prefix{}, tail{};
+        storage[0].immutableBytes = prefix.data();
+        artifact.regionCount = 2;
+        storage[1].immutableBytes = tail.data();
+        for (size_t split = 1; split < header.size(); ++split) {
+            prefix.fill(0xff);
+            std::memcpy(prefix.data(), header.data(), split);
+            std::memcpy(tail.data(), header.data() + split, header.size() - split);
+            rows[0].size = split;
+            rows[1] = {source + split, header.size() - split, 1, 0, FORGE_RT_READ};
+            REQUIRE(selected() == CrtApplicationType::gui);
+        }
+
+        ++rows[1].start;
+        REQUIRE(selected() == 0);
+        --rows[1].start;
+
+        // Keep the last byte identical while making its backing privately writable via an alias.
+        const forge_rt_fragment fragment{0, 1, tail.data()};
+        storage[1] = {1, nullptr, &fragment, 1};
+        artifact.regionCount = 3;
+        REQUIRE(selected() == 0);
+
+        // A v5 descriptor is authoritative even when a mapped GUI header is present.
+        artifact.regionCount = 1;
+        storage[0].immutableBytes = header.data();
+        rows[0].size = header.size();
+        artifact.version = FORGE_RT_PE_ARTIFACT_VERSION;
+        forge_rt_pe_artifact pe{{{{artifact, "app.exe"}, nullptr, 0}, nullptr, 0}, 3};
+        REQUIRE(run(registered(pe.functions.crt.named.artifact)).value ==
+                CrtApplicationType::console);
+        pe.subsystem = 0;
+        REQUIRE(run(registered(pe.functions.crt.named.artifact)).value == 0);
     }
 
     void setApplicationTypes(forge_rt_execution *execution) {
@@ -727,6 +774,40 @@ namespace {
         REQUIRE(setrlimit(RLIMIT_NOFILE, &previous) == 0);
         REQUIRE(forge_rt_process_register(raw, &artifact) == FORGE_RT_OK);
         REQUIRE(run(retry).kind == FORGE_RT_RETURNED);
+    }
+
+    void checkFatalCaptureBudget() {
+        forge_rt_pe_artifact pe{{{{fatalArtifact, "fatal.exe"}, nullptr, 0}, nullptr, 0}, 2};
+        auto &artifact = pe.functions.crt.named.artifact;
+        artifact.version = FORGE_RT_PE_ARTIFACT_VERSION;
+
+        struct rlimit previous{};
+        REQUIRE(getrlimit(RLIMIT_NOFILE, &previous) == 0);
+        const struct rlimit none{3, previous.rlim_max};
+        REQUIRE(setrlimit(RLIMIT_NOFILE, &none) == 0);
+        expectFatal(registered(artifact), 252);
+
+        const auto checkRetry = [&] {
+            forge_rt_process *raw = nullptr;
+            REQUIRE(forge_rt_process_create(FORGE_RT_ABI_VERSION, &raw) == FORGE_RT_OK);
+            Process retry(raw, forge_rt_process_destroy);
+            REQUIRE(forge_rt_process_register(raw, &artifact) == FORGE_RT_RESOURCE_EXHAUSTED);
+            REQUIRE(setrlimit(RLIMIT_NOFILE, &previous) == 0);
+            REQUIRE(forge_rt_process_register(raw, &artifact) == FORGE_RT_OK);
+            expectFatal(retry, 252);
+            REQUIRE(setrlimit(RLIMIT_NOFILE, &none) == 0);
+        };
+        for (const auto subsystem : std::array<uint16_t, 2>{0, 3}) {
+            pe.subsystem = subsystem;
+            checkRetry();
+        }
+
+        pe.subsystem = 2;
+        constexpr forge_rt_import dependencies[]{fatalImport, {"kernel32.dll", "WriteFile"}};
+        artifact.imports = dependencies;
+        artifact.importCount = std::size(dependencies);
+        checkRetry();
+        REQUIRE(setrlimit(RLIMIT_NOFILE, &previous) == 0);
     }
 
     void checkCaptureExhaustion() {
@@ -903,6 +984,7 @@ void testRuntimeConsoleProcess(const char *fatalObservations) {
 
     checkApplicationTypeHeader();
     checkNoDescriptorBudget();
+    checkFatalCaptureBudget();
     checkCaptureExhaustion();
 #ifdef __APPLE__
     checkNativeCaptureFailure();

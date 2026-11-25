@@ -8,7 +8,11 @@ entry:
     .seh_stackalloc 48
     .seh_endprologue
 .ifdef fatal_type
-.ifndef caller_argument
+.ifdef caller_argument
+    movq %rdx, %rbx
+    callq __set_app_type
+    movq %rbx, %rcx
+.else
     movabsq $0x5a5a000000000002, %rcx
     callq __set_app_type
     movl $fatal_type, %ecx

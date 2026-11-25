@@ -78,10 +78,8 @@ namespace forge::runtime {
     } // namespace
 
     forge_rt_status checkArtifact(const forge_rt_artifact &artifact) {
-        if (artifact.version != FORGE_RT_ARTIFACT_VERSION &&
-            artifact.version != FORGE_RT_NAMED_ARTIFACT_VERSION &&
-            artifact.version != FORGE_RT_CRT_ARTIFACT_VERSION &&
-            artifact.version != FORGE_RT_FUNCTION_IMPORT_ARTIFACT_VERSION) {
+        if (artifact.version < FORGE_RT_ARTIFACT_VERSION ||
+            artifact.version > FORGE_RT_PE_ARTIFACT_VERSION) {
             return FORGE_RT_ABI_MISMATCH;
         }
 
@@ -110,7 +108,7 @@ namespace forge::runtime {
             }
         }
 
-        if (artifact.version == FORGE_RT_FUNCTION_IMPORT_ARTIFACT_VERSION) {
+        if (artifact.version >= FORGE_RT_FUNCTION_IMPORT_ARTIFACT_VERSION) {
             const auto &extended =
                 *reinterpret_cast<const forge_rt_function_import_artifact *>(&artifact);
 

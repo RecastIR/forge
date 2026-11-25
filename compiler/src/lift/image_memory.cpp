@@ -1021,37 +1021,28 @@ namespace forge::x86 {
         auto *storageTable = artifactTable(module, storage, "image.backings");
         auto *regionTable = artifactTable(module, intervals, "image.ranges");
         auto imports = processImports(module, group);
-        auto version = FORGE_RT_NAMED_ARTIFACT_VERSION;
-        if (!slots.functions.empty()) {
-            version = FORGE_RT_FUNCTION_IMPORT_ARTIFACT_VERSION;
-        } else if (!slots.data.empty()) {
-            version = FORGE_RT_CRT_ARTIFACT_VERSION;
-        }
-
         auto *descriptor = ConstantStruct::getAnon(
-            {ir.getInt32(version), ir.getInt64(loadBase), ir.getInt64(sizeOfImage),
-             ir.getInt64(group.root()), ir.getInt64(group.image().module().entryPoint),
-             storageTable, ir.getInt64(storage.size()), regionTable, ir.getInt64(intervals.size()),
+            {ir.getInt32(FORGE_RT_PE_ARTIFACT_VERSION), ir.getInt64(loadBase),
+             ir.getInt64(sizeOfImage), ir.getInt64(group.root()),
+             ir.getInt64(group.image().module().entryPoint), storageTable,
+             ir.getInt64(storage.size()), regionTable, ir.getInt64(intervals.size()),
              artifactTable(module, imports, "image.imports"), ir.getInt64(imports.size()),
              &entryThunk});
 
         auto *name = ir.CreateGlobalString(group.image().module().path.filename().string(),
                                            "image.executable.name", 0, &module);
-        Constant *named = ConstantStruct::getAnon({descriptor, name});
-        if (version >= FORGE_RT_CRT_ARTIFACT_VERSION) {
-            named = ConstantStruct::getAnon(
-                {named, artifactTable(module, slots.data, "image.data.imports"),
-                 ir.getInt64(slots.data.size())});
-        }
+        auto *named = ConstantStruct::getAnon({descriptor, name});
+        auto *crt =
+            ConstantStruct::getAnon({named, artifactTable(module, slots.data, "image.data.imports"),
+                                     ir.getInt64(slots.data.size())});
+        auto *functions = ConstantStruct::getAnon(
+            {crt, artifactTable(module, slots.functions, "image.function.imports"),
+             ir.getInt64(slots.functions.size())});
+        auto *pe = ConstantStruct::getAnon({functions, ir.getInt16(group.image().subsystem())});
 
-        if (!slots.functions.empty()) {
-            named = ConstantStruct::getAnon(
-                {named, artifactTable(module, slots.functions, "image.function.imports"),
-                 ir.getInt64(slots.functions.size())});
-        }
         // Descriptor identity distinguishes artifacts during duplicate registration.
-        auto *artifact = new GlobalVariable(module, named->getType(), true,
-                                            GlobalValue::PrivateLinkage, named, "image.artifact");
+        auto *artifact = new GlobalVariable(module, pe->getType(), true,
+                                            GlobalValue::PrivateLinkage, pe, "image.artifact");
         auto *type = FunctionType::get(ir.getPtrTy(), false);
         auto *accessor =
             Function::Create(type, GlobalValue::ExternalLinkage, "forge_lifted_artifact", module);

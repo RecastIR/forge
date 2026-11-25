@@ -15,6 +15,7 @@ extern "C" {
 #define FORGE_RT_NAMED_ARTIFACT_VERSION UINT32_C(2)
 #define FORGE_RT_CRT_ARTIFACT_VERSION UINT32_C(3)
 #define FORGE_RT_FUNCTION_IMPORT_ARTIFACT_VERSION UINT32_C(4)
+#define FORGE_RT_PE_ARTIFACT_VERSION UINT32_C(5)
 #define FORGE_RT_STACK_BASE UINT64_C(0x70000000)
 #define FORGE_RT_STACK_SIZE UINT32_C(4096)
 #define FORGE_RT_ENTRY_RSP (FORGE_RT_STACK_BASE + FORGE_RT_STACK_SIZE - 32 - 8)
@@ -119,7 +120,8 @@ typedef struct forge_rt_import {
  * bytes, names, and native code have stable addresses and outlive every registered use.
  * Imports describe services resolved by the native linker. Include the console imports used by
  * hand-authored entries and their native adapters: registration captures standard streams when
- * the table declares KERNEL32.dll GetStdHandle or WriteFile. DLL names are case-insensitive. */
+ * the table declares KERNEL32.dll GetStdHandle or WriteFile, or MSVCRT _amsg_exit for
+ * a console or unknown subsystem. DLL names are case-insensitive. */
 typedef struct forge_rt_artifact {
     uint32_t version;
     uint64_t base;
@@ -175,6 +177,13 @@ typedef struct forge_rt_function_import_artifact {
     const forge_rt_function_import *functionImports;
     uint64_t functionImportCount;
 } forge_rt_function_import_artifact;
+
+/* Version 5 appends the source PE32+ optional header's Subsystem, independent of the
+ * selected entry and guest-visible header mappings. The complete v4 prefix is required. */
+typedef struct forge_rt_pe_artifact {
+    forge_rt_function_import_artifact functions;
+    uint16_t subsystem;
+} forge_rt_pe_artifact;
 
 /* Borrowed during registration. Arguments exclude argv[0]. A null executablePath defaults to
  * C:\\ plus the original PE basename in a v2 descriptor. Inputs to command-line services are

@@ -770,6 +770,18 @@ namespace {
                     result.kind == FORGE_RT_RETURNED && result.value == 42);
             process = create();
         }
+
+        forge_rt_pe_artifact pe{descriptor, 3};
+        auto &artifact = pe.functions.crt.named.artifact;
+        artifact.version = FORGE_RT_PE_ARTIFACT_VERSION;
+        pe.functions.functionImports = nullptr;
+        REQUIRE(forge_rt_process_register(process.get(), &artifact) == FORGE_RT_INVALID_ARGUMENT);
+        pe.functions.functionImports = functions;
+        REQUIRE(forge_rt_process_register(process.get(), &artifact) == FORGE_RT_OK);
+        forge_rt_process_result result{};
+        REQUIRE(forge_rt_process_run(process.get(), nullptr, &result) == FORGE_RT_OK &&
+                result.kind == FORGE_RT_RETURNED && result.value == 42);
+        process.reset();
     }
 
     void checkCrtInputConsumers() {

@@ -23,7 +23,7 @@ namespace {
     }
 
     std::span<const forge_rt_function_import> functionImports(const forge_rt_artifact &artifact) {
-        if (artifact.version != FORGE_RT_FUNCTION_IMPORT_ARTIFACT_VERSION) {
+        if (artifact.version < FORGE_RT_FUNCTION_IMPORT_ARTIFACT_VERSION) {
             return {};
         }
 
@@ -159,6 +159,14 @@ namespace {
 
     forge_rt_status LoadedProcess::initialize(const forge_rt_process_startup &startup) {
         const auto &artifact = image.artifact;
+        const auto prepared = image.prepare();
+        if (prepared != FORGE_RT_OK) {
+            return prepared;
+        }
+
+        windows.appType.initialize(artifact,
+                                   tableRows(image.execution.view.regions, artifact.regionCount));
+
         bool standardHandles = false, commandLine = false, startupInfo = false;
         CrtImports crt{dataImports(artifact), false};
         for (const auto &import : tableRows(artifact.imports, artifact.importCount)) {
@@ -170,7 +178,8 @@ namespace {
             const auto adapter = service->nativeSymbol;
             if (adapter == win64::getStdHandle.nativeSymbol ||
                 adapter == win64::writeFile.nativeSymbol ||
-                adapter == win64::crtAmsgExit.nativeSymbol) {
+                (adapter == win64::crtAmsgExit.nativeSymbol &&
+                 windows.appType.value != CrtApplicationType::gui)) {
                 standardHandles = true;
             } else if (adapter == win64::getCommandLineA.nativeSymbol ||
                        adapter == win64::getCommandLineW.nativeSymbol) {
@@ -203,13 +212,6 @@ namespace {
             return parameters;
         }
 
-        const auto prepared = image.prepare();
-        if (prepared != FORGE_RT_OK) {
-            return prepared;
-        }
-
-        windows.appType.initialize(artifact.base,
-                                   tableRows(image.execution.view.regions, artifact.regionCount));
         const auto functions = functionImports(artifact);
         if (!functions.empty()) {
             const auto reserved = image.reserveImportAddresses(

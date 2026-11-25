@@ -196,6 +196,8 @@ namespace forge {
 
         const Module &module() const { return metadata; }
 
+        uint16_t subsystem() const;
+
         // Borrow exactly the validated SizeOfHeaders bytes from the input snapshot.
         llvm::StringRef headerBytes() const &;
         llvm::StringRef headerBytes() const && = delete;

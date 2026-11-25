@@ -1,4 +1,5 @@
 #include "../differential/fixtures/arithmetic/operand.h"
+#include <forge/msvcrt_process.h>
 #include <forge/process.h>
 
 #include <cstdio>
@@ -68,6 +69,13 @@ extern "C" forge_rt_status probe_process_get(forge_rt_instance *instance,
     std::putchar('G');
     return failGetter ? FORGE_RT_RESOURCE_EXHAUSTED
                       : forge_rt_get_last_error(instance, thread, out);
+}
+
+// NOLINTNEXTLINE(readability-identifier-naming)
+extern "C" forge_rt_status probe_process_set_app_type(forge_rt_instance *instance,
+                                                      forge_rt_thread_token thread, int32_t type) {
+    std::printf("app_type %" PRId32 " ", type);
+    return forge_rt_msvcrt_set_app_type(instance, thread, type);
 }
 
 // NOLINTNEXTLINE(readability-identifier-naming)
