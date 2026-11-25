@@ -22,7 +22,6 @@ namespace forge::win64 {
 
 namespace forge::x86 {
     struct Continuation;
-    struct ResolvedCallSite;
     class RecoveredFunctionGroup;
 
     struct EmittedImage {
@@ -78,8 +77,7 @@ namespace forge::x86 {
         void computedAccess(const Step &step, std::optional<uint64_t> va, unsigned width,
                             bool write);
         void continuationAccess(const Step &step, const Continuation &origin,
-                                llvm::ArrayRef<const ResolvedCallSite *> sites, unsigned width,
-                                bool write);
+                                const RecoveredFunctionGroup &group, unsigned width, bool write);
         ImagePlan finish() &&;
 
       private:

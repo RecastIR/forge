@@ -19,6 +19,28 @@
 namespace forge {
     using namespace llvm;
 
+    bool StableMetadata::contains(uint32_t rva, uint32_t size) const {
+        const RvaRange range{rva, uint64_t(rva) + size};
+        const auto mapped = image.mapRva(rva, size);
+        return mapped && mapped->section.immutable() && !relocations.firstOverlap(range) &&
+               rangesIn(writes, range).empty();
+    }
+
+    bool StableMetadata::containsUnwindRecord(const FunctionRange &function) const {
+        const auto &directory = image.module().exceptions;
+        if (!directory || function.indices.empty() ||
+            !contains(function.record.unwind, function.unwindInfoSize)) {
+            return false;
+        }
+
+        const uint32_t table = directory->rva;
+        return llvm::all_of(function.indices, [&](size_t index) {
+            constexpr uint32_t recordSize = sizeof(llvm::Win64EH::RuntimeFunction);
+            const auto rva = uint64_t(table) + index * recordSize;
+            return rva <= UINT32_MAX && contains(static_cast<uint32_t>(rva), recordSize);
+        });
+    }
+
     namespace {
         auto key(const RuntimeFunction &r) { return std::tie(r.begin, r.end, r.unwind); }
 

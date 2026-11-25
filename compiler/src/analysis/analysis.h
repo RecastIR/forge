@@ -30,6 +30,16 @@ namespace forge {
         bool eligible() const { return covered() && !chainedFragment; }
     };
 
+    // All three views belong to the same parsed image.
+    struct StableMetadata {
+        const ParsedImage &image;
+        const RelocationIndex &relocations;
+        llvm::ArrayRef<RvaRange> writes;
+
+        bool contains(uint32_t rva, uint32_t size) const;
+        bool containsUnwindRecord(const FunctionRange &function) const;
+    };
+
     struct Finding {
         std::string code, message;
         std::vector<size_t> records;

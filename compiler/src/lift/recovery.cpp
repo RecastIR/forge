@@ -85,9 +85,14 @@ namespace forge::x86 {
         constexpr StringLiteral invalidFunctionStart =
             "expected an exact, valid, unambiguous discovered function start";
 
-        std::optional<MappedRange> validateFunction(const AnalyzedImage &analysis, uint32_t rva,
-                                                    const RelocationIndex &relocations,
-                                                    FailureContext &location) {
+        struct RecordedCode {
+            const FunctionRange &range;
+            MappedRange code;
+        };
+
+        std::optional<RecordedCode> validateFunction(const AnalyzedImage &analysis, uint32_t rva,
+                                                     const RelocationIndex &relocations,
+                                                     FailureContext &location) {
             const auto &functions = analysis.functions();
             auto it = llvm::lower_bound(functions, rva, [](const auto &function, uint32_t address) {
                 return function.record.begin < address;
@@ -143,12 +148,12 @@ namespace forge::x86 {
                             "function bytes overlap base relocation at " + hex(rel->rva));
             }
 
-            return code;
+            return RecordedCode{*it, *code};
         }
 
-        std::optional<MappedRange> validateCallee(const AnalyzedImage &analysis,
-                                                  const RelocationIndex &relocations,
-                                                  const Step &step, uint32_t target) {
+        std::optional<RecordedCode> validateCallee(const AnalyzedImage &analysis,
+                                                   const RelocationIndex &relocations,
+                                                   const Step &step, uint32_t target) {
             const auto *section = analysis.image().sectionAtRva(target);
 
             const auto invalid = step.flow == Flow::TailJump ? FailureCode::InvalidBranchTarget
@@ -233,7 +238,8 @@ namespace forge::x86 {
                                           const Step &step, uint32_t slot);
             std::optional<ExternalCallTarget> bindImportThunk(uint32_t caller, const Step &step,
                                                               uint32_t target);
-            std::optional<MappedRange> calleeCode(uint32_t target, const Step &step);
+            std::optional<RecordedCode> calleeCode(uint32_t target, const Step &step);
+            RecordedCode validateTailTarget(uint32_t target, const Step &step);
             bool schedule(uint32_t target, const Step &step, const CallResolutions &resolutions);
             void stage(uint32_t rva, MappedRange code);
             Flow guestCallFlow(uint32_t caller, const Step &step, std::optional<int64_t> target);
@@ -289,20 +295,45 @@ namespace forge::x86 {
             }
         }
 
-        std::optional<MappedRange> GroupDiscovery::calleeCode(uint32_t target, const Step &step) {
+        std::optional<RecordedCode> GroupDiscovery::calleeCode(uint32_t target, const Step &step) {
             const auto code = validateCallee(entry.analysis, entry.relocations, step, target);
 
             if (code) {
-                checkCalledExtent(target, *code, step);
-            } else if (const auto &table = entry.analysis.module().exceptions;
-                       table && table->trailingBytes()) {
+                checkCalledExtent(target, code->code, step);
+                return code;
+            }
+
+            if (const auto &table = entry.analysis.module().exceptions;
+                table && table->trailingBytes()) {
                 step.reject(
                     FailureCode::UnsupportedControlFlow,
                     "insufficient evidence for leaf recovery: partial runtime function record",
                     target);
             }
 
-            return code;
+            return {};
+        }
+
+        RecordedCode GroupDiscovery::validateTailTarget(uint32_t target, const Step &step) {
+            const auto code = calleeCode(target, step);
+            if (!code) {
+                const auto recorded = rangesIn(functionRanges(), {target, uint64_t(target) + 1});
+                step.reject(FailureCode::UnsupportedControlFlow,
+                            recorded.empty()
+                                ? "tail jump requires an unwind-backed function entry"
+                                : "tail jump enters the interior of a recorded function",
+                            target);
+            }
+
+            const StableMetadata stable{entry.analysis.image(), entry.relocations,
+                                        loaderWrittenRanges()};
+            if (!stable.containsUnwindRecord(code->range)) {
+                step.reject(FailureCode::UnsupportedControlFlow,
+                            "tail jump requires stable target function table and unwind metadata",
+                            target);
+            }
+
+            return *code;
         }
 
         bool GroupDiscovery::schedule(uint32_t target, const Step &step,
@@ -367,15 +398,8 @@ namespace forge::x86 {
             }
 
             const auto address = static_cast<uint32_t>(target);
-            const auto tailCode = tail ? calleeCode(address, step) : std::nullopt;
-            if (tail && !tailCode) {
-                const auto recorded = rangesIn(functionRanges(), {address, uint64_t(address) + 1});
-                step.reject(FailureCode::UnsupportedControlFlow,
-                            recorded.empty()
-                                ? "tail jump requires an unwind-backed function entry"
-                                : "tail jump enters the interior of a recorded function",
-                            target);
-            }
+            const auto tailCode =
+                tail ? std::optional{validateTailTarget(address, step)} : std::nullopt;
 
             if (leafCandidates.contains(address)) {
                 return Flow::Fallthrough;
@@ -406,7 +430,7 @@ namespace forge::x86 {
                     return Flow::Fallthrough;
                 }
 
-                stage(address, *code);
+                stage(address, code->code);
             }
 
             auto &callee = staging.at(address);
@@ -555,7 +579,7 @@ namespace forge::x86 {
 
             if (!staging.contains(rva) && !leafCandidates.contains(rva)) {
                 if (const auto code = calleeCode(rva, step)) {
-                    stage(rva, *code);
+                    stage(rva, code->code);
                 } else {
                     leafCandidates.insert(rva);
                 }
@@ -920,7 +944,8 @@ namespace forge::x86 {
             return order;
         }
 
-        void rejectTailCycles(const std::map<uint32_t, RecoveredFunction> &functions) {
+        std::map<uint32_t, uint32_t>
+        transferComponents(const std::map<uint32_t, RecoveredFunction> &functions) {
             const auto order = incomingFinishOrder(functions);
             std::map<uint32_t, uint32_t> components;
             for (auto start : llvm::reverse(order)) {
@@ -933,7 +958,7 @@ namespace forge::x86 {
                     const auto rva = pending.back();
                     pending.pop_back();
                     for (const auto &[site, transfer] : functions.at(rva).calls) {
-                        if (!transfer.external() &&
+                        if (!transfer.external() && functions.contains(transfer.guest().rva) &&
                             components.emplace(transfer.guest().rva, start).second) {
                             pending.push_back(transfer.guest().rva);
                         }
@@ -941,22 +966,54 @@ namespace forge::x86 {
                 }
             }
 
-            for (const auto &[rva, function] : functions) {
-                for (const auto &[site, transfer] : function.calls) {
-                    if (transfer.isTailJump() &&
-                        components.at(rva) == components.at(transfer.guest().rva)) {
-                        try {
-                            function.instructionContaining(site)->reject(
-                                FailureCode::UnsupportedControlFlow,
-                                "recursive cross-function tail transfer", transfer.guest().rva);
-                        } catch (InspectionError &error) {
-                            error.context.functionRva = rva;
-                            error.context.blockRva = transfer.block;
-                            throw;
-                        }
+            return components;
+        }
+
+        // Also classify the published portion of a group when a later dependency fails.
+        const ResolvedCallSite *indexTransfers(std::map<uint32_t, RecoveredFunction> &functions) {
+            bool hasTailJump = false;
+            for (const auto &[caller, function] : functions) {
+                for (const auto &[instruction, call] : function.calls) {
+                    if (call.external()) {
+                        continue;
+                    }
+
+                    const auto target = functions.find(call.guest().rva);
+                    if (target != functions.end()) {
+                        target->second.incoming.push_back(&call);
+                        hasTailJump |= call.isTailJump();
                     }
                 }
             }
+
+            if (!hasTailJump) {
+                return nullptr;
+            }
+
+            const auto components = transferComponents(functions);
+            const ResolvedCallSite *first = nullptr;
+
+            for (auto &[rva, function] : functions) {
+                for (auto &[site, transfer] : function.calls) {
+                    if (!transfer.isTailJump()) {
+                        continue;
+                    }
+
+                    auto &target = std::get<GuestCallTarget>(transfer.target);
+                    const auto component = components.find(target.rva);
+                    if (component == components.end() || component->second != components.at(rva)) {
+                        continue;
+                    }
+
+                    target.recursiveTail = true;
+
+                    if (!first) {
+                        first = &transfer;
+                    }
+                }
+            }
+
+            return first;
         }
 
         void GroupDiscovery::run() {
@@ -1028,21 +1085,6 @@ namespace forge::x86 {
             for (const auto &[rva, site] : callbackSources) {
                 functions.at(rva).callbackSource = site;
             }
-
-            bool hasTailJump = false;
-            // Incoming indices follow source order even when discovery began at a higher RVA.
-            for (const auto &[caller, function] : functions) {
-                for (const auto &[instruction, call] : function.calls) {
-                    if (!call.external()) {
-                        hasTailJump |= call.isTailJump();
-                        functions.at(call.guest().rva).incoming.push_back(&call);
-                    }
-                }
-            }
-
-            if (hasTailJump) {
-                rejectTailCycles(functions);
-            }
         }
     } // namespace
 
@@ -1091,7 +1133,7 @@ namespace forge::x86 {
                 throw atRva(FailureCode::InvalidEntry, rva, invalidFunctionStart);
             }
 
-            return ValidatedEntry{analysis, rva, *code, std::move(relocations)};
+            return ValidatedEntry{analysis, rva, code->code, std::move(relocations)};
         });
     }
 
@@ -1205,10 +1247,29 @@ namespace forge::x86 {
                 discovery.run();
             } catch (const InspectionError &failure) {
                 if (onFailure) {
+                    indexTransfers(recovered);
                     onFailure(*this, failure);
                 }
 
                 throw;
+            }
+
+            if (const auto *cycle = indexTransfers(recovered)) {
+                const auto &function = recovered.at(cycle->caller);
+                try {
+                    function.instructionContaining(cycle->instruction)
+                        ->reject(FailureCode::UnsupportedControlFlow,
+                                 "recursive cross-function tail transfer", cycle->guest().rva);
+                } catch (InspectionError &failure) {
+                    failure.context.functionRva = cycle->caller;
+                    failure.context.blockRva = cycle->block;
+
+                    if (onFailure) {
+                        onFailure(*this, failure);
+                    }
+
+                    throw;
+                }
             }
         });
     }

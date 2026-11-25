@@ -721,20 +721,25 @@ namespace forge::x86 {
     }
 
     void ImageMemory::continuationAccess(const Step &step, const Continuation &origin,
-                                         llvm::ArrayRef<const ResolvedCallSite *> sites,
-                                         unsigned width, bool write) {
-        // Repeated reads in a high-fan-in helper need only one expansion of its
-        // call sites. The first selecting step owns the budget diagnostic.
-        if (!continuationAccesses.emplace(origin.callee, origin.offset, width, write).second) {
-            return;
-        }
-
-        for (const auto *site : sites) {
-            if (site->isTailJump()) {
+                                         const RecoveredFunctionGroup &group, unsigned width,
+                                         bool write) {
+        // Only CALL creates a return address. Tail predecessors share this slot.
+        // The cache also deduplicates common predecessors across readers and diamonds.
+        SmallVector<uint32_t> pending{origin.callee};
+        while (!pending.empty()) {
+            const auto reader = pending.pop_back_val();
+            if (!continuationAccesses.emplace(reader, origin.offset, width, write).second) {
                 continue;
             }
-            selectComputed(step, loadBase + *site->continuation + origin.offset, width, write,
-                           ExecutableSelection::ContinuationBytes);
+
+            for (const auto *site : group.function(reader).incoming) {
+                if (site->isTailJump()) {
+                    pending.push_back(site->caller);
+                } else {
+                    selectComputed(step, loadBase + *site->continuation + origin.offset, width,
+                                   write, ExecutableSelection::ContinuationBytes);
+                }
+            }
         }
     }
 

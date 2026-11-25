@@ -1,41 +1,12 @@
 #include "analysis/analysis.h"
 
 #include "llvm/Support/Endian.h"
-#include "llvm/Support/Win64EH.h"
 
 #include <utility>
 
 namespace forge {
     namespace {
         using llvm::support::endian::read32le;
-
-        struct StableMetadata {
-            const ParsedImage &image;
-            const RelocationIndex relocations;
-            const std::vector<RvaRange> writes;
-
-            bool contains(uint32_t rva, uint32_t size) const {
-                const RvaRange range{rva, uint64_t(rva) + size};
-                const auto mapped = image.mapRva(rva, size);
-                return mapped && mapped->section.immutable() && !relocations.firstOverlap(range) &&
-                       rangesIn(writes, range).empty();
-            }
-
-            bool containsUnwindRecord(const FunctionRange &function) const {
-                const auto &directory = image.module().exceptions;
-                if (!directory || function.indices.empty() ||
-                    !contains(function.record.unwind, function.unwindInfoSize)) {
-                    return false;
-                }
-
-                const uint32_t table = directory->rva;
-                return llvm::all_of(function.indices, [&](size_t index) {
-                    constexpr uint32_t recordSize = sizeof(llvm::Win64EH::RuntimeFunction);
-                    const auto rva = uint64_t(table) + index * recordSize;
-                    return rva <= UINT32_MAX && contains(static_cast<uint32_t>(rva), recordSize);
-                });
-            }
-        };
 
         void inspectScope(const AnalyzedImage &analysis, const FunctionRange &owner,
                           const StableMetadata &stable, CSpecificHandler &handler) {
@@ -134,8 +105,9 @@ namespace forge {
             return {};
         }
 
-        const StableMetadata stable{*source, RelocationIndex(module().relocations),
-                                    source->loaderWrittenRanges()};
+        const RelocationIndex relocations(module().relocations);
+        const auto writes = source->loaderWrittenRanges();
+        const StableMetadata stable{*source, relocations, writes};
         if (!stable.containsUnwindRecord(function) ||
             !stable.contains(*function.handlerRva, amd64ImportThunkSize) ||
             imported->unstableIdentityRva(stable.relocations, stable.writes)) {

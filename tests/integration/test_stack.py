@@ -234,8 +234,10 @@ class StackTests(GuestExecution):
                 self.trap(exe, [(9, 1)])
 
     def test_tail_continuation(self):
-        for exe in self.variants("tail_caller"):
-            self.expect(exe, 0, 0, 0x90)
+        for name in ("tail_caller", "tail_eight", "tail_nine"):
+            with self.subTest(name=name):
+                for exe in self.variants(name):
+                    self.expect(exe, 0, 0, 0x90)
 
     def test_active_call_slots(self):
         for width, suffix in ((1, "b"), (2, "w"), (4, "l"), (8, "q")):

@@ -6,6 +6,14 @@ entry:
     subq $40, %rsp
     .seh_stackalloc 40
     .seh_endprologue
+.ifdef tail_registration
+    callq tail_register
+    testl %eax, %eax
+    jne failed
+    callq _cexit
+    movl $42, %eax
+    jmp done
+.endif
 .ifdef finite_depth
     .rept finite_depth
     leaq second(%rip), %rcx
@@ -71,6 +79,15 @@ done:
     addq $40, %rsp
     retq
 .seh_endproc
+
+.ifdef tail_registration
+.seh_proc tail_register
+tail_register:
+    .seh_endprologue
+    leaq second(%rip), %rcx
+    jmp register_callback
+.seh_endproc
+.endif
 
 .seh_proc register_callback
 register_callback:

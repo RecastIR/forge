@@ -718,6 +718,101 @@ class Readiness(Workspace):
         self.assertEqual(self.output.read_bytes(), b"previous output")
         return diagnostic
 
+    def test_tail_cycles_report_only_admitted_edges(self):
+        data = bytearray((FIXTURES / "cfg.exe").read_bytes())
+        layout = Layout(data)
+        records = layout.file_offset(layout.directory(3)[0])
+        root, left, right = (layout.u32(records + n * 12) for n in range(3))
+        self.assertEqual(root, entry(data))
+
+        def transfer(source, target, opcode):
+            start = layout.file_offset(source)
+            data[start:start + 5] = bytes([opcode]) + struct.pack("<i", target - source - 5)
+
+        transfer(root, left, 0xe9)
+        transfer(left, right, 0xe9)
+        for opcode in (0xe9, 0xe8):
+            with self.subTest(back_edge=opcode):
+                transfer(right, left, opcode)
+                data[layout.file_offset(right) + 5] = 0xc3
+                diagnostic = self.reject(data)
+                context = diagnostic["context"]
+                self.assertEqual(diagnostic["code"], "LIFT_UNSUPPORTED_CONTROL_FLOW")
+                self.assertIn("recursive cross-function tail transfer", diagnostic["message"])
+                self.assertEqual((context["instruction_rva"], context["branch_target"]), (hex(left), right))
+                self.assertEqual(context["tail_transfers"], [
+                    dict(caller_rva=hex(root), instruction_rva=hex(root), target_rva=hex(left))])
+
+        # A later decode failure wins the diagnostic; the already discovered cycle
+        # still cannot supply admitted transfers in this partial snapshot.
+        broken = layout.u32(records + 36)
+        start = layout.file_offset(root)
+        data[start:start + 4] = bytes.fromhex("31c0 7405")
+        transfer(root + 4, left, 0xe9)
+        transfer(root + 9, broken, 0xe9)
+        offset = layout.file_offset(broken)
+        data[offset:offset + 3] = bytes.fromhex("ff13 c3")
+        ctx = self.reject(data)["context"]
+        self.assertEqual((ctx["instruction_rva"], ctx["bytes"]), (hex(broken), "ff13"))
+        self.assertEqual(ctx["tail_transfers"], [
+            dict(caller_rva=hex(root), instruction_rva=hex(site), target_rva=hex(target))
+            for site, target in ((root + 4, left), (root + 9, broken))])
+
+    def test_tail_target_requires_stable_entry_evidence(self):
+        data = bytearray(image("tail-jump").read_bytes())
+        layout = Layout(data)
+        root = entry(data)
+        table, size = layout.directory(3)
+        row = table + 2 * 12
+        target, _, unwind = struct.unpack_from("<III", data, layout.file_offset(row))
+        self.assertEqual(data[layout.file_offset(unwind) + 2], 1)  # One unwind code.
+
+        # Reach the target first by CALL, then JMP to the same recorded entry.
+        start = layout.file_offset(root)
+        jump = root + 13
+        encoded = b"\xe9" + struct.pack("<i", target - jump - 5)
+        data[start:start + 18] = (bytes.fromhex("4883ec28 e8") + struct.pack("<i", target - root - 9)
+                                  + bytes.fromhex("4883c428") + encoded)
+        offset = layout.file_offset(target)
+        data[offset:offset + 6] = bytes.fromhex("b82a000000 c3")
+
+        # Both copies of a coalesced table row supply its provenance.
+        section = layout.section_header(table)
+        self.assertEqual(layout.u32(section + 8), size)
+        self.assertLessEqual(size + 12, layout.u32(section + 16))
+        struct.pack_into("<I", data, section + 8, size + 12)
+        struct.pack_into("<I", data, layout.directories + 3 * 8 + 4, size + 12)
+        duplicate = layout.file_offset(table) + size
+        data[duplicate:duplicate + 12] = data[layout.file_offset(row):layout.file_offset(row) + 12]
+        source = self.dir / "stable.exe"
+        source.write_bytes(data)
+        # Function lifting is portable, including on hosts without a native linker.
+        ir = self.dir / "stable.ll"
+        args = (FORGE, "lift", source, "--rva", hex(root), "--signature", "i64(i64,i64)", "--output", ir)
+        self.assertEqual(run(*args).returncode, 0)
+
+        for evidence in (row, table + size + 8, unwind + 4):
+            for cause in ("writable", "relocated", "loader-written"):
+                with self.subTest(evidence=hex(evidence), cause=cause):
+                    changed = data.copy()
+                    if cause == "writable":
+                        header = Layout(changed).section_header(evidence)
+                        struct.pack_into("<I", changed, header + 36, layout.u32(header + 36) | 0x80000000)
+                    elif cause == "relocated":
+                        reloc = layout.file_offset(layout.directory(5)[0])
+                        struct.pack_into("<I", changed, reloc, evidence & ~0xfff)
+                        changed[reloc + 8:reloc + layout.u32(reloc + 4)] = bytes(layout.u32(reloc + 4) - 8)
+                        struct.pack_into("<H", changed, reloc + 8, 0x3000 | (evidence & 0xfff))
+                    else:
+                        struct.pack_into("<II", changed, layout.directories + 12 * 8, evidence, 4)
+                    diagnostic = self.reject(changed)
+                    self.assertEqual(diagnostic["code"], "LIFT_UNSUPPORTED_CONTROL_FLOW")
+                    self.assertIn("stable target function table and unwind metadata", diagnostic["message"])
+                    ctx = diagnostic["context"]
+                    self.assertEqual((ctx["instruction_rva"], ctx["branch_target"], ctx["bytes"]),
+                                     (hex(jump), target, encoded.hex()))
+                    self.assertEqual(ctx["tail_transfers"], [])
+
     def test_invalid_roots(self):
         for root in (0, entry(image("return").read_bytes()) + 1):
             with self.subTest(root=root):
@@ -1539,6 +1634,11 @@ class Native(Workspace):
         self.assertEqual(diagnostic["code"], "LIFT_INVALID_CALL_TARGET")
         self.assertEqual(diagnostic["context"]["import_symbol"], "_onexit")
         self.assertIn("termination_target_rva", diagnostic["context"])
+
+    def test_nonnull_tail_registration(self):
+        self.compile(FIXTURES / "crt-term-tail-registration.exe")
+        result = self.program()
+        self.assertEqual((result.returncode, result.stdout, result.stderr), (42, b"B", b""))
 
     def test_null_registration_and_wrapper_diagnostics(self):
         pe = FIXTURES / "crt-term-null.exe"

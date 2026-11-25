@@ -62,7 +62,7 @@ def generate(output, mc, link, dlltool, clang):
 
         sources = Path(__file__).resolve().parent
         for name in ("executable-return", "executable-call", "executable-data", "executable-fault",
-                     "executable-tib", "executable-guarded-call"):
+                     "executable-tib", "executable-guarded-call", "recursive-continuation"):
             image(f"{name}.exe", (sources / f"{name}.s").read_text())
         returns = (sources / "executable-return.s").read_text()
         for dll in ("KERNEL32.dll", "msvcrt.dll"):
@@ -145,7 +145,7 @@ def generate(output, mc, link, dlltool, clang):
             image(f"crt-term-depth-{count}.exe", f"finite_depth = {count}\n" + termination,
                   link_flags=initializer_flags)
         for name, switches in (
-            ("cexit", ()), ("exit", ("normal_exit",)), ("nested-exit", ("normal_exit", "terminal")),
+            ("cexit", ()), ("tail-registration", ("tail_registration",)), ("exit", ("normal_exit",)), ("nested-exit", ("normal_exit", "terminal")),
             ("register", ("add_during",)), ("recursive", ("add_during", "recurse")),
             ("recursive-order", ("add_during", "recurse", "trace_recursive_return")),
             ("recursive-limit", ("recurse_forever",)), ("recursive-exit", ("add_during", "recursive_exit")),

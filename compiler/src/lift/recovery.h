@@ -43,6 +43,7 @@ namespace forge::x86 {
         uint32_t rva;
         CallKind kind;
         uint32_t evidenceRva;
+        bool recursiveTail = false; // Rejected by recovery, retained for failure reporting.
     };
 
     struct InitializerTable {

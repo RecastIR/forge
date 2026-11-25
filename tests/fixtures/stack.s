@@ -867,3 +867,35 @@ probe tail_reader
     movzbl (%r10), %eax
     ret
     .seh_endproc
+
+# Check every continuation, including the first one after the fan-in exceeds eight.
+.macro fan_in name, count
+probe \name
+    subq $40, %rsp
+    .irp n,1,2,3,4,5,6,7,8,9
+        .if \n <= \count
+            callq tail_wrapper_\n
+            nop
+            cmpl $0x90, %eax
+            jne 1f
+        .endif
+    .endr
+    jmp 2f
+1:
+    xorl %eax, %eax
+2:
+    addq $40, %rsp
+    ret
+    .seh_endproc
+.endm
+
+fan_in tail_eight, 8
+fan_in tail_nine, 9
+
+.irp n,1,2,3,4,5,6,7,8,9
+    .seh_proc tail_wrapper_\n
+tail_wrapper_\n:
+    .seh_endprologue
+    jmp tail_reader
+    .seh_endproc
+.endr

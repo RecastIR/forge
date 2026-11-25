@@ -201,6 +201,10 @@ class ProcessExecution(unittest.TestCase):
         self.exercise(image, "pivot", [(0, 0, "guard 3")])
         self.exercise(image, "bad_memory", [(1, 0, memory(1, READ, UNMAPPED))])
 
+    def test_return_slot_continuations(self):
+        self.exercise("stack", "tail_nine", [(0, 0, "return 144")])
+        self.exercise("recursive-continuation", None, [(1, 0, "return 72"), (0, 0, memory(ENTRY_RSP, READ, STACK))])
+
     def test_cmp16mi_read_boundaries(self):
         source = Path(FIXTURES) / "executable-cmp16mi.exe"
         module = json.loads(run(FORGE, "inspect", source, "--format", "json"))["modules"][0]

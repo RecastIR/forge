@@ -43,23 +43,19 @@ namespace forge::x86 {
 
         struct CallInputs {
             // Frame offsets use the original return slot, including across tail transfers.
-            AddressFact frameRsp, continuation;
+            AddressFact frameRsp;
             bool callbackFrame = false;
             AddressFacts facts;
 
-            explicit CallInputs(AddressFact frameRsp, AddressFact continuation = {})
-                : frameRsp(std::move(frameRsp)), continuation(std::move(continuation)) {
+            explicit CallInputs(AddressFact frameRsp) : frameRsp(std::move(frameRsp)) {
                 facts.registers[rspIndex] = AddressFact::frameStack();
             }
 
             bool merge(const CallInputs &other) {
                 const auto rsp = frameRsp.join(other.frameRsp);
-                const auto slot = continuation.join(other.continuation);
-                const bool changed = rsp != frameRsp || slot != continuation ||
-                                     (other.callbackFrame && !callbackFrame);
+                const bool changed = rsp != frameRsp || (other.callbackFrame && !callbackFrame);
                 callbackFrame |= other.callbackFrame;
                 frameRsp = rsp;
-                continuation = slot;
                 return facts.merge(other.facts, frameRsp) || changed;
             }
         };
@@ -152,7 +148,7 @@ namespace forge::x86 {
             ImageMemory &imageMemory;
             FunctionPlan &plan;
             const std::vector<uint32_t> &terminationTargets;
-            AddressFact entryAddresses, frameContinuation;
+            AddressFact entryAddresses;
             bool callbackFrame = false;
             std::map<uint32_t, AddressFacts> blockAddresses;
 
@@ -278,8 +274,7 @@ namespace forge::x86 {
             }
 
             for (const auto &origin : address.continuations()) {
-                imageMemory.continuationAccess(s, origin, group.function(origin.callee).incoming,
-                                               width, write);
+                imageMemory.continuationAccess(s, origin, group, width, write);
             }
 
             if (address.hasUnknown()) {
@@ -311,7 +306,7 @@ namespace forge::x86 {
             if (!function.incoming.empty() && (address.frameOffset() == 0 || absoluteSlot)) {
                 // The current activation protects all eight bytes until its RET.
                 // At the external entry the synthetic slot still faults on access.
-                return frameContinuation;
+                return AddressFact::continuation(rva);
             }
 
             return facts.spills.read(address, entryAddresses).reloaded(entryAddresses);
@@ -586,7 +581,7 @@ namespace forge::x86 {
 
             if (!collect) {
                 if (site.isTailJump()) {
-                    CallInputs inputs(entryAddresses, frameContinuation);
+                    CallInputs inputs(entryAddresses);
                     inputs.callbackFrame = callbackFrame;
                     inputs.facts = facts;
                     calls.enter(site.guest().rva, inputs);
@@ -594,7 +589,7 @@ namespace forge::x86 {
                     const auto rsp = facts.registers[rspIndex]
                                          .project(entryAddresses)
                                          .plus(AddressFact(uint64_t(0) - 8));
-                    CallInputs inputs(rsp, AddressFact::continuation(site.guest().rva));
+                    CallInputs inputs(rsp);
                     for (size_t i = 1; i <= 4; ++i) {
                         inputs.facts.registers[i] = facts.registers[i].project(entryAddresses);
                     }
@@ -705,7 +700,6 @@ namespace forge::x86 {
                 pending = {rva};
 
                 entryAddresses = state.entry.frameRsp;
-                frameContinuation = state.entry.continuation;
                 callbackFrame = state.entry.callbackFrame;
                 blockAddresses[rva] = state.entry.facts;
             }
