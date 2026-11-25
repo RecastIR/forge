@@ -119,7 +119,9 @@ Task 13.3L reran all eight unmodified PEs in Debug and Release. Fifteen recover 
 | puts | `0x1547` (puts) | `0x15c0` | 0, `Hello from C!\r\n` |
 | return | `0x15e0` | `0x15c0` | 42, empty |
 
-For every cell the pinned Wine reference validated, with empty stderr. Recovery and translation failed with `lifting / unsupported / LIFT_UNSUPPORTED_CONTROL_FLOW`. Native compilation, publication, execution and stream comparison did not run. The comparator exited 1, and no native exit status was observed. The Windows reference job runs each exported PE with its manifest arguments and checks its hash, full exit status and raw streams. The SDK-free tail-transfer PE independently exercises a returning chain on Windows, pinned Wine and ARM64. [Readiness regressions](../../test_native_differential.py) · [Reference checks](../../../integration/test_executable.py)
+Windows Server 2022 and pinned Wine 8 on Linux amd64 produced the exit and stdout shown in every row, with empty stderr in all 16 runs. The Windows runner used the same hashed Debug and Release PEs and manifest arguments as the Wine producer. [Windows observations](https://github.com/RecastIR/forge/actions/runs/45600535999/job/139164320778) · [Pinned Wine observations](https://github.com/RecastIR/forge/actions/runs/45600535999/job/139157958011)
+
+For all 16 Forge comparisons, recovery and translation failed with `lifting / unsupported / LIFT_UNSUPPORTED_CONTROL_FLOW`. The comparator exited 1 before native compilation, publication or execution, so there was no native exit status or stream comparison. The separate SDK-free tail-transfer fixture exercises a returning chain with expected exit 42 and empty output streams on Windows, pinned Wine and ARM64. [Readiness regressions](../../test_native_differential.py) · [Executable comparisons](../../../integration/test_executable.py)
 
 Schedule bounded constructor-list call recovery separately. Its evidence must identify which target pointers are admissible at the indirect call. The recorded tail jump establishes the entry of the constructor runner only.
 
