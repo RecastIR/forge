@@ -196,9 +196,16 @@ def verified_call_target(image, module, caller, site, forge, *, require_continua
             graph = reachable_instructions(begin, decode, lambda a: begin <= a < end,
                                            lambda _: True, ordinary, end=end, indirect=tables.targets,
                                            register_calls=True, iat_call=iat_call, terminals=("ret", "ud2"))
+
+            def table_call(address, reg, predecessors):
+                proof = forward_call(graph, decode, base, address, reg, predecessors)
+                # Only the diagnostic about this loop may describe a bypassed guard.
+                if not proof.guarded and (require_continuation or reported_range is None or address != base + site):
+                    raise ValueError("caller edge bypasses forward pointer load or guard")
+                return proof
+
             registers = register_call_targets(graph, decode, encoding=encoding,
-                                              forward_call=lambda a, reg, preds: forward_call(
-                                                  graph, decode, base, a, reg, preds))
+                                              forward_call=table_call)
     except (OSError, subprocess.SubprocessError) as error:
         raise ValueError(f"cannot disassemble the leaf caller: {error}") from error
 
@@ -221,8 +228,6 @@ def verified_call_target(image, module, caller, site, forge, *, require_continua
                     table_target = ()
                 else:
                     table_target = (dest.first, dest.last, expected_target)
-                if require_continuation and not dest.guarded:
-                    raise ValueError("caller edge bypasses forward pointer load or guard")
                 tables.validate(graph, forge, register_calls=True, iat_slots=slots,
                                 forward_target=table_target)
                 return expected_target

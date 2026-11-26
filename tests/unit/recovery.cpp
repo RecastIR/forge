@@ -630,6 +630,25 @@ namespace {
               "empty list needs a zero-trip exit and a terminal executed CALL");
     }
 
+    void checkUnalignedForwardBase(const AnalyzedImage &image, const x86::ResolvedCallSite &call,
+                                   const x86::BoundedTableCall &range) {
+        // Select each runner separately so the first rejection cannot mask the empty range.
+        const RecoveredFunctionGroup runner(image, call.caller);
+        for (const auto output : {LiftOutput::Function, LiftOutput::ProcessArtifact}) {
+            try {
+                x86::analyzeGroup(runner, 0x10000001, EntryMode::WindowsX64I64Pair, true, output);
+                throw std::runtime_error("accepted unaligned forward pointer range");
+            } catch (const InspectionError &error) {
+                const auto &ctx = error.context;
+                check(error.kind == FailureCode::ImageMemory &&
+                          ctx.instructionRva == call.instruction &&
+                          ctx.tableFirstRva == range.first && ctx.tableLastRva == range.last &&
+                          ctx.pointerLoadRva == range.forward()->pointerLoad,
+                      "unaligned selected base lost its forward call evidence");
+            }
+        }
+    }
+
     void checkForwardCalls(const fs::path &path) {
         const AnalyzedImage image(
             std::make_unique<ParsedImage>(InputFile(path), ParsePolicy::Inspection),
@@ -657,27 +676,8 @@ namespace {
 
         for (const auto &[entry, function] : group.functions()) {
             for (const auto &[instruction, call] : function.calls) {
-                const auto *range = call.table();
-                if (!range || !range->forward()) {
-                    continue;
-                }
-
-                // Select each runner separately so the first rejection cannot mask the empty range.
-                const RecoveredFunctionGroup runner(image, entry);
-                for (const auto output : {LiftOutput::Function, LiftOutput::ProcessArtifact}) {
-                    try {
-                        x86::analyzeGroup(runner, 0x10000001, EntryMode::WindowsX64I64Pair, true,
-                                          output);
-                        throw std::runtime_error("accepted unaligned forward pointer range");
-                    } catch (const InspectionError &error) {
-                        const auto &ctx = error.context;
-                        check(error.kind == FailureCode::ImageMemory &&
-                                  ctx.instructionRva == instruction &&
-                                  ctx.tableFirstRva == range->first &&
-                                  ctx.tableLastRva == range->last &&
-                                  ctx.pointerLoadRva == range->forward()->pointerLoad,
-                              "unaligned selected base lost its forward call evidence");
-                    }
+                if (const auto *range = call.table(); range && range->forward()) {
+                    checkUnalignedForwardBase(image, call, *range);
                 }
             }
         }

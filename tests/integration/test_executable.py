@@ -1707,6 +1707,12 @@ class Console(Workspace):
                         diff.parse_lift_failure(raw, pe, selected, ir, FORGE)
                 if case == "nested":
                     raw = (self.dir / "lifting.log").read_bytes()
+                    module = diff.read_json(self.dir / "inspect.json")["modules"][0]
+                    direct = data.index(b"\xe8", selected.file_offset, layout.file_offset(symbols["many_bounds"]))
+                    site = selected.start + direct - selected.file_offset
+                    self.assertEqual(diff.verified_call_target(pe, module, selected, site, FORGE,
+                                                              require_continuation=True),
+                                     site + 5 + struct.unpack_from("<i", data, direct + 1)[0])
                     # Keep the reported inner failure intact. Falsify only the incoming edge.
                     edge = symbols["late_edge"]
                     at = layout.file_offset(edge)
@@ -1714,6 +1720,9 @@ class Console(Workspace):
                     pe.write_bytes(data)
                     with self.assertRaisesRegex(ValueError, "bypasses forward pointer load"):
                         diff.parse_lift_failure(raw, pe, selected, ir, FORGE)
+                    # The same bypass cannot corroborate a different CALL in this caller.
+                    with self.assertRaisesRegex(ValueError, "bypasses forward pointer load"):
+                        diff.verified_call_target(pe, module, selected, site, FORGE, require_continuation=True)
                     data[at:at + 2] = original[at:at + 2]
                     struct.pack_into("<H", data, layout.dir64_fields()[first], 0)
                     pe.write_bytes(data)
