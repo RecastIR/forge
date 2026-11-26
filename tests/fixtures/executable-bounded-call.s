@@ -106,7 +106,7 @@ runner run_count, count_table, count_site, after_count
 runner run_one, one_table, one_site, after_one
 runner run_empty, empty_table, empty_site, after_empty
 runner run_mixed, mixed_table, mixed_site, after_mixed
-.globl run_switch, switch_site
+.globl run_switch, switch_site, mixed_site
 runner run_switch, switch_anchor, switch_site, after_switch, 1
 
 # The inferred leaf and recorded body both update shared guest data.
@@ -212,8 +212,8 @@ tamper_scan:
 .seh_proc overrun_switch
 overrun_switch:
     .seh_endprologue
-    movl $1, switch_table+8(%rip)
-    jmp entry
+    movl $-1, mixed_table(%rip)
+    jmp run_mixed
 .seh_endproc
 
 .globl exclusive
@@ -249,10 +249,10 @@ empty_table:
     .quad -1, 0
 mixed_table:
     .quad 2, two, terminal
+    .quad 0 # readable, outside the proved two-slot table
 .globl switch_table
 switch_table:
     .quad 1, 0
-    .quad 0 # readable, outside the proved one-slot table
 trace:
     .long 0
 .ifdef with_cleanup

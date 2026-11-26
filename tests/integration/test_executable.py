@@ -1473,21 +1473,21 @@ class Console(Workspace):
     def test_counted_scan_escape(self):
         original, symbols = bounded_fixture()
         layout = Layout(original)
-        header = symbols["switch_table"]
-        expected = (f"forge: bounded call RVA {symbols['switch_site']:#x} table RVA {header:#x}\n"
-                    "forge: guest control fault\n").encode()
-        # In both cases the next qword in guest memory is readable and zero.
-        # Only a NULL within the initially proved extent may terminate the scan.
-        for count in (0, 1):
-            with self.subTest(count=count):
+        # Both have a readable NULL just past the proved extent. Without the
+        # scan guard the empty list returns 42 and the two-slot list exits 57.
+        for header, site in (("switch_table", "switch_site"), ("mixed_table", "mixed_site")):
+            with self.subTest(header=header):
                 data = bytearray(original)
-                struct.pack_into("<Q", data, layout.file_offset(header), count)
-                if count:
+                if header == "switch_table":
+                    struct.pack_into("<Q", data, layout.file_offset(symbols[header]), 0)
+                else:
                     struct.pack_into("<I", data, layout.opt + 16, symbols["overrun_switch"])
                 pe = self.dir / "escape.exe"
                 pe.write_bytes(data)
                 self.compile(pe)
                 result = self.program()
+                expected = (f"forge: bounded call RVA {symbols[site]:#x} table RVA {symbols[header]:#x}\n"
+                            "forge: guest control fault\n").encode()
                 self.assertEqual((result.returncode, result.stdout, result.stderr), (125, b"", expected))
 
     def test_bounded_zero_filled_terminator(self):

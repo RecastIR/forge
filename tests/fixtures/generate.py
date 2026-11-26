@@ -92,7 +92,7 @@ def generate(output, mc, link, dlltool, clang):
               exports=["entry", "run_count", "run_one", "run_empty", "one", "two", "writer",
                        "count_table", "one_table", "empty_table", "replacement", "after_count",
                        "count_site", "unrelated_cell", "exclusive", "tamper_count", "tamper_scan", "shorten_mixed", "bad_nonvolatile", "bad_return", "terminal", "run_mixed", "mixed_table",
-                       "run_switch", "switch_table", "switch_site", "overrun_switch"])
+                       "run_switch", "switch_table", "switch_site", "overrun_switch", "mixed_site"])
         image("bounded-budget.exe", bounded + (sources / "bounded-budget.s").read_text(),
               [("KERNEL32.dll", "ExitProcess")], entry="budget_runner",
               exports=["budget_table", "budget_tail", "budget_tail_site"])
