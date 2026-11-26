@@ -1,5 +1,6 @@
 """Capture independent full-width VirtualProtect observations from the producer's PEs."""
 import hashlib
+import json
 import os
 from pathlib import Path
 import struct
@@ -7,11 +8,18 @@ import subprocess
 import sys
 
 
+def check_observation(backend, case, status, stdout, stderr):
+    table = json.loads(Path(__file__).with_name("virtual-protect.json").read_text())
+    expected = struct.pack("<7I", *table[backend][case])
+    if (status, stdout, stderr) != (42, expected, b""):
+        raise ValueError(f"{backend} case {case}: {status:#x} {stdout.hex()} {stderr.hex()}")
+
+
 def observe(directory):
     manifest = (directory / "SHA256SUMS").read_bytes()
     if hashlib.sha256(manifest).hexdigest() != os.environ["PE_MANIFEST_SHA256"]:
         raise ValueError("producer manifest mismatch")
-    for name, cases in (("virtual-protect-reference.exe", range(30)),
+    for name, cases in (("virtual-protect-reference.exe", range(44)),
                         ("executable-virtual-protect.exe", [None]),
                         ("executable-virtual-protect-denied.exe", [None])):
         pe = (directory / name).resolve()
