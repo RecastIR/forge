@@ -23,6 +23,7 @@ namespace forge::runtime {
         std::vector<PageInterval> privatePages;
 
         void recordWrite(PageInterval bytes);
+        bool touchesPrivate(PageInterval bytes) const noexcept;
         bool isPrivate(uint64_t address) const noexcept;
         bool permitsMapping(uint64_t imageBase, const forge_rt_region_template &row) const noexcept;
         std::optional<uint64_t> deniedWrite(PageInterval range) const noexcept;
@@ -45,10 +46,31 @@ namespace forge::runtime {
                                      ProtectionUpdate &update);
     // A rejected DWORD may name valid Windows storage omitted or sealed by the image plan.
     bool unavailableProtectionOutput(std::span<const Reservation> reservations, uint64_t address);
-    forge_rt_status checkProtectionOutput(const forge_rt_instance &instance, const Thread &active,
-                                          uint64_t address, forge_rt_memory_fault &fault);
-    // Requires a checked DWORD under the same mapping lock. Its write probe realizes
-    // private image pages even if the new access subsequently prevents publishing the value.
-    void publishProtectionOutput(const forge_rt_instance &instance, uint64_t address,
-                                 const uint32_t *value);
+
+    // One contiguous transfer can intersect the managed image at most once. Hold the
+    // invocation through publication. Heap insertion may relocate reservation iterators.
+    struct ImageWrite {
+        PageProtections *owner = nullptr;
+        PageInterval bytes{};
+
+        void record() const {
+            if (owner) {
+                owner->recordWrite(bytes);
+            }
+        }
+    };
+
+    struct GuestWrite {
+        uint64_t address;
+        size_t size;
+        const void *source; // A null source realizes the write probe without storing bytes.
+        ImageWrite image{};
+    };
+
+    forge_rt_status checkGuestWrite(const forge_rt_instance &instance, const Thread &active,
+                                    GuestWrite &write, forge_rt_memory_fault &fault);
+    // Reserve sparse tracking before a multi-output service makes any observable changes.
+    forge_rt_status prepareGuestWrites(const forge_rt_instance &instance, const Thread &active,
+                                       std::span<GuestWrite> writes, forge_rt_memory_fault &fault);
+    void publishGuestWrite(const forge_rt_instance &instance, const GuestWrite &write);
 } // namespace forge::runtime

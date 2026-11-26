@@ -1,3 +1,4 @@
+#include "forge/msvcrt_process.h"
 #include "forge/process.h"
 
 #include <cstdio>
@@ -60,6 +61,51 @@ namespace {
         execution->result = {FORGE_RT_RETURNED, FORGE_RT_OK, 42, {}, 0};
     }
 
+    void lowAddressEntry(forge_rt_execution *execution) {
+        Access access(*execution);
+        constexpr uint64_t minimum = 0x10000;
+        uint32_t error{};
+        for (const uint64_t address : {uint64_t{0}, minimum - 1}) {
+            CHECK(access.protect(address, 1, 2) == FORGE_RT_OK && access.result == 0);
+            CHECK(access.read(output) == 1);
+            CHECK(forge_rt_get_last_error(execution->instance, execution->thread, &error) ==
+                      FORGE_RT_OK &&
+                  error == 487);
+            CHECK(access.write(address, 0x12345678) == FORGE_RT_OK);
+            CHECK(access.protect(minimum, 1, 2, address) == FORGE_RT_OK && access.result == 0);
+            CHECK(forge_rt_get_last_error(execution->instance, execution->thread, &error) ==
+                      FORGE_RT_OK &&
+                  error == 998);
+            CHECK(access.read(address) == 0x12345678);
+        }
+        CHECK(access.protect(minimum, 1, 2) == FORGE_RT_OK && access.result == 1);
+        execution->result = {FORGE_RT_RETURNED, FORGE_RT_OK, 42, {}, 0};
+    }
+
+    void checkHeapPadding(Access &access) {
+        auto &execution = access.execution;
+        uint64_t prefix{}, block{};
+        CHECK(forge_rt_msvcrt_malloc(execution.instance, execution.thread, 1, &prefix) ==
+              FORGE_RT_OK);
+        CHECK(forge_rt_msvcrt_malloc(execution.instance, execution.thread, 5, &block) ==
+              FORGE_RT_OK);
+        CHECK(prefix + 1 < block && prefix / page == (block + 5) / page);
+        CHECK(forge_rt_set_last_error(execution.instance, execution.thread, 73) == FORGE_RT_OK);
+        CHECK(access.write(output, 0x12345678) == FORGE_RT_OK);
+        access.result = -1;
+
+        for (auto address : {block - 1, block, block + 5}) {
+            CHECK(access.protect(address, 1, 2) == FORGE_RT_UNSUPPORTED_PAGE_PROTECTION);
+            uint32_t error{};
+            CHECK(forge_rt_get_last_error(execution.instance, execution.thread, &error) ==
+                  FORGE_RT_OK);
+            CHECK(access.result == -1 && error == 73 && access.read(output) == 0x12345678);
+            CHECK(access.write(block, 17) == FORGE_RT_OK);
+        }
+        CHECK(forge_rt_msvcrt_free(execution.instance, execution.thread, block) == FORGE_RT_OK);
+        CHECK(forge_rt_msvcrt_free(execution.instance, execution.thread, prefix) == FORGE_RT_OK);
+    }
+
     void legacyEntry(forge_rt_execution *execution) {
         Access access(*execution);
         CHECK(access.protect(base, 1, 2) == FORGE_RT_UNSUPPORTED_PAGE_PROTECTION);
@@ -69,6 +115,7 @@ namespace {
 
     void exercise(forge_rt_execution *execution) {
         Access access(*execution);
+        checkHeapPadding(access);
         CHECK(access.read(base) == 0);
         const auto alias = base + 2 * page;
         CHECK(access.protect(alias, 1, 2, alias + 12) == FORGE_RT_OK && access.result == 1);
@@ -198,12 +245,15 @@ void testRuntimePageProtection() {
     auto legacy = artifact.pe;
     legacy.functions.crt.named.artifact.version = FORGE_RT_PE_ARTIFACT_VERSION;
     legacy.functions.crt.named.artifact.entry = legacyEntry;
-    forge_rt_process *process = nullptr;
-    CHECK(forge_rt_process_create(FORGE_RT_ABI_VERSION, &process) == FORGE_RT_OK);
-    CHECK(forge_rt_process_register(process, &legacy.functions.crt.named.artifact) == FORGE_RT_OK);
-    forge_rt_process_result result{};
-    CHECK(forge_rt_process_run(process, nullptr, &result) == FORGE_RT_OK && result.value == 42);
-    CHECK(forge_rt_process_destroy(process) == FORGE_RT_OK);
+    const auto run = [](const forge_rt_artifact &description) {
+        forge_rt_process *process = nullptr;
+        CHECK(forge_rt_process_create(FORGE_RT_ABI_VERSION, &process) == FORGE_RT_OK);
+        CHECK(forge_rt_process_register(process, &description) == FORGE_RT_OK);
+        forge_rt_process_result result{};
+        CHECK(forge_rt_process_run(process, nullptr, &result) == FORGE_RT_OK && result.value == 42);
+        CHECK(forge_rt_process_destroy(process) == FORGE_RT_OK);
+    };
+    run(legacy.functions.crt.named.artifact);
 
     // A host-selected guest mapping can exist outside the Windows user VA range.
     const forge_rt_region_template highRow{UINT64_C(0x800000000000), page, 0, 0, rw};
@@ -213,8 +263,19 @@ void testRuntimePageProtection() {
     highDescriptor.regions = &highRow;
     highDescriptor.regionCount = 1;
     highDescriptor.entry = highOutputEntry;
-    CHECK(forge_rt_process_create(FORGE_RT_ABI_VERSION, &process) == FORGE_RT_OK);
-    CHECK(forge_rt_process_register(process, &highDescriptor) == FORGE_RT_OK);
-    CHECK(forge_rt_process_run(process, nullptr, &result) == FORGE_RT_OK && result.value == 42);
-    CHECK(forge_rt_process_destroy(process) == FORGE_RT_OK);
+    run(highDescriptor);
+    constexpr uint64_t lowSize = 0x10000 + page;
+    const forge_rt_backing lowBacking{lowSize, nullptr, nullptr, 0};
+    const forge_rt_region_template lowRow{0, lowSize, 0, 0, rw};
+    const forge_rt_section_protection lowSource{0, lowSize, rw};
+    auto low = artifact;
+    auto &lowDescriptor = low.pe.functions.crt.named.artifact;
+    lowDescriptor.base = 0;
+    lowDescriptor.size = lowSize;
+    lowDescriptor.backings = &lowBacking;
+    lowDescriptor.regions = &lowRow;
+    lowDescriptor.regionCount = 1;
+    lowDescriptor.entry = lowAddressEntry;
+    low.sections = &lowSource;
+    run(lowDescriptor);
 }

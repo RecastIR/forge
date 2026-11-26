@@ -10,11 +10,6 @@ import sys
 
 def check_observation(backend, case, status, stdout, stderr):
     table = json.loads(Path(__file__).with_name("virtual-protect.json").read_text())
-    if case == 44:
-        if status != 42 or len(stdout) != 28 or stderr:
-            raise ValueError(f"{backend} failed-probe measurement failed")
-        print(backend, case, struct.unpack("<7I", stdout), flush=True)
-        return
     expected = struct.pack("<7I", *table[backend][case])
     if (status, stdout, stderr) != (42, expected, b""):
         raise ValueError(f"{backend} case {case}: {status:#x} {stdout.hex()} {stderr.hex()}")
@@ -29,6 +24,8 @@ def error_records(backend):
         if case == 13:
             old = 0
         records.append(struct.pack("<3I", result, old, error))
+    result, old, error = table[44][2:5]
+    records.append(struct.pack("<4I", result, old, error, table[44][6]))
     return b"".join(records)
 
 

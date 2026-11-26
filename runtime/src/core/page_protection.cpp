@@ -10,11 +10,27 @@ namespace forge::runtime {
         return it != privatePages.end() && it->first <= address;
     }
 
+    namespace {
+        PageInterval writtenPages(PageInterval bytes) {
+            constexpr uint64_t mask = FORGE_RT_GUEST_PAGE_SIZE - 1;
+            return {bytes.first & ~mask, bytes.last | mask};
+        }
+
+        auto firstTouching(auto &ranges, PageInterval pages) {
+            return std::ranges::lower_bound(ranges, pages.first - (pages.first != 0), {},
+                                            &PageInterval::last);
+        }
+    } // namespace
+
+    bool PageProtections::touchesPrivate(PageInterval bytes) const noexcept {
+        const auto pages = writtenPages(bytes);
+        const auto it = firstTouching(privatePages, pages);
+        return it != privatePages.end() && it->first <= pages.last + (pages.last != UINT64_MAX);
+    }
+
     void PageProtections::recordWrite(PageInterval bytes) {
-        constexpr uint64_t mask = FORGE_RT_GUEST_PAGE_SIZE - 1;
-        PageInterval pages{bytes.first & ~mask, bytes.last | mask};
-        const auto begin = std::ranges::lower_bound(privatePages, pages.first - (pages.first != 0),
-                                                    {}, &PageInterval::last);
+        const auto pages = writtenPages(bytes);
+        const auto begin = firstTouching(privatePages, pages);
         const auto end = std::upper_bound(
             begin, privatePages.end(), pages.last + (pages.last != UINT64_MAX),
             [](uint64_t address, PageInterval span) { return address < span.first; });
@@ -149,15 +165,24 @@ namespace forge::runtime {
                                      PageInterval pages, PageInterval output,
                                      ProtectionUpdate &update) {
         auto after = std::ranges::upper_bound(reservations, address, {}, &Reservation::base);
-        if (after == reservations.begin()) {
+        if (after == reservations.begin() ||
+            address - std::prev(after)->base >= std::prev(after)->size) {
+            // A sub-page heap or parameter block only describes the bytes Forge lends.
+            // Padding on either side is on a page of unknown Windows allocation extent.
+            const auto pageEnd = pages.first | (FORGE_RT_GUEST_PAGE_SIZE - 1);
+            const auto next =
+                std::ranges::upper_bound(reservations, pages.first, {}, &Reservation::base);
+            auto it = next == reservations.begin() ? next : std::prev(next);
+            for (; it != reservations.end() && it->base <= pageEnd; ++it) {
+                if (!it->protections && it->base + (it->size - 1) >= pages.first) {
+                    return ProtectionResult::Unsupported;
+                }
+            }
+
             return ProtectionResult::Unmapped;
         }
 
         const auto &reservation = *std::prev(after);
-        if (address - reservation.base >= reservation.size) {
-            return ProtectionResult::Unmapped;
-        }
-
         // Synthetic parameter, heap, and active stack extents do not establish a
         // Windows allocation boundary, including when page rounding extends before them.
         if (!reservation.protections) {

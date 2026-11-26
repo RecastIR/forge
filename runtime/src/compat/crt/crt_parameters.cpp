@@ -1,6 +1,7 @@
 #include "crt_parameters.h"
 
 #include "../../core/instance.h"
+#include "../../core/page_protection.h"
 #include "../process_state.h"
 #include "forge/msvcrt_process.h"
 
@@ -224,27 +225,19 @@ extern "C" forge_rt_status forge_rt_msvcrt_getmainargs(forge_rt_instance *instan
         return FORGE_RT_UNSUPPORTED_CRT_NEW_MODE;
     }
 
-    struct Output {
-        uint64_t address;
-        size_t size;
-        const void *bytes;
-    };
-
     const auto &crt = *windows->crt;
     const int32_t count = crt.count();
     uint64_t argumentVector = 0, environmentVector = 0;
-    const std::array<Output, 3> outputs{
+    std::array<forge::runtime::GuestWrite, 3> outputs{
         {{argc, sizeof(count), &count},
          {argv, sizeof(argumentVector), &argumentVector},
          {environment, sizeof(environmentVector), &environmentVector}}};
 
-    for (const auto &output : outputs) {
-        status = forge_rt_validate_guest(instance, thread, token, output.address, output.size,
-                                         FORGE_RT_WRITE, fault);
-
-        if (status != FORGE_RT_OK) {
-            return status;
-        }
+    status = forge::runtime::withInstance(instance, [&](const auto &owner) {
+        return prepareGuestWrites(owner, owner.threads.at(thread), outputs, *fault);
+    });
+    if (status != FORGE_RT_OK) {
+        return status;
     }
 
     status = forge_rt_read_guest(instance, thread, token, crt.dataAddress(FORGE_RT_CRT_INITENV),
@@ -255,26 +248,22 @@ extern "C" forge_rt_status forge_rt_msvcrt_getmainargs(forge_rt_instance *instan
         return status;
     }
 
-    status = forge::runtime::withInstance(
-        instance, [&](auto &owner) { return crt.copyArguments(owner, argumentVector); });
+    return forge::runtime::withInstance(instance, [&](auto &owner) {
+        const auto copied = crt.copyArguments(owner, argumentVector);
+        if (copied != FORGE_RT_OK) {
+            return copied;
+        }
 
-    if (status != FORGE_RT_OK || !argumentVector) {
-        if (status == FORGE_RT_OK) {
+        if (!argumentVector) {
             *outResult = -1;
+            return FORGE_RT_OK;
         }
 
-        return status;
-    }
-
-    for (const auto &output : outputs) {
-        status = forge_rt_write_guest(instance, thread, token, output.address, output.size,
-                                      output.bytes, output.size, fault);
-
-        if (status != FORGE_RT_OK) {
-            return status;
+        for (const auto &output : outputs) {
+            publishGuestWrite(owner, output);
         }
-    }
 
-    *outResult = 0;
-    return FORGE_RT_OK;
+        *outResult = 0;
+        return FORGE_RT_OK;
+    });
 }

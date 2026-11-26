@@ -157,7 +157,8 @@ namespace {
     }
 
     forge_rt_status preflight(Cursor cursor, const Thread &active, uint64_t start, uint64_t count,
-                              uint32_t access, forge_rt_memory_fault &fault, bool readSaved) {
+                              uint32_t access, forge_rt_memory_fault &fault, bool readSaved,
+                              ImageWrite *write = nullptr) {
         uint64_t offset = 0;
 
         while (offset < count) {
@@ -173,9 +174,17 @@ namespace {
             }
 
             if ((access & FORGE_RT_WRITE) && segment.protections) {
-                if (const auto denied =
-                        segment.protections->deniedWrite({address, address + (segment.size - 1)})) {
+                const PageInterval bytes{address, address + (segment.size - 1)};
+                if (const auto denied = segment.protections->deniedWrite(bytes)) {
                     return report(fault, *denied, access, FORGE_RT_FAULT_PERMISSION);
+                }
+
+                if (write) {
+                    if (!write->owner) {
+                        write->owner = segment.protections;
+                        write->bytes.first = address;
+                    }
+                    write->bytes.last = bytes.last;
                 }
             }
 
@@ -191,29 +200,6 @@ namespace {
         }
 
         return FORGE_RT_OK;
-    }
-
-    // Only the managed PE has mutable protection state. One contiguous checked copy
-    // intersects that reservation at most once, even when it visits several rows.
-    void recordGuestWrite(Cursor cursor, uint64_t start, uint64_t count) {
-        PageProtections *owner = nullptr;
-        PageInterval bytes{};
-        uint64_t offset = 0;
-        while (offset < count) {
-            const auto address = start + offset;
-            const auto segment = cursor.next(address, count - offset);
-            if (segment.protections) {
-                if (!owner) {
-                    owner = segment.protections;
-                    bytes.first = address;
-                }
-                bytes.last = address + (segment.size - 1);
-            }
-            offset += segment.size;
-        }
-        if (owner) {
-            owner->recordWrite(bytes);
-        }
     }
 
     struct HostBuffers {
@@ -273,16 +259,15 @@ namespace {
             }
 
             const Cursor cursor(process.reservations, address);
-            const auto status =
-                preflight(cursor, entry->second, address, count, access, *fault, readSaved);
+            ImageWrite write;
+            const auto status = preflight(cursor, entry->second, address, count, access, *fault,
+                                          readSaved, host.source ? &write : nullptr);
 
             if (status == FORGE_RT_OK && (host.source || host.destination)) {
 #ifdef FORGE_RUNTIME_TEST_TRANSFER
                 forgeMemoryTransferProbe();
 #endif
-                if (host.source && process.managedExecution) {
-                    recordGuestWrite(cursor, address, count);
-                }
+                write.record();
                 transfer(cursor, address, count, host);
             }
 
@@ -291,24 +276,52 @@ namespace {
     }
 } // namespace
 
-forge_rt_status forge::runtime::checkProtectionOutput(const forge_rt_instance &instance,
-                                                      const Thread &active, uint64_t address,
-                                                      forge_rt_memory_fault &fault) {
-    if (!GuestRange::fromOffset({address}, 0, sizeof(uint32_t))) {
-        return report(fault, address, FORGE_RT_WRITE, FORGE_RT_FAULT_OVERFLOW);
+forge_rt_status forge::runtime::checkGuestWrite(const forge_rt_instance &instance,
+                                                const Thread &active, GuestWrite &write,
+                                                forge_rt_memory_fault &fault) {
+    if (!GuestRange::fromOffset({write.address}, 0, write.size)) {
+        return report(fault, write.address, FORGE_RT_WRITE, FORGE_RT_FAULT_OVERFLOW);
     }
 
-    return preflight(Cursor(instance.reservations, address), active, address, sizeof(uint32_t),
-                     FORGE_RT_WRITE, fault, false);
+    write.image = {};
+    return preflight(Cursor(instance.reservations, write.address), active, write.address,
+                     write.size, FORGE_RT_WRITE, fault, false, &write.image);
 }
 
-void forge::runtime::publishProtectionOutput(const forge_rt_instance &instance, uint64_t address,
-                                             const uint32_t *value) {
-    Cursor cursor(instance.reservations, address);
-    recordGuestWrite(cursor, address, sizeof(uint32_t));
-    if (value) {
-        transfer(cursor, address, sizeof(*value),
-                 {nullptr, reinterpret_cast<const uint8_t *>(value)});
+forge_rt_status forge::runtime::prepareGuestWrites(const forge_rt_instance &instance,
+                                                   const Thread &active,
+                                                   std::span<GuestWrite> writes,
+                                                   forge_rt_memory_fault &fault) {
+    PageProtections *owner = nullptr;
+    size_t additional = 0;
+
+    for (auto &write : writes) {
+        const auto status = checkGuestWrite(instance, active, write, fault);
+        if (status != FORGE_RT_OK) {
+            return status;
+        }
+
+        if (write.image.owner && !write.image.owner->touchesPrivate(write.image.bytes)) {
+            owner = write.image.owner;
+            ++additional;
+        }
+    }
+
+    // Adding bytes only grows the set of private pages. A range already touching it
+    // will still merge at publication, even when earlier destinations overlap it.
+    if (owner) {
+        owner->privatePages.reserve(owner->privatePages.size() + additional);
+    }
+
+    return FORGE_RT_OK;
+}
+
+void forge::runtime::publishGuestWrite(const forge_rt_instance &instance, const GuestWrite &write) {
+    write.image.record();
+
+    if (write.source) {
+        transfer(Cursor(instance.reservations, write.address), write.address, write.size,
+                 {nullptr, static_cast<const uint8_t *>(write.source)});
     }
 }
 

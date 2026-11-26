@@ -1,4 +1,5 @@
 #include "../../core/instance.h"
+#include "../../core/page_protection.h"
 #include "../process_state.h"
 #include "forge/service_memory.h"
 
@@ -148,6 +149,34 @@ namespace forge::runtime {
             return value;
         }
 
+        forge_rt_status publishStartupInfo(ServiceInvocation &call, GuestAddress address,
+                                           const StartupInfo64 &value, bool ansi) {
+            const auto bytes = std::bit_cast<std::array<uint8_t, sizeof(value)>>(value);
+
+            // Writing only the named ranges also preserves uninitialized stack marks.
+            constexpr auto first = offsetof(StartupInfo64, reserved);
+            constexpr auto middle = offsetof(StartupInfo64, pad1);
+            constexpr auto last = offsetof(StartupInfo64, reservedData);
+            const auto end = ansi || (value.window.flags & StartupInfo::useStdHandles)
+                                 ? sizeof(value)
+                                 : offsetof(StartupInfo64, handles);
+            std::array<GuestWrite, 3> writes{{
+                {address.value, sizeof(value.cb), bytes.data()},
+                {address.value + first, middle - first, bytes.data() + first},
+                {address.value + last, end - last, bytes.data() + last},
+            }};
+            return withInstance(call.instance, [&](const auto &owner) {
+                const auto status =
+                    prepareGuestWrites(owner, owner.threads.at(call.thread), writes, call.fault);
+                if (status == FORGE_RT_OK) {
+                    for (const auto &write : writes) {
+                        publishGuestWrite(owner, write);
+                    }
+                }
+                return status;
+            });
+        }
+
         template <const ServiceBinding &binding>
         forge_rt_status getStartupInfo(forge_rt_instance *instance, forge_rt_thread_token thread,
                                        GuestAddress address, forge_rt_memory_fault *fault) {
@@ -182,27 +211,7 @@ namespace forge::runtime {
                 return FORGE_RT_INVALID_STATE;
             }
 
-            const auto &value = *view;
-            const auto bytes = std::bit_cast<std::array<uint8_t, sizeof(value)>>(value);
-
-            // Writing only the named ranges also preserves uninitialized stack marks.
-            auto status = output.writeScalar(0, value.cb);
-
-            if (status == FORGE_RT_OK) {
-                constexpr size_t start = offsetof(StartupInfo64, reserved);
-                constexpr size_t end = offsetof(StartupInfo64, pad1);
-                status = output.write(start, std::span(bytes).subspan<start, end - start>());
-            }
-
-            if (status == FORGE_RT_OK) {
-                constexpr size_t start = offsetof(StartupInfo64, reservedData);
-                const auto end = ansi || (value.window.flags & StartupInfo::useStdHandles)
-                                     ? sizeof(value)
-                                     : offsetof(StartupInfo64, handles);
-                status = output.write(start, std::span(bytes).subspan(start, end - start));
-            }
-
-            return status;
+            return publishStartupInfo(call, address, *view, ansi);
         }
     } // namespace
 } // namespace forge::runtime

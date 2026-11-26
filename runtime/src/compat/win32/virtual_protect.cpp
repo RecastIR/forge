@@ -4,7 +4,7 @@
 #include <bit>
 
 namespace {
-    constexpr uint64_t highestUser = UINT64_C(0x7ffffffeffff);
+    constexpr uint64_t lowestUser = 0x10000, highestUser = UINT64_C(0x7ffffffeffff);
     constexpr uint32_t noAccess = 1, readOnly = 2, readWrite = 4, writeCopy = 8;
     constexpr uint32_t invalidParameter = 87, invalidAddress = 487, inaccessible = 998;
     constexpr uint32_t guard = 0x100, noCache = 0x200, writeCombine = 0x400;
@@ -16,6 +16,22 @@ namespace {
         const auto modifiers = flags & (guard | noCache | writeCombine);
         return !std::has_single_bit(base) || (modifiers && base == noAccess) ||
                std::popcount(modifiers) > 1;
+    }
+
+    forge_rt_status probeOutput(forge_rt_instance &owner, const forge::runtime::Thread &active,
+                                forge::runtime::GuestWrite &out, forge_rt_memory_fault &fault) {
+        if (out.address < lowestUser || out.address > highestUser - (out.size - 1)) {
+            fault = {out.address, FORGE_RT_WRITE, FORGE_RT_FAULT_UNMAPPED};
+            return FORGE_RT_GUEST_FAULT;
+        }
+
+        const auto status = checkGuestWrite(owner, active, out, fault);
+        if (status == FORGE_RT_GUEST_FAULT && fault.reason != FORGE_RT_FAULT_STACK &&
+            unavailableProtectionOutput(owner.reservations, fault.address)) {
+            return FORGE_RT_UNSUPPORTED_PAGE_PROTECTION;
+        }
+
+        return status;
     }
 
     uint32_t windowsProtection(forge::runtime::PageAccess access) {
@@ -43,29 +59,31 @@ namespace {
             return fail(invalidParameter);
         }
 
-        if (output > highestUser - (sizeof(uint32_t) - 1)) {
-            return fail(inaccessible);
-        }
-
         forge_rt_memory_fault outputFault{};
-        const auto checked = checkProtectionOutput(owner, active, output, outputFault);
+        GuestWrite out{output, sizeof(uint32_t), nullptr};
+        const auto checked = probeOutput(owner, active, out, outputFault);
         if (checked == FORGE_RT_GUEST_FAULT) {
             if (outputFault.reason == FORGE_RT_FAULT_STACK) {
                 fault = outputFault;
                 return checked;
             }
 
-            if (unavailableProtectionOutput(owner.reservations, outputFault.address)) {
-                return FORGE_RT_UNSUPPORTED_PAGE_PROTECTION;
-            }
             return fail(inaccessible);
         }
+
         if (checked != FORGE_RT_OK) {
             return checked;
         }
 
         // Windows probes a valid protection mask and the output before checking zero size.
-        if (!size || address > highestUser || size - 1 > highestUser - address) {
+        if (!size) {
+            // The Windows write probe realizes a pristine output page even though the
+            // zero-length call preserves the DWORD and subsequently fails.
+            out.image.record();
+            return fail(invalidParameter);
+        }
+
+        if (address > highestUser || size - 1 > highestUser - address) {
             return fail(invalidParameter);
         }
 
@@ -73,7 +91,9 @@ namespace {
         const PageInterval pages{address & ~mask, (address + (size - 1)) | mask};
         const PageInterval outBytes{output, output + sizeof(uint32_t) - 1};
         ProtectionUpdate update;
-        const auto status = queryProtection(owner.reservations, address, pages, outBytes, update);
+        const auto status = address < lowestUser ? ProtectionResult::Unmapped
+                                                 : queryProtection(owner.reservations, address,
+                                                                   pages, outBytes, update);
         // The enclave-unvalidated bit is ignored on an ordinary image data page
         // for this measured read-only request.
         const bool requestsReadOnly =
@@ -99,7 +119,8 @@ namespace {
         const auto old = error ? noAccess : windowsProtection(update.previous);
         const bool losesOutput = !error && requestsReadOnly && outBytes.first <= pages.last &&
                                  outBytes.last >= pages.first;
-        publishProtectionOutput(owner, output, losesOutput ? nullptr : &old);
+        out.source = losesOutput ? nullptr : &old;
+        publishGuestWrite(owner, out);
 
         if (error) {
             return fail(error);

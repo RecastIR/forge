@@ -46,6 +46,9 @@ entry:
         movl $1, %r9d
     .elseif \number == 12
         leaq immutable(%rip), %r9
+    .elseif \number == 44
+        xorl %edx, %edx
+        leaq pages+4096(%rip), %r9
     .elseif \number == 13
         movl $0, pages+8(%rip)
         leaq pages+8(%rip), %r9
@@ -55,12 +58,29 @@ entry:
     .if \number == 13
         movl pages+8(%rip), %eax
         movl %eax, 52(%rsp)
+    .elseif \number == 44
+        movl pages+4096(%rip), %eax
+        movl %eax, 52(%rsp)
     .endif
     callq *__imp_GetLastError(%rip)
     movl %eax, 56(%rsp)
+    .if \number == 44
+        # A stack output lets us observe the first probe's effect on the neighboring page.
+        leaq pages+4096(%rip), %rcx
+        movl $1, %edx
+        movl $2, %r8d
+        leaq 60(%rsp), %r9
+        callq *__imp_VirtualProtect(%rip)
+        testl %eax, %eax
+        je .Lbad
+    .endif
     movq %rbx, %rcx
     leaq 48(%rsp), %rdx
-    movl $12, %r8d
+    .if \number == 44
+        movl $16, %r8d
+    .else
+        movl $12, %r8d
+    .endif
     leaq 64(%rsp), %r9
     movq $0, 32(%rsp)
     callq *__imp_WriteFile(%rip)
@@ -76,6 +96,7 @@ entry:
     probe 11
     probe 12
     probe 13
+    probe 44
     movl $42, %eax
     jmp .Ldone
 .Lbad:
