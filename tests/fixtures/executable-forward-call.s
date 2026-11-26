@@ -170,8 +170,27 @@ process_attach:
 .globl single_callback, writer, tail_callback, replacement, bad_return, bad_save, terminal
 .seh_proc single_callback
 single_callback:
+    subq $40, %rsp
+    .seh_stackalloc 40
     .seh_endprologue
-    addl $1, single_count(%rip)
+    movl $0, (%rsp)
+    call single_helper
+    cmpl $8, %eax
+    jne .Lsingle_done
+    movl (%rsp), %eax
+    addl %eax, single_count(%rip)
+.Lsingle_done:
+    addq $40, %rsp
+    retq
+.seh_endproc
+
+.seh_proc single_helper
+single_helper:
+    .seh_endprologue
+    # Record the visit in the caller-provided home slot and return the entry alignment.
+    movl $1, 8(%rsp)
+    movq %rsp, %rax
+    andl $15, %eax
     retq
 .seh_endproc
 
