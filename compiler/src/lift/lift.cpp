@@ -300,7 +300,7 @@ namespace forge {
             if (const auto guard = plan.tableInstructions.find(s.rva);
                 access && guard != plan.tableInstructions.end()) {
                 const auto &table = *guard->second->table();
-                if (table.forward() || table.reverse()->scanRead == s.rva) {
+                if (const auto *reverse = table.reverse(); !reverse || reverse->scanRead == s.rva) {
                     guardTableSlot(address, {table.first, table.extent().end});
                 }
             }
@@ -510,7 +510,7 @@ namespace forge {
                 const auto &site = *guard->second;
                 const auto &table = *site.table();
                 memory.checks.tableOrigin = (uint64_t(site.instruction) << 32) | table.originRva();
-                if (table.reverse() && table.reverse()->zeroGuard == s.rva) {
+                if (const auto *reverse = table.reverse(); reverse && reverse->zeroGuard == s.rva) {
                     memory.checks.guard(
                         ir.CreateICmpULE(value(s, s.inst.getOperand(0), 32),
                                          ir.getInt32((table.last - table.first) / 8)),
@@ -722,8 +722,8 @@ namespace forge {
         Value *Translator::checkedTableTarget(const Step &s, const x86::BoundedTableCall &table) {
             const auto guestBase = analysis.image.guestBase();
             Value *value;
-            if (table.forward()) {
-                value = read(s, {table.forward()->target, 64});
+            if (const auto *forward = table.forward()) {
+                value = read(s, {forward->target, 64});
             } else {
                 auto *address = effectiveAddress(s, 0, true);
                 guardTableSlot(address, {table.first, table.last});

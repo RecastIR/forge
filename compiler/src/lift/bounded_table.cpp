@@ -20,8 +20,10 @@ namespace forge::x86 {
             }
 
             [[noreturn]] void reject() const {
-                call.reject(FailureCode::UnsupportedControlFlow,
-                            "unproven bounded table-call loop at " + hex(position));
+                const auto reason = call.isRegisterCall()
+                                        ? "unsupported register call: unproven forward loop at "
+                                        : "unproven bounded table-call loop at ";
+                call.reject(FailureCode::UnsupportedControlFlow, reason + hex(position));
             }
 
             const Step &take() {
@@ -237,20 +239,19 @@ namespace forge::x86 {
                                    std::optional<uint32_t> branchOnly = {}) {
             for (const auto &[leader, block] : function.graph) {
                 const auto &last = block.steps.back();
-                for (const auto dest : block.successors) {
-                    if (!protectedAddress(dest)) {
-                        continue;
-                    }
-
+                const auto bypass = llvm::find_if(block.successors, [&](uint32_t dest) {
                     const bool sequential =
                         last.next == dest && dest != branchOnly &&
                         (last.flow == Flow::Conditional || last.flow == Flow::Fallthrough);
-                    if (!sequential && !branches.contains({last.rva, dest})) {
-                        call.reject(FailureCode::UnsupportedControlFlow,
-                                    "edge bypasses bounded table proof from " + hex(last.rva) +
-                                        " to " + hex(dest),
-                                    dest);
-                    }
+                    return protectedAddress(dest) && !sequential &&
+                           !branches.contains({last.rva, dest});
+                });
+
+                if (bypass != block.successors.end()) {
+                    call.reject(FailureCode::UnsupportedControlFlow,
+                                "edge bypasses bounded table proof from " + hex(last.rva) + " to " +
+                                    hex(*bypass),
+                                *bypass);
                 }
             }
         }
@@ -258,7 +259,7 @@ namespace forge::x86 {
         void reserveTableEntries(const BoundedTableCall &table, const Step &call, unsigned count,
                                  unsigned &remainingEntries, unsigned used = 0) {
             if (uint64_t(used) + count > win64::maxInitializerEntries) {
-                if (table.reverse() && table.reverse()->sentinel) {
+                if (const auto *reverse = table.reverse(); reverse && reverse->sentinel) {
                     call.reject(FailureCode::UnsupportedControlFlow,
                                 "missing bounded table terminator at " + hex(table.last));
                 }
@@ -277,7 +278,7 @@ namespace forge::x86 {
         }
 
         unsigned initialCount(BoundedTableCall &table, const Step &call, const ParsedImage &image,
-                              const ImageInitialization &init, uint64_t sectionEnd,
+                              const ImageInitialization &init, uint64_t end,
                               llvm::function_ref<RvaRange(uint32_t)> slotRange) {
             if (auto *reverse = std::get_if<ReverseTableProof>(&table.proof)) {
                 const auto origin = reverse->header;
@@ -294,8 +295,7 @@ namespace forge::x86 {
                 return value;
             }
 
-            if (table.last < table.first || table.last % 8 || table.last > sectionEnd ||
-                table.last > image.module().sizeOfImage ||
+            if (table.last < table.first || table.last % 8 || table.last > end ||
                 table.last > UINT64_MAX - image.module().imageBase) {
                 call.reject(FailureCode::ImageMemory, "invalid forward pointer range [" +
                                                           hex(table.first) + ", " +
@@ -305,9 +305,8 @@ namespace forge::x86 {
             return (table.last - table.first) / 8;
         }
 
-        void readTable(BoundedTableCall &table, const Step &call, const ParsedImage &image,
-                       const ImageInitialization &init, llvm::ArrayRef<RvaRange> functions,
-                       unsigned &remainingEntries) try {
+        uint64_t tableLimit(const BoundedTableCall &table, const Step &call,
+                            const ParsedImage &image) {
             const auto origin = table.originRva();
             const auto *section = image.sectionAtRva(origin);
             if (!section && table.forward() && table.first == table.last && origin) {
@@ -321,11 +320,17 @@ namespace forge::x86 {
                             "invalid guest pointer table at " + hex(origin));
             }
 
-            const auto sectionEnd = uint64_t(section->rva) + section->virtualSize;
+            return std::min<uint64_t>(uint64_t(section->rva) + section->virtualSize,
+                                      image.module().sizeOfImage);
+        }
+
+        void readTable(BoundedTableCall &table, const Step &call, const ParsedImage &image,
+                       const ImageInitialization &init, llvm::ArrayRef<RvaRange> functions,
+                       unsigned &remainingEntries) try {
+            const auto end = tableLimit(table, call, image);
             const auto slotRange = [&](uint32_t slot) {
                 RvaRange field{slot, uint64_t(slot) + 8};
-                if (field.end > sectionEnd || field.end > image.module().sizeOfImage ||
-                    !rangesIn(functions, field).empty()) {
+                if (field.end > end || !rangesIn(functions, field).empty()) {
                     call.reject(FailureCode::ImageMemory,
                                 "invalid bounded table extent at " + hex(slot));
                 }
@@ -333,8 +338,9 @@ namespace forge::x86 {
                 return field;
             };
 
-            const auto count = initialCount(table, call, image, init, sectionEnd, slotRange);
-            const bool sentinel = table.reverse() && table.reverse()->sentinel;
+            const auto count = initialCount(table, call, image, init, end, slotRange);
+            const auto *reverse = table.reverse();
+            const bool sentinel = reverse && reverse->sentinel;
             if (!sentinel) {
                 reserveTableEntries(table, call, count, remainingEntries);
             }
@@ -371,7 +377,8 @@ namespace forge::x86 {
             if (table.extent().begin < table.extent().end &&
                 image.overlapsDirectory(table.extent())) {
                 call.reject(FailureCode::ImageMemory,
-                            "bounded pointer table overlaps a PE directory at " + hex(origin));
+                            "bounded pointer table overlaps a PE directory at " +
+                                hex(table.originRva()));
             }
 
             llvm::sort(table.targets);

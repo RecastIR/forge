@@ -67,7 +67,10 @@ namespace forge::x86 {
 
         const ForwardTableProof *forward() const { return std::get_if<ForwardTableProof>(&proof); }
 
-        uint32_t originRva() const { return reverse() ? reverse()->header : first; }
+        uint32_t originRva() const {
+            const auto *layout = reverse();
+            return layout ? layout->header : first;
+        }
 
         void annotate(FailureContext &context) const {
             if (const auto *loop = forward()) {
@@ -75,12 +78,14 @@ namespace forge::x86 {
                 context.tableLastRva = last;
                 context.pointerLoadRva = loop->pointerLoad;
             } else {
-                context.tableHeaderRva = reverse()->header;
+                context.tableHeaderRva = std::get<ReverseTableProof>(proof).header;
             }
         }
 
         RvaRange extent() const {
-            return {originRva(), uint64_t(last) + (reverse() && reverse()->sentinel ? 8 : 0)};
+            const auto *layout = reverse();
+            return {layout ? layout->header : first,
+                    uint64_t(last) + (layout && layout->sentinel ? 8 : 0)};
         }
     };
 
