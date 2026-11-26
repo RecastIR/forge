@@ -20,8 +20,15 @@ namespace forge {
 
         const auto callee = error.context.functionRva;
         const auto site = error.context.sourceCall;
-        if (error.context.tableHeaderRva) {
-            err << " (guest pointer table " << hex(*error.context.tableHeaderRva);
+        if (error.context.tableHeaderRva || error.context.tableFirstRva) {
+            if (error.context.tableFirstRva) {
+                err << " (guest pointer range [" << hex(*error.context.tableFirstRva) << ", "
+                    << hex(*error.context.tableLastRva) << "), load at "
+                    << hex(*error.context.pointerLoadRva);
+            } else {
+                err << " (guest pointer table " << hex(*error.context.tableHeaderRva);
+            }
+
             if (error.context.tableTargetRva) {
                 err << ", target " << hex(*error.context.tableTargetRva);
             }
@@ -70,6 +77,12 @@ namespace forge {
             if (context.tableHeaderRva) {
                 fields["table_header_rva"] = hex(*context.tableHeaderRva);
             }
+            if (context.tableFirstRva) {
+                fields["table_first_rva"] = hex(*context.tableFirstRva);
+                fields["table_last_rva"] = hex(*context.tableLastRva);
+                fields["pointer_load_rva"] = hex(*context.pointerLoadRva);
+            }
+
             if (context.tableTargetRva) {
                 fields["table_target_rva"] = hex(*context.tableTargetRva);
             }
@@ -267,12 +280,16 @@ namespace forge {
                     for (const auto rva : table.initialTargetRvas) {
                         targets.emplace_back(hex(rva));
                     }
-                    tables.emplace_back(
-                        llvm::json::Object{{"caller_rva", hex(table.callerRva)},
+                    llvm::json::Object row{{"caller_rva", hex(table.callerRva)},
                                            {"instruction_rva", hex(table.instructionRva)},
                                            {"first_rva", hex(table.firstRva)},
                                            {"last_rva", hex(table.lastRva)},
-                                           {"initial_target_rvas", std::move(targets)}});
+                                           {"initial_target_rvas", std::move(targets)}};
+                    if (table.pointerLoadRva) {
+                        row["pointer_load_rva"] = hex(*table.pointerLoadRva);
+                    }
+
+                    tables.emplace_back(std::move(row));
                 }
                 return tables;
             };

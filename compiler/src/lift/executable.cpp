@@ -71,7 +71,9 @@ namespace forge::x86 {
 
                 if (const auto *table = call.table()) {
                     readiness.boundedCalls.push_back(
-                        {function.entry, instruction, table->first, table->last, table->targets});
+                        {function.entry, instruction, table->first, table->last, table->targets,
+                         table->forward() ? std::optional{table->forward()->pointerLoad}
+                                          : std::nullopt});
                 }
 
                 const bool failedSite = failed && failed->callerRva == function.entry &&

@@ -85,10 +85,19 @@ class NativeDifferentialTests(unittest.TestCase):
             self.assertEqual(ctx["bounded_calls"], [
                 dict(caller_rva=hex(target), instruction_rva=hex(target + 0x30),
                      first_rva=hex(header + 8), last_rva=hex(header + 8 * (count + 1)),
-                     initial_target_rvas=list(map(hex, targets)))])
-            self.assertEqual((ctx["function_rva"], ctx["instruction_rva"], ctx["opcode"], ctx["bytes"]),
-                             (hex(target + 0xd0), hex(target + 0x120), "CALL64r", "ffd0"))
-            self.assertIn("unsupported register call", record["message"])
+                     initial_target_rvas=list(map(hex, targets))),
+                dict(caller_rva=hex(target + 0xd0), instruction_rva=hex(target + 0x120),
+                     pointer_load_rva=hex(target + 0x118), first_rva="0x9058", last_rva="0x9058",
+                     initial_target_rvas=[])])
+            protect_slot = {"argc": "0x81b8", "argc_none": "0x81b8", "argv": "0x81c0",
+                            "argv_edges": "0x81c0", "cleanup": "0x81e0", "globals": "0x81b8",
+                            "puts": "0x81c0", "return": "0x81b8"}[name]
+            self.assertEqual((ctx["function_rva"], ctx["block_rva"], ctx["instruction_rva"],
+                              ctx["opcode"], ctx["bytes"]),
+                             (hex(target + 0x460), hex(target + 0x652), hex(target + 0x65d),
+                              "CALL64r", "ffd6"))
+            self.assertEqual((ctx["import_dll"], ctx["import_symbol"], ctx["iat_slot_rva"]),
+                             ("KERNEL32.dll", "VirtualProtect", protect_slot))
         offset = ctx["file_offset"]
         self.assertEqual(data[offset:offset + len(bytes.fromhex(ctx["bytes"]))].hex(), ctx["bytes"])
         return report

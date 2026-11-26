@@ -258,7 +258,7 @@ namespace forge::x86 {
             void admitCallback(const ResolvedCallSite &site, const Step &step, uint32_t rva);
             void scanCalls(RecoveredFunction &caller, const GuestBlock &block,
                            const CallResolutions &resolutions, InitializerRecovery &initializers);
-            Flow admitTableTarget(uint32_t caller, const Step &step, uint32_t header,
+            Flow admitTableTarget(uint32_t caller, const Step &step, const BoundedTableCall &table,
                                   uint32_t target);
             Flow tableFlow(uint32_t caller, FunctionDiscovery &active, const Step &step);
             Flow importFlow(uint32_t rva, FunctionDiscovery &caller, const Step &step);
@@ -461,14 +461,14 @@ namespace forge::x86 {
             return Flow::TerminalCall;
         }
 
-        Flow GroupDiscovery::admitTableTarget(uint32_t caller, const Step &step, uint32_t header,
-                                              uint32_t target) try {
+        Flow GroupDiscovery::admitTableTarget(uint32_t caller, const Step &step,
+                                              const BoundedTableCall &table, uint32_t target) try {
             const auto &image = entry.analysis.image();
             const auto *section = image.sectionAtRva(target);
             if (!section || !section->immutable() || section->permissions[2] != 'x') {
                 step.reject(FailureCode::InvalidCallTarget,
                             "bounded table target outside immutable executable code at table " +
-                                hex(header),
+                                hex(table.originRva()),
                             target);
             }
             const auto code = calleeCode(target, step);
@@ -479,7 +479,7 @@ namespace forge::x86 {
             }
             return stageGuestTarget(caller, step, target);
         } catch (InspectionError &failure) {
-            failure.context.tableHeaderRva = header;
+            table.annotate(failure.context);
             failure.context.tableTargetRva = target;
             throw;
         }
@@ -494,14 +494,14 @@ namespace forge::x86 {
             auto table =
                 recoverTableCall(active.cfg.steps(), step, operands, image, *pointerInitialization,
                                  functionRanges(), active.remainingTableEntries);
-            if (!rangesIn(loaderWrittenRanges(), table.extent()).empty()) {
+            if (table.extent().begin < table.extent().end &&
+                !rangesIn(loaderWrittenRanges(), table.extent()).empty()) {
                 step.reject(FailureCode::ImageMemory,
-                            "loader write overlaps bounded table at " + hex(table.header));
+                            "loader write overlaps bounded table at " + hex(table.originRva()));
             }
             bool returns = false;
             for (const auto target : table.targets) {
-                returns |=
-                    admitTableTarget(caller, step, table.header, target) == Flow::Fallthrough;
+                returns |= admitTableTarget(caller, step, table, target) == Flow::Fallthrough;
             }
 
             active.resolutions.emplace(step.rva, std::move(table));
@@ -513,7 +513,8 @@ namespace forge::x86 {
 
         bool GroupDiscovery::advance(uint32_t rva, FunctionDiscovery &active) try {
             const auto classify = [&](const Step &step, std::optional<int64_t> target) {
-                if (step.isMemoryCall() && !operands.ripRva(step, 0)) {
+                if (step.forwardTableCandidate ||
+                    (step.isMemoryCall() && !operands.ripRva(step, 0))) {
                     return tableFlow(rva, active, step);
                 }
                 return step.isMemoryCall() || step.registerImportSlot
@@ -840,7 +841,7 @@ namespace forge::x86 {
                 const auto *producer = std::exchange(previous, &step);
                 const auto found = resolutions.find(step.rva);
                 if (found != resolutions.end() &&
-                    (step.isMemoryCall() || step.registerImportSlot ||
+                    (step.isMemoryCall() || step.forwardTableCandidate || step.registerImportSlot ||
                      std::holds_alternative<ExternalCallTarget>(found->second))) {
                     const auto &resolution = found->second;
 
@@ -850,7 +851,9 @@ namespace forge::x86 {
 
                     if (const auto *table = std::get_if<BoundedTableCall>(&resolution)) {
                         validateTableLoop(caller, step, *table, operands);
-                        tableData.push_back(table->extent());
+                        if (table->extent().begin < table->extent().end) {
+                            tableData.push_back(table->extent());
+                        }
                         const auto &site =
                             caller.calls
                                 .emplace(step.rva, ResolvedCallSite{caller.entry, leader, step.rva,

@@ -106,22 +106,30 @@ The hosted Windows test verifies the producer manifest and prints each PE hash, 
 
 ### Startup comparison results
 
-Task 13.3M reran all eight unmodified PEs in both configurations. Fifteen recover the bounded constructor call and next stop at `CALL64r` (`ff d0`) in `__dyn_tls_init`. That loop loads a pointer into RAX, tests it, and walks forward between two linker bounds. In the primary PE both bounds name RVA `0x9058`. Its recovery and PE loader TLS setup remain separate work. Debug `puts` stops at the application call to its unbound CRT import.
+All 16 original PEs have a writable `.CRT` section with `__xd_a` at RVA `0x9050` and `__xd_z` at `0x9058`. Both RIP-relative LEAs resolve to `0x9058`. The half-open initializer range contains zero slots. In primary Debug, the empty branch at `0x16d1` skips the loop. The qword load at `0x16d8` feeds the NULL guard and the call at `0x16e0`. The NULL path and a successful return rejoin at `0x16e2`, where RBX advances by eight. The backedge at `0x16e9` returns to the load. The older outer function sets `_CRT_MT` to 2 and calls `__mingw_TLScallback` for process attach. Thread attach traverses the range of no-argument functions. The newer MinGW implementation has a different outer function. [Linked CRT source](https://github.com/mingw-w64/mingw-w64/blob/v10.0.0/mingw-w64-crt/crt/tlssup.c) · [Later implementation](https://github.com/mingw-w64/mingw-w64/blob/9c44fc5d65f515470dbb6febac91c33c2b58edbc/mingw-w64-crt/crt/tlsdyn.c)
 
-| Fixture | Constructor header RVA (Debug / Release) | Next blocking RVA (Debug / Release) | Windows and Wine exit, stdout |
-| --- | --- | --- | --- |
-| argc | `0x2780 / 0x2780` | `0x16e0 / 0x16b0` | 42, empty |
-| argc_none | `0x2780 / 0x2780` | `0x16e0 / 0x16b0` | 1, empty |
-| argv | `0x2800 / 0x27e0` | `0x1750 / 0x16b0` | 42, empty |
-| argv_edges | `0x28b0 / 0x2870` | `0x1800 / 0x16b0` | 42, empty |
-| cleanup | `0x2870 / 0x2850` | `0x17d0 / 0x1750` | 42, `IMBA` |
-| globals | `0x27a0 / 0x27a0` | `0x1700 / 0x16b0` | 42, empty |
-| puts | `0x2790 / 0x2780` | `0x1547` (puts) / `0x16b0` | 0, `Hello from C!\r\n` |
-| return | `0x2770 / 0x2770` | `0x16d0 / 0x16b0` | 42, empty |
+Fifteen comparisons recover both the reverse constructor call and the forward initializer call. Their next failure is in the MinGW pseudo-relocator, which calls `KERNEL32.dll!VirtualProtect` at `CALL64r` (`ff d6`). Debug `puts` stops earlier at `msvcrt.dll!puts` through a direct call (`e8 c4 11 00 00`) to the thunk at `0x2710`. Each row has a validated reference with empty stderr. Forge reports `LIFT_UNSUPPORTED_CONTROL_FLOW` during recovery. Native compilation, publication, artifact verification, execution and stream comparison are unrun. There is no Forge exit status for a translated program.
 
-In all 16 PEs the table sits in readable, immutable `.text`. A DIR64 cell in `.rdata` points to the header. Each header contains eight `ff` bytes. Each list has a DIR64 entry for `register_frame_ctor`, located 16 bytes before the header, followed by a NULL terminator. Cleanup has one additional pointer before that entry, to `setup` at RVA `0x1592` in Debug and `0x27e0` in Release. All targets have unwind records. The primary Debug loop calls at `0x15f0` and returns to `0x15f2`. The corresponding Release RVAs are `0x15c0` and `0x15c2`. Both loops subtract eight from RBX and repeat until it equals RSI, then tail-transfer to `atexit` to register the destructor runner. [MinGW-w64 source](https://github.com/mingw-w64/mingw-w64/blob/v10.0.0/mingw-w64-crt/crt/gccmain.c)
+| Fixture | PE | Function RVA | Block RVA | Call RVA | File offset | IAT slot RVA | Reference exit, stdout |
+| --- | --- | --- | --- | --- | --- | --- | --- |
+| argc | Debug | 0x1a20 | 0x1c12 | 0x1c1d | 0x121d | 0x81b8 | 42, empty |
+| argc_none | Debug | 0x1a20 | 0x1c12 | 0x1c1d | 0x121d | 0x81b8 | 1, empty |
+| argv | Debug | 0x1a90 | 0x1c82 | 0x1c8d | 0x128d | 0x81c0 | 42, empty |
+| argv_edges | Debug | 0x1b40 | 0x1d32 | 0x1d3d | 0x133d | 0x81c0 | 42, empty |
+| cleanup | Debug | 0x1b10 | 0x1d02 | 0x1d0d | 0x130d | 0x81e0 | 42, `IMBA` |
+| globals | Debug | 0x1a40 | 0x1c32 | 0x1c3d | 0x123d | 0x81b8 | 42, empty |
+| puts | Debug | 0x1530 | 0x1530 | 0x1547 | 0xb47 | 0x8280 | 0, `Hello from C!\r\n` |
+| return | Debug | 0x1a10 | 0x1c02 | 0x1c0d | 0x120d | 0x81b8 | 42, empty |
+| argc | Release | 0x19f0 | 0x1be2 | 0x1bed | 0x11ed | 0x81b8 | 42, empty |
+| argc_none | Release | 0x19f0 | 0x1be2 | 0x1bed | 0x11ed | 0x81b8 | 1, empty |
+| argv | Release | 0x19f0 | 0x1be2 | 0x1bed | 0x11ed | 0x81c0 | 42, empty |
+| argv_edges | Release | 0x19f0 | 0x1be2 | 0x1bed | 0x11ed | 0x81c0 | 42, empty |
+| cleanup | Release | 0x1a90 | 0x1c82 | 0x1c8d | 0x128d | 0x81e0 | 42, `IMBA` |
+| globals | Release | 0x19f0 | 0x1be2 | 0x1bed | 0x11ed | 0x81b8 | 42, empty |
+| puts | Release | 0x19f0 | 0x1be2 | 0x1bed | 0x11ed | 0x81c0 | 0, `Hello from C!\r\n` |
+| return | Release | 0x19f0 | 0x1be2 | 0x1bed | 0x11ed | 0x81b8 | 42, empty |
 
-Each row in both configurations has a validated reference and empty reference stderr. Forge recovery and translation fail with `LIFT_UNSUPPORTED_CONTROL_FLOW`. Native compilation, publication, artifact verification, execution and stream comparison are unrun for all rows. There is no native exit code. Debug `puts` retains its independent service dependency at IAT slot `0x8280`. [Exact regressions](../../test_native_differential.py) · [SDK-free executable](../../../fixtures/executable-bounded-call.s)
+The comparator's per-row `result.json` retains the complete structured diagnostic, including imports, call edges, unwind metadata, file offset, bytes and table evidence. The primary Debug constructor runner calls at RVA `0x15f0` and returns to `0x15f2`. The Release RVAs are `0x15c0` and `0x15c2`. The original constructor lists use a sentinel header in immutable `.text`, DIR64 entries for `register_frame_ctor` and, for cleanup, `setup`. The dedicated SDK-free PE exercises the nonempty forward path, changing the current slot after the load and changing later slots before their loads. Pinned Wine 8 and the standalone ARM64 translation of PE SHA-256 `0411e4c5a0aadcc4cbef6c3bc2b65c3af34cc38cbb712d21cc210b62fc846582` returned 42 with empty stdout and stderr. Its exit status checks the callback order, register and stack sentinels, last error, and outer reason handling. [Regression assertions](../../test_native_differential.py) · [Focused PE](../../../fixtures/executable-forward-call.s) · [Bounded call design](../../../../docs/program-architecture.md#bounded-indirect-calls-through-pointer-tables)
 
 ### CMP16mi acceptance and remaining compatibility work
 
@@ -137,12 +145,13 @@ A successful scalar read requires both bytes to fit one readable mapping. Two re
 | Full Unicode startup titles and Windows ANSI code pages | Defer conversion support and retain call-time rejection of unsupported input. |
 | CRT-managed buffered streams and flushing | Defer. |
 | Wine `_onexit` allocation exhaustion | Parity remains unverified. |
-| PE TLS initialization and callbacks | Separate loader task. |
-| Missing Windows and CRT services | Future compatibility tasks, including `puts` and `__setusermatherr`. |
+| PE TLS initialization and callbacks | Separate loader task covering template copying, index publication and pre-entry callbacks. |
+| TLS storage, thread attach/detach and destructors | Deferred with TEB/TLS lifecycle support. |
+| Missing Windows and CRT services | Future compatibility tasks, including `VirtualProtect`, `puts` and `__setusermatherr`. |
 | GUI CRT error reporting | Detect required GUI routing at `_amsg_exit`. The message-box backend is deferred. |
 | Guest exception delivery and SEH | Separate exception-delivery task. |
 | Scalar reads across adjacent readable mappings | Separate shared guest-memory task. |
-| General dynamic indirect calls | Future compiler research. The forward register-call TLS loop also requires its own proof. |
+| General dynamic indirect calls | Future compiler research. Arbitrary register calls still require target and path evidence. |
 
 ### Conventional startup responsibilities
 

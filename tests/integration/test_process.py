@@ -192,6 +192,8 @@ class ProcessExecution(unittest.TestCase):
                       imports=[("kernel32.dll", "SetLastError")])
 
     def test_bounded_table_calls(self):
+        self.exercise("executable-forward-call", None, [(0, 0, "return 42"), (0, 0, "return 42")],
+                      base=0x10000000, imports=[("kernel32.dll", "SetLastError"), ("kernel32.dll", "GetLastError")])
         image = "executable-bounded-call"
         self.exercise(image, None, [(0, 0, "return 42"), (0, 0, "return 42")], base=0x10000000)
 

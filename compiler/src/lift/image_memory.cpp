@@ -496,7 +496,17 @@ namespace forge::x86 {
     }
 
     void ImageMemory::boundedTable(const Step &step, const BoundedTableCall &table) {
-        const auto &section = *source.sectionAtRva(table.header);
+        const auto extent = table.extent();
+        if (extent.end > UINT64_MAX - loadBase) {
+            step.reject(FailureCode::ImageMemory,
+                        "bounded table overflows the selected guest address space");
+        }
+
+        if (extent.begin == extent.end) {
+            return;
+        }
+
+        const auto &section = *source.sectionAtRva(extent.begin);
         if (section.permissions[2] == 'x') {
             for (uint32_t slot = table.first; slot < table.last; slot += 8) {
                 executableDataSlots.insert(slot);

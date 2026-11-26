@@ -813,6 +813,75 @@ class Readiness(Workspace):
                     self.assertIn(dict(caller_rva=hex(symbols["run_count"]), instruction_rva=hex(site),
                                        target_rva=hex(table)), ctx["unresolved_calls"])
 
+    def test_forward_table_rejections(self):
+        original, symbols = bounded_fixture(image("forward-call"))
+        layout = Layout(original)
+        site, load = symbols["many_site"], symbols["many_load"]
+        bounds, first, last = (symbols[key] for key in ("many_bounds", "slots", "slots_end"))
+        offset = layout.file_offset
+        base, = struct.unpack_from("<Q", original, layout.opt + 24)
+        directory, size = layout.directory(5)
+        fields = {}
+        block = offset(directory)
+        while block < offset(directory) + size:
+            page, length = struct.unpack_from("<II", original, block)
+            for at in range(block + 8, block + length, 2):
+                fixup, = struct.unpack_from("<H", original, at)
+                if fixup >> 12 == 10:
+                    fields[page + (fixup & 4095)] = at
+            block += length
+
+        for case in ("alignment", "reversed", "underflow", "budget", "unmapped", "permission",
+                     "missing", "conflict", "loader", "data_target", "interior", "after_load",
+                     "after_guard", "late_backedge", "empty_backedge", "stride", "partial_rax", "unguarded_null"):
+            with self.subTest(case=case):
+                data = bytearray(original)
+                # Select this recorded function directly so malformed input is attributed
+                # to its own call even when another table shares the containing section.
+                struct.pack_into("<I", data, layout.opt + 16, symbols["outer"])
+                section = layout.section_header(first)
+                if case in ("alignment", "reversed", "underflow", "budget", "unmapped"):
+                    endpoint = {"alignment": last-1, "reversed": first-8, "underflow": -8,
+                                "budget": first+8*1025, "unmapped": first+0x4000}[case]
+                    struct.pack_into("<i", data, offset(bounds)+10, endpoint-(bounds+14))
+                elif case == "permission":
+                    struct.pack_into("<I", data, section + 36, layout.u32(section+36) & ~0x40000000)
+                elif case == "missing":
+                    struct.pack_into("<H", data, fields[first], 0)
+                elif case == "conflict":
+                    data[fields[first+16]:fields[first+16]+2] = data[fields[first]:fields[first]+2]
+                elif case == "loader":
+                    tls = first+0x80
+                    struct.pack_into("<I", data, section+8, tls+40-layout.u32(section+12))
+                    struct.pack_into("<II", data, layout.directories+9*8, tls, 40)
+                    struct.pack_into("<Q", data, offset(first)+(tls-first)+16, base+first)
+                elif case in ("data_target", "interior"):
+                    target = first if case == "data_target" else symbols["writer"]+1
+                    struct.pack_into("<Q", data, offset(first), base+target)
+                elif case in ("after_load", "after_guard", "late_backedge", "empty_backedge"):
+                    if case == "empty_backedge":
+                        struct.pack_into("<i", data, offset(bounds)+10, first-(bounds+14))
+                    dest = {"after_load": load+3, "after_guard": site, "late_backedge": load, "empty_backedge": load}[case]
+                    edge = symbols["late_edge"]
+                    data[offset(edge):offset(edge)+2] = struct.pack("<Bb", 0x75, dest-edge-2)
+                elif case == "stride":
+                    data[offset(site)+5] = 16
+                elif case == "partial_rax":
+                    data[offset(site)-7:offset(site)] = bytes.fromhex("b4 00 90 90 90 90 90")
+                else:
+                    data[offset(load)+6] = 0x75  # JNE skips non-NULL and reaches CALL on NULL.
+                report = self.reject(data)
+                ctx = report["context"]
+                self.assertEqual((ctx.get("instruction_rva"), ctx.get("opcode")),
+                                 (hex(site), "CALL64r"), report)
+                if case in ("after_load", "after_guard", "late_backedge", "empty_backedge"):
+                    self.assertIn("bypasses bounded table proof", report["message"])
+                if case == "budget":
+                    self.assertIn("count exceeds budget", report["message"])
+                if case in ("after_load", "after_guard", "late_backedge", "empty_backedge", "missing",
+                            "data_target", "interior", "conflict", "budget", "alignment", "reversed"):
+                    self.assertEqual(ctx.get("pointer_load_rva"), hex(load), report)
+
     def test_bounded_nested_import_failure(self):
         original, symbols = bounded_fixture(image("bounded-cleanup"))
         data = bytearray(original)
@@ -1340,6 +1409,7 @@ class Reference(Workspace):
         headers = image("headers")
         expected = {
             image("bounded-cleanup").name: (42, b"", b""),
+            image("forward-call").name: (42, b"", b""),
             image("bounded-call").name: (42, b"", b""),
             image("tail-jump").name: (42, b"", b""),
             headers.name: (header_result(headers.read_bytes()), b"", b""),
@@ -1407,6 +1477,7 @@ class WindowsTailJump(WindowsExecutable):
 
 class WindowsBoundedCall(WindowsExecutable):
     def test_bounded_call(self):
+        self.check_image("forward-call")
         self.check_image("bounded-call")
         self.check_image("bounded-cleanup")
 
@@ -1470,6 +1541,42 @@ def bounded_fixture(pe=None):
 
 
 class Console(Workspace):
+    def test_forward_live_targets(self):
+        pe = image("forward-call")
+        original, symbols = bounded_fixture(pe)
+        layout = Layout(original)
+        preferred, = struct.unpack_from("<Q", original, layout.opt + 24)
+        run(CONTRACT, "--guest-base", hex(preferred + 0x30000000), pe, self.output,
+            OPT, LLC, "/usr/bin/xcrun", *LINK, check=True)
+        result = self.program()
+        self.assertEqual((result.returncode, result.stdout, result.stderr), (42, b"", b""))
+        # This nonempty zero-filled range admits no targets. A guest write makes
+        # its call reachable with a nonzero register. The default dispatch must fault.
+        data = bytearray(original)
+        struct.pack_into("<I", data, layout.opt + 16, symbols["tamper_null"])
+        modified = self.dir / "null-table.exe"
+        modified.write_bytes(data)
+        self.compile(modified)
+        result = self.program()
+        expected = (f"forge: bounded call RVA {symbols['null_site']:#x} table RVA {symbols['null_only']:#x}\n"
+                    "forge: guest control fault\n").encode()
+        self.assertEqual((result.returncode, result.stdout, result.stderr), (125, b"", expected))
+
+        for target, code, fault in (("single_callback", 125, "control"), ("bad_return", 125, "control"),
+                                    ("bad_save", 125, "ABI"), ("terminal", 57, None)):
+            with self.subTest(target=target):
+                data = bytearray(original)
+                # single_callback is admitted at a different call site in this module.
+                slot = symbols["replacement"] if target == "single_callback" else symbols["slots"]+16
+                struct.pack_into("<Q", data, layout.file_offset(slot), preferred + symbols[target])
+                modified = self.dir / "forward.exe"
+                modified.write_bytes(data)
+                self.compile(modified)
+                result = self.program()
+                expected = (f"forge: bounded call RVA {symbols['many_site']:#x} table RVA {symbols['slots']:#x}\n"
+                            f"forge: guest {fault} fault\n").encode() if fault else b""
+                self.assertEqual((result.returncode, result.stdout, result.stderr), (code, b"", expected))
+
     def test_counted_scan_escape(self):
         original, symbols = bounded_fixture()
         layout = Layout(original)

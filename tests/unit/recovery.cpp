@@ -596,8 +596,9 @@ namespace {
         const auto site = runner.callAt(exportedRva(image, "count_site"));
         check(site && site->table() && !site->external(), "missing bounded memory call");
         const auto &table = *site->table();
-        check(!table.sentinel && table.header == exportedRva(image, "count_table") &&
-                  table.first == table.header + 8 && table.last == table.first + 32 &&
+        check(table.reverse() && !table.reverse()->sentinel &&
+                  table.reverse()->header == exportedRva(image, "count_table") &&
+                  table.first == table.reverse()->header + 8 && table.last == table.first + 32 &&
                   site->continuation == exportedRva(image, "after_count"),
               "incorrect counted range or continuation");
         const std::vector<uint32_t> expected{exportedRva(image, "one"), exportedRva(image, "two"),
@@ -622,11 +623,37 @@ namespace {
 
         const auto &empty = group.function(exportedRva(image, "run_empty"));
         const auto &emptyCall = empty.calls.begin()->second;
-        check(empty.mayReturn && emptyCall.table() && emptyCall.table()->sentinel &&
-                  emptyCall.guestTargets().empty() &&
+        check(empty.mayReturn && emptyCall.table() && emptyCall.table()->reverse() &&
+                  emptyCall.table()->reverse()->sentinel && emptyCall.guestTargets().empty() &&
                   empty.instructionContaining(emptyCall.instruction)->flow ==
                       x86::Flow::TerminalCall,
               "empty list needs a zero-trip exit and a terminal executed CALL");
+    }
+
+    void checkForwardCalls(const fs::path &path) {
+        const AnalyzedImage image(
+            std::make_unique<ParsedImage>(InputFile(path), ParsePolicy::Inspection),
+            DebugInfo::Omit);
+        const RecoveredFunctionGroup group(image, image.module().entryPoint);
+        const auto &outer = group.function(exportedRva(image, "outer"));
+        const auto *site = outer.callAt(exportedRva(image, "many_site"));
+        check(site && site->table() && site->table()->forward(), "missing forward call proof");
+        const auto &table = *site->table();
+        const auto &proof = *table.forward();
+        check(table.first == exportedRva(image, "slots") &&
+                  table.last == exportedRva(image, "slots_end") &&
+                  proof.firstDefinition == exportedRva(image, "many_bounds") &&
+                  proof.pointerLoad == exportedRva(image, "many_load") &&
+                  outer.instructionContaining(proof.nullBranch)->relativeTarget() ==
+                      site->continuation &&
+                  outer.instructionContaining(proof.backedge)->relativeTarget() ==
+                      proof.pointerLoad,
+              "lost forward bounds, null skip or latch");
+        const auto tail = exportedRva(image, "tail_callback");
+        check(table.targets == std::vector<uint32_t>{exportedRva(image, "writer"), tail} &&
+                  group.function(tail).mayReturn && group.function(tail).incoming.size() == 1 &&
+                  group.function(tail).incoming.front() == site,
+              "incorrect deduplication or tail return");
     }
 
     // Check PE stability for the differential runner's independently disassembled caller.
@@ -679,13 +706,14 @@ int main(int argc, char **argv) try {
         return 0;
     }
 
-    check(argc == 9, "expected stack, leaves, jump, indirect, last-error, noreturn, CRT and "
-                     "bounded-call fixtures");
+    check(argc == 10, "expected stack, leaves, jump, indirect, last-error, noreturn, CRT and "
+                      "bounded-call fixtures");
     checkGuestRanges();
     checkImportSnapshot(argv[5]);
     checkTerminalGuestCall(argv[6]);
     checkInitializerTables(argv[7]);
     checkBoundedCalls(argv[8]);
+    checkForwardCalls(argv[9]);
     const AnalyzedImage analysis(
         std::make_unique<ParsedImage>(InputFile(argv[1]), ParsePolicy::Inspection),
         DebugInfo::Omit);

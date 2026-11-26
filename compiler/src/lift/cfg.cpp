@@ -222,7 +222,7 @@ namespace forge::x86 {
 
             std::map<uint32_t, Leader> leaders;
             std::vector<uint32_t> pending;
-            std::set<uint32_t> memoryCalls;
+            std::set<uint32_t> boundedCalls;
             void schedule(const Step &s, int64_t address, bool explicitEntry,
                           std::optional<unsigned> index = {});
             std::optional<int64_t> registerTarget(Step &call);
@@ -355,6 +355,15 @@ namespace forge::x86 {
                 }
             }
 
+            // A skip edge to the continuation permits deferred inspection of the full loop.
+            // It supplies no target evidence by itself.
+            const auto continuation = leaders.find(call.next);
+            if (tables && !lea && continuation != leaders.end() &&
+                continuation->second.explicitEntry) {
+                call.forwardTableCandidate = true;
+                return {};
+            }
+
             const auto proof =
                 operands.leaCallTarget(call, producer == stop ? nullptr : &producer->second);
             registerProofs.emplace_back(proof.producer, call.rva);
@@ -363,11 +372,17 @@ namespace forge::x86 {
 
         void Discovery::recordEdges(Step &s, CallFlow classify) {
             if (s.isRegisterCall()) {
-                s.flow = classify(s, registerTarget(s));
+                const auto target = registerTarget(s);
+                if (s.forwardTableCandidate) {
+                    boundedCalls.insert(s.rva);
+                    s.flow = Flow::TerminalCall;
+                } else {
+                    s.flow = classify(s, target);
+                }
             } else if (classify && s.isMemoryCall() &&
                        !InstructionOperands(*dis.getContext().getRegisterInfo(), 0).ripRva(s, 0)) {
                 // Bounds can originate on another branch which has not yet been traced.
-                memoryCalls.insert(s.rva);
+                boundedCalls.insert(s.rva);
                 s.flow = Flow::TerminalCall;
             } else if (classify && (s.isDirectCall() || s.isMemoryCall())) {
                 s.flow = classify(s, s.directCallTarget());
@@ -606,9 +621,9 @@ namespace forge::x86 {
                                       FailureCode::FunctionSize);
             }
 
-            while (!pending.empty() || !unresolved.empty() || !memoryCalls.empty()) {
+            while (!pending.empty() || !unresolved.empty() || !boundedCalls.empty()) {
                 if (pending.empty() && unresolved.empty()) {
-                    const auto site = memoryCalls.extract(memoryCalls.begin()).value();
+                    const auto site = boundedCalls.extract(boundedCalls.begin()).value();
                     auto &step = decoded.at(site);
                     if (classify(step, {}) == Flow::Fallthrough) {
                         resume(site);

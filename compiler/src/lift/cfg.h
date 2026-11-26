@@ -44,6 +44,9 @@ namespace forge::x86 {
         // Recovery separately validates ownership and binds the indicated IAT slot.
         std::optional<uint32_t> registerImportSlot = {};
 
+        // Provisional until the complete loop and every incoming edge validate.
+        bool forwardTableCandidate = false;
+
         bool isDirectCall() const { return opcode == "CALL64pcrel32"; }
 
         std::optional<int64_t> directCallTarget() const {

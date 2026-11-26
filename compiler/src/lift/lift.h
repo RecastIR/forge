@@ -52,6 +52,7 @@ namespace forge {
         uint32_t callerRva, instructionRva, firstRva, lastRva;
         // Slot evidence is available even when recovery subsequently rejects a body.
         std::vector<uint32_t> initialTargetRvas;
+        std::optional<uint32_t> pointerLoadRva = {};
     };
 
     struct ExecutableImport {

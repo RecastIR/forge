@@ -300,7 +300,7 @@ namespace forge {
             if (const auto guard = plan.tableInstructions.find(s.rva);
                 access && guard != plan.tableInstructions.end()) {
                 const auto &table = *guard->second->table();
-                if (table.scanRead == s.rva) {
+                if (table.forward() || table.reverse()->scanRead == s.rva) {
                     guardTableSlot(address, {table.first, table.extent().end});
                 }
             }
@@ -509,8 +509,8 @@ namespace forge {
             if (guard != plan.tableInstructions.end()) {
                 const auto &site = *guard->second;
                 const auto &table = *site.table();
-                memory.checks.tableOrigin = (uint64_t(site.instruction) << 32) | table.header;
-                if (table.zeroGuard == s.rva) {
+                memory.checks.tableOrigin = (uint64_t(site.instruction) << 32) | table.originRva();
+                if (table.reverse() && table.reverse()->zeroGuard == s.rva) {
                     memory.checks.guard(
                         ir.CreateICmpULE(value(s, s.inst.getOperand(0), 32),
                                          ir.getInt32((table.last - table.first) / 8)),
@@ -721,9 +721,15 @@ namespace forge {
 
         Value *Translator::checkedTableTarget(const Step &s, const x86::BoundedTableCall &table) {
             const auto guestBase = analysis.image.guestBase();
-            auto *address = effectiveAddress(s, 0, true);
-            guardTableSlot(address, {table.first, table.last});
-            auto *value = memory.load(address, 64, false);
+            Value *value;
+            if (table.forward()) {
+                value = read(s, {table.forward()->target, 64});
+            } else {
+                auto *address = effectiveAddress(s, 0, true);
+                guardTableSlot(address, {table.first, table.last});
+                value = memory.load(address, 64, false);
+            }
+
             auto *fault = BasicBlock::Create(ir.getContext(), "table.invalid", impl);
             auto *valid = BasicBlock::Create(ir.getContext(), "table.call", impl);
             auto *select =
@@ -768,7 +774,7 @@ namespace forge {
             SaveAndRestore origin(memory.checks.tableOrigin);
             Value *liveTarget = nullptr;
             if (const auto *table = call.table()) {
-                memory.checks.tableOrigin = (uint64_t(call.instruction) << 32) | table->header;
+                memory.checks.tableOrigin = (uint64_t(call.instruction) << 32) | table->originRva();
                 liveTarget = checkedTableTarget(s, *table);
                 if (table->targets.empty()) {
                     memory.checks.fail(FORGE_RT_FAULT_CONTROL);

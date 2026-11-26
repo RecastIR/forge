@@ -931,9 +931,13 @@ namespace forge::x86 {
                 if (const auto *table = call.table()) {
                     image.boundedTable(*function.instructionContaining(instruction), *table);
                     auto &instructions = result.functions[address].tableInstructions;
-                    instructions.emplace(table->countLoad, &call);
-                    instructions.emplace(table->scanRead, &call);
-                    instructions.emplace(table->zeroGuard, &call);
+                    if (const auto *reverse = table->reverse()) {
+                        instructions.emplace(reverse->countLoad, &call);
+                        instructions.emplace(reverse->scanRead, &call);
+                        instructions.emplace(reverse->zeroGuard, &call);
+                    } else {
+                        instructions.emplace(table->forward()->pointerLoad, &call);
+                    }
                 }
                 const auto *service = call.external();
                 if (service && service->binding.callback == win64::Callback::Cleanup) {

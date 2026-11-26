@@ -163,70 +163,189 @@ namespace forge::x86 {
                     finish.next};
         }
 
+        uint32_t endpoint(Sequence &seq, const Step &definition, const InstructionOperands &ops) {
+            const auto source = ops.ripRva(definition, 1);
+            if (!source || !std::in_range<uint32_t>(*source)) {
+                seq.call.reject(FailureCode::UnsupportedControlFlow,
+                                "invalid RIP-relative range endpoint at " + hex(definition.rva));
+            }
+
+            ops.decodeAddress(definition, 1, false);
+            return static_cast<uint32_t>(*source);
+        }
+
+        BoundedTableCall forwardLoop(Sequence &seq, const InstructionOperands &ops) {
+            // A plain store may change the slot after the load without redefining its
+            // address, the target register, or flags. Its guest memory effect is retained.
+            const auto &previous = seq.take();
+            const auto &skip = previous.opcode == "MOV64mi32" || previous.opcode == "MOV64mr"
+                                   ? seq.take()
+                                   : previous;
+            const auto &test = seq.expect("TEST64rr");
+            const auto &load = seq.expect("MOV64rm");
+            const auto &empty = seq.take();
+            const auto &compare = seq.expect("CMP64rr");
+            const auto &last = seq.expect("LEA64r");
+            const auto &first = seq.expect("LEA64r");
+            const auto cursor = reg(ops, first, 0, 64);
+            const auto limit = reg(ops, last, 0, 64);
+            const auto target = reg(ops, seq.call, 0, 64);
+
+            const auto comparesBounds = [&](const Step &s) {
+                const auto left = reg(ops, s, 0, 64);
+                const auto right = reg(ops, s, 1, 64);
+                return (left == cursor && right == limit) || (left == limit && right == cursor);
+            };
+
+            if (!nonvolatile(cursor) || !nonvolatile(limit) || cursor == rspIndex ||
+                limit == rspIndex || cursor == limit || target == cursor || target == limit ||
+                target == rspIndex || !comparesBounds(compare) || !branch(empty, 4) ||
+                reg(ops, load, 0, 64) != target ||
+                !address(ops.decodeAddress(load, 1, true), cursor, {}, 1, 0) ||
+                reg(ops, test, 0, 64) != target || reg(ops, test, 1, 64) != target ||
+                !branch(skip, 4) || skip.relativeTarget() != seq.call.next) {
+                seq.call.reject(FailureCode::UnsupportedControlFlow,
+                                "unproven forward bounds or NULL guard for pointer load at " +
+                                    hex(load.rva));
+            }
+
+            seq.seekForward(seq.call.next);
+            const auto &increment = seq.expect("ADD64ri8");
+            const auto &latch = seq.expect("CMP64rr");
+            const auto &back = seq.take();
+            if (reg(ops, increment, 0, 64) != cursor ||
+                increment.inst.getOperand(2).getImm() != 8 || !comparesBounds(latch) ||
+                !branch(back, 5) || back.relativeTarget() != load.rva ||
+                (empty.relativeTarget() >= first.rva && empty.relativeTarget() < back.next)) {
+                seq.call.reject(
+                    FailureCode::UnsupportedControlFlow,
+                    "unproven forward range increment or backedge for pointer load at " +
+                        hex(load.rva));
+            }
+
+            return {endpoint(seq, first, ops),
+                    endpoint(seq, last, ops),
+                    {},
+                    ForwardTableProof{first.rva, last.rva, compare.rva, empty.rva, load.rva,
+                                      test.rva, skip.rva, increment.rva, latch.rva, back.rva,
+                                      cursor, limit, target}};
+        }
+
+        void validateIncomingEdges(const RecoveredFunction &function, const Step &call,
+                                   llvm::function_ref<bool(uint32_t)> protectedAddress,
+                                   const std::set<std::pair<uint32_t, uint32_t>> &branches,
+                                   std::optional<uint32_t> branchOnly = {}) {
+            for (const auto &[leader, block] : function.graph) {
+                const auto &last = block.steps.back();
+                for (const auto dest : block.successors) {
+                    if (!protectedAddress(dest)) {
+                        continue;
+                    }
+
+                    const bool sequential =
+                        last.next == dest && dest != branchOnly &&
+                        (last.flow == Flow::Conditional || last.flow == Flow::Fallthrough);
+                    if (!sequential && !branches.contains({last.rva, dest})) {
+                        call.reject(FailureCode::UnsupportedControlFlow,
+                                    "edge bypasses bounded table proof from " + hex(last.rva) +
+                                        " to " + hex(dest),
+                                    dest);
+                    }
+                }
+            }
+        }
+
         void reserveTableEntries(const BoundedTableCall &table, const Step &call, unsigned count,
-                                 unsigned &remainingEntries) {
-            const uint64_t used = (table.last - table.first) / 8;
-            if (used + count > win64::maxInitializerEntries) {
-                if (table.sentinel) {
+                                 unsigned &remainingEntries, unsigned used = 0) {
+            if (uint64_t(used) + count > win64::maxInitializerEntries) {
+                if (table.reverse() && table.reverse()->sentinel) {
                     call.reject(FailureCode::UnsupportedControlFlow,
                                 "missing bounded table terminator at " + hex(table.last));
                 }
 
                 call.reject(FailureCode::UnsupportedControlFlow,
-                            "bounded table count exceeds budget at " + hex(table.header));
+                            "bounded table count exceeds budget at " + hex(table.originRva()));
             }
 
             if (count > remainingEntries) {
                 call.reject(FailureCode::UnsupportedControlFlow,
-                            "bounded table entry budget exceeded at " + hex(table.header));
+                            "bounded table entry budget exceeded at " + hex(table.originRva()));
             }
 
             // Discovery can continue at another site after a deferred failure.
             remainingEntries -= count;
         }
 
+        unsigned initialCount(BoundedTableCall &table, const Step &call, const ParsedImage &image,
+                              const ImageInitialization &init, uint64_t sectionEnd,
+                              llvm::function_ref<RvaRange(uint32_t)> slotRange) {
+            if (auto *reverse = std::get_if<ReverseTableProof>(&table.proof)) {
+                const auto origin = reverse->header;
+                const auto head = slotRange(origin);
+                init.validateRelocations(head);
+                if (!init.exclusionsIn(head).empty() || !init.relocationsIn(head).empty()) {
+                    call.reject(FailureCode::ImageMemory,
+                                "unstable bounded table header at " + hex(origin));
+                }
+
+                const auto value = static_cast<uint32_t>(image.initialQword(origin));
+                reverse->sentinel = value == UINT32_MAX;
+                table.first = table.last = static_cast<uint32_t>(head.end);
+                return value;
+            }
+
+            if (table.last < table.first || table.last % 8 || table.last > sectionEnd ||
+                table.last > image.module().sizeOfImage ||
+                table.last > UINT64_MAX - image.module().imageBase) {
+                call.reject(FailureCode::ImageMemory, "invalid forward pointer range [" +
+                                                          hex(table.first) + ", " +
+                                                          hex(table.last) + ")");
+            }
+
+            return (table.last - table.first) / 8;
+        }
+
         void readTable(BoundedTableCall &table, const Step &call, const ParsedImage &image,
                        const ImageInitialization &init, llvm::ArrayRef<RvaRange> functions,
-                       unsigned &remainingEntries) {
-            const auto *section = image.sectionAtRva(table.header);
-            if (!section || (!section->immutable() && !section->writableData()) ||
-                section->shared || table.header % 8 || image.advertisesDynamicRelocations()) {
-                call.reject(FailureCode::ImageMemory,
-                            "invalid guest pointer table at " + hex(table.header));
+                       unsigned &remainingEntries) try {
+            const auto origin = table.originRva();
+            const auto *section = image.sectionAtRva(origin);
+            if (!section && table.forward() && table.first == table.last && origin) {
+                // An empty half-open range may denote the end of its owning section.
+                section = image.sectionAtRva(origin - 1);
             }
+
+            if (!section || (!section->immutable() && !section->writableData()) ||
+                section->shared || origin % 8 || image.advertisesDynamicRelocations()) {
+                call.reject(FailureCode::ImageMemory,
+                            "invalid guest pointer table at " + hex(origin));
+            }
+
             const auto sectionEnd = uint64_t(section->rva) + section->virtualSize;
-            const auto slotRange = [&](uint64_t slot) {
-                RvaRange field{slot, slot + 8};
+            const auto slotRange = [&](uint32_t slot) {
+                RvaRange field{slot, uint64_t(slot) + 8};
                 if (field.end > sectionEnd || field.end > image.module().sizeOfImage ||
                     !rangesIn(functions, field).empty()) {
                     call.reject(FailureCode::ImageMemory,
                                 "invalid bounded table extent at " + hex(slot));
                 }
+
                 return field;
             };
 
-            const auto head = slotRange(table.header);
-            init.validateRelocations(head);
-            if (!init.exclusionsIn(head).empty() || !init.relocationsIn(head).empty()) {
-                call.reject(FailureCode::ImageMemory,
-                            "unstable bounded table header at " + hex(table.header));
-            }
-
-            const auto count = static_cast<uint32_t>(image.initialQword(table.header));
-            table.sentinel = count == UINT32_MAX;
-            table.first = static_cast<uint32_t>(head.end);
-            table.last = table.first;
-            if (!table.sentinel) {
+            const auto count = initialCount(table, call, image, init, sectionEnd, slotRange);
+            const bool sentinel = table.reverse() && table.reverse()->sentinel;
+            if (!sentinel) {
                 reserveTableEntries(table, call, count, remainingEntries);
             }
 
-            for (unsigned i = 0; table.sentinel || i < count; ++i) {
-                const uint32_t slot = table.last;
+            for (unsigned i = 0; sentinel || i < count; ++i) {
+                const uint32_t slot = table.first + 8 * i;
                 const auto field = slotRange(slot);
                 const auto value = image.initialQword(slot);
                 const bool nullSlot = !value && init.relocationsIn(field).empty();
-                if (table.sentinel && !nullSlot) {
-                    reserveTableEntries(table, call, 1, remainingEntries);
+                if (sentinel && !nullSlot) {
+                    reserveTableEntries(table, call, 1, remainingEntries, i);
                 }
 
                 init.validateRelocations(field);
@@ -235,7 +354,8 @@ namespace forge::x86 {
                         call.reject(FailureCode::ImageMemory,
                                     "unstable NULL table slot at " + hex(slot));
                     }
-                    if (table.sentinel) {
+
+                    if (sentinel) {
                         break;
                     }
                 } else {
@@ -243,18 +363,26 @@ namespace forge::x86 {
                         relocatedPointerRva(call, image.module(), init, slot, value));
                 }
 
-                table.last += 8;
+                if (table.reverse()) {
+                    table.last = static_cast<uint32_t>(field.end);
+                }
             }
 
-            if (image.overlapsDirectory(table.extent())) {
+            if (table.extent().begin < table.extent().end &&
+                image.overlapsDirectory(table.extent())) {
                 call.reject(FailureCode::ImageMemory,
-                            "bounded pointer table overlaps a PE directory at " +
-                                hex(table.header));
+                            "bounded pointer table overlaps a PE directory at " + hex(origin));
             }
 
             llvm::sort(table.targets);
             table.targets.erase(std::unique(table.targets.begin(), table.targets.end()),
                                 table.targets.end());
+        } catch (InspectionError &error) {
+            if (error.context.instructionRva != call.rva) {
+                call.reject(error.kind, error.what());
+            }
+
+            throw;
         }
     } // namespace
 
@@ -274,6 +402,18 @@ namespace forge::x86 {
             return it == steps.end() ? nullptr : &it->second;
         };
         Sequence seq{call, lookup, call.rva};
+        if (call.isRegisterCall()) {
+            auto table = forwardLoop(seq, ops);
+            try {
+                readTable(table, call, image, init, functions, remainingEntries);
+            } catch (InspectionError &error) {
+                table.annotate(error.context);
+                throw;
+            }
+
+            return table;
+        }
+
         const auto loop = prefix(seq, ops);
         const auto scanner = scan(seq, loop, ops);
         const auto rva = ops.ripRva(loop.source, 1);
@@ -285,16 +425,12 @@ namespace forge::x86 {
         const auto header = loop.source.opcode == "LEA64r"
                                 ? slot
                                 : readImmutableImagePointer(call, image, init, slot);
-        BoundedTableCall table{header,
+        BoundedTableCall table{0,
                                0,
-                               0,
-                               loop.source.rva,
-                               loop.countLoad.rva,
-                               loop.zeroTest.rva,
-                               scanner.read,
-                               loop.cursor,
-                               false,
-                               {}};
+                               {},
+                               ReverseTableProof{header, loop.source.rva, loop.countLoad.rva,
+                                                 loop.zeroTest.rva, scanner.read, loop.cursor,
+                                                 false}};
         readTable(table, call, image, init, functions, remainingEntries);
         return table;
     } catch (InspectionError &error) {
@@ -305,7 +441,7 @@ namespace forge::x86 {
     }
 
     void validateTableLoop(const RecoveredFunction &function, const Step &call,
-                           const BoundedTableCall &table, const InstructionOperands &ops) {
+                           const BoundedTableCall &table, const InstructionOperands &ops) try {
         const auto lookup = [&](uint32_t rva, bool forward) -> const Step * {
             if (!forward && !rva) {
                 return nullptr;
@@ -313,11 +449,28 @@ namespace forge::x86 {
             return function.instructionContaining(forward ? rva : rva - 1);
         };
         Sequence seq{call, lookup, call.rva};
+        if (const auto *forward = table.forward()) {
+            const auto end = function.instructionContaining(forward->backedge)->next;
+            const auto protectedAddress = [&](uint32_t rva) {
+                return rva > forward->firstDefinition && rva < end;
+            };
+
+            if (protectedAddress(function.entry)) {
+                seq.reject();
+            }
+
+            validateIncomingEdges(
+                function, call, protectedAddress,
+                {{forward->backedge, forward->pointerLoad}, {forward->nullBranch, call.next}});
+            return;
+        }
+
+        const auto &reverse = *table.reverse();
         const auto loop = prefix(seq, ops);
         const auto scanner = scan(seq, loop, ops);
         uint32_t end = call.next;
         std::set<std::pair<uint32_t, uint32_t>> branches{{loop.sentinelBranch.rva, scanner.start},
-                                                         {scanner.finish, table.zeroGuard},
+                                                         {scanner.finish, reverse.zeroGuard},
                                                          {scanner.backedge, scanner.increment}};
         if (call.flow != Flow::TerminalCall) {
             seq.seekForward(call.next);
@@ -334,30 +487,18 @@ namespace forge::x86 {
             end = again.next;
         }
         const auto protectedAddress = [&](uint32_t rva) {
-            return (rva > table.baseDefinition && rva < end) ||
+            return (rva > reverse.baseDefinition && rva < end) ||
                    (rva >= scanner.start && rva < scanner.end);
         };
         if (protectedAddress(function.entry) ||
             protectedAddress(static_cast<uint32_t>(loop.empty.relativeTarget())) ||
-            (table.baseDefinition < scanner.end && scanner.start < end)) {
+            (reverse.baseDefinition < scanner.end && scanner.start < end)) {
             seq.reject();
         }
 
-        for (const auto &[leader, block] : function.graph) {
-            const auto &last = block.steps.back();
-            for (const auto dest : block.successors) {
-                if (!protectedAddress(dest)) {
-                    continue;
-                }
-                const bool sequential =
-                    last.next == dest && dest != scanner.start &&
-                    (last.flow == Flow::Conditional || last.flow == Flow::Fallthrough);
-                if (!sequential && !branches.contains({last.rva, dest})) {
-                    call.reject(FailureCode::UnsupportedControlFlow,
-                                "edge bypasses bounded table proof from " + hex(last.rva) + " to " +
-                                    hex(dest));
-                }
-            }
-        }
+        validateIncomingEdges(function, call, protectedAddress, branches, scanner.start);
+    } catch (InspectionError &error) {
+        table.annotate(error.context);
+        throw;
     }
 } // namespace forge::x86

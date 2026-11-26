@@ -46,16 +46,42 @@ namespace forge::x86 {
         bool recursiveTail = false; // Rejected by recovery, retained for failure reporting.
     };
 
-    // The header is followed by aligned guest pointers in [first, last). The scan
-    // may inspect one additional proved NULL qword for a sentinel layout.
-    struct BoundedTableCall {
-        uint32_t header, first, last;
-        uint32_t baseDefinition, countLoad, zeroGuard, scanRead;
+    struct ReverseTableProof {
+        uint32_t header, baseDefinition, countLoad, zeroGuard, scanRead;
         unsigned cursor;
         bool sentinel;
-        std::vector<uint32_t> targets;
+    };
 
-        RvaRange extent() const { return {header, uint64_t(last) + (sentinel ? 8 : 0)}; }
+    struct ForwardTableProof {
+        uint32_t firstDefinition, lastDefinition, entryCompare, emptyBranch;
+        uint32_t pointerLoad, nullTest, nullBranch, increment, latchCompare, backedge;
+        unsigned cursor, limit, target;
+    };
+
+    struct BoundedTableCall {
+        uint32_t first, last;
+        std::vector<uint32_t> targets;
+        std::variant<ReverseTableProof, ForwardTableProof> proof;
+
+        const ReverseTableProof *reverse() const { return std::get_if<ReverseTableProof>(&proof); }
+
+        const ForwardTableProof *forward() const { return std::get_if<ForwardTableProof>(&proof); }
+
+        uint32_t originRva() const { return reverse() ? reverse()->header : first; }
+
+        void annotate(FailureContext &context) const {
+            if (const auto *loop = forward()) {
+                context.tableFirstRva = first;
+                context.tableLastRva = last;
+                context.pointerLoadRva = loop->pointerLoad;
+            } else {
+                context.tableHeaderRva = reverse()->header;
+            }
+        }
+
+        RvaRange extent() const {
+            return {originRva(), uint64_t(last) + (reverse() && reverse()->sentinel ? 8 : 0)};
+        }
     };
 
     struct InitializerTable {
@@ -102,7 +128,7 @@ namespace forge::x86 {
 
         void annotateTableFailure(FailureContext &context, uint32_t targetRva) const {
             context.sourceCall = CallLocation{caller, instruction};
-            context.tableHeaderRva = table()->header;
+            table()->annotate(context);
             context.tableTargetRva = targetRva;
         }
 
