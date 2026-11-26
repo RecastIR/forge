@@ -64,6 +64,19 @@ def generate(output, mc, link, dlltool, clang):
         for name in ("executable-return", "executable-call", "executable-data", "executable-fault",
                      "executable-tib", "executable-guarded-call", "recursive-continuation"):
             image(f"{name}.exe", (sources / f"{name}.s").read_text())
+        protect_def = work / "memory.def"
+        protect_def.write_text("LIBRARY KERNEL32.dll\nEXPORTS\nVirtualProtect\nVirtualAlloc\nVirtualFree\nVirtualQuery\nGetSystemInfo\n")
+        run(dlltool, "-m", "i386:x86-64", "-d", protect_def, "-l", "memory.lib")
+        memory_libraries = ["memory.lib", "KERNEL32.dll.lib"]
+        protect = (sources / "executable-virtual-protect.s").read_text()
+        image("executable-virtual-protect.exe", protect, link_flags=memory_libraries)
+        image("executable-virtual-protect-denied.exe", "deny_write = 1\n" + protect, link_flags=memory_libraries)
+        reference = "virtual-protect-reference.exe"
+        run(clang, "--target=x86_64-pc-windows-msvc", "-O1", "-ffreestanding", "-fno-stack-protector",
+            "-c", sources / "virtual-protect-reference.c", "-o", "reference.obj")
+        run(link, "/nodefaultlib", "/timestamp:0", "/entry:entry", "/subsystem:console",
+            "/out:" + reference, "reference.obj", *memory_libraries)
+        (output / reference).write_bytes((work / reference).read_bytes())
         returns = (sources / "executable-return.s").read_text()
         for dll in ("KERNEL32.dll", "msvcrt.dll"):
             name = dll.split(".")[0].lower()
