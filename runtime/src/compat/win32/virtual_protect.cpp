@@ -4,6 +4,7 @@
 #include <bit>
 
 namespace {
+    constexpr uint64_t highestUser = UINT64_C(0x7ffffffeffff);
     constexpr uint32_t noAccess = 1, readOnly = 2, readWrite = 4, writeCopy = 8;
     constexpr uint32_t invalidParameter = 87, invalidAddress = 487, inaccessible = 998;
     constexpr uint32_t guard = 0x100, noCache = 0x200, writeCombine = 0x400;
@@ -42,6 +43,10 @@ namespace {
             return fail(invalidParameter);
         }
 
+        if (output > highestUser - (sizeof(uint32_t) - 1)) {
+            return fail(inaccessible);
+        }
+
         forge_rt_memory_fault outputFault{};
         const auto checked = checkProtectionOutput(owner, active, output, outputFault);
         if (checked == FORGE_RT_GUEST_FAULT) {
@@ -60,7 +65,6 @@ namespace {
         }
 
         // Windows probes a valid protection mask and the output before checking zero size.
-        constexpr uint64_t highestUser = UINT64_C(0x7ffffffeffff);
         if (!size || address > highestUser || size - 1 > highestUser - address) {
             return fail(invalidParameter);
         }

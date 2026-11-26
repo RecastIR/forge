@@ -48,6 +48,18 @@ namespace {
         }
     };
 
+    void highOutputEntry(forge_rt_execution *execution) {
+        Access access(*execution);
+        constexpr uint64_t high = UINT64_C(0x800000000000);
+        CHECK(access.write(high, 0x11223344) == FORGE_RT_OK);
+        CHECK(access.protect(base, 1, 2, high) == FORGE_RT_OK && access.result == 0);
+        uint32_t error{};
+        CHECK(forge_rt_get_last_error(execution->instance, execution->thread, &error) ==
+              FORGE_RT_OK);
+        CHECK(error == 998 && access.read(high) == 0x11223344);
+        execution->result = {FORGE_RT_RETURNED, FORGE_RT_OK, 42, {}, 0};
+    }
+
     void legacyEntry(forge_rt_execution *execution) {
         Access access(*execution);
         CHECK(access.protect(base, 1, 2) == FORGE_RT_UNSUPPORTED_PAGE_PROTECTION);
@@ -190,6 +202,19 @@ void testRuntimePageProtection() {
     CHECK(forge_rt_process_create(FORGE_RT_ABI_VERSION, &process) == FORGE_RT_OK);
     CHECK(forge_rt_process_register(process, &legacy.functions.crt.named.artifact) == FORGE_RT_OK);
     forge_rt_process_result result{};
+    CHECK(forge_rt_process_run(process, nullptr, &result) == FORGE_RT_OK && result.value == 42);
+    CHECK(forge_rt_process_destroy(process) == FORGE_RT_OK);
+
+    // A host-selected guest mapping can exist outside the Windows user VA range.
+    const forge_rt_region_template highRow{UINT64_C(0x800000000000), page, 0, 0, rw};
+    auto high = artifact;
+    auto &highDescriptor = high.pe.functions.crt.named.artifact;
+    highDescriptor.base = highRow.start;
+    highDescriptor.regions = &highRow;
+    highDescriptor.regionCount = 1;
+    highDescriptor.entry = highOutputEntry;
+    CHECK(forge_rt_process_create(FORGE_RT_ABI_VERSION, &process) == FORGE_RT_OK);
+    CHECK(forge_rt_process_register(process, &highDescriptor) == FORGE_RT_OK);
     CHECK(forge_rt_process_run(process, nullptr, &result) == FORGE_RT_OK && result.value == 42);
     CHECK(forge_rt_process_destroy(process) == FORGE_RT_OK);
 }
