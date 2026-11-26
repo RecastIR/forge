@@ -987,21 +987,6 @@ namespace forge {
             ranges.push_back({rva, rva + sizeof(uint64_t)});
         }
 
-        std::vector<RvaRange> mergeRanges(std::vector<RvaRange> ranges) {
-            llvm::sort(ranges, [](auto a, auto b) { return a.begin < b.begin; });
-            std::vector<RvaRange> merged;
-
-            for (auto range : ranges) {
-                if (!merged.empty() && range.begin <= merged.back().end) {
-                    merged.back().end = std::max(merged.back().end, range.end);
-                } else {
-                    merged.push_back(range);
-                }
-            }
-
-            return merged;
-        }
-
         std::vector<RvaRange> directoryRanges(const llvm::object::COFFObjectFile &coff) {
             std::vector<RvaRange> ranges;
 
@@ -1023,6 +1008,21 @@ namespace forge {
         }
 
     } // namespace
+
+    std::vector<RvaRange> mergeRanges(std::vector<RvaRange> ranges) {
+        llvm::sort(ranges, [](auto a, auto b) { return a.begin < b.begin; });
+        std::vector<RvaRange> merged;
+
+        for (auto range : ranges) {
+            if (!merged.empty() && range.begin <= merged.back().end) {
+                merged.back().end = std::max(merged.back().end, range.end);
+            } else {
+                merged.push_back(range);
+            }
+        }
+
+        return merged;
+    }
 
     llvm::ArrayRef<RvaRange> rangesIn(llvm::ArrayRef<RvaRange> view, RvaRange range) {
         auto begin = llvm::lower_bound(
@@ -1401,7 +1401,14 @@ namespace forge {
         return {};
     }
 
-    ImageInitialization ParsedImage::imageInitialization() const {
+    bool ParsedImage::overlapsDirectory(RvaRange range) const {
+        return llvm::any_of(directoryRanges(*coff), [range](RvaRange dir) {
+            return dir.begin < range.end && range.begin < dir.end;
+        });
+    }
+
+    ImageInitialization
+    ParsedImage::imageInitialization(const std::set<uint32_t> &executableDataSlots) const {
         ImageInitialization result;
         result.excluded = loaderWrittenRanges();
         std::vector<const Relocation *> ordered;
@@ -1452,7 +1459,8 @@ namespace forge {
                 return dir.begin < field.end && field.begin < dir.end;
             });
 
-            if (rel->type != COFF::IMAGE_REL_BASED_DIR64 || section->permissions[2] == 'x' ||
+            if (rel->type != COFF::IMAGE_REL_BASED_DIR64 ||
+                (section->permissions[2] == 'x' && !executableDataSlots.contains(rel->rva)) ||
                 isMetadata || !result.exclusionsIn(field).empty()) {
                 unavailable.push_back(field);
             }

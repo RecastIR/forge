@@ -213,6 +213,8 @@ jobs:
           echo "cmp16mi=success" >> "$GITHUB_OUTPUT"
           python -B tests/integration/test_executable.py windows-app-type executables
           echo "app_type=success" >> "$GITHUB_OUTPUT"
+          python -B tests/integration/test_executable.py windows-bounded-call executables
+          echo "bounded_call=success" >> "$GITHUB_OUTPUT"
           python -B tests/integration/test_executable.py windows-tail-jump executables
           echo "tail_jump=success" >> "$GITHUB_OUTPUT"
           python -B tests/integration/test_executable.py windows-startup build/fixtures/windows-x64

@@ -177,6 +177,8 @@ namespace forge::x86 {
                 pending.push_back(begin);
             }
 
+            const std::map<uint32_t, Step> &steps() const { return decoded; }
+
             bool advance(CallFlow classify);
             void resume(uint32_t instruction);
             bool hasBypassedProof() const;
@@ -220,6 +222,7 @@ namespace forge::x86 {
 
             std::map<uint32_t, Leader> leaders;
             std::vector<uint32_t> pending;
+            std::set<uint32_t> memoryCalls;
             void schedule(const Step &s, int64_t address, bool explicitEntry,
                           std::optional<unsigned> index = {});
             std::optional<int64_t> registerTarget(Step &call);
@@ -361,6 +364,11 @@ namespace forge::x86 {
         void Discovery::recordEdges(Step &s, CallFlow classify) {
             if (s.isRegisterCall()) {
                 s.flow = classify(s, registerTarget(s));
+            } else if (classify && s.isMemoryCall() &&
+                       !InstructionOperands(*dis.getContext().getRegisterInfo(), 0).ripRva(s, 0)) {
+                // Bounds can originate on another branch which has not yet been traced.
+                memoryCalls.insert(s.rva);
+                s.flow = Flow::TerminalCall;
             } else if (classify && (s.isDirectCall() || s.isMemoryCall())) {
                 s.flow = classify(s, s.directCallTarget());
             } else if (s.flow == Flow::Return) {
@@ -598,7 +606,15 @@ namespace forge::x86 {
                                       FailureCode::FunctionSize);
             }
 
-            while (!pending.empty() || !unresolved.empty()) {
+            while (!pending.empty() || !unresolved.empty() || !memoryCalls.empty()) {
+                if (pending.empty() && unresolved.empty()) {
+                    const auto site = memoryCalls.extract(memoryCalls.begin()).value();
+                    auto &step = decoded.at(site);
+                    if (classify(step, {}) == Flow::Fallthrough) {
+                        resume(site);
+                    }
+                    continue;
+                }
                 if (pending.empty()) {
                     resolve(unresolved.extract(unresolved.begin()).value());
                     continue;
@@ -660,6 +676,8 @@ namespace forge::x86 {
     bool RecordedCFG::advance(CallFlow classify) { return state->advance(classify); }
 
     void RecordedCFG::resume(uint32_t instruction) { state->resume(instruction); }
+
+    const std::map<uint32_t, Step> &RecordedCFG::steps() const & { return state->steps(); }
 
     bool RecordedCFG::hasBypassedProof() const { return state->hasBypassedProof(); }
 

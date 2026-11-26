@@ -29,6 +29,10 @@ namespace forge::x86 {
             if (context.sourceCall) {
                 const auto &source = *context.sourceCall;
                 const auto &call = group.function(source.caller).calls.at(source.instruction);
+                if (call.table()) {
+                    return ExecutableUnresolvedCall{source.caller, source.instruction,
+                                                    context.tableTargetRva};
+                }
                 if (!call.external()) {
                     return ExecutableUnresolvedCall{source.caller, source.instruction,
                                                     call.guest().rva};
@@ -65,25 +69,31 @@ namespace forge::x86 {
                     continue;
                 }
 
-                if (failed && failed->callerRva == function.entry &&
-                    failed->instructionRva == instruction) {
-                    continue;
+                if (const auto *table = call.table()) {
+                    readiness.boundedCalls.push_back(
+                        {function.entry, instruction, table->first, table->last, table->targets});
                 }
 
-                const auto target = call.guest().rva;
+                const bool failedSite = failed && failed->callerRva == function.entry &&
+                                        failed->instructionRva == instruction;
                 if (call.isTailJump()) {
-                    if (!call.guest().recursiveTail) {
-                        readiness.tailTransfers.push_back({function.entry, instruction, target});
+                    if (!failedSite && !call.guest().recursiveTail) {
+                        readiness.tailTransfers.push_back(
+                            {function.entry, instruction, call.guest().rva});
                     }
-
                     continue;
                 }
-                const auto callee = group.functions().find(target);
 
-                if (callee == group.functions().end() || callee->second.graph.empty()) {
-                    readiness.unresolvedCalls.push_back({function.entry, instruction, target});
-                } else {
-                    readiness.calls.push_back({function.entry, instruction, target});
+                for (const auto target : call.guestTargets()) {
+                    if (failedSite && (!call.table() || failed->targetRva == target)) {
+                        continue;
+                    }
+                    const auto callee = group.functions().find(target);
+                    if (callee == group.functions().end() || callee->second.graph.empty()) {
+                        readiness.unresolvedCalls.push_back({function.entry, instruction, target});
+                    } else {
+                        readiness.calls.push_back({function.entry, instruction, target});
+                    }
                 }
             }
         }

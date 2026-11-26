@@ -718,6 +718,97 @@ class Readiness(Workspace):
         self.assertEqual(self.output.read_bytes(), b"previous output")
         return diagnostic
 
+    def test_bounded_table_rejections(self):
+        original, symbols = bounded_fixture()
+        layout = Layout(original)
+        base, = struct.unpack_from("<Q", original, layout.opt + 24)
+        table = symbols["count_table"]
+        site = symbols["count_site"]
+        # Identify the exact relocation belonging to the first constructor.
+        directory, size = layout.directory(5)
+        block = layout.file_offset(directory)
+        end = block + size
+        fields = {}
+        while block < end:
+            page, length = struct.unpack_from("<II", original, block)
+            for n in range(block + 8, block + length, 2):
+                fixup, = struct.unpack_from("<H", original, n)
+                if fixup >> 12 == 10:
+                    fields[page + (fixup & 4095)] = n
+            block += length
+
+        for mutation in ("missing_reloc", "wrong_reloc", "excess_count", "truncated",
+                         "no_terminator", "unreadable", "wrong_index", "outside", "middle", "guard",
+                         "scan_guard", "entry_bypass", "provenance", "metadata", "overlap"):
+            with self.subTest(mutation=mutation):
+                data = bytearray(original)
+                expected_site = site
+                offset = layout.file_offset
+                header = offset(table)
+                caller = offset(symbols["run_count"])
+                at = offset(site)
+                if mutation in ("missing_reloc", "wrong_reloc"):
+                    rel = fields[table + 8]
+                    v, = struct.unpack_from("<H", data, rel)
+                    struct.pack_into("<H", data, rel, 0 if mutation == "missing_reloc" else (v & 4095) | 0x3000)
+                elif mutation == "excess_count":
+                    struct.pack_into("<Q", data, header, 1025)
+                elif mutation in ("truncated", "no_terminator"):
+                    last = symbols["one_table"]
+                    struct.pack_into("<I", data, layout.opt + 16, symbols["run_one"])
+                    struct.pack_into("<Q", data, offset(last), 2 if mutation == "truncated" else 2**64 - 1)
+                    sec = layout.section_header(last)
+                    struct.pack_into("<I", data, sec + 8, last - layout.u32(sec + 12) + 16)
+                    expected_site = symbols["run_one"] + site - symbols["run_count"]
+                elif mutation == "unreadable":
+                    sec = layout.section_header(table)
+                    struct.pack_into("<I", data, sec + 36, layout.u32(sec + 36) & ~0x40000000)
+                elif mutation == "wrong_index":
+                    self.assertEqual(data[at + 2:at + 6], bytes.fromhex("4883eb08"))
+                    data[at + 5] = 16
+                elif mutation in ("outside", "middle"):
+                    struct.pack_into("<Q", data, header + 8,
+                                     base + (table if mutation == "outside" else symbols["writer"] + 1))
+                elif mutation == "guard":
+                    # A jump around the zero check must not become a valid backedge.
+                    branch = data.index(bytes.fromhex("85c974"), caller, at) + 2
+                    data[branch + 1] = at - (branch + 2)
+                elif mutation == "entry_bypass":
+                    # Add a predecessor before the base definition while preserving
+                    # every instruction of the valid reverse loop and scan.
+                    self.assertEqual(data[caller + 2:caller + 6], bytes.fromhex("4883ec28"))
+                    data[caller + 2:caller + 6] = bytes([0x74, at - (caller + 4), 0x90, 0x90])
+                elif mutation == "scan_guard":
+                    branch = data.index(bytes.fromhex("83f8ff74"), caller, at) + 3
+                    data[branch + 1] += 2
+                elif mutation == "provenance":
+                    self.assertEqual(data[at:at + 2], bytes.fromhex("ff13"))
+                    data[at + 1] = 0x16
+                elif mutation == "metadata":
+                    # The loader writes this four-byte TLS index over a function pointer.
+                    tls = layout.directory(9)[0]
+                    if not tls:
+                        # Reserve directory bytes in the unused, zero-filled section padding.
+                        sec = layout.section_header(table)
+                        old_size = layout.u32(sec + 8)
+                        tls = table - table % 4096 + ((old_size + 7) & ~7)
+                        struct.pack_into("<I", data, sec + 8, tls - (table & ~4095) + 40)
+                        struct.pack_into("<II", data, layout.directories + 9 * 8, tls, 40)
+                    tls_offset = header + tls - table
+                    struct.pack_into("<Q", data, tls_offset + 16, base + table + 8)
+                else:
+                    rows, size = layout.directory(3)
+                    rec = offset(rows)
+                    while layout.u32(rec) != symbols["two"]:
+                        rec += 12
+                        self.assertLess(rec, offset(rows) + size)
+                    struct.pack_into("<I", data, rec + 4, symbols["writer"] + 1)
+                report = self.reject(data)
+                ctx = report["context"]
+                self.assertEqual(ctx.get("instruction_rva"), hex(expected_site), report["message"])
+                self.assertEqual(ctx.get("opcode"), "CALL64m")
+                self.assertNotIn("iat_slot_rva", ctx)
+
     def test_tail_cycles_report_only_admitted_edges(self):
         data = bytearray((FIXTURES / "cfg.exe").read_bytes())
         layout = Layout(data)
@@ -1160,6 +1251,8 @@ class Reference(Workspace):
     def test_executables(self):
         headers = image("headers")
         expected = {
+            image("bounded-cleanup").name: (42, b"", b""),
+            image("bounded-call").name: (42, b"", b""),
             image("tail-jump").name: (42, b"", b""),
             headers.name: (header_result(headers.read_bytes()), b"", b""),
             image("cmp16mi").name: CMP16MI,
@@ -1207,9 +1300,9 @@ class WindowsComparison(unittest.TestCase):
         self.assertEqual((result.returncode, result.stdout, result.stderr), CMP16MI)
 
 
-class WindowsTailJump(unittest.TestCase):
-    def test_tail_jump(self):
-        pe = image("tail-jump").resolve()
+class WindowsExecutable(unittest.TestCase):
+    def check_image(self, name):
+        pe = image(name).resolve()
         manifest = FIXTURES / "SHA256SUMS"
         self.assertEqual(hashlib.sha256(manifest.read_bytes()).hexdigest(), os.environ["PE_MANIFEST_SHA256"])
         digest = hashlib.sha256(pe.read_bytes()).hexdigest()
@@ -1217,6 +1310,17 @@ class WindowsTailJump(unittest.TestCase):
         result = subprocess.run([pe], capture_output=True, timeout=10)
         print(f"{pe.name} sha256={digest} exit={result.returncode} stdout={result.stdout.hex()} stderr={result.stderr.hex()}")
         self.assertEqual((result.returncode, result.stdout, result.stderr), (42, b"", b""))
+
+
+class WindowsTailJump(WindowsExecutable):
+    def test_tail_jump(self):
+        self.check_image("tail-jump")
+
+
+class WindowsBoundedCall(WindowsExecutable):
+    def test_bounded_call(self):
+        self.check_image("bounded-call")
+        self.check_image("bounded-cleanup")
 
 
 class WindowsStartup(unittest.TestCase):
@@ -1269,7 +1373,95 @@ class WindowsAppType(unittest.TestCase):
                 self.assertEqual((result.returncode, result.stdout, result.stderr), expected)
 
 
+def bounded_fixture():
+    pe = image("bounded-call")
+    module = json.loads(run(FORGE, "inspect", pe, "--format", "json", check=True).stdout)["modules"][0]
+    symbols = {n: int(e["rva"], 16) for e in module["exports"] for n in e["names"]}
+    return pe.read_bytes(), symbols
+
+
 class Console(Workspace):
+    def test_bounded_zero_filled_terminator(self):
+        original, symbols = bounded_fixture()
+        data = bytearray(original)
+        layout = Layout(data)
+        end = symbols["one_table"] + 16
+        section = layout.section_header(end)
+        raw_size = end - layout.u32(section + 12)
+        self.assertEqual(raw_size % 512, 0)
+        self.assertLess(raw_size, layout.u32(section + 16))
+        struct.pack_into("<I", data, section + 16, raw_size)
+        pe = self.dir / "zero-tail.exe"
+        pe.write_bytes(data)
+        self.compile(pe)
+        result = self.program()
+        self.assertEqual((result.returncode, result.stdout, result.stderr), (42, b"", b""))
+
+    def test_bounded_live_failures(self):
+        original, symbols = bounded_fixture()
+        layout = Layout(original)
+        base, = struct.unpack_from("<Q", original, layout.opt + 24)
+        site = symbols["count_site"]
+        header = symbols["count_table"]
+        prefix = f"forge: bounded call RVA {site:#x} table RVA {header:#x}\n".encode()
+        for target in ("foreign", "null", "bad_nonvolatile", "bad_return", "terminal", "all_terminal", "shorten_mixed", "tamper_count", "tamper_scan"):
+            with self.subTest(target=target):
+                data = bytearray(original)
+                def set_pointer(slot, rva):
+                    struct.pack_into("<Q", data, layout.file_offset(slot), base + rva if rva else 0)
+
+                if target in ("bad_nonvolatile", "bad_return"):
+                    # These become legitimate entries but violate the normal return contract.
+                    set_pointer(header + 32, symbols[target])
+                    expected = prefix + (b"forge: guest ABI fault\n" if target == "bad_nonvolatile"
+                                         else b"forge: guest control fault\n")
+                elif target.startswith("tamper_"):
+                    struct.pack_into("<I", data, layout.opt + 16, symbols[target])
+                    at, table = site, header
+                    if target == "tamper_scan":
+                        at = symbols["run_empty"] + site - symbols["run_count"]
+                        table = symbols["empty_table"]
+                    expected = (f"forge: bounded call RVA {at:#x} table RVA {table:#x}\n"
+                                "forge: guest control fault\n").encode()
+                elif target in ("terminal", "all_terminal", "shorten_mixed"):
+                    root = symbols["shorten_mixed"] if target == "shorten_mixed" else symbols["run_mixed"]
+                    struct.pack_into("<I", data, layout.opt + 16, root)
+                    if target == "all_terminal":
+                        set_pointer(symbols["mixed_table"] + 8, symbols["terminal"])
+                    expected = b""
+                else:
+                    # The writer retargets an earlier slot after recovery. Its replacement
+                    # cell supplies either NULL or a body admitted only at another site.
+                    if target == "null":
+                        writer = layout.file_offset(symbols["writer"])
+                        insn = data.index(bytes.fromhex("488b05"), writer)
+                        data[insn:insn + 7] = bytes.fromhex("48c7c000000000")
+                    else:
+                        set_pointer(symbols["replacement"], symbols["exclusive"])
+                    expected = prefix + b"forge: guest control fault\n"
+                pe = self.dir / "mutation.exe"
+                pe.write_bytes(data)
+                self.compile(pe)
+                result = self.program()
+                self.assertEqual((result.returncode, result.stdout, result.stderr),
+                                 (dict(terminal=57, all_terminal=57, shorten_mixed=42).get(target, 125), b"", expected))
+
+
+    def test_bounded_call(self):
+        self.compile(image("bounded-cleanup"))
+        cleanup = self.program()
+        self.assertEqual((cleanup.returncode, cleanup.stdout, cleanup.stderr), (42, b"", b""))
+        pe = image("bounded-call")
+        self.compile(pe)
+        result = self.program()
+        self.assertEqual((result.returncode, result.stdout, result.stderr), (42, b"", b""))
+        data = pe.read_bytes()
+        preferred, = struct.unpack_from("<Q", data, Layout(data).opt + 24)
+        run(CONTRACT, "--guest-base", hex(preferred + 0x30000000), pe, self.output,
+            OPT, LLC, "/usr/bin/xcrun", *LINK, check=True)
+        result = self.program()
+        self.assertEqual((result.returncode, result.stdout, result.stderr), (42, b"", b""))
+
     def test_tail_jump(self):
         pe = image("tail-jump")
         self.compile(pe)
@@ -2074,5 +2266,5 @@ if __name__ == "__main__":
     suites = {"compiler": ("Portable", "StartupAdmission"), "object": ("Object",),
               "readiness": ("Readiness",), "native": ("Native", "Console"), "reference": ("Reference",),
               "windows-cmp16mi": ("WindowsComparison",), "windows-app-type": ("WindowsAppType",),
-              "windows-tail-jump": ("WindowsTailJump",), "windows-startup": ("WindowsStartup",)}
+              "windows-bounded-call": ("WindowsBoundedCall",), "windows-tail-jump": ("WindowsTailJump",), "windows-startup": ("WindowsStartup",)}
     unittest.main(argv=[__file__, *suites[MODE]], verbosity=2)

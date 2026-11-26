@@ -470,7 +470,7 @@ namespace forge::x86 {
 
     const ImageInitialization &ImageMemory::contents() {
         if (!initialization) {
-            initialization = source.imageInitialization();
+            initialization = source.imageInitialization(executableDataSlots);
         }
 
         return *initialization;
@@ -493,6 +493,16 @@ namespace forge::x86 {
                             ") at selected image base " + hex(loadBase) + " with SizeOfImage " +
                             hex(source.module().sizeOfImage));
         }
+    }
+
+    void ImageMemory::boundedTable(const Step &step, const BoundedTableCall &table) {
+        const auto &section = *source.sectionAtRva(table.header);
+        if (section.permissions[2] == 'x') {
+            for (uint32_t slot = table.first; slot < table.last; slot += 8) {
+                executableDataSlots.insert(slot);
+            }
+        }
+        select(step, section, table.extent());
     }
 
     void ImageMemory::initializerTable(const Step &step, uint32_t first, uint32_t last) {

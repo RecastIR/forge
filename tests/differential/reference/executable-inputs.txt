@@ -28,6 +28,8 @@ crt-term-recursive-exit.exe
 crt-term-recursive-order.exe
 crt-term-recursive.exe
 crt-term-register.exe
+executable-bounded-call.exe
+executable-bounded-cleanup.exe
 executable-cmp16mi.exe
 executable-headers.exe
 executable-import-register.exe

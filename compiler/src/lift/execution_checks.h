@@ -18,6 +18,7 @@ namespace forge::x86 {
 
         bool managed() const { return result != nullptr; }
 
+        uint64_t tableOrigin = 0;
         void guard(llvm::Value *condition, uint32_t fault = FORGE_RT_FAULT_ABI);
         void requireSupported(llvm::Value *condition, forge_rt_status status = FORGE_RT_OK);
         void unsupported(forge_rt_status status);

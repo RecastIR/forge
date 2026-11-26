@@ -33,6 +33,9 @@ namespace forge::x86 {
         ir.CreateStore(ir.getInt32(FORGE_RT_EXECUTION_FAULT), field(0));
         ir.CreateStore(ir.getInt32(FORGE_RT_GUEST_FAULT), field(1));
         ir.CreateStore(ir.getInt32(fault), field(4));
+        if (tableOrigin) {
+            ir.CreateStore(ir.getInt64(tableOrigin), field(2));
+        }
     }
 
     void ExecutionChecks::fail(uint32_t fault) {
@@ -97,6 +100,12 @@ namespace forge::x86 {
                 word, word, word);
             ir.CreateCall(report, {function->getArg(0), address, ir.getInt32(size),
                                    ir.getInt32(access), ir.getInt32(stack)});
+            if (tableOrigin) {
+                auto *kind = ir.CreateLoad(word, field(0));
+                auto *fault = ir.CreateICmpEQ(kind, ir.getInt32(FORGE_RT_EXECUTION_FAULT));
+                ir.CreateStore(ir.CreateSelect(fault, ir.getInt64(tableOrigin), ir.getInt64(0)),
+                               field(2));
+            }
         });
     }
 

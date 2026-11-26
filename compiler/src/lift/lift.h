@@ -78,7 +78,7 @@ namespace forge {
         std::optional<uint32_t> entryRva;
         bool entryRecovered = false, recoveryComplete = false;
         std::vector<ExecutableCall> calls, tailTransfers;
-        std::vector<ExecutableInitializerTable> initializerTables;
+        std::vector<ExecutableInitializerTable> initializerTables, boundedCalls;
         std::vector<ExecutableImport> imports;
         std::vector<ExecutableUnresolvedCall> unresolvedCalls;
         // Image declarations are independent of the calls recovered before a failure.

@@ -332,7 +332,7 @@ class Imports(Case):
             self.invoke_lift(self.patch(("ff15", target), "c3"), reason="complete validated IAT", code="LIFT_UNSUPPORTED_CONTROL_FLOW")
         self.invoke_lift(self.patch(("ff15", self.slots["SwitchToThread"]), "c3"), reason="unsupported import",
                          code="LIFT_UNSUPPORTED_CONTROL_FLOW", symbol="SwitchToThread")
-        self.invoke_lift(self.patch("ff11 c3"), reason="RIP-relative call", code="LIFT_UNSUPPORTED_CONTROL_FLOW")
+        self.invoke_lift(self.patch("ff11 c3"), reason="unproven bounded table-call loop", code="LIFT_UNSUPPORTED_CONTROL_FLOW")
         # Function-wrapper mode has no process loader to provide a stable imported function address.
         self.invoke_lift(self.patch(("488b05", slot), "ffd0 c3"), reason="expected a same-block", code="LIFT_UNSUPPORTED_CONTROL_FLOW")
         self.invoke_lift(self.patch(("488b05", slot), "c3"), reason="loader-written", code="LIFT_IMAGE_MEMORY")

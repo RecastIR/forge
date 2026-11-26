@@ -26,6 +26,11 @@ namespace {
             return static_cast<int>(dword & 0xffU);
         }
         case FORGE_RT_EXECUTION_FAULT:
+            if (result.value) {
+                std::fprintf(stderr,
+                             "forge: bounded call RVA 0x%" PRIx64 " table RVA 0x%" PRIx32 "\n",
+                             result.value >> 32, static_cast<uint32_t>(result.value));
+            }
             switch (result.fault) {
             case FORGE_RT_FAULT_MEMORY:
                 std::fprintf(stderr,

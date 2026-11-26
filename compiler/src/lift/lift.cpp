@@ -11,6 +11,7 @@
 #include "llvm/IR/CFG.h"
 #include "llvm/IR/Module.h"
 #include "llvm/IR/Verifier.h"
+#include "llvm/Support/SaveAndRestore.h"
 
 #include <set>
 
@@ -148,6 +149,9 @@ namespace forge {
             Function *initializerDispatcher(const Step &s, const x86::InitializerTable &table);
             void lowerService(const Step &s, const x86::ExternalCallTarget &external,
                               Value *calleeRsp);
+            Value *checkedTableTarget(const Step &step, const x86::BoundedTableCall &table);
+            void callTableBodies(const Step &step, const x86::BoundedTableCall &table,
+                                 Value *target, Value *calleeRsp);
             void lowerCall(const Step &s, const x86::ResolvedCallSite &call);
             void lowerTailJump(const Step &step, const x86::ResolvedCallSite &site);
             void emitReturn(const Step &s);
@@ -292,6 +296,19 @@ namespace forge {
                 address = ir.CreateAdd(address, term);
             }
 
+            if (const auto guard = plan.tableGuards.find(s.rva);
+                access && guard != plan.tableGuards.end()) {
+                const auto &table = *guard->second->table();
+                if (table.scanRead == s.rva) {
+                    const auto firstVA = analysis.image.guestBase() + table.first;
+                    auto *offset = ir.CreateSub(address, ir.getInt64(firstVA));
+                    auto *allowed =
+                        table.sentinel
+                            ? ir.CreateICmpULE(offset, ir.getInt64(table.last - table.first))
+                            : static_cast<Value *>(ir.getFalse());
+                    memory.checks.guard(allowed, FORGE_RT_FAULT_CONTROL);
+                }
+            }
             return address;
         }
 
@@ -492,6 +509,19 @@ namespace forge {
         }
 
         void Translator::lower(const Step &s) {
+            const auto guard = plan.tableGuards.find(s.rva);
+            SaveAndRestore origin(memory.checks.tableOrigin);
+            if (guard != plan.tableGuards.end()) {
+                const auto &site = *guard->second;
+                const auto &table = *site.table();
+                memory.checks.tableOrigin = (uint64_t(site.instruction) << 32) | table.header;
+                if (table.zeroGuard == s.rva) {
+                    memory.checks.guard(
+                        ir.CreateICmpULE(value(s, s.inst.getOperand(0), 32),
+                                         ir.getInt32((table.last - table.first) / 8)),
+                        FORGE_RT_FAULT_CONTROL);
+                }
+            }
             if (s.isAtomicExchange()) {
                 lowerAtomicExchange(s);
                 return;
@@ -685,14 +715,72 @@ namespace forge {
             }
         }
 
+        Value *Translator::checkedTableTarget(const Step &s, const x86::BoundedTableCall &table) {
+            const auto guestBase = analysis.image.guestBase();
+            auto *address = effectiveAddress(s, 0, true);
+            auto *offset = ir.CreateSub(address, ir.getInt64(guestBase + table.first));
+            auto *inRange = ir.CreateICmpULT(offset, ir.getInt64(table.last - table.first));
+            auto *aligned = ir.CreateIsNull(ir.CreateAnd(offset, ir.getInt64(7)));
+            memory.checks.guard(ir.CreateAnd(inRange, aligned), FORGE_RT_FAULT_CONTROL);
+            auto *value = memory.load(address, 64, false);
+            auto *fault = BasicBlock::Create(ir.getContext(), "table.invalid", impl);
+            auto *valid = BasicBlock::Create(ir.getContext(), "table.call", impl);
+            auto *select =
+                ir.CreateSwitch(value, fault, static_cast<unsigned>(table.targets.size()));
+            for (const auto target : table.targets) {
+                select->addCase(ir.getInt64(guestBase + target), valid);
+            }
+            ir.SetInsertPoint(fault);
+            memory.checks.fail(FORGE_RT_FAULT_CONTROL);
+            ir.SetInsertPoint(valid);
+            return value;
+        }
+
+        void Translator::callTableBodies(const Step &s, const x86::BoundedTableCall &table,
+                                         Value *target, Value *calleeRsp) {
+            auto *next = BasicBlock::Create(ir.getContext(), "table.return", impl);
+            auto *invalid = BasicBlock::Create(ir.getContext(), "table.unreachable", impl);
+            auto *dispatch =
+                ir.CreateSwitch(target, invalid, static_cast<unsigned>(table.targets.size()));
+            ir.SetInsertPoint(invalid);
+            ir.CreateUnreachable();
+            for (const auto rva : table.targets) {
+                auto *body = BasicBlock::Create(ir.getContext(), "table.target", impl);
+                dispatch->addCase(ir.getInt64(analysis.image.guestBase() + rva), body);
+                ir.SetInsertPoint(body);
+                auto *ceiling = layout.callbacks ? impl->getArg(1) : nullptr;
+                auto *returned = layout.callBody(ir, *bodies.at(rva), impl->getArg(0), calleeRsp,
+                                                 ceiling, s.rva);
+                if (analysis.flows.at(rva).mayReturn) {
+                    memory.checks.propagate(returned);
+                    ir.CreateBr(next);
+                } else if (memory.checks.managed()) {
+                    ir.CreateRet(ir.getFalse());
+                } else {
+                    ir.CreateUnreachable();
+                }
+            }
+            ir.SetInsertPoint(next);
+        }
+
         void Translator::lowerCall(const Step &s, const x86::ResolvedCallSite &call) {
+            SaveAndRestore origin(memory.checks.tableOrigin);
+            Value *liveTarget = nullptr;
+            if (const auto *table = call.table()) {
+                memory.checks.tableOrigin = (uint64_t(call.instruction) << 32) | table->header;
+                liveTarget = checkedTableTarget(s, *table);
+                if (table->targets.empty()) {
+                    memory.checks.fail(FORGE_RT_FAULT_CONTROL);
+                    return;
+                }
+            }
             const auto guestBase = analysis.image.guestBase();
             if (const auto *external = call.external(); external && s.isRegisterCall()) {
                 auto *target = value(s, s.inst.getOperand(0), 64);
                 auto *slotAddress = ir.getInt64(guestBase + external->slot);
                 auto *expected = memory.load(slotAddress, 64, false);
                 memory.checks.guard(ir.CreateICmpEQ(target, expected), FORGE_RT_FAULT_CONTROL);
-            } else if (!call.external() &&
+            } else if (!call.external() && !call.table() &&
                        call.guest().kind == x86::CallKind::RipRelativeRegister) {
                 auto *target = value(s, s.inst.getOperand(0), 64);
                 memory.checks.guard(
@@ -706,6 +794,16 @@ namespace forge {
             x86::SavedRegisters saved{};
             if (const auto *external = call.external()) {
                 lowerService(s, *external, calleeRsp);
+            } else if (const auto *table = call.table()) {
+                x86::RegisterSet modified;
+                for (const auto rva : table->targets) {
+                    if (analysis.flows.at(rva).mayReturn) {
+                        modified |= analysis.functions.at(rva).modified;
+                    }
+                }
+                saved = x86::captureNonvolatiles(ir, context, modified);
+                storeFlags();
+                callTableBodies(s, *table, liveTarget, calleeRsp);
             } else {
                 const auto target = call.guest().rva;
                 if (s.flow != x86::Flow::TerminalCall) {

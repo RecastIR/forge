@@ -100,6 +100,15 @@ namespace forge::x86 {
                         pending.insert(caller);
                     }
 
+                    // Another alternative may already have resumed the caller past this
+                    // site and suspended it at a later call in the same block.
+                    for (const auto *site : sites) {
+                        if (site->table() && site->guestTargets().size() > 1 &&
+                            functions.contains(site->caller)) {
+                            functions.at(site->caller).restart = true;
+                            pending.insert(site->caller);
+                        }
+                    }
                     state.waiting.clear();
                     return;
                 }
@@ -593,24 +602,29 @@ namespace forge::x86 {
                     for (size_t i = 1; i <= 4; ++i) {
                         inputs.facts.registers[i] = facts.registers[i].project(entryAddresses);
                     }
-                    calls.enter(site.guest().rva, inputs);
+                    for (const auto target : site.guestTargets()) {
+                        calls.enter(target, inputs);
+                    }
                 }
             }
 
-            auto &callee = calls.functions.at(site.guest().rva);
-
-            if (!callee.returned) {
-                if (!collect) {
+            std::optional<AddressFact> returned;
+            for (const auto target : site.guestTargets()) {
+                auto &callee = calls.functions.at(target);
+                if (callee.returned) {
+                    returned = returned ? returned->join(*callee.returned) : *callee.returned;
+                } else if (!collect) {
                     callee.waiting.emplace(site.caller, site.block);
                 }
-
+            }
+            if (!returned) {
                 return false;
             }
 
             // Checked returns preserve RSP and nonvolatiles. Any other volatile
             // or saved stack value can have changed through a register or alias.
             std::fill_n(facts.registers.begin(), callerSlots, AddressFact{});
-            facts.registers[0] = *callee.returned;
+            facts.registers[0] = *returned;
             facts.spills = {};
             return true;
         }
@@ -913,6 +927,12 @@ namespace forge::x86 {
         std::set<uint32_t> retainedTargets;
         for (const auto &[address, function] : group.functions()) {
             for (const auto &[instruction, call] : function.calls) {
+                if (const auto *table = call.table()) {
+                    image.boundedTable(*function.instructionContaining(instruction), *table);
+                    auto &guards = result.functions[address].tableGuards;
+                    guards.emplace(table->scanRead, &call);
+                    guards.emplace(table->zeroGuard, &call);
+                }
                 const auto *service = call.external();
                 if (service && service->binding.callback == win64::Callback::Cleanup) {
                     result.usesTermination = true;

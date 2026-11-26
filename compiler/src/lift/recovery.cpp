@@ -1,4 +1,5 @@
 #include "lift/recovery.h"
+#include "lift/bounded_table.h"
 
 #include "analysis/analysis.h"
 #include "forge/guest_range.h"
@@ -181,7 +182,8 @@ namespace forge::x86 {
         // A guest call needs an entry here only if its target failed admission. Replay that
         // error at publication so earlier call sites remain available to diagnostics.
         using CallResolutions =
-            std::map<uint32_t, std::variant<ExternalCallTarget, std::exception_ptr>>;
+            std::map<uint32_t,
+                     std::variant<ExternalCallTarget, BoundedTableCall, std::exception_ptr>>;
 
         struct FunctionDiscovery {
             FunctionDiscovery(uint32_t rva, MappedRange code, const MCDisassembler &dis,
@@ -192,6 +194,7 @@ namespace forge::x86 {
             MappedRange code;
             RecordedCFG cfg;
             CallResolutions resolutions;
+            unsigned tableEntries = 0;
             std::exception_ptr failure;
             bool mayReturn = false;
             std::vector<CallLocation> waiting;
@@ -226,6 +229,8 @@ namespace forge::x86 {
             std::optional<std::vector<RvaRange>> recordedRanges;
             std::optional<ImageInitialization> pointerInitialization;
             std::set<uint32_t> thunkStarts;
+            std::vector<RvaRange> tableData;
+            std::map<uint32_t, const ResolvedCallSite *> tableSources;
 
             ArrayRef<RvaRange> loaderWrittenRanges();
             ArrayRef<RvaRange> functionRanges();
@@ -243,6 +248,7 @@ namespace forge::x86 {
             bool schedule(uint32_t target, const Step &step, const CallResolutions &resolutions);
             void stage(uint32_t rva, MappedRange code);
             Flow guestCallFlow(uint32_t caller, const Step &step, std::optional<int64_t> target);
+            Flow stageGuestTarget(uint32_t caller, const Step &step, std::optional<int64_t> target);
             bool advance(uint32_t rva, FunctionDiscovery &active);
             void resumeCallers(FunctionDiscovery &callee);
             void discoverReturns();
@@ -252,6 +258,9 @@ namespace forge::x86 {
             void admitCallback(const ResolvedCallSite &site, const Step &step, uint32_t rva);
             void scanCalls(RecoveredFunction &caller, const GuestBlock &block,
                            const CallResolutions &resolutions, InitializerRecovery &initializers);
+            Flow admitTableTarget(uint32_t caller, const Step &step, uint32_t header,
+                                  uint32_t target);
+            Flow tableFlow(uint32_t caller, FunctionDiscovery &active, const Step &step);
             Flow importFlow(uint32_t rva, FunctionDiscovery &caller, const Step &step);
             std::vector<ResolvedCallSite *> forwardedRegistrations;
 
@@ -345,7 +354,9 @@ namespace forge::x86 {
                 return true;
             }
 
-            if (const auto failed = resolutions.find(step.rva); failed != resolutions.end()) {
+            if (const auto failed = resolutions.find(step.rva);
+                failed != resolutions.end() &&
+                std::holds_alternative<std::exception_ptr>(failed->second)) {
                 std::rethrow_exception(std::get<std::exception_ptr>(failed->second));
             }
 
@@ -378,6 +389,14 @@ namespace forge::x86 {
 
         Flow GroupDiscovery::guestCallFlow(uint32_t caller, const Step &step,
                                            std::optional<int64_t> immediate) try {
+            return stageGuestTarget(caller, step, immediate);
+        } catch (const InspectionError &) {
+            staging.at(caller).resolutions.emplace(step.rva, std::current_exception());
+            return Flow::Fallthrough;
+        }
+
+        Flow GroupDiscovery::stageGuestTarget(uint32_t caller, const Step &step,
+                                              std::optional<int64_t> immediate) {
             int64_t target;
             if (immediate) {
                 target = *immediate;
@@ -440,13 +459,68 @@ namespace forge::x86 {
 
             callee.waiting.push_back({caller, step.rva});
             return Flow::TerminalCall;
+        }
+
+        Flow GroupDiscovery::admitTableTarget(uint32_t caller, const Step &step, uint32_t header,
+                                              uint32_t target) try {
+            const auto &image = entry.analysis.image();
+            const auto *section = image.sectionAtRva(target);
+            if (!section || !section->immutable() || section->permissions[2] != 'x') {
+                step.reject(FailureCode::InvalidCallTarget,
+                            "bounded table target outside immutable executable code at table " +
+                                hex(header),
+                            target);
+            }
+            const auto code = calleeCode(target, step);
+            if (code && !StableMetadata{image, entry.relocations, loaderWrittenRanges()}
+                             .containsUnwindRecord(code->range)) {
+                step.reject(FailureCode::UnsupportedControlFlow,
+                            "unstable bounded target function record", target);
+            }
+            return stageGuestTarget(caller, step, target);
+        } catch (InspectionError &failure) {
+            failure.context.tableHeaderRva = header;
+            failure.context.tableTargetRva = target;
+            throw;
+        }
+
+        Flow GroupDiscovery::tableFlow(uint32_t caller, FunctionDiscovery &active,
+                                       const Step &step) try {
+            const auto &image = entry.analysis.image();
+            if (!pointerInitialization) {
+                pointerInitialization = image.imageInitialization();
+            }
+            validateCallEvidence(caller, active.code, step, step.rva);
+            auto table = recoverTableCall(active.cfg.steps(), step, operands, image,
+                                          *pointerInitialization, functionRanges());
+            if (!rangesIn(loaderWrittenRanges(), table.extent()).empty()) {
+                step.reject(FailureCode::ImageMemory,
+                            "loader write overlaps bounded table at " + hex(table.header));
+            }
+            const unsigned count = (table.last - table.first) / 8;
+            if (count > 4096 - active.tableEntries) {
+                step.reject(FailureCode::UnsupportedControlFlow,
+                            "bounded table entry budget exceeded at " + hex(table.header));
+            }
+            active.tableEntries += count;
+            bool returns = false;
+            for (const auto target : table.targets) {
+                returns |=
+                    admitTableTarget(caller, step, table.header, target) == Flow::Fallthrough;
+            }
+
+            active.resolutions.emplace(step.rva, std::move(table));
+            return returns ? Flow::Fallthrough : Flow::TerminalCall;
         } catch (const InspectionError &) {
-            staging.at(caller).resolutions.emplace(step.rva, std::current_exception());
+            active.resolutions.emplace(step.rva, std::current_exception());
             return Flow::Fallthrough;
         }
 
         bool GroupDiscovery::advance(uint32_t rva, FunctionDiscovery &active) try {
             const auto classify = [&](const Step &step, std::optional<int64_t> target) {
+                if (step.isMemoryCall() && !operands.ripRva(step, 0)) {
+                    return tableFlow(rva, active, step);
+                }
                 return step.isMemoryCall() || step.registerImportSlot
                            ? importFlow(rva, active, step)
                            : guestCallFlow(rva, step, target);
@@ -779,6 +853,23 @@ namespace forge::x86 {
                         std::rethrow_exception(*error);
                     }
 
+                    if (const auto *table = std::get_if<BoundedTableCall>(&resolution)) {
+                        validateTableLoop(caller, step, *table, operands);
+                        tableData.push_back(table->extent());
+                        const auto &site =
+                            caller.calls
+                                .emplace(step.rva, ResolvedCallSite{caller.entry, leader, step.rva,
+                                                                    step.next, *table})
+                                .first->second;
+                        for (const auto target : table->targets) {
+                            tableSources.try_emplace(target, &site);
+                            if (!schedule(target, step, resolutions)) {
+                                deferred.try_emplace(target, &site);
+                            }
+                        }
+                        continue;
+                    }
+
                     const auto &service = std::get<ExternalCallTarget>(resolution);
                     if (mode == RecoveryMode::FunctionLift &&
                         service.binding.callback != win64::Callback::None) {
@@ -864,7 +955,7 @@ namespace forge::x86 {
 
             const auto &caller = functions.at(incoming.caller);
             const auto &step = *caller.instructionContaining(incoming.instruction);
-            if (incoming.guest().kind == CallKind::RipRelativeRegister ||
+            if (incoming.table() || incoming.guest().kind == CallKind::RipRelativeRegister ||
                 proof.targets.size() >= 4096) {
                 step.reject(FailureCode::UnsupportedControlFlow,
                             "unsupported CRT registration wrapper origin");
@@ -886,7 +977,7 @@ namespace forge::x86 {
             auto &context = error.context;
             context.functionRva = incoming.caller;
             context.blockRva = incoming.block;
-            context.branchTarget = incoming.guest().rva;
+            context.branchTarget = site.caller;
             if (!context.sourceCall) {
                 site.annotateCallbackFailure(context, {});
             }
@@ -901,8 +992,8 @@ namespace forge::x86 {
             std::map<uint32_t, std::vector<const ResolvedCallSite *>> callers;
             for (const auto &[rva, function] : functions) {
                 for (const auto &[address, call] : function.calls) {
-                    if (!call.external()) {
-                        callers[call.guest().rva].push_back(&call);
+                    for (const auto target : call.guestTargets()) {
+                        callers[target].push_back(&call);
                     }
                 }
             }
@@ -958,9 +1049,11 @@ namespace forge::x86 {
                     const auto rva = pending.back();
                     pending.pop_back();
                     for (const auto &[site, transfer] : functions.at(rva).calls) {
-                        if (!transfer.external() && functions.contains(transfer.guest().rva) &&
-                            components.emplace(transfer.guest().rva, start).second) {
-                            pending.push_back(transfer.guest().rva);
+                        for (const auto target : transfer.guestTargets()) {
+                            if (functions.contains(target) &&
+                                components.emplace(target, start).second) {
+                                pending.push_back(target);
+                            }
                         }
                     }
                 }
@@ -974,14 +1067,12 @@ namespace forge::x86 {
             bool hasTailJump = false;
             for (const auto &[caller, function] : functions) {
                 for (const auto &[instruction, call] : function.calls) {
-                    if (call.external()) {
-                        continue;
-                    }
-
-                    const auto target = functions.find(call.guest().rva);
-                    if (target != functions.end()) {
-                        target->second.incoming.push_back(&call);
-                        hasTailJump |= call.isTailJump();
+                    for (const auto rva : call.guestTargets()) {
+                        const auto target = functions.find(rva);
+                        if (target != functions.end()) {
+                            target->second.incoming.push_back(&call);
+                            hasTailJump |= call.isTailJump();
+                        }
                     }
                 }
             }
@@ -1052,6 +1143,10 @@ namespace forge::x86 {
                         error.context.functionRva = rva;
                     }
 
+                    const auto indirect = tableSources.find(rva);
+                    if (!error.context.sourceCall && indirect != tableSources.end()) {
+                        indirect->second->annotateTableFailure(error.context, rva);
+                    }
                     const auto source = callbackSources.find(rva);
                     if (!error.context.sourceCall && source != callbackSources.end()) {
                         source->second->annotateCallbackFailure(error.context, rva);
@@ -1078,8 +1173,9 @@ namespace forge::x86 {
                 for (const auto start : thunkStarts) {
                     thunks.push_back({start, uint64_t(start) + amd64ImportThunkSize});
                 }
+                tableData = mergeRanges(std::move(tableData));
                 recoverLeaves(entry, functions, deferred, functionRanges(), thunks,
-                              loaderWrittenRanges(), dis, instructions, regs);
+                              loaderWrittenRanges(), tableData, dis, instructions, regs);
             }
 
             for (const auto &[rva, site] : callbackSources) {
@@ -1316,6 +1412,15 @@ namespace forge::x86 {
 
             failure.context.functionRva = rva;
 
+            for (const auto *incoming : owner.incoming) {
+                if (incoming->table() && !failure.context.sourceCall) {
+                    incoming->annotateTableFailure(failure.context, rva);
+                    break;
+                }
+            }
+            if (failure.context.sourceCall) {
+                return;
+            }
             if (const auto *sourceSite = owner.callbackSource) {
                 sourceSite->annotateCallbackFailure(failure.context, rva);
             } else if (owner.origin == RecoveryOrigin::InferredLeaf && !owner.incoming.empty()) {

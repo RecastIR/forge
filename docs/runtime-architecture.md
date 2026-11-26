@@ -90,6 +90,8 @@ Keep proved stack and image operations in generated native code so LLVM can opti
 
 One live `forge_rt_instance` identifies one logical guest process. Its native host creates it and controls its lifetime. Within that lifetime the pair (instance, thread token) selects a guest thread on any host thread. ABI v1 exposes thread services and checked guest-memory operations. Lifting with `--checked-memory` enables image registration and stack publication at the existing typed runtime entry. A Windows-visible process ID would be a separate process-owned value.
 
+Checked failures raised by a bounded guest-table CALL carry the instruction RVA in the upper DWORD of the fault result’s `value` and the table header RVA in the lower DWORD. The standalone launcher prints both before the fault class. A memory fault also retains its address, access and reason. The ordinary guest caller owns the return slot and validates it on normal return. [Compiler proof and dispatch](program-architecture.md#bounded-indirect-calls-through-pointer-tables)
+
 ### Function-level entry ownership
 
 | Owner | State and lifetime |

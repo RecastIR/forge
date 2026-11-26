@@ -11,6 +11,7 @@
 #include <cstdint>
 #include <mutex>
 #include <optional>
+#include <set>
 #include <string>
 #include <variant>
 #include <vector>
@@ -40,6 +41,8 @@ namespace forge {
     struct RvaRange {
         uint64_t begin, end;
     };
+
+    std::vector<RvaRange> mergeRanges(std::vector<RvaRange> ranges);
 
     // Return whole ranges intersecting a nonempty interval in a sorted, disjoint index.
     llvm::ArrayRef<RvaRange> rangesIn(llvm::ArrayRef<RvaRange> view, RvaRange range);
@@ -218,7 +221,9 @@ namespace forge {
         // Borrows the immutable index for this snapshot. Ownership failures are cached too.
         const ImportBindings &importBindings() const &;
         const ImportBindings &importBindings() const && = delete;
-        ImageInitialization imageInitialization() const;
+        ImageInitialization
+        imageInitialization(const std::set<uint32_t> &executableDataSlots = {}) const;
+        bool overlapsDirectory(RvaRange range) const;
         ImageBytes imageBytes(RvaRange range, const ImageInitialization &init,
                               uint64_t guestLoadBase) const;
         // DWARF enrichment borrows this object for the duration of its lookup.

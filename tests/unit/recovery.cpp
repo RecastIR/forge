@@ -555,6 +555,47 @@ namespace {
         check(nestedLeaf, "missing metadata-free initializer shared with an ordinary guest call");
     }
 
+    void checkBoundedCalls(const fs::path &path) {
+        const AnalyzedImage image(
+            std::make_unique<ParsedImage>(InputFile(path), ParsePolicy::Inspection),
+            DebugInfo::Omit);
+        const RecoveredFunctionGroup group(image, image.module().entryPoint);
+        const auto &runner = group.function(exportedRva(image, "run_count"));
+        const auto site = runner.callAt(exportedRva(image, "count_site"));
+        check(site && site->table() && !site->external(), "missing bounded memory call");
+        const auto &table = *site->table();
+        check(!table.sentinel && table.header == exportedRva(image, "count_table") &&
+                  table.first == table.header + 8 && table.last == table.first + 32 &&
+                  site->continuation == exportedRva(image, "after_count"),
+              "incorrect counted range or continuation");
+        const std::vector<uint32_t> expected{exportedRva(image, "one"), exportedRva(image, "two"),
+                                             exportedRva(image, "writer")};
+        check(table.targets == expected, "incorrect site-specific target set");
+        for (const auto target : expected) {
+            const auto &callee = group.function(target);
+            check(!callee.callbackSource && callee.mayReturn &&
+                      llvm::count(callee.incoming, site) == 1,
+                  "ordinary bounded guest edge was missing or duplicated");
+        }
+        check(group.function(expected.front()).origin == x86::RecoveryOrigin::InferredLeaf,
+              "bounded call did not use the inferred-leaf proof");
+
+        const auto slot = exportedRva(image, "one_table") + 8;
+        const auto other = exportedRva(image, "unrelated_cell");
+        const auto init = image.image().imageInitialization({slot});
+        check(init.exclusionsIn({slot, slot + 8}).empty() &&
+                  !init.exclusionsIn({other, other + 8}).empty(),
+              "bounded executable pointer field exposed an unrelated fixup");
+
+        const auto &empty = group.function(exportedRva(image, "run_empty"));
+        const auto &emptyCall = empty.calls.begin()->second;
+        check(empty.mayReturn && emptyCall.table() && emptyCall.table()->sentinel &&
+                  emptyCall.guestTargets().empty() &&
+                  empty.instructionContaining(emptyCall.instruction)->flow ==
+                      x86::Flow::TerminalCall,
+              "empty list needs a zero-trip exit and a terminal executed CALL");
+    }
+
     // Check PE stability for the differential runner's independently disassembled caller.
     // The first interval is code. Each following interval is a relative table.
     void checkDispatchSpans(const fs::path &path, llvm::ArrayRef<char *> bounds) {
@@ -605,12 +646,13 @@ int main(int argc, char **argv) try {
         return 0;
     }
 
-    check(argc == 8,
-          "expected stack, leaves, jump, indirect, last-error, noreturn and CRT fixtures");
+    check(argc == 9, "expected stack, leaves, jump, indirect, last-error, noreturn, CRT and "
+                     "bounded-call fixtures");
     checkGuestRanges();
     checkImportSnapshot(argv[5]);
     checkTerminalGuestCall(argv[6]);
     checkInitializerTables(argv[7]);
+    checkBoundedCalls(argv[8]);
     const AnalyzedImage analysis(
         std::make_unique<ParsedImage>(InputFile(argv[1]), ParsePolicy::Inspection),
         DebugInfo::Omit);

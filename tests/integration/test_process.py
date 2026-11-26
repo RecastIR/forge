@@ -191,6 +191,10 @@ class ProcessExecution(unittest.TestCase):
                       [(0, 0, "return 17"), (0, 1, "guard 3")],
                       imports=[("kernel32.dll", "SetLastError")])
 
+    def test_bounded_table_calls(self):
+        image = "executable-bounded-call"
+        self.exercise(image, None, [(0, 0, "return 42"), (0, 0, "return 42")], base=0x10000000)
+
     def test_tail_transfers(self):
         image = "executable-tail-jump"
         self.exercise(image, None, [(0, 0, "return 42"), (0, 0, "return 42")], base=0x10000000,

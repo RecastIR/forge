@@ -2,7 +2,7 @@ add_library(forge_core STATIC
   src/diagnostic.cpp
   src/pe/input.cpp src/pe/pe.cpp src/pe/dependencies.cpp
   src/analysis/analysis.cpp src/analysis/exception_scope.cpp
-  src/lift/address_fact.cpp src/lift/cfg.cpp src/lift/jump_table.cpp src/lift/guarded_call.cpp src/lift/initializer_table.cpp src/lift/recovery.cpp src/lift/leaf_recovery.cpp src/lift/call_flow.cpp
+  src/lift/address_fact.cpp src/lift/cfg.cpp src/lift/jump_table.cpp src/lift/guarded_call.cpp src/lift/initializer_table.cpp src/lift/bounded_table.cpp src/lift/recovery.cpp src/lift/leaf_recovery.cpp src/lift/call_flow.cpp
   src/lift/operands.cpp src/lift/group_analysis.cpp src/lift/execution_context.cpp src/lift/execution_checks.cpp
   src/lift/integer.cpp src/lift/memory.cpp src/lift/image_memory.cpp src/lift/lift.cpp src/lift/executable.cpp
   src/output/publication.cpp src/output/executable.cpp)

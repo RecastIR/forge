@@ -101,7 +101,7 @@ namespace forge::x86 {
             const std::map<uint32_t, const ResolvedCallSite *> &deferred;
             ArrayRef<RvaRange> recorded;
             ArrayRef<RvaRange> thunks;
-            ArrayRef<RvaRange> loaderWrites;
+            ArrayRef<RvaRange> loaderWrites, tableData;
             const MCDisassembler &dis;
             const MCInstrInfo &instructions;
             const InstructionOperands operands;
@@ -153,6 +153,10 @@ namespace forge::x86 {
         ControlFlowGraph LeafRecovery::decode(uint32_t target, const MappedRange &code) const try {
             bool returned = false;
             auto validate = [&](const Step &step, Flow flow) {
+                if (!rangesIn(tableData, {step.rva, step.next}).empty()) {
+                    step.reject(FailureCode::InvalidCallTarget,
+                                "leaf instruction overlaps bounded pointer table");
+                }
                 if (!rangesIn(thunks, {step.rva, step.next}).empty()) {
                     step.reject(FailureCode::UnsupportedControlFlow,
                                 "candidate overlaps a proven import thunk");
@@ -290,13 +294,20 @@ namespace forge::x86 {
                        std::map<uint32_t, RecoveredFunction> &functions,
                        const std::map<uint32_t, const ResolvedCallSite *> &deferred,
                        ArrayRef<RvaRange> recorded, ArrayRef<RvaRange> thunks,
-                       ArrayRef<RvaRange> loaderWrites, const MCDisassembler &dis,
-                       const MCInstrInfo &instructions, const MCRegisterInfo &regs) {
-        LeafRecovery recovery{
-            entry,    functions,    deferred,
-            recorded, thunks,       loaderWrites,
-            dis,      instructions, InstructionOperands(regs, entry.analysis.module().imageBase),
-            {}};
+                       ArrayRef<RvaRange> loaderWrites, ArrayRef<RvaRange> tableData,
+                       const MCDisassembler &dis, const MCInstrInfo &instructions,
+                       const MCRegisterInfo &regs) {
+        LeafRecovery recovery{entry,
+                              functions,
+                              deferred,
+                              recorded,
+                              thunks,
+                              loaderWrites,
+                              tableData,
+                              dis,
+                              instructions,
+                              InstructionOperands(regs, entry.analysis.module().imageBase),
+                              {}};
 
         for (const auto &[rva, function] : functions) {
             recovery.occupied.add(function);
@@ -306,7 +317,9 @@ namespace forge::x86 {
             try {
                 recovery.recover(rva, *call);
             } catch (InspectionError &error) {
-                if (call->external()) {
+                if (call->table()) {
+                    call->annotateTableFailure(error.context, rva);
+                } else if (call->external()) {
                     call->annotateCallbackFailure(error.context, rva);
                 }
                 throw;

@@ -83,6 +83,14 @@ def generate(output, mc, link, dlltool, clang):
         image("executable-cmp16mi.exe", (sources / "executable-cmp16mi.s").read_text(),
               [("KERNEL32.dll", name) for name in ("GetLastError", "GetStdHandle", "WriteFile")],
               exports=["compare_at"])
+        bounded = (sources / "executable-bounded-call.s").read_text()
+        image("executable-bounded-cleanup.exe", "with_cleanup = 1\n" + bounded,
+              [("msvcrt.dll", "_onexit"), ("msvcrt.dll", "_cexit"), ("KERNEL32.dll", "ExitProcess")])
+        image("executable-bounded-call.exe", bounded,
+              [("KERNEL32.dll", "ExitProcess")],
+              exports=["entry", "run_count", "run_one", "run_empty", "one", "two", "writer",
+                       "count_table", "one_table", "empty_table", "replacement", "after_count",
+                       "count_site", "unrelated_cell", "exclusive", "tamper_count", "tamper_scan", "shorten_mixed", "bad_nonvolatile", "bad_return", "terminal", "run_mixed", "mixed_table"])
         image("executable-tail-jump.exe", (sources / "executable-tail-jump.s").read_text(),
               [("KERNEL32.dll", name) for name in ("SetLastError", "GetLastError", "ExitProcess")],
               exports=["bad_register", "nested_clobber", "bad_stack", "bad_memory", "terminal", "pivot"])

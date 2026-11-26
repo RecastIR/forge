@@ -55,6 +55,7 @@ namespace forge::x86 {
         std::map<uint32_t, BlockEffects> blocks;
         DefinitionEffect returns;
         Definitions entry;
+        bool mayReturn = false;
     };
 
     using FunctionFlows = std::map<uint32_t, FunctionFlow>;

@@ -106,24 +106,22 @@ The hosted Windows test verifies the producer manifest and prints each PE hash, 
 
 ### Startup comparison results
 
-Task 13.3L reran all eight unmodified PEs in Debug and Release. Fifteen recover the direct jump from `__main` to `__do_global_ctors`. Recovery then reaches `callq *(%rbx)` in the constructor loop (`CALL64m`, bytes `ff 13`). Debug `puts` still reaches its unbound `msvcrt.dll!puts` thunk at `0x2710`, IAT slot `0x8280`. Every row retains the earlier `__set_app_type` binding.
+Task 13.3M reran all eight unmodified PEs in both configurations. Fifteen recover the bounded constructor call and next stop at `CALL64r` (`ff d0`) in `__dyn_tls_init`. That loop loads a pointer into RAX, tests it, and walks forward between two linker bounds. In the primary PE both bounds name RVA `0x9058`. Its recovery and PE loader TLS setup remain separate work. Debug `puts` stops at the application call to its unbound CRT import.
 
-| Fixture | Debug blocking instruction RVA | Release blocking instruction RVA | Reference exit and stdout |
+| Fixture | Constructor header RVA (Debug / Release) | Next blocking RVA (Debug / Release) | Windows and Wine exit, stdout |
 | --- | --- | --- | --- |
-| argc | `0x15f0` | `0x15c0` | 42, empty |
-| argc_none | `0x15f0` | `0x15c0` | 1, empty |
-| argv | `0x1660` | `0x15c0` | 42, empty |
-| argv_edges | `0x1710` | `0x15c0` | 42, empty |
-| cleanup | `0x16e0` | `0x1660` | 42, `IMBA` |
-| globals | `0x1610` | `0x15c0` | 42, empty |
-| puts | `0x1547` (puts) | `0x15c0` | 0, `Hello from C!\r\n` |
-| return | `0x15e0` | `0x15c0` | 42, empty |
+| argc | `0x2780 / 0x2780` | `0x16e0 / 0x16b0` | 42, empty |
+| argc_none | `0x2780 / 0x2780` | `0x16e0 / 0x16b0` | 1, empty |
+| argv | `0x2800 / 0x27e0` | `0x1750 / 0x16b0` | 42, empty |
+| argv_edges | `0x28b0 / 0x2870` | `0x1800 / 0x16b0` | 42, empty |
+| cleanup | `0x2870 / 0x2850` | `0x17d0 / 0x1750` | 42, `IMBA` |
+| globals | `0x27a0 / 0x27a0` | `0x1700 / 0x16b0` | 42, empty |
+| puts | `0x2790 / 0x2780` | `0x1547` (puts) / `0x16b0` | 0, `Hello from C!\r\n` |
+| return | `0x2770 / 0x2770` | `0x16d0 / 0x16b0` | 42, empty |
 
-Windows Server 2022 and pinned Wine 8 on Linux amd64 produced the exit and stdout shown in every row, with empty stderr in all 16 runs. The Windows runner used the same hashed Debug and Release PEs and manifest arguments as the Wine producer. [Windows observations](https://github.com/RecastIR/forge/actions/runs/45600535999/job/139164320778) · [Pinned Wine observations](https://github.com/RecastIR/forge/actions/runs/45600535999/job/139157958011)
+In all 16 PEs the table sits in readable, immutable `.text`. A DIR64 cell in `.rdata` points to the header. Each header contains eight `ff` bytes. Each list has a DIR64 entry for `register_frame_ctor`, located 16 bytes before the header, followed by a NULL terminator. Cleanup has one additional pointer before that entry, to `setup` at RVA `0x1592` in Debug and `0x27e0` in Release. All targets have unwind records. The primary Debug loop calls at `0x15f0` and returns to `0x15f2`. The corresponding Release RVAs are `0x15c0` and `0x15c2`. Both loops subtract eight from RBX and repeat until it equals RSI, then tail-transfer to `atexit` to register the destructor runner. [MinGW-w64 source](https://github.com/mingw-w64/mingw-w64/blob/v10.0.0/mingw-w64-crt/crt/gccmain.c)
 
-For all 16 Forge comparisons, recovery and translation failed with `lifting / unsupported / LIFT_UNSUPPORTED_CONTROL_FLOW`. The comparator exited 1 before native compilation, publication or execution, so there was no native exit status or stream comparison. The separate SDK-free tail-transfer fixture exercises a returning chain with expected exit 42 and empty output streams on Windows, pinned Wine and ARM64. [Readiness regressions](../../test_native_differential.py) · [Executable comparisons](../../../integration/test_executable.py)
-
-Schedule bounded constructor-list call recovery separately. Its evidence must identify which target pointers are admissible at the indirect call. The recorded tail jump establishes the entry of the constructor runner only.
+Each row in both configurations has a validated reference and empty reference stderr. Forge recovery and translation fail with `LIFT_UNSUPPORTED_CONTROL_FLOW`. Native compilation, publication, artifact verification, execution and stream comparison are unrun for all rows. There is no native exit code. Debug `puts` retains its independent service dependency at IAT slot `0x8280`. [Exact regressions](../../test_native_differential.py) · [SDK-free executable](../../../fixtures/executable-bounded-call.s)
 
 ### CMP16mi acceptance and remaining compatibility work
 
@@ -144,6 +142,7 @@ A successful scalar read requires both bytes to fit one readable mapping. Two re
 | GUI CRT error reporting | Detect required GUI routing at `_amsg_exit`. The message-box backend is deferred. |
 | Guest exception delivery and SEH | Separate exception-delivery task. |
 | Scalar reads across adjacent readable mappings | Separate shared guest-memory task. |
+| General dynamic indirect calls | Future compiler research. The forward register-call TLS loop also requires its own proof. |
 
 ### Conventional startup responsibilities
 

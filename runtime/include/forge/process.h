@@ -42,6 +42,7 @@ typedef uint32_t forge_rt_process_state;
 /* RETURNED supplies the complete guest RAX in value. EXIT_PROCESS supplies the
  * zero-extended DWORD exit code from a terminal guest service such as ExitProcess or _amsg_exit.
  * EXECUTION_FAULT identifies the fault class. FAULT_MEMORY carries the checked-copy diagnostic.
+ * A bounded-call fault carries (call RVA << 32) | table header RVA in value.
  * RUNTIME_FAILURE supplies a nonzero native runtime status. */
 typedef struct forge_rt_process_result {
     uint32_t kind;

@@ -112,6 +112,8 @@ namespace forge::x86 {
         ~RecordedCFG();
         bool advance(CallFlow classify);
         void resume(uint32_t instruction);
+        const std::map<uint32_t, Step> &steps() const &;
+        const std::map<uint32_t, Step> &steps() const && = delete;
         bool hasBypassedProof() const;
         ControlFlowGraph finish();
 

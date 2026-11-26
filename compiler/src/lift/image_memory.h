@@ -21,6 +21,7 @@ namespace forge::win64 {
 }
 
 namespace forge::x86 {
+    struct BoundedTableCall;
     struct Continuation;
     class RecoveredFunctionGroup;
 
@@ -70,6 +71,7 @@ namespace forge::x86 {
         void addressTaken(const Step &step, uint64_t va);
         void serviceArgument(const Step &step, uint64_t va, bool write,
                              std::optional<uint64_t> size);
+        void boundedTable(const Step &step, const BoundedTableCall &table);
         void initializerTable(const Step &step, uint32_t first, uint32_t last);
         bool isDataImportPointer(uint64_t va) const;
         void fixedAccess(const Step &step, uint64_t va, unsigned width, bool write);
@@ -100,6 +102,7 @@ namespace forge::x86 {
         std::vector<Span> direct;
         std::map<uint32_t, Span> executable;
         std::set<std::tuple<uint32_t, uint64_t, unsigned, bool>> continuationAccesses;
+        std::set<uint32_t> executableDataSlots;
         std::optional<ImageInitialization> initialization;
 
         enum class ExecutableSelection : uint8_t { AddressTakenSection, ContinuationBytes };

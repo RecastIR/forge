@@ -46,6 +46,18 @@ namespace forge::x86 {
         bool recursiveTail = false; // Rejected by recovery, retained for failure reporting.
     };
 
+    // The header is followed by aligned guest pointers in [first, last). The scan
+    // may inspect one additional proved NULL qword for a sentinel layout.
+    struct BoundedTableCall {
+        uint32_t header, first, last;
+        uint32_t baseDefinition, countLoad, zeroGuard, scanRead;
+        unsigned cursor;
+        bool sentinel;
+        std::vector<uint32_t> targets;
+
+        RvaRange extent() const { return {header, uint64_t(last) + (sentinel ? 8 : 0)}; }
+    };
+
     struct InitializerTable {
         uint32_t first, last;
         // Sorted, unique RVAs admitted for this call. The runtime reads the live table.
@@ -74,7 +86,25 @@ namespace forge::x86 {
     struct ResolvedCallSite {
         uint32_t caller, block, instruction;
         std::optional<uint32_t> continuation; // Only CALL pushes a continuation.
-        std::variant<GuestCallTarget, ExternalCallTarget> target;
+        std::variant<GuestCallTarget, ExternalCallTarget, BoundedTableCall> target;
+
+        const BoundedTableCall *table() const { return std::get_if<BoundedTableCall>(&target); }
+
+        std::span<const uint32_t> guestTargets() const & {
+            if (const auto *single = std::get_if<GuestCallTarget>(&target)) {
+                return {&single->rva, 1};
+            }
+            if (const auto *bounded = table()) {
+                return bounded->targets;
+            }
+            return {};
+        }
+
+        void annotateTableFailure(FailureContext &context, uint32_t targetRva) const {
+            context.sourceCall = CallLocation{caller, instruction};
+            context.tableHeaderRva = table()->header;
+            context.tableTargetRva = targetRva;
+        }
 
         void annotateCallbackFailure(FailureContext &context,
                                      std::optional<uint32_t> targetRva) const;

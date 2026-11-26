@@ -72,9 +72,23 @@ class NativeDifferentialTests(unittest.TestCase):
             target = root - 0x70
             self.assertIn({"caller_rva": hex(root), "instruction_rva": hex(root + 0x1a),
                            "target_rva": hex(target)}, ctx["tail_transfers"])
+            # Independently read .text's sentinel, relocated targets and terminator.
+            headers = {"argc": (0x2780, 0x2780), "argc_none": (0x2780, 0x2780),
+                       "argv": (0x2800, 0x27e0), "argv_edges": (0x28b0, 0x2870),
+                       "cleanup": (0x2870, 0x2850), "globals": (0x27a0, 0x27a0),
+                       "puts": (0x2790, 0x2780), "return": (0x2770, 0x2770)}
+            header = headers[name][config == "release"]
+            count = 2 if name == "cleanup" else 1
+            words = struct.unpack_from(f"<{count + 2}Q", data, 0x600 + header - 0x1000)
+            self.assertEqual((words[0], words[-1]), (2**64 - 1, 0))
+            targets = sorted(w - 0x140000000 for w in words[1:-1])
+            self.assertEqual(ctx["bounded_calls"], [
+                dict(caller_rva=hex(target), instruction_rva=hex(target + 0x30),
+                     first_rva=hex(header + 8), last_rva=hex(header + 8 * (count + 1)),
+                     initial_target_rvas=list(map(hex, targets)))])
             self.assertEqual((ctx["function_rva"], ctx["instruction_rva"], ctx["opcode"], ctx["bytes"]),
-                             (hex(target), hex(target + 0x30), "CALL64m", "ff13"))
-            self.assertIn("expected RIP-relative call", record["message"])
+                             (hex(target + 0xd0), hex(target + 0x120), "CALL64r", "ffd0"))
+            self.assertIn("unsupported register call", record["message"])
         offset = ctx["file_offset"]
         self.assertEqual(data[offset:offset + len(bytes.fromhex(ctx["bytes"]))].hex(), ctx["bytes"])
         return report

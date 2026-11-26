@@ -11,6 +11,7 @@ namespace forge::x86 {
 
     struct FunctionPlan {
         RegisterSet modified;
+        std::map<uint32_t, const ResolvedCallSite *> tableGuards;
         llvm::DenseSet<uint32_t> stackAccesses;
     };
 

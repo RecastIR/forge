@@ -56,7 +56,19 @@ namespace forge::x86 {
     DefinitionEffect callEffect(const ResolvedCallSite &site, const FunctionFlows &flows) {
         const auto *external = site.external();
         if (!external) {
-            return flows.at(site.guest().rva).returns;
+            if (!site.table()) {
+                return flows.at(site.guest().rva).returns;
+            }
+            DefinitionEffect result;
+            result.writes.fill(UINT64_MAX);
+            result.flags.generated.set();
+            for (const auto target : site.guestTargets()) {
+                const auto &flow = flows.at(target);
+                if (flow.mayReturn) {
+                    result.intersect(flow.returns);
+                }
+            }
+            return result;
         }
 
         DefinitionEffect result;
@@ -85,8 +97,8 @@ namespace forge::x86 {
 
             for (const auto &call : block.calls) {
                 result.append(call.prefix);
-                if (!call.site->external()) {
-                    visit(call.site->guest().rva, result);
+                for (const auto target : call.site->guestTargets()) {
+                    visit(target, result);
                 }
 
                 result.append(callEffect(*call.site, flows));
@@ -143,6 +155,7 @@ namespace forge::x86 {
         std::set<uint32_t> pending;
 
         for (auto &[address, function] : flows) {
+            function.mayReturn = group.function(address).mayReturn;
             function.returns = top();
             pending.insert(address);
         }
