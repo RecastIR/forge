@@ -1439,7 +1439,7 @@ class Reference(Workspace):
             expected[filename] = captured_streams(observations["pipe"])
         inputs = Path(__file__).resolve().parents[1] / "differential/reference/executable-inputs.txt"
         filenames = inputs.read_text().splitlines()
-        self.assertCountEqual(filenames, expected.keys())
+        self.assertEqual(filenames, sorted(expected))
         for name in filenames:
             with self.subTest(pe=name):
                 self.assertEqual(self.capture(FIXTURES / name), expected[name])
