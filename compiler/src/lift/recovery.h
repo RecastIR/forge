@@ -56,6 +56,7 @@ namespace forge::x86 {
         uint32_t firstDefinition, lastDefinition, entryCompare, emptyBranch;
         uint32_t pointerLoad, nullTest, nullBranch, increment, latchCompare, backedge;
         unsigned cursor, limit, target;
+        std::optional<uint32_t> slotStore;
     };
 
     struct BoundedTableCall {
@@ -133,8 +134,12 @@ namespace forge::x86 {
 
         void annotateTableFailure(FailureContext &context, uint32_t targetRva) const {
             context.sourceCall = CallLocation{caller, instruction};
-            table()->annotate(context);
-            context.tableTargetRva = targetRva;
+
+            // A nested table's evidence belongs to the failing CALL inside the callee.
+            if (!context.tableFirstRva && !context.tableHeaderRva) {
+                table()->annotate(context);
+                context.tableTargetRva = targetRva;
+            }
         }
 
         void annotateCallbackFailure(FailureContext &context,

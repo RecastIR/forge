@@ -32,6 +32,16 @@ class Layout:
         struct.pack_into("<I", self.data, left + 8, right_rva - left_rva)
         struct.pack_into("<I", self.data, left + 36, self.u32(right + 36))
 
+    def add_unused_section(self, size, flags):
+        header = self.section_table + 40 * len(self.sections)
+        assert header + 40 <= self.u32(self.opt + 60)
+        start = self.u32(self.opt + 56)
+        struct.pack_into("<H", self.data, self.pe + 6, len(self.sections) + 1)
+        struct.pack_into("<8sIIIIIIHHI", self.data, header, b".unused", size, start,
+                         0, 0, 0, 0, 0, 0, flags)
+        struct.pack_into("<I", self.data, self.opt + 56, start + size)
+        self.sections.append((size, start, 0, 0))
+
     def file_offset(self, rva):
         for size, start, raw_size, offset in self.sections:
             if start <= rva < start + min(size, raw_size):

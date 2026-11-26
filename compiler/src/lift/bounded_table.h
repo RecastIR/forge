@@ -8,6 +8,7 @@ namespace forge::x86 {
                                       const InstructionOperands &operands, const ParsedImage &image,
                                       const ImageInitialization &init,
                                       llvm::ArrayRef<RvaRange> functions,
+                                      llvm::ArrayRef<RvaRange> loaderWrites,
                                       unsigned &remainingEntries);
 
     void validateTableLoop(const RecoveredFunction &function, const Step &call,

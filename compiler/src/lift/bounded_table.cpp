@@ -176,13 +176,33 @@ namespace forge::x86 {
             return static_cast<uint32_t>(*source);
         }
 
+        BoundedTableCall reverseLoop(Sequence &seq, const InstructionOperands &ops,
+                                     const ParsedImage &image, const ImageInitialization &init) {
+            const auto loop = prefix(seq, ops);
+            const auto scanner = scan(seq, loop, ops);
+            const auto rva = ops.ripRva(loop.source, 1);
+            if (!rva || !std::in_range<uint32_t>(*rva)) {
+                seq.reject();
+            }
+
+            ops.decodeAddress(loop.source, 1, loop.source.opcode == "MOV64rm");
+            const auto slot = static_cast<uint32_t>(*rva);
+            const auto header = loop.source.opcode == "LEA64r"
+                                    ? slot
+                                    : readImmutableImagePointer(seq.call, image, init, slot);
+            return {0,
+                    0,
+                    {},
+                    ReverseTableProof{header, loop.source.rva, loop.countLoad.rva,
+                                      loop.zeroTest.rva, scanner.read, loop.cursor, false}};
+        }
+
         BoundedTableCall forwardLoop(Sequence &seq, const InstructionOperands &ops) {
             // A plain store may change the slot after the load without redefining its
             // address, the target register, or flags. Its guest memory effect is retained.
             const auto &previous = seq.take();
-            const auto &skip = previous.opcode == "MOV64mi32" || previous.opcode == "MOV64mr"
-                                   ? seq.take()
-                                   : previous;
+            const bool hasStore = previous.opcode == "MOV64mi32" || previous.opcode == "MOV64mr";
+            const auto &skip = hasStore ? seq.take() : previous;
             const auto &test = seq.expect("TEST64rr");
             const auto &load = seq.expect("MOV64rm");
             const auto &empty = seq.take();
@@ -225,12 +245,20 @@ namespace forge::x86 {
                         hex(load.rva));
             }
 
+            std::optional<uint32_t> slotStore;
+            // Leave unrelated store operands to normal address planning and diagnostics.
+            if (hasStore &&
+                previous.inst.getOperand(0).getReg() == load.inst.getOperand(1).getReg() &&
+                address(ops.decodeAddress(previous, 0, true), cursor, {}, 1, 0)) {
+                slotStore = previous.rva;
+            }
+
             return {endpoint(seq, first, ops),
                     endpoint(seq, last, ops),
                     {},
                     ForwardTableProof{first.rva, last.rva, compare.rva, empty.rva, load.rva,
                                       test.rva, skip.rva, increment.rva, latch.rva, back.rva,
-                                      cursor, limit, target}};
+                                      cursor, limit, target, slotStore}};
         }
 
         void validateIncomingEdges(const RecoveredFunction &function, const Step &call,
@@ -250,8 +278,7 @@ namespace forge::x86 {
                 if (bypass != block.successors.end()) {
                     call.reject(FailureCode::UnsupportedControlFlow,
                                 "edge bypasses bounded table proof from " + hex(last.rva) + " to " +
-                                    hex(*bypass),
-                                *bypass);
+                                    hex(*bypass));
                 }
             }
         }
@@ -397,6 +424,7 @@ namespace forge::x86 {
                                       const InstructionOperands &ops, const ParsedImage &image,
                                       const ImageInitialization &init,
                                       llvm::ArrayRef<RvaRange> functions,
+                                      llvm::ArrayRef<RvaRange> loaderWrites,
                                       unsigned &remainingEntries) try {
         const auto lookup = [&](uint32_t rva, bool forward) -> const Step * {
             auto it = steps.lower_bound(rva);
@@ -409,36 +437,21 @@ namespace forge::x86 {
             return it == steps.end() ? nullptr : &it->second;
         };
         Sequence seq{call, lookup, call.rva};
-        if (call.isRegisterCall()) {
-            auto table = forwardLoop(seq, ops);
-            try {
-                readTable(table, call, image, init, functions, remainingEntries);
-            } catch (InspectionError &error) {
-                table.annotate(error.context);
-                throw;
+        auto table =
+            call.isRegisterCall() ? forwardLoop(seq, ops) : reverseLoop(seq, ops, image, init);
+
+        try {
+            readTable(table, call, image, init, functions, remainingEntries);
+            const auto extent = table.extent();
+            if (extent.begin < extent.end && !rangesIn(loaderWrites, extent).empty()) {
+                call.reject(FailureCode::ImageMemory,
+                            "loader write overlaps bounded table at " + hex(table.originRva()));
             }
-
-            return table;
+        } catch (InspectionError &error) {
+            table.annotate(error.context);
+            throw;
         }
 
-        const auto loop = prefix(seq, ops);
-        const auto scanner = scan(seq, loop, ops);
-        const auto rva = ops.ripRva(loop.source, 1);
-        if (!rva || !std::in_range<uint32_t>(*rva)) {
-            seq.reject();
-        }
-        ops.decodeAddress(loop.source, 1, loop.source.opcode == "MOV64rm");
-        const auto slot = static_cast<uint32_t>(*rva);
-        const auto header = loop.source.opcode == "LEA64r"
-                                ? slot
-                                : readImmutableImagePointer(call, image, init, slot);
-        BoundedTableCall table{0,
-                               0,
-                               {},
-                               ReverseTableProof{header, loop.source.rva, loop.countLoad.rva,
-                                                 loop.zeroTest.rva, scanner.read, loop.cursor,
-                                                 false}};
-        readTable(table, call, image, init, functions, remainingEntries);
         return table;
     } catch (InspectionError &error) {
         if (error.context.instructionRva != call.rva) {

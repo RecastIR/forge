@@ -491,14 +491,10 @@ namespace forge::x86 {
                 pointerInitialization = image.imageInitialization();
             }
             validateCallEvidence(caller, active.code, step, step.rva);
-            auto table =
-                recoverTableCall(active.cfg.steps(), step, operands, image, *pointerInitialization,
-                                 functionRanges(), active.remainingTableEntries);
-            if (table.extent().begin < table.extent().end &&
-                !rangesIn(loaderWrittenRanges(), table.extent()).empty()) {
-                step.reject(FailureCode::ImageMemory,
-                            "loader write overlaps bounded table at " + hex(table.originRva()));
-            }
+            auto table = recoverTableCall(active.cfg.steps(), step, operands, image,
+                                          *pointerInitialization, functionRanges(),
+                                          loaderWrittenRanges(), active.remainingTableEntries);
+
             bool returns = false;
             for (const auto target : table.targets) {
                 returns |= admitTableTarget(caller, step, table, target) == Flow::Fallthrough;

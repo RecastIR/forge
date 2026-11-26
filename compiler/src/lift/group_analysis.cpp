@@ -366,7 +366,7 @@ namespace forge::x86 {
             }
             const auto address = addressFact(operand, facts);
 
-            // Bounded calls already selected their header and scan bytes in analyzeGroup.
+            // The call-site proof already selected the guest bytes for each bounded access.
             if (collect && table && table->loadRva == s.rva) {
                 imageMemory.tableRead(s, *table);
             } else if (collect && !plan.tableInstructions.contains(s.rva)) {
@@ -936,9 +936,15 @@ namespace forge::x86 {
                         instructions.emplace(reverse->scanRead, &call);
                         instructions.emplace(reverse->zeroGuard, &call);
                     } else {
-                        instructions.emplace(table->forward()->pointerLoad, &call);
+                        const auto &forward = *table->forward();
+                        instructions.emplace(forward.pointerLoad, &call);
+
+                        if (forward.slotStore) {
+                            instructions.emplace(*forward.slotStore, &call);
+                        }
                     }
                 }
+
                 const auto *service = call.external();
                 if (service && service->binding.callback == win64::Callback::Cleanup) {
                     result.usesTermination = true;
