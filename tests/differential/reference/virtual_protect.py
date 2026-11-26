@@ -38,6 +38,9 @@ def observe(directory):
         raise ValueError("producer manifest mismatch")
     for name, cases in (("virtual-protect-reference.exe", range(45)),
                         ("executable-virtual-protect.exe", [None]),
+                        ("executable-virtual-protect-sections.exe", [None]),
+                        ("executable-virtual-protect-split.exe", [None]),
+                        ("executable-virtual-protect-dynamic.exe", [None]),
                         ("executable-virtual-protect-errors.exe", [None]),
                         ("executable-virtual-protect-origin.exe", [None]),
                         ("executable-virtual-protect-fresh.exe", [None]),

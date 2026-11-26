@@ -1536,6 +1536,8 @@ class Reference(Workspace):
         from virtual_protect import check_observation, error_records
         expected[image("virtual-protect-errors").name] = (42, error_records("wine"), b"")
         expected[image("virtual-protect").name] = (42, b"", b"")
+        for case in ("sections", "dynamic", "split"):
+            expected[image("virtual-protect-" + case).name] = (42, b"", b"")
         expected[image("virtual-protect-fresh").name] = (42, b"", b"")
         expected[image("virtual-protect-origin").name] = (46, b"", b"")
         observer = FIXTURES / "virtual-protect-reference.exe"
@@ -1988,11 +1990,17 @@ class Console(Workspace):
             self.compile(image(name))
             result = self.program()
             self.assertEqual((result.returncode, result.stdout, result.stderr), (42, b"", b""))
-        preferred, = struct.unpack_from("<Q", pe.read_bytes(), Layout(pe.read_bytes()).opt + 24)
-        run(CONTRACT, "--guest-base", hex(preferred + 0x30000000), pe, self.output,
-            OPT, LLC, "/usr/bin/xcrun", *LINK, check=True)
-        rebased = self.program()
-        self.assertEqual((rebased.returncode, rebased.stdout, rebased.stderr), (42, b"", b""))
+        for case in ("virtual-protect", "virtual-protect-sections", "virtual-protect-dynamic", "virtual-protect-split"):
+            pe = image(case)
+            if case != "virtual-protect":
+                self.compile(pe)
+                native = self.program()
+                self.assertEqual((native.returncode, native.stdout, native.stderr), (42, b"", b""))
+            preferred, = struct.unpack_from("<Q", pe.read_bytes(), Layout(pe.read_bytes()).opt + 24)
+            run(CONTRACT, "--guest-base", hex(preferred + 0x30000000), pe, self.output,
+                OPT, LLC, "/usr/bin/xcrun", *LINK, check=True)
+            rebased = self.program()
+            self.assertEqual((rebased.returncode, rebased.stdout, rebased.stderr), (42, b"", b""))
         for case, access in (("denied", 2), ("rmw", 3), ("atomic", 3), ("adapter", 2)):
             with self.subTest(case=case):
                 self.compile(image("virtual-protect-" + case))

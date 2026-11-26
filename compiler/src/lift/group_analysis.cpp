@@ -492,28 +492,42 @@ namespace forge::x86 {
                                                         AddressFacts &facts, bool collect) const {
             const auto &binding = win64::virtualProtect;
             const auto target = facts.serviceValue(binding, 0, entryAddresses);
+            const auto sizes =
+                facts.serviceValue(binding, 1, entryAddresses).project(entryAddresses);
             const auto output = facts.serviceValue(binding, 3, entryAddresses);
-            invalidateServiceOutput(facts.spills, output, entryAddresses,
-                                    binding.arguments[3].size);
+            const auto outputSize = binding.arguments[3].size;
+            invalidateServiceOutput(facts.spills, output, entryAddresses, outputSize);
             if (!collect) {
                 return;
             }
 
-            // Select available backing for the runtime probe, including calls whose VAs
-            // can only be classified after control reaches the service.
             const auto &step = *function.instructionContaining(site.instruction);
-            const auto select = [&](const AddressFact &address, unsigned width) {
+            const auto select = [&](const AddressFact &address, auto known) {
                 if (address.known()) {
                     for (const auto va : address.values()) {
-                        imageMemory.computedAccess(step, va, width, true);
+                        known(va);
                     }
                 } else if (!address.stackDerived() && !address.pointsToProcessStorage() &&
                            !address.frameOffset()) {
-                    imageMemory.computedAccess(step, std::nullopt, width, true);
+                    imageMemory.computedAccess(step, std::nullopt, 8, true);
                 }
             };
-            select(target, 8);
-            select(output, binding.arguments[3].size * 8);
+
+            if (!sizes.known() ||
+                std::ranges::any_of(sizes.values(), [](auto n) { return n != 0; })) {
+                select(target, [&](uint64_t va) {
+                    if (!sizes.known()) {
+                        imageMemory.protectionTarget(step, va, std::nullopt);
+                        return;
+                    }
+
+                    for (const auto size : sizes.values()) {
+                        imageMemory.protectionTarget(step, va, size);
+                    }
+                });
+            }
+            select(output,
+                   [&](uint64_t va) { imageMemory.protectionOutput(step, va, outputSize); });
         }
 
         void FunctionAnalyzer::traceServiceArguments(const ResolvedCallSite &site,

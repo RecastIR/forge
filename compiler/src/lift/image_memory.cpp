@@ -620,6 +620,51 @@ namespace forge::x86 {
         selectServiceSections(step, rva, *size, write);
     }
 
+    void ImageMemory::protectionTarget(const Step &step, uint64_t va,
+                                       std::optional<uint64_t> size) {
+        const uint64_t imageSize = source.module().sizeOfImage;
+        constexpr uint64_t mask = FORGE_RT_GUEST_PAGE_SIZE - 1;
+        const uint64_t first = (va & ~mask) - loadBase;
+        const uint64_t rva = va - loadBase;
+        if (first >= imageSize || rva >= imageSize) {
+            return;
+        }
+
+        if (size) {
+            if (!*size || *size > imageSize - rva || *size - 1 > UINT64_MAX - va) {
+                return;
+            }
+
+            const auto last = ((va + (*size - 1)) | mask) - loadBase;
+            if (last < imageSize) {
+                selectServiceSections(step, first, last - first + 1, true);
+            }
+            return;
+        }
+
+        // Starting in known image storage bounds even a dynamic count: protection cannot
+        // succeed past the first gap or ineligible section.
+        auto next = first;
+        while (const auto *section = source.sectionAtRva(next)) {
+            if (!section->writableData()) {
+                break;
+            }
+
+            const auto end = uint64_t{section->rva} + section->virtualSize;
+            select(step, *section, {next, end});
+            next = end;
+        }
+    }
+
+    void ImageMemory::protectionOutput(const Step &step, uint64_t va, unsigned size) {
+        if (!size || size - 1 > UINT64_MAX - va || va + (size - 1) < loadBase) {
+            return;
+        }
+
+        const auto first = std::max(va, loadBase);
+        selectServiceSections(step, first - loadBase, size - (first - va), true);
+    }
+
     // A bounded transfer may touch several sections, including a valid subrange after a gap.
     // finish() preserves protected holes in each selected backing.
     void ImageMemory::selectServiceSections(const Step &step, uint64_t rva, uint64_t size,

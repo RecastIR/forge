@@ -79,6 +79,10 @@ def generate(output, mc, link, dlltool, clang):
         image("executable-virtual-protect-fresh.exe", "fresh_page = 1\n" + protect, link_flags=memory_libraries)
         image("executable-virtual-protect-errors.exe", (sources / "executable-virtual-protect-errors.s").read_text(),
               link_flags=memory_libraries)
+        sections = (sources / "executable-virtual-protect-sections.s").read_text()
+        for name, setup in (("sections", ""), ("dynamic", "dynamic_count = 1\n"),
+                            ("split", "split_output = 1\n")):
+            image(f"executable-virtual-protect-{name}.exe", setup + sections, link_flags=memory_libraries)
         reference = "virtual-protect-reference.exe"
         run(clang, "--target=x86_64-pc-windows-msvc", "-O1", "-ffreestanding", "-fno-stack-protector",
             "-c", sources / "virtual-protect-reference.c", "-o", "reference.obj")

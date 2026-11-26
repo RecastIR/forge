@@ -71,6 +71,8 @@ namespace forge::x86 {
         void addressTaken(const Step &step, uint64_t va);
         void serviceArgument(const Step &step, uint64_t va, bool write,
                              std::optional<uint64_t> size);
+        void protectionTarget(const Step &step, uint64_t va, std::optional<uint64_t> size);
+        void protectionOutput(const Step &step, uint64_t va, unsigned size);
         void boundedTable(const Step &step, const BoundedTableCall &table);
         void initializerTable(const Step &step, uint32_t first, uint32_t last);
         bool isDataImportPointer(uint64_t va) const;
