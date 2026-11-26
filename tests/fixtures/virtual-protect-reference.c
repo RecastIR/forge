@@ -199,6 +199,10 @@ int entry(void) {
     case 43:
         out = (Dword *)(data + 4096);
         break;
+    case 44:
+        out = (Dword *)(data + 4096);
+        length = 0;
+        break;
     default:
         return 99;
     }
@@ -218,6 +222,13 @@ int entry(void) {
                       error,
                       protection(target),
                       protection(data + 4096)};
+    if (test == 44) {
+        // Capture the untouched or published DWORD before probing its page a second time.
+        record[3] = *out;
+        if (!VirtualProtect(out, 1, 2, &record[6])) {
+            return 98;
+        }
+    }
     return WriteFile(GetStdHandle(-11), record, sizeof(record), &written, 0) &&
                    written == sizeof(record)
                ? 42

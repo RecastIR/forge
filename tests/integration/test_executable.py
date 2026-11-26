@@ -1543,7 +1543,7 @@ class Reference(Workspace):
         inputs = Path(__file__).resolve().parents[1] / "differential/reference/executable-inputs.txt"
         filenames = inputs.read_text().splitlines()
         self.assertEqual(filenames, sorted([*expected, observer.name, denied.name]))
-        for case in range(44):
+        for case in range(45):
             with self.subTest(case=case):
                 check_observation("wine", case, *self.capture(observer, [f"{case:02}"]))
         status, stdout, stderr = self.capture(denied)

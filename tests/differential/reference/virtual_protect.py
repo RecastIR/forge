@@ -10,6 +10,11 @@ import sys
 
 def check_observation(backend, case, status, stdout, stderr):
     table = json.loads(Path(__file__).with_name("virtual-protect.json").read_text())
+    if case == 44:
+        if status != 42 or len(stdout) != 28 or stderr:
+            raise ValueError(f"{backend} failed-probe measurement failed")
+        print(backend, case, struct.unpack("<7I", stdout), flush=True)
+        return
     expected = struct.pack("<7I", *table[backend][case])
     if (status, stdout, stderr) != (42, expected, b""):
         raise ValueError(f"{backend} case {case}: {status:#x} {stdout.hex()} {stderr.hex()}")
@@ -31,7 +36,7 @@ def observe(directory):
     manifest = (directory / "SHA256SUMS").read_bytes()
     if hashlib.sha256(manifest).hexdigest() != os.environ["PE_MANIFEST_SHA256"]:
         raise ValueError("producer manifest mismatch")
-    for name, cases in (("virtual-protect-reference.exe", range(44)),
+    for name, cases in (("virtual-protect-reference.exe", range(45)),
                         ("executable-virtual-protect.exe", [None]),
                         ("executable-virtual-protect-errors.exe", [None]),
                         ("executable-virtual-protect-origin.exe", [None]),
