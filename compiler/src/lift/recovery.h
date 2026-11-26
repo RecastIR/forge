@@ -73,7 +73,14 @@ namespace forge::x86 {
             return layout ? layout->header : first;
         }
 
-        void annotate(FailureContext &context) const {
+        void annotate(FailureContext &context, std::optional<uint32_t> target = {}) const {
+            // The failing call records its own proof before an incoming call supplies context.
+            if (context.tableFirstRva || context.tableHeaderRva) {
+                return;
+            }
+
+            context.tableTargetRva = target;
+
             if (const auto *loop = forward()) {
                 context.tableFirstRva = first;
                 context.tableLastRva = last;
@@ -134,12 +141,7 @@ namespace forge::x86 {
 
         void annotateTableFailure(FailureContext &context, uint32_t targetRva) const {
             context.sourceCall = CallLocation{caller, instruction};
-
-            // A nested table's evidence belongs to the failing CALL inside the callee.
-            if (!context.tableFirstRva && !context.tableHeaderRva) {
-                table()->annotate(context);
-                context.tableTargetRva = targetRva;
-            }
+            table()->annotate(context, targetRva);
         }
 
         void annotateCallbackFailure(FailureContext &context,

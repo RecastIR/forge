@@ -32,10 +32,13 @@ namespace forge {
             if (error.context.tableTargetRva) {
                 err << ", target " << hex(*error.context.tableTargetRva);
             }
-            if (site) {
-                err << ", call at " << hex(site->instruction);
-            }
+
             err << ")";
+
+            if (site && site->instruction != error.context.instructionRva) {
+                err << " (reached from call at " << hex(site->instruction) << " in "
+                    << hex(site->caller) << ")";
+            }
         } else if (site && error.context.initializerTargetRva) {
             err << " (initializer " << hex(*error.context.initializerTargetRva) << " from call at "
                 << hex(site->instruction) << " in " << hex(site->caller) << ")";

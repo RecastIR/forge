@@ -238,7 +238,7 @@ namespace forge::x86 {
             std::optional<uint64_t> firstLoaderWrite(uint32_t start, const MappedRange &code);
             void checkCalledExtent(uint32_t target, const MappedRange &code, const Step &step);
             void validateCallEvidence(uint32_t caller, const MappedRange &code, const Step &call,
-                                      int64_t target);
+                                      std::optional<int64_t> target);
             ExternalCallTarget bindImport(uint32_t caller, const MappedRange &code,
                                           const Step &step, uint32_t slot);
             std::optional<ExternalCallTarget> bindImportThunk(uint32_t caller, const Step &step,
@@ -479,8 +479,7 @@ namespace forge::x86 {
             }
             return stageGuestTarget(caller, step, target);
         } catch (InspectionError &failure) {
-            table.annotate(failure.context);
-            failure.context.tableTargetRva = target;
+            table.annotate(failure.context, target);
             throw;
         }
 
@@ -490,7 +489,7 @@ namespace forge::x86 {
             if (!pointerInitialization) {
                 pointerInitialization = image.imageInitialization();
             }
-            validateCallEvidence(caller, active.code, step, step.rva);
+            validateCallEvidence(caller, active.code, step, std::nullopt);
             auto table = recoverTableCall(active.cfg.steps(), step, operands, image,
                                           *pointerInitialization, functionRanges(),
                                           loaderWrittenRanges(), active.remainingTableEntries);
@@ -662,7 +661,7 @@ namespace forge::x86 {
         }
 
         void GroupDiscovery::validateCallEvidence(uint32_t caller, const MappedRange &code,
-                                                  const Step &call, int64_t target) {
+                                                  const Step &call, std::optional<int64_t> target) {
             const auto &image = entry.analysis.image();
             if (image.advertisesDynamicRelocations() || !code.section.immutable()) {
                 const auto transfer = call.flow == Flow::TailJump ? "tail jump" : "indirect call";
@@ -1391,38 +1390,51 @@ namespace forge::x86 {
             return;
         }
 
-        for (const auto &[rva, owner] : recovered) {
-            if (const auto *site = owner.callAt(*instruction); site && site->external()) {
-                const auto &target = *site->external();
-                failure.context.blockRva = site->block;
-                failure.context.importSlot = target.slot;
-                failure.context.importDll = target.descriptor.name;
-                failure.context.importSymbol = std::string(target.binding.name);
-            }
+        const auto found = std::ranges::find_if(recovered, [instruction](const auto &entry) {
+            return entry.second.instructionContaining(*instruction) != nullptr;
+        });
 
-            if (rva == entryRva || !owner.instructionContaining(*instruction)) {
-                continue;
-            }
+        if (found == recovered.end()) {
+            return;
+        }
 
-            failure.context.functionRva = rva;
+        const auto &[rva, owner] = *found;
+        auto &context = failure.context;
 
-            for (const auto *incoming : owner.incoming) {
-                if (incoming->table() && !failure.context.sourceCall) {
-                    incoming->annotateTableFailure(failure.context, rva);
-                    break;
-                }
+        if (const auto *site = owner.callAt(*instruction)) {
+            if (const auto *target = site->external()) {
+                context.blockRva = site->block;
+                context.importSlot = target->slot;
+                context.importDll = target->descriptor.name;
+                context.importSymbol = std::string(target->binding.name);
+            } else if (const auto *table = site->table()) {
+                context.blockRva = site->block;
+                table->annotate(context);
             }
-            if (failure.context.sourceCall) {
+        }
+
+        if (rva == entryRva) {
+            return;
+        }
+
+        context.functionRva = rva;
+
+        if (context.sourceCall) {
+            return;
+        }
+
+        for (const auto *incoming : owner.incoming) {
+            if (incoming->table()) {
+                incoming->annotateTableFailure(context, rva);
                 return;
             }
-            if (const auto *sourceSite = owner.callbackSource) {
-                sourceSite->annotateCallbackFailure(failure.context, rva);
-            } else if (owner.origin == RecoveryOrigin::InferredLeaf && !owner.incoming.empty()) {
-                const auto &site = *owner.incoming.front();
-                failure.context.sourceCall = CallLocation{site.caller, site.instruction};
-            }
+        }
 
-            return;
+        if (const auto *sourceSite = owner.callbackSource) {
+            sourceSite->annotateCallbackFailure(context, rva);
+        } else if (owner.origin == RecoveryOrigin::InferredLeaf && !owner.incoming.empty()) {
+            const auto &site = *owner.incoming.front();
+            context.sourceCall = CallLocation{site.caller, site.instruction};
         }
     }
 } // namespace forge::x86

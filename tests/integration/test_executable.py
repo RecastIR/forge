@@ -836,7 +836,7 @@ class Readiness(Workspace):
             block += length
 
         for case in ("alignment", "reversed", "underflow", "budget", "unmapped", "permission",
-                     "missing", "conflict", "loader", "data_target", "interior", "after_load",
+                     "missing", "conflict", "loader", "loader_code", "data_target", "interior", "after_load",
                      "after_guard", "late_backedge", "empty_backedge", "stride", "partial_rax", "unguarded_null"):
             with self.subTest(case=case):
                 data = bytearray(original)
@@ -854,11 +854,12 @@ class Readiness(Workspace):
                     struct.pack_into("<H", data, fields[first], 0)
                 elif case == "conflict":
                     data[fields[first+16]:fields[first+16]+2] = data[fields[first]:fields[first]+2]
-                elif case == "loader":
+                elif case in ("loader", "loader_code"):
                     tls = first+0x80
                     struct.pack_into("<I", data, section+8, tls+40-layout.u32(section+12))
                     struct.pack_into("<II", data, layout.directories+9*8, tls, 40)
-                    struct.pack_into("<Q", data, offset(first)+(tls-first)+16, base+first)
+                    index = bounds if case == "loader_code" else first
+                    struct.pack_into("<Q", data, offset(tls)+16, base+index)
                 elif case in ("data_target", "interior"):
                     target = first if case == "data_target" else symbols["writer"]+1
                     struct.pack_into("<Q", data, offset(first), base+target)
@@ -887,6 +888,11 @@ class Readiness(Workspace):
                     self.assertIn("loader write overlaps bounded table", report["message"])
                     self.assertEqual((ctx["table_first_rva"], ctx["table_last_rva"], ctx["pointer_load_rva"]),
                                      (hex(first), hex(last), hex(load)))
+                if case == "loader_code":
+                    self.assertIn(f"proof depends on loader-written code at {bounds:#x}", report["message"])
+                    self.assertNotIn("branch_target", ctx)
+                    self.assertIn(dict(caller_rva=hex(symbols["outer"]), instruction_rva=hex(site)),
+                                  ctx["unresolved_calls"])
                 if case == "budget":
                     self.assertIn("count exceeds budget", report["message"])
                 if case in ("after_load", "after_guard", "late_backedge", "empty_backedge", "missing",
@@ -898,13 +904,7 @@ class Readiness(Workspace):
         layout = Layout(original)
         base, = struct.unpack_from("<Q", original, layout.opt + 24)
         outer, outer_site, inner_site = (symbols[k] for k in ("outer", "many_site", "null_site"))
-        pdata, size = layout.directory(3)
-        rows = struct.iter_unpack("<III", original[layout.file_offset(pdata):layout.file_offset(pdata) + size])
-        inner = next(start for start, end, _ in rows if start <= inner_site < end)
-        start, end = layout.file_offset(inner), layout.file_offset(inner_site)
-        first_lea = original.index(bytes.fromhex("488d1d"), start, end)
-        last_lea = original.index(bytes.fromhex("488d35"), first_lea, end)
-        load = inner + original.index(bytes.fromhex("488b03"), last_lea, end) - start
+        inner, bounds, load = null_walk(original, layout, inner_site)
         # Reuse the single-entry table's relocated slot for the nested walk.
         first = symbols["empty"] - 8
         bad_target = symbols["slots"]
@@ -914,8 +914,7 @@ class Readiness(Workspace):
                 struct.pack_into("<I", data, layout.opt + 16, outer)
                 struct.pack_into("<Q", data, layout.file_offset(symbols["slots"]), base + inner)
                 struct.pack_into("<Q", data, layout.file_offset(first), base + bad_target)
-                for lea, dest in ((first_lea, first), (last_lea, last)):
-                    struct.pack_into("<i", data, lea + 3, dest - (inner + lea - start + 7))
+                set_forward_bounds(data, layout, bounds, first, last)
                 ctx = self.reject(data)["context"]
                 self.assertEqual((ctx["caller_rva"], ctx["call_site_rva"]), (hex(outer), hex(outer_site)))
                 self.assertIn(dict(caller_rva=hex(outer), instruction_rva=hex(outer_site), target_rva=hex(inner)),
@@ -929,7 +928,42 @@ class Readiness(Workspace):
                 else:
                     self.assertEqual(ctx["table_target_rva"], hex(bad_target))
                     edge["target_rva"] = hex(bad_target)
+                    result = run(FORGE, "lift", self.dir / "bad.exe", "--executable", "--output", self.output)
+                    self.assertEqual(result.returncode, 1)
+                    self.assertIn(f"{inner_site:#x}: CALL64r", result.stderr)
+                    self.assertIn(f"load at {load:#x}, target {bad_target:#x})", result.stderr)
+                    self.assertIn(f"reached from call at {outer_site:#x} in {outer:#x}", result.stderr)
                 self.assertIn(edge, ctx["unresolved_calls"])
+
+    def test_forward_table_image_planning_failure(self):
+        original, symbols = bounded_fixture(image("forward-call"))
+        data = bytearray(original)
+        layout = Layout(data)
+        site = symbols["null_site"]
+        inner, bounds, load = null_walk(data, layout, site)
+        first = layout.u32(layout.opt + 56)
+        layout.add_unused_section(257 << 20, 0xc0000080)
+        set_forward_bounds(data, layout, bounds, first, first + 8)
+        base, = struct.unpack_from("<Q", data, layout.opt + 24)
+        struct.pack_into("<Q", data, layout.file_offset(symbols["slots"]), base + inner)
+
+        for root in (entry(original), inner):
+            with self.subTest(root=hex(root)):
+                struct.pack_into("<I", data, layout.opt + 16, root)
+                report = self.reject(data)
+                self.assertEqual(report["code"], "LIFT_IMAGE_MEMORY")
+                self.assertIn("writable virtual limit", report["message"])
+                ctx = report["context"]
+                self.assertTrue(ctx["recovery_complete"])
+                self.assertEqual((ctx["instruction_rva"], ctx["block_rva"], ctx["table_first_rva"],
+                                  ctx["table_last_rva"], ctx["pointer_load_rva"]),
+                                 tuple(map(hex, (site, site, first, first + 8, load))))
+                self.assertNotIn("table_target_rva", ctx)
+                if root == inner:
+                    self.assertNotIn("call_site_rva", ctx)
+                else:
+                    self.assertEqual((ctx["function_rva"], ctx["caller_rva"], ctx["call_site_rva"]),
+                                     tuple(map(hex, (inner, symbols["outer"], symbols["many_site"]))))
 
     def test_bounded_nested_import_failure(self):
         original, symbols = bounded_fixture(image("bounded-cleanup"))
@@ -1583,7 +1617,54 @@ def bounded_fixture(pe=None):
     return pe.read_bytes(), symbols
 
 
+def null_walk(data, layout, site):
+    """Locate the two LEAs and pointer load in the fixture's run_null function."""
+    pdata, size = layout.directory(3)
+    records = layout.file_offset(pdata)
+    rows = struct.iter_unpack("<III", data[records:records + size])
+    inner = next(start for start, end, _ in rows if start <= site < end)
+    start, end = layout.file_offset(inner), layout.file_offset(site)
+    bounds = data.index(bytes.fromhex("488d1d"), start, end)
+    assert data.startswith(bytes.fromhex("488d35"), bounds + 7)
+    load = data.index(bytes.fromhex("488b03"), bounds + 14, end)
+    return inner, inner + bounds - start, inner + load - start
+
+
+def set_forward_bounds(data, layout, bounds, first, last):
+    for lea, dest in ((bounds, first), (bounds + 7, last)):
+        struct.pack_into("<i", data, layout.file_offset(lea) + 3, dest - (lea + 7))
+
+
 class Console(Workspace):
+    def test_forward_empty_section_boundary(self):
+        original, symbols = bounded_fixture(image("forward-call"))
+        layout = Layout(original)
+        site = symbols["null_site"]
+        _, bounds, _ = null_walk(original, layout, site)
+        tail = symbols["null_only"]
+        reloc, _ = layout.directory(5)
+        boundary = layout.u32(layout.section_header(reloc) + 12)
+        pe = self.dir / "boundary.exe"
+        for name, extent, first, last in (("empty", boundary, boundary, boundary),
+                                          ("nonempty", boundary, boundary, boundary + 8),
+                                          ("gap", boundary - 16, boundary - 8, boundary - 8)):
+            with self.subTest(name=name):
+                data = bytearray(original)
+                struct.pack_into("<I", data, layout.section_header(tail) + 8, extent - tail)
+                set_forward_bounds(data, layout, bounds, first, last)
+                pe.write_bytes(data)
+                if name == "empty":
+                    tables = self.compile(pe)["context"]["bounded_calls"]
+                    row = next(row for row in tables if row["instruction_rva"] == hex(site))
+                    self.assertEqual((row["first_rva"], row["last_rva"], row["initial_target_rvas"]),
+                                     (hex(first), hex(last), []))
+                    result = self.program()
+                    self.assertEqual((result.returncode, result.stdout, result.stderr), (42, b"", b""))
+                else:
+                    report = self.compile(pe, success=False)
+                    self.assertEqual(report["code"], "LIFT_IMAGE_MEMORY")
+                    self.assertIn(f"invalid guest pointer table at {first:#x}", report["message"])
+
     def test_forward_store_image_selection(self):
         original, symbols = bounded_fixture(image("forward-call"))
         large = bytearray(original)
@@ -1595,6 +1676,9 @@ class Console(Workspace):
         pe = self.dir / "store.exe"
         for name, instruction in (("immediate", large[store:store + 7]),
                                   ("register", bytes.fromhex("488903 90909090")),
+                                  ("sib_no_index", bytes.fromhex("48890423 909090")),
+                                  ("sib_no_index_scale_two", bytes.fromhex("48890463 909090")),
+                                  ("indexed", bytes.fromhex("4889044b 909090")),
                                   ("other_base", bytes.fromhex("48c700 00000000")),
                                   ("next_slot", bytes.fromhex("48894308 909090")),
                                   ("segment_override", bytes.fromhex("65488903 909090"))):
@@ -1606,7 +1690,7 @@ class Console(Workspace):
                     report = self.compile(pe, success=False)
                     self.assertEqual(report["context"]["instruction_rva"], hex(site - 7))
                     self.assertEqual(report["code"], "LIFT_UNSUPPORTED_PREFIX")
-                elif name in ("other_base", "next_slot"):
+                elif name in ("other_base", "next_slot", "indexed"):
                     report = self.compile(pe, success=False)
                     self.assertEqual(report["code"], "LIFT_IMAGE_MEMORY")
                     self.assertEqual(report["context"]["instruction_rva"], hex(site - 7))
@@ -1625,9 +1709,7 @@ class Console(Workspace):
         slot = next(rva for _, rva, _, _ in layout.sections
                     if data.startswith(b".rdata\0", layout.section_header(rva)))
         struct.pack_into("<Q", data, layout.file_offset(slot), base + symbols["terminal"])
-        bounds = symbols["many_bounds"]
-        for lea, dest in ((bounds, slot), (bounds + 7, slot + 8)):
-            struct.pack_into("<i", data, layout.file_offset(lea) + 3, dest - (lea + 7))
+        set_forward_bounds(data, layout, symbols["many_bounds"], slot, slot + 8)
         pe = self.dir / "readonly.exe"
         pe.write_bytes(data)
         self.compile(pe)

@@ -68,7 +68,8 @@ namespace forge::x86 {
                      unsigned scale, int displacement) {
             return !mem.gsRelative && mem.base && mem.base->index == base &&
                    (mem.index ? std::optional{mem.index->index} : std::nullopt) == index &&
-                   mem.scale == scale && mem.displacement == static_cast<uint64_t>(displacement);
+                   (!index || mem.scale == scale) &&
+                   mem.displacement == static_cast<uint64_t>(displacement);
         }
 
         struct Loop {
@@ -335,14 +336,22 @@ namespace forge::x86 {
         uint64_t tableLimit(const BoundedTableCall &table, const Step &call,
                             const ParsedImage &image) {
             const auto origin = table.originRva();
+            const auto eligible = [](const Section *section) {
+                return section && !section->shared &&
+                       (section->immutable() || section->writableData());
+            };
             const auto *section = image.sectionAtRva(origin);
-            if (!section && table.forward() && table.first == table.last && origin) {
-                // An empty half-open range may denote the end of its owning section.
-                section = image.sectionAtRva(origin - 1);
+
+            if (!eligible(section) && table.forward() && table.first == table.last && origin) {
+                // A linker endpoint can coincide with the start of an ineligible section.
+                const auto *previous = image.sectionAtRva(origin - 1);
+
+                if (previous && uint64_t(previous->rva) + previous->virtualSize == origin) {
+                    section = previous;
+                }
             }
 
-            if (!section || (!section->immutable() && !section->writableData()) ||
-                section->shared || origin % 8 || image.advertisesDynamicRelocations()) {
+            if (!eligible(section) || origin % 8 || image.advertisesDynamicRelocations()) {
                 call.reject(FailureCode::ImageMemory,
                             "invalid guest pointer table at " + hex(origin));
             }
