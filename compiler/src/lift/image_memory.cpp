@@ -502,6 +502,11 @@ namespace forge::x86 {
                         "bounded table overflows the selected guest address space");
         }
 
+        if (table.forward() && ((loadBase + extent.begin) % 8 || (loadBase + extent.end) % 8)) {
+            step.reject(FailureCode::ImageMemory,
+                        "unaligned forward pointer range at selected image base " + hex(loadBase));
+        }
+
         if (extent.begin == extent.end) {
             return;
         }

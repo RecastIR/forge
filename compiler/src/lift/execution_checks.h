@@ -40,6 +40,7 @@ namespace forge::x86 {
         llvm::Value *field(unsigned index);
         void onFailure(llvm::Value *condition, llvm::function_ref<void()> record);
         void recordFault(uint32_t fault);
+        void annotateScalarFault();
         void recordUnsupported(forge_rt_status status);
         void returnFailure();
     };

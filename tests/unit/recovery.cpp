@@ -654,6 +654,67 @@ namespace {
                   group.function(tail).mayReturn && group.function(tail).incoming.size() == 1 &&
                   group.function(tail).incoming.front() == site,
               "incorrect deduplication or tail return");
+
+        for (const auto &[entry, function] : group.functions()) {
+            for (const auto &[instruction, call] : function.calls) {
+                const auto *range = call.table();
+                if (!range || !range->forward()) {
+                    continue;
+                }
+
+                // Select each runner separately so the first rejection cannot mask the empty range.
+                const RecoveredFunctionGroup runner(image, entry);
+                for (const auto output : {LiftOutput::Function, LiftOutput::ProcessArtifact}) {
+                    try {
+                        x86::analyzeGroup(runner, 0x10000001, EntryMode::WindowsX64I64Pair, true,
+                                          output);
+                        throw std::runtime_error("accepted unaligned forward pointer range");
+                    } catch (const InspectionError &error) {
+                        const auto &ctx = error.context;
+                        check(error.kind == FailureCode::ImageMemory &&
+                                  ctx.instructionRva == instruction &&
+                                  ctx.tableFirstRva == range->first &&
+                                  ctx.tableLastRva == range->last &&
+                                  ctx.pointerLoadRva == range->forward()->pointerLoad,
+                              "unaligned selected base lost its forward call evidence");
+                    }
+                }
+            }
+        }
+    }
+
+    void checkForwardTarget(const ParsedImage &image, const ImageInitialization &init,
+                            llvm::ArrayRef<char *> args) {
+        uint32_t first = 0, last = 0, target = 0;
+        check(args.size() == 3 && !llvm::StringRef(args[0]).getAsInteger(0, first) &&
+                  !llvm::StringRef(args[1]).getAsInteger(0, last) &&
+                  !llvm::StringRef(args[2]).getAsInteger(0, target),
+              "expected forward table bounds and target RVA");
+        const auto *section = image.sectionAtRva(first);
+        const RvaRange extent{first, last};
+        check(win64::initializerRangeBytes(first, last) && section && !section->shared &&
+                  (section->immutable() || section->writableData()) &&
+                  last <= uint64_t(section->rva) + section->virtualSize &&
+                  last <= image.module().sizeOfImage && target < image.module().sizeOfImage &&
+                  !image.overlapsDirectory(extent) &&
+                  rangesIn(image.loaderWrittenRanges(), extent).empty(),
+              "invalid forward table for a reported target");
+        init.validateRelocations(extent);
+        bool found = false;
+        for (uint32_t slot = first; slot < last; slot += 8) {
+            const auto pointer = image.initialQword(slot);
+            const auto fields = init.relocationsIn({slot, uint64_t(slot) + 8});
+            if (!pointer && fields.empty()) {
+                continue;
+            }
+            check(fields.size() == 1 && fields.front()->rva == slot &&
+                      fields.front()->type == llvm::COFF::IMAGE_REL_BASED_DIR64 &&
+                      pointer >= image.module().imageBase &&
+                      pointer - image.module().imageBase < image.module().sizeOfImage,
+                  "invalid relocated slot in the reported forward table");
+            found |= pointer - image.module().imageBase == target;
+        }
+        check(found, "target lacks a relocated slot in the reported forward table");
     }
 
     // Check PE stability for the differential runner's independently disassembled caller.
@@ -661,7 +722,11 @@ namespace {
     void checkDispatchSpans(const fs::path &path, llvm::ArrayRef<char *> bounds) {
         const auto slots =
             llvm::find_if(bounds, [](llvm::StringRef arg) { return arg == "--iat-slots"; });
-        const auto intervals = bounds.take_front(static_cast<size_t>(slots - bounds.begin()));
+        const auto beforeSlots = bounds.take_front(static_cast<size_t>(slots - bounds.begin()));
+        const auto forward = llvm::find_if(
+            beforeSlots, [](llvm::StringRef arg) { return arg == "--forward-target"; });
+        const auto intervals =
+            beforeSlots.take_front(static_cast<size_t>(forward - beforeSlots.begin()));
         check(intervals.size() >= 2 && intervals.size() % 2 == 0,
               "expected a code RVA span and optional table spans");
         ParsedImage image(InputFile(path), ParsePolicy::FunctionAnalysis);
@@ -677,14 +742,19 @@ namespace {
             check(mapped && mapped->section.immutable() &&
                       (mapped->section.permissions[2] == 'x') == (i == 0),
                   "dispatch requires stable file-backed bytes");
+            init.validateRelocations({begin, end});
             check(init.exclusionsIn({begin, end}).empty() &&
                       init.relocationsIn({begin, end}).empty(),
                   "dispatch overlaps loader-written bytes or relocations");
         }
 
+        if (forward != beforeSlots.end()) {
+            checkForwardTarget(image, init, beforeSlots.drop_front(intervals.size() + 1));
+        }
+
         if (slots != bounds.end()) {
             const RelocationIndex relocations(image.module().relocations);
-            for (const auto *arg : bounds.drop_front(intervals.size() + 1)) {
+            for (const auto *arg : bounds.drop_front(beforeSlots.size() + 1)) {
                 uint32_t rva = 0;
                 check(!llvm::StringRef(arg).getAsInteger(0, rva), "invalid IAT slot RVA");
                 const auto slot = image.importBindings().at(rva);

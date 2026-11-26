@@ -16,15 +16,22 @@
 namespace forge::x86 {
     using namespace llvm;
 
-    void Step::reject(FailureCode kind, const Twine &reason, std::optional<int64_t> target,
-                      std::optional<uint32_t> importSlot,
-                      const std::optional<ImportOwnershipFailure> &ownership) const {
+    InspectionError Step::errorAtInstruction(FailureCode kind, const Twine &reason,
+                                             FailureContext context) const {
         auto encoded = toHex(bytes, true);
         InspectionError failure(hex(rva) + ": " + (opcode + " [" + encoded + "]: " + reason).str(),
                                 kind);
-        failure.context.instructionRva = rva;
-        failure.context.opcode = opcode.str();
-        failure.context.bytes = std::move(encoded);
+        context.instructionRva = rva;
+        context.opcode = opcode.str();
+        context.bytes = std::move(encoded);
+        failure.context = std::move(context);
+        return failure;
+    }
+
+    void Step::reject(FailureCode kind, const Twine &reason, std::optional<int64_t> target,
+                      std::optional<uint32_t> importSlot,
+                      const std::optional<ImportOwnershipFailure> &ownership) const {
+        auto failure = errorAtInstruction(kind, reason);
         failure.context.branchTarget = target;
         failure.context.importSlot = importSlot;
         failure.context.importOwnership = ownership;

@@ -98,6 +98,27 @@ def validate_context(context, stage, category, code, image, selected, ir, resolv
         raise ValueError("invalid call target diagnostic lacks a resolved call site")
     if context.get("opcode") == "CALL64r" and "bytes" not in context:
         raise ValueError("register call diagnostic lacks instruction bytes")
+    local_range = False
+    range_fields = ("table_first_rva", "table_last_rva", "pointer_load_rva")
+    if (instruction_failure or code == "LIFT_FUNCTION_SIZE") and any(key in context for key in range_fields):
+        proof = tuple(context_rva(context, key) for key in range_fields)
+        target = context_rva(context, "table_target_rva") if "table_target_rva" in context else None
+        local_range = owner.start <= proof[2] < owner.end
+        if local_range:
+            if context.get("opcode") != "CALL64r":
+                raise ValueError("forward range requires a register call")
+            table_owner, site = owner, context_rva(context, "instruction_rva")
+            if "branch_target" in context and target != context["branch_target"]:
+                raise ValueError("forward call target disagrees with its branch target")
+        else:
+            if "call_site_rva" not in allowed or target != owner.start:
+                raise ValueError("forward range lacks its incoming call edge")
+            table_owner = resolve_callee(context_rva(context, "caller_rva"))
+            site = context_rva(context, "call_site_rva")
+        if register_target is None:
+            raise ValueError("forward range requires independent caller evidence")
+        register_target(table_owner, site, reported_range=proof, expected_target=target)
+        allowed.update((*range_fields, "table_target_rva"))
     if code == "LIFT_INVALID_BRANCH_TARGET" and (context.get("opcode") != "JMP64r"
             or not {"instruction_rva", "branch_target", "bytes"} <= context.keys()):
         raise ValueError("invalid branch target diagnostic lacks a dispatch site")
@@ -178,7 +199,7 @@ def validate_context(context, stage, category, code, image, selected, ir, resolv
         if context.get("opcode") == "CALL64r":
             if not register_call_encoding(encoded, rejected_prefix=code == "LIFT_UNSUPPORTED_PREFIX"):
                 raise ValueError("invalid register call encoding")
-            if code == "LIFT_INVALID_CALL_TARGET" and (register_target is None
+            if code == "LIFT_INVALID_CALL_TARGET" and not local_range and (register_target is None
                     or register_target(owner, instruction) != context["branch_target"]):
                 raise ValueError("call target disagrees with the reachable RIP-relative LEA")
         elif code == "LIFT_INVALID_CALL_TARGET":

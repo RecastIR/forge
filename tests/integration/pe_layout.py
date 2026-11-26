@@ -19,6 +19,21 @@ class Layout:
     def directory(self, index):
         return struct.unpack_from("<II", self.data, self.directories + 8 * index)
 
+    def dir64_fields(self):
+        directory, size = self.directory(5)
+        block = self.file_offset(directory)
+        end = block + size
+        fields = {}
+        while block < end:
+            page, length = struct.unpack_from("<II", self.data, block)
+            assert 8 <= length <= end - block
+            for at in range(block + 8, block + length, 2):
+                fixup, = struct.unpack_from("<H", self.data, at)
+                if fixup >> 12 == 10:
+                    fields[page + (fixup & 4095)] = at
+            block += length
+        return fields
+
     def section_header(self, rva):
         for index, (size, start, _, _) in enumerate(self.sections):
             if start <= rva < start + size:

@@ -824,16 +824,7 @@ class Readiness(Workspace):
         bounds, first, last = (symbols[key] for key in ("many_bounds", "slots", "slots_end"))
         offset = layout.file_offset
         base, = struct.unpack_from("<Q", original, layout.opt + 24)
-        directory, size = layout.directory(5)
-        fields = {}
-        block = offset(directory)
-        while block < offset(directory) + size:
-            page, length = struct.unpack_from("<II", original, block)
-            for at in range(block + 8, block + length, 2):
-                fixup, = struct.unpack_from("<H", original, at)
-                if fixup >> 12 == 10:
-                    fields[page + (fixup & 4095)] = at
-            block += length
+        fields = layout.dir64_fields()
 
         for case in ("alignment", "reversed", "underflow", "budget", "unmapped", "permission",
                      "missing", "conflict", "loader", "loader_code", "data_target", "interior", "after_load",
@@ -898,6 +889,33 @@ class Readiness(Workspace):
                 if case in ("after_load", "after_guard", "late_backedge", "empty_backedge", "missing",
                             "data_target", "interior", "conflict", "budget", "alignment", "reversed"):
                     self.assertEqual(ctx.get("pointer_load_rva"), hex(load), report)
+
+    def test_forward_table_invalid_pe_initialization(self):
+        original, symbols = bounded_fixture(image("forward-call"))
+        data = bytearray(original)
+        layout = Layout(data)
+        site = symbols["null_site"]
+        runner, bounds, _ = null_walk(data, layout, site)
+        section = layout.section_header(symbols["slots"])
+        first = layout.u32(section + 12)
+        set_forward_bounds(data, layout, bounds, first, first + 8)
+        struct.pack_into("<I", data, layout.opt + 16, runner)
+        struct.pack_into("<I", data, section + 8, 4)  # The first DIR64 straddles the mapped end.
+        executable = self.reject(data)
+        self.assertEqual(executable["context"]["unresolved_calls"],
+                         [dict(caller_rva=hex(runner), instruction_rva=hex(site))])
+        result = run(FORGE, "lift", self.dir / "bad.exe", "--rva", hex(runner),
+                     "--signature", "i64(i64,i64)", "--checked-memory", "--output", self.output,
+                     "--diagnostics-format", "json")
+        self.assertEqual(result.returncode, 1)
+        for record in (executable, json.loads(result.stderr)):
+            self.assertEqual(record["code"], "INVALID_PE")
+            self.assertIn(f"relocation target outside a single mapped section at RVA {first:#x}",
+                          record["message"])
+            ctx = record["context"]
+            self.assertEqual((ctx["instruction_rva"], ctx["opcode"], ctx["bytes"]), (hex(site), "CALL64r", "ffd0"))
+            self.assertNotIn("table_target_rva", ctx)
+            self.assertNotIn("branch_target", ctx)
 
     def test_nested_forward_table_failure(self):
         original, symbols = bounded_fixture(image("forward-call"))
@@ -1636,6 +1654,72 @@ def set_forward_bounds(data, layout, bounds, first, last):
 
 
 class Console(Workspace):
+    def test_forward_function_diagnostics(self):
+        sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "differential"))
+        import differential as diff
+
+        original, symbols = bounded_fixture(image("forward-call"))
+        layout = Layout(original)
+        base, = struct.unpack_from("<Q", original, layout.opt + 24)
+        first, last = symbols["slots"], symbols["slots_end"]
+        inner, bounds, _ = null_walk(original, layout, symbols["null_site"])
+        pe = self.dir / "reported.exe"
+        ir = self.dir / diff.CANONICAL_IR
+        ir.parent.mkdir()
+        for case, code in (("range", "LIFT_IMAGE_MEMORY"), ("reversed", "LIFT_IMAGE_MEMORY"),
+                           ("target", "LIFT_INVALID_CALL_TARGET"), ("nested", "LIFT_INVALID_CALL_TARGET"),
+                           ("callback", "LIFT_UNSUPPORTED_CONTROL_FLOW")):
+            with self.subTest(case=case):
+                data = bytearray(original)
+                slot = first
+                if case in ("range", "reversed"):
+                    end = last - 1 if case == "range" else first - 8
+                    set_forward_bounds(data, layout, symbols["many_bounds"], first, end)
+                elif case == "callback":
+                    at = layout.file_offset(symbols["writer"])
+                    data[at:at + 2] = bytes.fromhex("ffd0")  # Unproven call inside the admitted callback.
+                else:
+                    if case == "nested":
+                        struct.pack_into("<Q", data, layout.file_offset(first), base + inner)
+                        slot = first - 8
+                        set_forward_bounds(data, layout, bounds, slot, slot + 8)
+                    struct.pack_into("<Q", data, layout.file_offset(slot), base + first)
+                pe.write_bytes(data)
+                selected = diff.analyze(FORGE, pe, "outer", self.dir)
+                with self.assertRaisesRegex(ValueError, "lifting/" + code):
+                    diff.lift(FORGE, pe, dict(signature="i64(i64,i64)", harness="runtime_pairs",
+                                              checked_memory=True), selected, ir)
+                record = diff.read_json(self.dir / "lifting.log")
+                ctx = record["context"]
+                forged = [dict(table_first_rva=hex(last)), dict(table_last_rva=hex(last + 8)),
+                          dict(pointer_load_rva=hex(symbols["many_site"])), dict(pointer_load_rva=None)]
+                if case in ("target", "nested"):
+                    other = symbols["writer" if case == "nested" else "single_callback"]
+                    forged.append(dict(table_target_rva=hex(other), branch_target=other))
+                if case in ("nested", "callback"):
+                    forged.append(dict(call_site_rva=hex(symbols["many_load"])))
+                for changes in forged:
+                    changed = dict(ctx, **changes)
+                    if changed["pointer_load_rva"] is None:
+                        del changed["pointer_load_rva"]
+                    raw = (json.dumps(dict(record, context=changed)) + "\n").encode()
+                    with self.subTest(changes=changes), self.assertRaises(ValueError):
+                        diff.parse_lift_failure(raw, pe, selected, ir, FORGE)
+                if case == "nested":
+                    raw = (self.dir / "lifting.log").read_bytes()
+                    # Keep the reported inner failure intact. Falsify only the incoming edge.
+                    edge = symbols["late_edge"]
+                    at = layout.file_offset(edge)
+                    data[at:at + 2] = struct.pack("<Bb", 0x75, symbols["many_load"] - edge - 2)
+                    pe.write_bytes(data)
+                    with self.assertRaisesRegex(ValueError, "bypasses forward pointer load"):
+                        diff.parse_lift_failure(raw, pe, selected, ir, FORGE)
+                    data[at:at + 2] = original[at:at + 2]
+                    struct.pack_into("<H", data, layout.dir64_fields()[first], 0)
+                    pe.write_bytes(data)
+                    with self.assertRaisesRegex(ValueError, "invalid relocated slot"):
+                        diff.parse_lift_failure(raw, pe, selected, ir, FORGE)
+
     def test_forward_empty_section_boundary(self):
         original, symbols = bounded_fixture(image("forward-call"))
         layout = Layout(original)
@@ -1715,8 +1799,9 @@ class Console(Workspace):
         self.compile(pe)
         result = self.program()
         self.assertEqual((result.returncode, result.stdout), (125, b""))
-        self.assertIn(f"forge: guest memory fault address={base + slot:#x} access=2 reason=3\n".encode(),
-                      result.stderr)
+        self.assertEqual(result.stderr,
+                         (f"forge: bounded call RVA {symbols['many_site']:#x} table RVA {slot:#x}\n"
+                          f"forge: guest memory fault address={base + slot:#x} access=2 reason=3\n").encode())
 
     def test_forward_all_terminal(self):
         original, symbols = bounded_fixture(image("forward-call"))

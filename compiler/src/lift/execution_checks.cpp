@@ -89,6 +89,17 @@ namespace forge::x86 {
         returnFailure();
     }
 
+    void ExecutionChecks::annotateScalarFault() {
+        if (tableOrigin) {
+            auto *kind = ir.CreateLoad(ir.getInt32Ty(), field(0));
+            auto *slot = field(2);
+            auto *origin = ir.CreateLoad(ir.getInt64Ty(), slot);
+            auto *fault = ir.CreateICmpEQ(kind, ir.getInt32(FORGE_RT_EXECUTION_FAULT));
+            auto *unlocated = ir.CreateAnd(fault, ir.CreateIsNull(origin));
+            ir.CreateStore(ir.CreateSelect(unlocated, ir.getInt64(tableOrigin), origin), slot);
+        }
+    }
+
     void ExecutionChecks::scalarBoundary(Value *condition, Value *address, unsigned size,
                                          uint32_t access, bool stack) {
         onFailure(condition, [&] {
@@ -100,12 +111,7 @@ namespace forge::x86 {
                 word, word, word);
             ir.CreateCall(report, {function->getArg(0), address, ir.getInt32(size),
                                    ir.getInt32(access), ir.getInt32(stack)});
-            if (tableOrigin) {
-                auto *kind = ir.CreateLoad(word, field(0));
-                auto *fault = ir.CreateICmpEQ(kind, ir.getInt32(FORGE_RT_EXECUTION_FAULT));
-                ir.CreateStore(ir.CreateSelect(fault, ir.getInt64(tableOrigin), ir.getInt64(0)),
-                               field(2));
-            }
+            annotateScalarFault();
         });
     }
 
@@ -142,7 +148,7 @@ namespace forge::x86 {
             ir.getInt32Ty(), ir.getInt32Ty());
         auto *bytes = ir.CreateCall(
             resolve, {function->getArg(0), address, ir.getInt32(size), ir.getInt32(access)});
-        propagate(ir.CreateIsNotNull(bytes));
+        onFailure(ir.CreateIsNotNull(bytes), [&] { annotateScalarFault(); });
         auto *resolved = ir.GetInsertBlock();
         ir.CreateBr(join);
         ir.SetInsertPoint(join);

@@ -168,7 +168,7 @@ def call_padding(asm, raw):
     return len(body) >= 3 and body.startswith(b"\x0f\x1f") and body[2] < 0xc0
 
 
-def register_call_targets(graph, decode, *, encoding=None):
+def register_call_targets(graph, decode, *, encoding=None, forward_call=None):
     """Independently recover RIP-relative targets from reachable linked disassembly."""
     preds = {}
     for address, edges in graph.items():
@@ -212,7 +212,9 @@ def register_call_targets(graph, decode, *, encoding=None):
                 targets[address] = end + disp
             break
         if address not in targets:
-            raise ValueError(f"unproven register call at {address:x}")
+            if forward_call is None:
+                raise ValueError(f"unproven register call at {address:x}")
+            targets[address] = forward_call(address, reg, preds)
     return targets
 
 

@@ -70,6 +70,8 @@ namespace forge::x86 {
 
         bool isAtomicExchange() const { return isLockedCompareExchange() || opcode == "XCHG64rm"; }
 
+        InspectionError errorAtInstruction(FailureCode kind, const llvm::Twine &reason,
+                                           FailureContext context = {}) const;
         [[noreturn]] void reject(FailureCode kind, const llvm::Twine &reason,
                                  std::optional<int64_t> target = {},
                                  std::optional<uint32_t> importSlot = {},

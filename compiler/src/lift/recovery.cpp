@@ -501,8 +501,13 @@ namespace forge::x86 {
 
             active.resolutions.emplace(step.rva, std::move(table));
             return returns ? Flow::Fallthrough : Flow::TerminalCall;
-        } catch (const InspectionError &) {
-            active.resolutions.emplace(step.rva, std::current_exception());
+        } catch (const InspectionError &failure) {
+            auto error = std::current_exception();
+            if (!failure.context.instructionRva && failureKind(failure.kind).stage == "pe") {
+                error = std::make_exception_ptr(
+                    step.errorAtInstruction(failure.kind, failure.what(), failure.context));
+            }
+            active.resolutions.emplace(step.rva, std::move(error));
             return Flow::Fallthrough;
         }
 
