@@ -16,6 +16,10 @@ extern "C" {
 #define FORGE_RT_CRT_ARTIFACT_VERSION UINT32_C(3)
 #define FORGE_RT_FUNCTION_IMPORT_ARTIFACT_VERSION UINT32_C(4)
 #define FORGE_RT_PE_ARTIFACT_VERSION UINT32_C(5)
+#define FORGE_RT_PROTECTION_ARTIFACT_VERSION UINT32_C(6)
+#define FORGE_RT_GUEST_PAGE_SIZE UINT32_C(4096)
+#define FORGE_RT_FIXED_PROTECTION UINT32_C(8)
+#define FORGE_RT_LOADER_MAY_WRITE UINT32_C(16)
 #define FORGE_RT_STACK_BASE UINT64_C(0x70000000)
 #define FORGE_RT_STACK_SIZE UINT32_C(4096)
 #define FORGE_RT_ENTRY_RSP (FORGE_RT_STACK_BASE + FORGE_RT_STACK_SIZE - 32 - 8)
@@ -186,6 +190,19 @@ typedef struct forge_rt_pe_artifact {
     uint16_t subsystem;
 } forge_rt_pe_artifact;
 
+/* The original section extents and source R/W/X bits are independent of which
+ * bytes are materialized. FIXED excludes shared, discardable and noncached data.
+ * Only v6 generated entries consult effective protection on every mutable access. */
+typedef struct forge_rt_section_protection {
+    uint32_t rva, size, attributes;
+} forge_rt_section_protection;
+
+typedef struct forge_rt_protection_artifact {
+    forge_rt_pe_artifact pe;
+    const forge_rt_section_protection *sections;
+    uint64_t sectionCount;
+} forge_rt_protection_artifact;
+
 /* Borrowed during registration. Arguments exclude argv[0]. A null executablePath defaults to
  * C:\\ plus the original PE basename in a v2 descriptor. Inputs to command-line services are
  * ASCII and the encoded command line is limited to 32767 UTF-16 units including the NUL. */
@@ -212,9 +229,10 @@ forge_rt_status forge_rt_process_register_with_startup(
     forge_rt_process *process, const forge_rt_artifact *artifact,
     const forge_rt_process_startup *startup) FORGE_PROCESS_NOEXCEPT;
 
-/* A managed scalar miss may resolve into process-owned memory outside the PE. The returned
- * native pointer is borrowed by the current guest instruction only. A null result publishes
- * a terminal diagnostic in the execution view. */
+/* A managed scalar miss may resolve into process-owned memory outside the PE. Protection-enabled
+ * v6 entries use this resolver for every nonstack scalar. The native pointer is borrowed by the
+ * current guest instruction only. A null result publishes a terminal diagnostic in the execution
+ * view. */
 void *forge_rt_resolve_process_scalar(forge_rt_execution *execution, uint64_t address,
                                       uint32_t size, uint32_t access) FORGE_PROCESS_NOEXCEPT;
 /* Primary guest thread GS base. A zero result publishes a failure on the supplied view. */

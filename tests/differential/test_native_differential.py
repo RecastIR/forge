@@ -92,12 +92,25 @@ class NativeDifferentialTests(unittest.TestCase):
             protect_slot = {"argc": "0x81b8", "argc_none": "0x81b8", "argv": "0x81c0",
                             "argv_edges": "0x81c0", "cleanup": "0x81e0", "globals": "0x81b8",
                             "puts": "0x81c0", "return": "0x81b8"}[name]
+            self.assertIn({"dll": "kernel32.dll", "name": "VirtualProtect"}, ctx["imports"])
+            kernel = next(d for d in ctx["load_imports"] if d["dll"].lower() == "kernel32.dll")
+            protect = next(s for s in kernel["symbols"] if s["name"] == "VirtualProtect")
+            self.assertEqual((protect["iat_slot_rva"], protect["catalogued_service"]), (protect_slot, True))
+            # The admitted register call still reads RSI from this precise IAT slot.
+            call = target + 0x65d
+            self.assertEqual(data[call - 0xa00:call - 0xa00 + 2], bytes.fromhex("ff d6"))
+            load = call - 0x2f
+            self.assertEqual(data[load - 0xa00:load - 0xa00 + 3], bytes.fromhex("48 8b 35"))
+            self.assertEqual(load + 7 + struct.unpack_from("<i", data, load - 0xa00 + 3)[0], int(protect_slot, 16))
+            self.assertNotIn({"caller_rva": hex(target + 0x460), "instruction_rva": hex(call)}, ctx["unresolved_calls"])
+            fwrite_slot = int(protect_slot, 16) + (0xb0 if name == "cleanup" else 0xa8)
+            failure = target + 0x280
             self.assertEqual((ctx["function_rva"], ctx["block_rva"], ctx["instruction_rva"],
-                              ctx["opcode"], ctx["bytes"]),
-                             (hex(target + 0x460), hex(target + 0x652), hex(target + 0x65d),
-                              "CALL64r", "ffd6"))
+                              ctx["opcode"], ctx["bytes"], ctx["branch_target"]),
+                             (hex(failure), hex(failure), hex(failure + 0x41),
+                              "CALL64pcrel32", "e8720e0000", failure + 0xeb8))
             self.assertEqual((ctx["import_dll"], ctx["import_symbol"], ctx["iat_slot_rva"]),
-                             ("KERNEL32.dll", "VirtualProtect", protect_slot))
+                             ("msvcrt.dll", "fwrite", hex(fwrite_slot)))
         offset = ctx["file_offset"]
         self.assertEqual(data[offset:offset + len(bytes.fromhex(ctx["bytes"]))].hex(), ctx["bytes"])
         return report

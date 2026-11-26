@@ -1,4 +1,5 @@
 #include "instance.h"
+#include "page_protection.h"
 
 #include "forge/guest_range.h"
 #include "forge/process.h"
@@ -23,6 +24,7 @@ namespace {
         uint32_t permissions;
         const Thread *stackOwner;
         uint8_t *marks;
+        PageProtections *protections = nullptr;
     };
 
     // Locate the first reservation and row with two binary searches. Copies of this cursor
@@ -78,7 +80,10 @@ namespace {
                 const auto offset = address - row.start;
                 segment = {static_cast<const uint8_t *>(row.bytes) + offset,
                            static_cast<size_t>(std::min(remaining, row.size - offset)),
-                           row.permissions, nullptr, nullptr};
+                           row.permissions,
+                           nullptr,
+                           nullptr,
+                           reservation->protections};
                 ++rowIndex;
             }
 
@@ -167,6 +172,13 @@ namespace {
                 return report(fault, address, access, FORGE_RT_FAULT_PERMISSION);
             }
 
+            if ((access & FORGE_RT_WRITE) && segment.protections) {
+                if (const auto denied =
+                        segment.protections->deniedWrite({address, address + (segment.size - 1)})) {
+                    return report(fault, *denied, access, FORGE_RT_FAULT_PERMISSION);
+                }
+            }
+
             if (segment.stackOwner) {
                 const auto status = checkStack(segment, address, access, active, fault, readSaved);
 
@@ -179,6 +191,29 @@ namespace {
         }
 
         return FORGE_RT_OK;
+    }
+
+    // Only the managed PE has mutable protection state. One contiguous checked copy
+    // intersects that reservation at most once, even when it visits several rows.
+    void recordGuestWrite(Cursor cursor, uint64_t start, uint64_t count) {
+        PageProtections *owner = nullptr;
+        PageInterval bytes{};
+        uint64_t offset = 0;
+        while (offset < count) {
+            const auto address = start + offset;
+            const auto segment = cursor.next(address, count - offset);
+            if (segment.protections) {
+                if (!owner) {
+                    owner = segment.protections;
+                    bytes.first = address;
+                }
+                bytes.last = address + (segment.size - 1);
+            }
+            offset += segment.size;
+        }
+        if (owner) {
+            owner->recordWrite(bytes);
+        }
     }
 
     struct HostBuffers {
@@ -245,6 +280,9 @@ namespace {
 #ifdef FORGE_RUNTIME_TEST_TRANSFER
                 forgeMemoryTransferProbe();
 #endif
+                if (host.source && process.managedExecution) {
+                    recordGuestWrite(cursor, address, count);
+                }
                 transfer(cursor, address, count, host);
             }
 
@@ -252,6 +290,27 @@ namespace {
         });
     }
 } // namespace
+
+forge_rt_status forge::runtime::checkProtectionOutput(const forge_rt_instance &instance,
+                                                      const Thread &active, uint64_t address,
+                                                      forge_rt_memory_fault &fault) {
+    if (!GuestRange::fromOffset({address}, 0, sizeof(uint32_t))) {
+        return report(fault, address, FORGE_RT_WRITE, FORGE_RT_FAULT_OVERFLOW);
+    }
+
+    return preflight(Cursor(instance.reservations, address), active, address, sizeof(uint32_t),
+                     FORGE_RT_WRITE, fault, false);
+}
+
+void forge::runtime::publishProtectionOutput(const forge_rt_instance &instance, uint64_t address,
+                                             const uint32_t *value) {
+    Cursor cursor(instance.reservations, address);
+    recordGuestWrite(cursor, address, sizeof(uint32_t));
+    if (value) {
+        transfer(cursor, address, sizeof(*value),
+                 {nullptr, reinterpret_cast<const uint8_t *>(value)});
+    }
+}
 
 extern "C" void *forge_rt_resolve_process_scalar(forge_rt_execution *execution, uint64_t address,
                                                  uint32_t size, uint32_t access) noexcept {
@@ -281,7 +340,12 @@ extern "C" void *forge_rt_resolve_process_scalar(forge_rt_execution *execution, 
         const auto segment = Cursor(instance.reservations, address).next(address, size);
 
         if (!segment.stackOwner && segment.size == size &&
-            (segment.permissions & permissions) == permissions) {
+            (segment.permissions & permissions) == permissions &&
+            (!(permissions & FORGE_RT_WRITE) || !segment.protections ||
+             !segment.protections->deniedWrite({address, address + (size - 1)}))) {
+            if ((permissions & FORGE_RT_WRITE) && segment.protections) {
+                segment.protections->recordWrite({address, address + (size - 1)});
+            }
             bytes = segment.bytes;
         }
 

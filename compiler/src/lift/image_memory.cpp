@@ -337,12 +337,42 @@ namespace forge::x86 {
                                             ir.getInt64(fragments.size())});
         }
 
-        SmallVector<Constant *> processImports(llvm::Module &module,
-                                               const RecoveredFunctionGroup &group) {
+        SmallVector<Constant *> protectionSections(const ParsedImage &image, IRBuilder<> &ir) {
+            SmallVector<const Section *> ordered;
+            for (const auto &section : image.module().sections) {
+                if (section.virtualSize) {
+                    ordered.push_back(&section);
+                }
+            }
+            std::ranges::sort(ordered, {}, &Section::rva);
+
+            const RelocationIndex relocations(image.module().relocations);
+            SmallVector<Constant *> records;
+            for (const auto *section : ordered) {
+                const RvaRange extent{section->rva, uint64_t{section->rva} + section->virtualSize};
+                const uint32_t loader =
+                    relocations.firstOverlap(extent) ? FORGE_RT_LOADER_MAY_WRITE : 0;
+                const uint32_t flags =
+                    loader | (section->permissions[0] == 'r' ? FORGE_RT_READ : 0U) |
+                    (section->permissions[1] == 'w' ? FORGE_RT_WRITE : 0U) |
+                    (section->permissions[2] == 'x' ? FORGE_RT_EXECUTE : 0U) |
+                    (section->shared || section->discardable || section->noncached
+                         ? FORGE_RT_FIXED_PROTECTION
+                         : 0U);
+                records.push_back(ConstantStruct::getAnon({ir.getInt32(section->rva),
+                                                           ir.getInt32(section->virtualSize),
+                                                           ir.getInt32(flags)}));
+            }
+            return records;
+        }
+
+        SmallVector<Constant *>
+        processImports(llvm::Module &module,
+                       const std::set<std::pair<std::string_view, std::string_view>> &required) {
             IRBuilder<> ir(module.getContext());
             SmallVector<Constant *> imports;
 
-            for (const auto &[dll, name] : group.requiredImports()) {
+            for (const auto &[dll, name] : required) {
                 imports.push_back(ConstantStruct::getAnon(
                     {ir.CreateGlobalString(dll, "service.dll", 0, &module),
                      ir.CreateGlobalString(name, "service.name", 0, &module)}));
@@ -1053,12 +1083,16 @@ namespace forge::x86 {
 
         auto *storageTable = artifactTable(module, storage, "image.backings");
         auto *regionTable = artifactTable(module, intervals, "image.ranges");
-        auto imports = processImports(module, group);
+        const auto required = group.requiredImports();
+        auto imports = processImports(module, required);
+        const bool dynamicProtection =
+            required.contains({win64::virtualProtect.dll, win64::virtualProtect.name});
+        const auto version =
+            dynamicProtection ? FORGE_RT_PROTECTION_ARTIFACT_VERSION : FORGE_RT_PE_ARTIFACT_VERSION;
         auto *descriptor = ConstantStruct::getAnon(
-            {ir.getInt32(FORGE_RT_PE_ARTIFACT_VERSION), ir.getInt64(loadBase),
-             ir.getInt64(sizeOfImage), ir.getInt64(group.root()),
-             ir.getInt64(group.image().module().entryPoint), storageTable,
-             ir.getInt64(storage.size()), regionTable, ir.getInt64(intervals.size()),
+            {ir.getInt32(version), ir.getInt64(loadBase), ir.getInt64(sizeOfImage),
+             ir.getInt64(group.root()), ir.getInt64(group.image().module().entryPoint),
+             storageTable, ir.getInt64(storage.size()), regionTable, ir.getInt64(intervals.size()),
              artifactTable(module, imports, "image.imports"), ir.getInt64(imports.size()),
              &entryThunk});
 
@@ -1073,6 +1107,13 @@ namespace forge::x86 {
              ir.getInt64(slots.functions.size())});
         auto *pe = ConstantStruct::getAnon({functions, ir.getInt16(group.image().subsystem())});
 
+        if (dynamicProtection) {
+            const auto sections = protectionSections(group.image(), ir);
+            pe = ConstantStruct::getAnon(
+                {pe, artifactTable(module, sections, "image.section.protections"),
+                 ir.getInt64(sections.size())});
+        }
+
         // Descriptor identity distinguishes artifacts during duplicate registration.
         auto *artifact = new GlobalVariable(module, pe->getType(), true,
                                             GlobalValue::PrivateLinkage, pe, "image.artifact");
@@ -1083,7 +1124,7 @@ namespace forge::x86 {
         ir.SetInsertPoint(BasicBlock::Create(module.getContext(), "entry", accessor));
         ir.CreateRet(artifact);
 
-        if (intervals.empty()) {
+        if (dynamicProtection || intervals.empty()) {
             return nullptr;
         }
 

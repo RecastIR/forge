@@ -24,11 +24,14 @@ namespace forge::runtime {
 
     // A reservation covers the whole image, including holes, or one active stack.
     // Thread references survive table rehash. An active thread cannot be destroyed.
+    struct PageProtections;
+
     struct Reservation {
         uint64_t base;
         uint64_t size;
         const forge_rt_image *image;
         const Thread *stackOwner;
+        PageProtections *protections = nullptr;
     };
 
     struct HeapBlock {

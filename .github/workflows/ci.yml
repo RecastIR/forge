@@ -205,7 +205,7 @@ jobs:
         with:
           name: windows-x64-inputs
           path: build
-      - name: Observe integer, CRT, tail-transfer and conventional startup behavior on Windows x64
+      - name: Observe integer, CRT, page protection and startup behavior on Windows x64
         id: verify
         shell: bash
         run: |
@@ -218,6 +218,7 @@ jobs:
           python -B tests/integration/test_executable.py windows-tail-jump executables
           echo "tail_jump=success" >> "$GITHUB_OUTPUT"
           python -B tests/differential/reference/virtual_protect.py executables
+          echo "virtual_protect=success" >> "$GITHUB_OUTPUT"
           python -B tests/integration/test_executable.py windows-startup build/fixtures/windows-x64
           echo "startup=success" >> "$GITHUB_OUTPUT"
         env:

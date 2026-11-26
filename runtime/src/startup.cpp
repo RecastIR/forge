@@ -50,7 +50,9 @@ namespace {
 
             return failureExit;
         case FORGE_RT_UNSUPPORTED:
-            if (result.status == FORGE_RT_UNSUPPORTED_STARTUP_TITLE) {
+            if (result.status == FORGE_RT_UNSUPPORTED_PAGE_PROTECTION) {
+                std::fputs("forge: unsupported guest page protection change\n", stderr);
+            } else if (result.status == FORGE_RT_UNSUPPORTED_STARTUP_TITLE) {
                 std::fputs("forge: GetStartupInfoA/W requires an ASCII startup title\n", stderr);
             } else if (result.status == FORGE_RT_UNSUPPORTED_CRT_ERROR_ROUTING) {
                 std::fputs("forge: unsupported MSVCRT _amsg_exit GUI diagnostic routing\n", stderr);
@@ -100,7 +102,7 @@ int main(int argc, char **argv, char **environment) {
     const auto *artifact = forge_lifted_artifact();
 
     if (!artifact || artifact->version < FORGE_RT_ARTIFACT_VERSION ||
-        artifact->version > FORGE_RT_PE_ARTIFACT_VERSION) {
+        artifact->version > FORGE_RT_PROTECTION_ARTIFACT_VERSION) {
         return runtimeFailure("artifact", FORGE_RT_ABI_MISMATCH);
     }
 

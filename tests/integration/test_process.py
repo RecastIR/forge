@@ -197,6 +197,11 @@ class ProcessExecution(unittest.TestCase):
         image = "executable-bounded-call"
         self.exercise(image, None, [(0, 0, "return 42"), (0, 0, "return 42")], base=0x10000000)
 
+    def test_virtual_protect(self):
+        self.exercise("executable-virtual-protect", None, [(0, 0, "return 42"), (0, 0, "return 42")],
+                      base=0x10000000, imports=[("kernel32.dll", name) for name in
+                                               ("GetLastError", "SetLastError", "VirtualProtect")])
+
     def test_tail_transfers(self):
         image = "executable-tail-jump"
         self.exercise(image, None, [(0, 0, "return 42"), (0, 0, "return 42")], base=0x10000000,

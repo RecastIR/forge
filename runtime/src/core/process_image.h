@@ -2,6 +2,7 @@
 
 #include "forge/process.h"
 #include "instance.h"
+#include "page_protection.h"
 
 #include <array>
 
@@ -47,6 +48,7 @@ namespace forge::runtime {
       private:
         std::vector<forge_rt_image_region> regions;
         forge_rt_image image{};
+        PageProtections protections;
         forge_rt_status bindRegions();
     };
 

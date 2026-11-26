@@ -178,6 +178,8 @@ namespace forge::x86 {
                               bool collect, const std::optional<RelativeTable> &table);
             void traceRepeatedStore(const Step &s, AddressFacts &facts, bool collect);
             AddressFact savedAddress(const AddressFacts &facts, const AddressFact &address) const;
+            void traceProtectionArguments(const ResolvedCallSite &site, AddressFacts &facts,
+                                          bool collect) const;
             void traceServiceArguments(const ResolvedCallSite &site, AddressFacts &facts,
                                        bool collect) const;
             bool traceCall(const ResolvedCallSite &site, AddressFacts &facts, CallAddresses &calls,
@@ -486,13 +488,45 @@ namespace forge::x86 {
                                               entryAddresses);
         }
 
+        void FunctionAnalyzer::traceProtectionArguments(const ResolvedCallSite &site,
+                                                        AddressFacts &facts, bool collect) const {
+            const auto &binding = win64::virtualProtect;
+            const auto target = facts.serviceValue(binding, 0, entryAddresses);
+            const auto output = facts.serviceValue(binding, 3, entryAddresses);
+            invalidateServiceOutput(facts.spills, output, entryAddresses,
+                                    binding.arguments[3].size);
+            if (!collect) {
+                return;
+            }
+
+            // Select available backing for the runtime probe, including calls whose VAs
+            // can only be classified after control reaches the service.
+            const auto &step = *function.instructionContaining(site.instruction);
+            const auto select = [&](const AddressFact &address, unsigned width) {
+                if (address.known()) {
+                    for (const auto va : address.values()) {
+                        imageMemory.computedAccess(step, va, width, true);
+                    }
+                } else if (!address.stackDerived() && !address.pointsToProcessStorage() &&
+                           !address.frameOffset()) {
+                    imageMemory.computedAccess(step, std::nullopt, width, true);
+                }
+            };
+            select(target, 8);
+            select(output, binding.arguments[3].size * 8);
+        }
+
         void FunctionAnalyzer::traceServiceArguments(const ResolvedCallSite &site,
                                                      AddressFacts &facts, bool collect) const {
             const auto &binding = site.external()->binding;
+            if (binding.nativeSymbol == win64::virtualProtect.nativeSymbol) {
+                traceProtectionArguments(site, facts, collect);
+                return;
+            }
+
             // Read all arguments from the incoming state, even when an earlier parameter
             // can overwrite the stack slot that supplies another parameter or its count.
             auto outgoing = facts.spills;
-
             for (size_t i = 0; i < binding.arguments.size(); ++i) {
                 const auto arg = binding.arguments[i];
                 if (arg.access == win64::Access::None || (!collect && !arg.writes())) {

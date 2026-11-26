@@ -51,6 +51,7 @@ namespace forge::test {
                   rejected({Value::Address, Access::Input, Extent::CountArgument, 0}));
 
     inline constexpr ServiceBinding abiServices[] = {
+        virtualProtect,
         setLastError,
         getLastError,
         stringLength,

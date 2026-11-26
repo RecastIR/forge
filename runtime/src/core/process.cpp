@@ -79,7 +79,7 @@ namespace forge::runtime {
 
     forge_rt_status checkArtifact(const forge_rt_artifact &artifact) {
         if (artifact.version < FORGE_RT_ARTIFACT_VERSION ||
-            artifact.version > FORGE_RT_PE_ARTIFACT_VERSION) {
+            artifact.version > FORGE_RT_PROTECTION_ARTIFACT_VERSION) {
             return FORGE_RT_ABI_MISMATCH;
         }
 
@@ -117,6 +117,26 @@ namespace forge::runtime {
             }
         }
 
+        if (artifact.version >= FORGE_RT_PROTECTION_ARTIFACT_VERSION) {
+            const auto &extended =
+                *reinterpret_cast<const forge_rt_protection_artifact *>(&artifact);
+            if (!validTable(extended.sections, extended.sectionCount)) {
+                return FORGE_RT_INVALID_ARGUMENT;
+            }
+
+            uint64_t previousEnd = 0;
+            for (const auto &section : tableRows(extended.sections, extended.sectionCount)) {
+                const auto end = uint64_t{section.rva} + section.size;
+                constexpr auto allowed = FORGE_RT_READ | FORGE_RT_WRITE | FORGE_RT_EXECUTE |
+                                         FORGE_RT_FIXED_PROTECTION | FORGE_RT_LOADER_MAY_WRITE;
+                if (!section.size || section.rva < previousEnd || end > artifact.size ||
+                    (section.attributes & ~allowed)) {
+                    return FORGE_RT_INVALID_ARGUMENT;
+                }
+                previousEnd = end;
+            }
+        }
+
         for (const auto &binding : tableRows(artifact.imports, artifact.importCount)) {
             if (!binding.dll || !*binding.dll || !binding.name || !*binding.name) {
                 return FORGE_RT_INVALID_ARGUMENT;
@@ -146,6 +166,13 @@ namespace forge::runtime {
     }
 
     forge_rt_status ProcessImage::bindRegions() {
+        const bool hasProtection = artifact.version >= FORGE_RT_PROTECTION_ARTIFACT_VERSION;
+        if (hasProtection) {
+            const auto &extended =
+                *reinterpret_cast<const forge_rt_protection_artifact *>(&artifact);
+            protections.original = tableRows(extended.sections, extended.sectionCount);
+        }
+
         backings.resize(static_cast<size_t>(artifact.backingCount));
         const auto templates = tableRows(artifact.backings, artifact.backingCount);
 
@@ -167,7 +194,8 @@ namespace forge::runtime {
         regions.reserve(static_cast<size_t>(artifact.regionCount));
 
         for (const auto &row : tableRows(artifact.regions, artifact.regionCount)) {
-            if (row.backing >= templates.size()) {
+            if (row.backing >= templates.size() ||
+                (hasProtection && !protections.permitsMapping(artifact.base, row))) {
                 return FORGE_RT_INVALID_ARGUMENT;
             }
 
@@ -211,7 +239,13 @@ namespace forge::runtime {
         execution.view.thread = execution.thread;
         execution.view.regions = regions.data();
 
-        return forge_rt_register_image(&instance, &image);
+        const auto registered = forge_rt_register_image(&instance, &image);
+        if (registered == FORGE_RT_OK && artifact.version >= FORGE_RT_PROTECTION_ARTIFACT_VERSION) {
+            // The occurrence is unpublished. Its PE is the first registered reservation.
+            instance.reservations.front().protections = &protections;
+        }
+
+        return registered;
     }
 
     forge_rt_status ProcessImage::reserveImportAddresses(uint64_t size, uint64_t alignment) {

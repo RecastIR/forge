@@ -7,10 +7,11 @@ if(BUILD_TESTING OR CMAKE_EXPORT_COMPILE_COMMANDS)
   target_compile_definitions(runtime_transfer_probe PRIVATE FORGE_RUNTIME_TEST_TRANSFER
     forge_rt_read_guest=forgeTestReadGuest forge_rt_write_guest=forgeTestWriteGuest
     forge_rt_validate_guest=forgeTestValidateGuest forge_rt_resolve_process_scalar=forgeTestResolveProcessScalar
+    checkProtectionOutput=forgeTestCheckProtectionOutput publishProtectionOutput=forgeTestPublishProtectionOutput
     forge_rt_report_scalar_boundary=forgeTestReportScalarBoundary)
   configure_forge_cxx(runtime_transfer_probe)
   add_executable(runtime_contract unit/runtime.cpp unit/runtime_memory.cpp unit/runtime_process.cpp
-    unit/runtime_console_process.cpp unit/runtime_write.cpp unit/runtime_startup_info.cpp
+    unit/runtime_console_process.cpp unit/runtime_write.cpp unit/runtime_startup_info.cpp unit/runtime_page_protection.cpp
     $<TARGET_OBJECTS:runtime_transfer_probe>)
   target_link_libraries(runtime_contract PRIVATE forge_runtime Threads::Threads)
   configure_forge_cxx(runtime_contract)

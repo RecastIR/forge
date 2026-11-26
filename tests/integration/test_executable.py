@@ -1532,10 +1532,25 @@ class Reference(Workspace):
                 expected[name] = captured_streams(observation)
         for filename, observations in amsg_observations("wine", AMSG_CASES + AMSG_MARKERS).items():
             expected[filename] = captured_streams(observations["pipe"])
+        sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "differential/reference"))
+        from virtual_protect import check_observation, error_records
+        expected[image("virtual-protect-errors").name] = (42, error_records("wine"), b"")
+        expected[image("virtual-protect").name] = (42, b"", b"")
+        expected[image("virtual-protect-fresh").name] = (42, b"", b"")
+        expected[image("virtual-protect-origin").name] = (46, b"", b"")
+        observer = FIXTURES / "virtual-protect-reference.exe"
+        denied = image("virtual-protect-denied")
         inputs = Path(__file__).resolve().parents[1] / "differential/reference/executable-inputs.txt"
         filenames = inputs.read_text().splitlines()
-        self.assertEqual(filenames, sorted(expected))
-        for name in filenames:
+        self.assertEqual(filenames, sorted([*expected, observer.name, denied.name]))
+        for case in range(44):
+            with self.subTest(case=case):
+                check_observation("wine", case, *self.capture(observer, [f"{case:02}"]))
+        status, stdout, stderr = self.capture(denied)
+        print(f"{denied.name} exit={status:#x} stdout={stdout.hex()} stderr={stderr.hex()}", flush=True)
+        self.assertEqual((status, stderr), (0xc0000005, b""))
+        self.assertIn(b"page fault on write access to 0x0000000140003000", stdout)
+        for name in expected:
             with self.subTest(pe=name):
                 self.assertEqual(self.capture(FIXTURES / name), expected[name])
         self.assertEqual(self.capture(FIXTURES / "crt-argument-heap.exe", ["*example"]),
@@ -1948,6 +1963,48 @@ class Console(Workspace):
                 self.assertEqual((result.returncode, result.stdout, result.stderr),
                                  (dict(terminal=57, all_terminal=57, shorten_mixed=42).get(target, 125), b"", expected))
 
+    def test_virtual_protect(self):
+        pe = image("virtual-protect")
+        self.compile(pe)
+        positive = self.program()
+        self.assertEqual((positive.returncode, positive.stdout, positive.stderr), (42, b"", b""))
+        sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "differential/reference"))
+        from virtual_protect import error_records
+        self.compile(image("virtual-protect-errors"))
+        errors = self.program()
+        self.assertEqual((errors.returncode, errors.stdout, errors.stderr), (42, error_records("windows"), b""))
+        # The observer additionally imports native allocation and query APIs for reference setup.
+        observer = run(FORGE, "lift", FIXTURES / "virtual-protect-reference.exe", "--executable",
+                       "--diagnostics-format", "json", "--output", self.dir / "observer")
+        self.assertEqual(observer.returncode, 1)
+        observation = json.loads(observer.stderr)
+        self.assertEqual((observation["stage"], observation["code"], observation["context"]["entry_rva"]),
+                         ("entry", "ENTRY_INVALID_START", "0x1000"))
+        imports = observation["context"]["load_imports"][0]["symbols"]
+        self.assertEqual({sym["name"] for sym in imports if not sym["catalogued_service"]},
+                         {"GetSystemInfo", "VirtualAlloc", "VirtualFree", "VirtualQuery"})
+        self.assertFalse((self.dir / "observer").exists())
+        for name in ("virtual-protect-origin", "virtual-protect-fresh"):
+            self.compile(image(name))
+            result = self.program()
+            self.assertEqual((result.returncode, result.stdout, result.stderr), (42, b"", b""))
+        preferred, = struct.unpack_from("<Q", pe.read_bytes(), Layout(pe.read_bytes()).opt + 24)
+        run(CONTRACT, "--guest-base", hex(preferred + 0x30000000), pe, self.output,
+            OPT, LLC, "/usr/bin/xcrun", *LINK, check=True)
+        rebased = self.program()
+        self.assertEqual((rebased.returncode, rebased.stdout, rebased.stderr), (42, b"", b""))
+        for case, access in (("denied", 2), ("rmw", 3), ("atomic", 3), ("adapter", 2)):
+            with self.subTest(case=case):
+                self.compile(image("virtual-protect-" + case))
+                result = self.program()
+                self.assertEqual((result.returncode, result.stdout), (125, b""))
+                self.assertRegex(result.stderr.decode(), rf"^forge: guest memory fault address=0x[0-9a-f]+ access={access} reason=3\n$")
+        for case in ("code", "guard", "executable", "iat", "immutable"):
+            with self.subTest(case=case):
+                self.compile(image("virtual-protect-" + case))
+                result = self.program()
+                self.assertEqual((result.returncode, result.stdout, result.stderr),
+                                 (125, b"", b"forge: unsupported guest page protection change\n"))
 
     def test_bounded_call(self):
         self.compile(image("bounded-cleanup"))

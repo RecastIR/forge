@@ -71,6 +71,14 @@ def generate(output, mc, link, dlltool, clang):
         protect = (sources / "executable-virtual-protect.s").read_text()
         image("executable-virtual-protect.exe", protect, link_flags=memory_libraries)
         image("executable-virtual-protect-denied.exe", "deny_write = 1\n" + protect, link_flags=memory_libraries)
+        for case in ("rmw", "atomic", "adapter", "guard", "code", "iat", "executable", "immutable"):
+            setup = "bad_target = 1\n" if case in ("code", "iat", "immutable") else ""
+            image(f"executable-virtual-protect-{case}.exe", setup + f"deny_{case} = 1\n" + protect,
+                  link_flags=memory_libraries)
+        image("executable-virtual-protect-origin.exe", "observe_original = 1\n" + protect, link_flags=memory_libraries)
+        image("executable-virtual-protect-fresh.exe", "fresh_page = 1\n" + protect, link_flags=memory_libraries)
+        image("executable-virtual-protect-errors.exe", (sources / "executable-virtual-protect-errors.s").read_text(),
+              link_flags=memory_libraries)
         reference = "virtual-protect-reference.exe"
         run(clang, "--target=x86_64-pc-windows-msvc", "-O1", "-ffreestanding", "-fno-stack-protector",
             "-c", sources / "virtual-protect-reference.c", "-o", "reference.obj")

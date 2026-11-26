@@ -21,6 +21,65 @@ namespace {
         execution->result = {FORGE_RT_RETURNED, FORGE_RT_OK, 42, {}, 0};
     }
 
+    void failProtectionAllocation(forge_rt_execution *execution) {
+        constexpr auto address = uint64_t{0x400000};
+        constexpr auto output = FORGE_RT_STACK_BASE + 128;
+        int32_t result = -1;
+        forge_rt_memory_fault fault{};
+        auto *instance = execution->instance;
+        const auto thread = execution->thread;
+        forge_rt_invocation_token invocation{};
+        REQUIRE(forge_rt_current_invocation(instance, thread, &invocation) == FORGE_RT_OK);
+        const uint32_t sentinel = 73;
+        REQUIRE(forge_rt_write_guest(instance, thread, invocation, output, 4, &sentinel, 4,
+                                     &fault) == FORGE_RT_OK);
+        rejectAllocations = true;
+        const auto status =
+            forge_rt_virtual_protect(instance, thread, address, 1, 2, output, &result, &fault);
+        rejectAllocations = false;
+        REQUIRE(status == FORGE_RT_RESOURCE_EXHAUSTED && result == -1);
+        uint32_t value{};
+        REQUIRE(forge_rt_read_guest(instance, thread, invocation, output, 4, &value, 4, &fault) ==
+                FORGE_RT_OK);
+        REQUIRE(value == sentinel);
+        REQUIRE(forge_rt_write_guest(instance, thread, invocation, address, 4, &sentinel, 4,
+                                     &fault) == FORGE_RT_OK);
+        REQUIRE(forge_rt_virtual_protect(instance, thread, address, 1, 2, output, &result,
+                                         &fault) == FORGE_RT_OK);
+        REQUIRE(result == 1);
+        returnToHost(execution);
+    }
+
+    void checkProtectionAllocation() {
+        constexpr auto size = FORGE_RT_GUEST_PAGE_SIZE;
+        constexpr auto rw = FORGE_RT_READ | FORGE_RT_WRITE;
+        const forge_rt_backing backing{size, nullptr, nullptr, 0};
+        const forge_rt_region_template row{0x400000, size, 0, 0, rw};
+        const forge_rt_section_protection source{0, size, rw};
+        const forge_rt_artifact descriptor{FORGE_RT_PROTECTION_ARTIFACT_VERSION,
+                                           0x400000,
+                                           size,
+                                           0,
+                                           0,
+                                           &backing,
+                                           1,
+                                           &row,
+                                           1,
+                                           nullptr,
+                                           0,
+                                           failProtectionAllocation};
+        const forge_rt_protection_artifact artifact{
+            {{{{descriptor, "memory.exe"}, nullptr, 0}, nullptr, 0}, 3}, &source, 1};
+        forge_rt_process *process = nullptr;
+        REQUIRE(forge_rt_process_create(FORGE_RT_ABI_VERSION, &process) == FORGE_RT_OK);
+        REQUIRE(forge_rt_process_register(process, &artifact.pe.functions.crt.named.artifact) ==
+                FORGE_RT_OK);
+        forge_rt_process_result result{};
+        REQUIRE(forge_rt_process_run(process, nullptr, &result) == FORGE_RT_OK &&
+                result.value == 42);
+        REQUIRE(forge_rt_process_destroy(process) == FORGE_RT_OK);
+    }
+
     void checkAdmission(bool importFunction) {
         constexpr uint64_t base = 0x1000;
         const forge_rt_backing backing{8, nullptr, nullptr, 0};
@@ -83,4 +142,5 @@ void operator delete(void *bytes, std::size_t) noexcept { std::free(bytes); }
 int main() {
     checkAdmission(false);
     checkAdmission(true);
+    checkProtectionAllocation();
 }

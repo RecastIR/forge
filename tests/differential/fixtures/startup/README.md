@@ -65,7 +65,7 @@ Argument duplication exposes a later boundary. The compiler accepts `strlen` on 
 
 ## Compatibility boundary
 
-For the primary PE, Forge recognizes 20 of 36 load-time symbols. These are KERNEL32 `GetLastError`, `GetStartupInfoA`, `SetUnhandledExceptionFilter` and `Sleep`, the twelve MSVCRT functions `__getmainargs`, `_amsg_exit`, `_cexit`, `_initterm`, `_onexit`, `calloc`, `exit`, `free`, `malloc`, `memcpy`, `strlen` and `strncmp`, and the four MSVCRT data exports. Eight KERNEL32 symbols and eight MSVCRT symbols still lack bindings. The argument fixture’s additional `strcmp` import has a binding.
+For the primary PE, Forge recognizes 21 of 36 load-time symbols. These are KERNEL32 `GetLastError`, `GetStartupInfoA`, `SetUnhandledExceptionFilter`, `Sleep` and `VirtualProtect`, the twelve MSVCRT functions `__getmainargs`, `_amsg_exit`, `_cexit`, `_initterm`, `_onexit`, `calloc`, `exit`, `free`, `malloc`, `memcpy`, `strlen` and `strncmp`, and the four MSVCRT data exports. Seven KERNEL32 symbols and eight MSVCRT symbols still lack bindings. The argument fixture’s additional `strcmp` import has a binding.
 
 In `__tmainCRTStartup`, the startup conflict branch loads error 31 at `0x1407`. Forge recovers the terminating call at `0x140c` to **`msvcrt.dll!_amsg_exit`**. In the primary PE the thunk is at `0x26b0` in Debug and `0x2680` in Release, both jumping through IAT slot `0x8208`. Separate focused PEs execute `_amsg_exit(31)` through the same import-thunk shape and exercise an unused import. [Original Windows, Wine and ARM64 observations](amsg-exit/) · [Lifted tests](../../../integration/test_executable.py)
 
@@ -108,32 +108,49 @@ The hosted Windows test verifies the producer manifest and prints each PE hash, 
 
 All 16 original PEs have a writable `.CRT` section with `__xd_a` at RVA `0x9050` and `__xd_z` at `0x9058`. Both RIP-relative LEAs resolve to `0x9058`. The half-open initializer range contains zero slots. In primary Debug, the empty branch at `0x16d1` skips the loop. The qword load at `0x16d8` feeds the NULL guard and the call at `0x16e0`. The NULL path and a successful return rejoin at `0x16e2`, where RBX advances by eight. The backedge at `0x16e9` returns to the load. The older outer function sets `_CRT_MT` to 2 and calls `__mingw_TLScallback` for process attach. Thread attach traverses the range of no-argument functions. The newer MinGW implementation has a different outer function. [Linked CRT source](https://github.com/mingw-w64/mingw-w64/blob/v10.0.0/mingw-w64-crt/crt/tlssup.c) · [Later implementation](https://github.com/mingw-w64/mingw-w64/blob/9c44fc5d65f515470dbb6febac91c33c2b58edbc/mingw-w64-crt/crt/tlsdyn.c)
 
-Fifteen comparisons recover both the reverse constructor call and the forward initializer call. Their next failure is in the MinGW pseudo-relocator, which calls `KERNEL32.dll!VirtualProtect` at `CALL64r` (`ff d6`). Debug `puts` stops earlier at `msvcrt.dll!puts` through a direct call (`e8 c4 11 00 00`) to the thunk at `0x2710`. Windows Server 2022 and pinned Wine 8 agreed on the exit code and both streams for all 16 PE hashes. Each row had empty stderr. Forge reports `LIFT_UNSUPPORTED_CONTROL_FLOW` during recovery. Native compilation, publication, artifact verification, execution and stream comparison are unrun. There is no Forge exit status for a translated program. [Windows reference observations](https://github.com/RecastIR/forge/actions/runs/45879006669/job/140118342619)
+Fifteen inputs now recover the register-held `VirtualProtect` import and stop at the direct `msvcrt.dll!fwrite` thunk in the MinGW pseudo-relocator’s error-reporting helper (`CALL64pcrel32`, bytes `e8 72 0e 00 00`). Debug `puts` stops earlier at `msvcrt.dll!puts` (`e8 c4 11 00 00`). All 16 Windows Server 2022 and pinned Wine references validate with empty stderr. Recovery and translation fail for each Forge input with `LIFT_UNSUPPORTED_CONTROL_FLOW`. Native build, publication, artifact verification, execution and stream comparison are unrun for every row. Each exit and stdout below belongs to the reference process.
 
-| Fixture | PE | Function RVA | Block RVA | Call RVA | File offset | IAT slot RVA | Reference exit, stdout |
+The producer hashes, stored pointers for both pseudo-relocation list bounds, and the signed early-return branch were checked in each original PE. Both pointers hold the same VA in every case. Their common RVA is `0x48d0` for argv and puts, `0x4910` for argv_edges, and `0x48b0` for the other fixtures. On this startup path the relocator exits before a relocation write, `VirtualQuery`, protection change or restoration. Recovery still walks those call sites. In primary Debug, the load at `0x1bee` reads RSI from IAT slot `0x81b8` before the call at `0x1c1d`. [MinGW source](https://github.com/mingw-w64/mingw-w64/blob/v10.0.0/mingw-w64-crt/crt/pseudo-reloc.c)
+
+| Fixture | PE | Function / block RVA | Call RVA | File offset | Thunk RVA | IAT RVA | Reference exit, stdout |
 | --- | --- | --- | --- | --- | --- | --- | --- |
-| argc | Debug | 0x1a20 | 0x1c12 | 0x1c1d | 0x121d | 0x81b8 | 42, empty |
-| argc_none | Debug | 0x1a20 | 0x1c12 | 0x1c1d | 0x121d | 0x81b8 | 1, empty |
-| argv | Debug | 0x1a90 | 0x1c82 | 0x1c8d | 0x128d | 0x81c0 | 42, empty |
-| argv_edges | Debug | 0x1b40 | 0x1d32 | 0x1d3d | 0x133d | 0x81c0 | 42, empty |
-| cleanup | Debug | 0x1b10 | 0x1d02 | 0x1d0d | 0x130d | 0x81e0 | 42, `IMBA` |
-| globals | Debug | 0x1a40 | 0x1c32 | 0x1c3d | 0x123d | 0x81b8 | 42, empty |
-| puts | Debug | 0x1530 | 0x1530 | 0x1547 | 0xb47 | 0x8280 | 0, `Hello from C!\r\n` |
-| return | Debug | 0x1a10 | 0x1c02 | 0x1c0d | 0x120d | 0x81b8 | 42, empty |
-| argc | Release | 0x19f0 | 0x1be2 | 0x1bed | 0x11ed | 0x81b8 | 42, empty |
-| argc_none | Release | 0x19f0 | 0x1be2 | 0x1bed | 0x11ed | 0x81b8 | 1, empty |
-| argv | Release | 0x19f0 | 0x1be2 | 0x1bed | 0x11ed | 0x81c0 | 42, empty |
-| argv_edges | Release | 0x19f0 | 0x1be2 | 0x1bed | 0x11ed | 0x81c0 | 42, empty |
-| cleanup | Release | 0x1a90 | 0x1c82 | 0x1c8d | 0x128d | 0x81e0 | 42, `IMBA` |
-| globals | Release | 0x19f0 | 0x1be2 | 0x1bed | 0x11ed | 0x81b8 | 42, empty |
-| puts | Release | 0x19f0 | 0x1be2 | 0x1bed | 0x11ed | 0x81c0 | 0, `Hello from C!\r\n` |
-| return | Release | 0x19f0 | 0x1be2 | 0x1bed | 0x11ed | 0x81b8 | 42, empty |
+| argc | Debug | 0x1840 | 0x1881 | 0xe81 | 0x26f8 | 0x8260 | 42, empty |
+| argc_none | Debug | 0x1840 | 0x1881 | 0xe81 | 0x26f8 | 0x8260 | 1, empty |
+| argv | Debug | 0x18b0 | 0x18f1 | 0xef1 | 0x2768 | 0x8268 | 42, empty |
+| argv_edges | Debug | 0x1960 | 0x19a1 | 0xfa1 | 0x2818 | 0x8268 | 42, empty |
+| cleanup | Debug | 0x1930 | 0x1971 | 0xf71 | 0x27e8 | 0x8290 | 42, `IMBA` |
+| globals | Debug | 0x1860 | 0x18a1 | 0xea1 | 0x2718 | 0x8260 | 42, empty |
+| puts | Debug | 0x1530 | 0x1547 | 0xb47 | 0x2710 | 0x8280 | 0, `Hello from C!\r\n` |
+| return | Debug | 0x1830 | 0x1871 | 0xe71 | 0x26e8 | 0x8260 | 42, empty |
+| argc | Release | 0x1810 | 0x1851 | 0xe51 | 0x26c8 | 0x8260 | 42, empty |
+| argc_none | Release | 0x1810 | 0x1851 | 0xe51 | 0x26c8 | 0x8260 | 1, empty |
+| argv | Release | 0x1810 | 0x1851 | 0xe51 | 0x26c8 | 0x8268 | 42, empty |
+| argv_edges | Release | 0x1810 | 0x1851 | 0xe51 | 0x26c8 | 0x8268 | 42, empty |
+| cleanup | Release | 0x18b0 | 0x18f1 | 0xef1 | 0x2768 | 0x8290 | 42, `IMBA` |
+| globals | Release | 0x1810 | 0x1851 | 0xe51 | 0x26c8 | 0x8260 | 42, empty |
+| puts | Release | 0x1810 | 0x1851 | 0xe51 | 0x26c8 | 0x8268 | 0, `Hello from C!\r\n` |
+| return | Release | 0x1810 | 0x1851 | 0xe51 | 0x26c8 | 0x8260 | 42, empty |
 
 The comparator's per-row `result.json` retains the complete structured diagnostic, including imports, call edges, unwind metadata, file offset, bytes and table evidence. The primary Debug constructor runner calls at RVA `0x15f0` and returns to `0x15f2`. The Release RVAs are `0x15c0` and `0x15c2`. The original constructor lists use a sentinel header in immutable `.text`, DIR64 entries for `register_frame_ctor` and, for cleanup, `setup`. [Regression assertions](../../test_native_differential.py)
 
 The SDK-free forward-call fixture changes the current slot after the load and later slots before their loads. Its single-entry initializer calls a guest helper that writes the first home slot and returns the low four bits of its entry RSP. The initializer resumes, checks for the expected value of eight and adds the marker from its home slot to the visit count. Exit 42 requires that count to be one. The fixture also checks callback order, a tail transfer, register and stack sentinels, last error and the outer attach reason. [Focused PE](../../../fixtures/executable-forward-call.s) · [Bounded call design](../../../../docs/program-architecture.md#bounded-indirect-calls-through-pointer-tables)
 
 Windows Server 2022, pinned Wine 8 and the standalone ARM64 translation returned 42 with empty stdout and stderr for PE SHA-256 `075cc462472df820b34a960c00f890d855c17411c670014bcf24f9402aa09452`. ARM64 produced the same result at a guest base offset by `0x30000000`. Two managed processes using the same artifact at base `0x10000000` each returned 42 in both the unoptimized and O2 runs. [Windows reference observation](https://github.com/RecastIR/forge/actions/runs/45879006669/job/140118342619) · [Rebased executable test](../../../integration/test_executable.py) · [Managed-process test](../../../integration/test_process.py)
+
+### VirtualProtect reference comparisons
+
+The SDK-free observer runs 44 independent processes per reference backend. Each writes seven little-endian DWORDs covering page size, initial protection, BOOL, old protection, last error and two post-call page protections. Rejected requests distinguish a preserved sentinel from a published `PAGE_NOACCESS`. Windows and Wine both measure a 4096-byte page. The Windows captures establish the initial copy-on-write protection and the effects of writing a page or probing an aliased output DWORD. The runtime uses the Windows results for the cases where Wine differs. The C observer itself stops at Forge entry discovery and imports separate allocation and query services for its setup. [Probe source](../../../fixtures/virtual-protect-reference.c) · [All reference values](../../reference/virtual-protect.json) · [Windows observation log](https://github.com/RecastIR/forge/actions/runs/45902961953/job/140196908329)
+
+| Focused PE | Producer SHA-256 | Observed behavior |
+| --- | --- | --- |
+| `virtual-protect-reference` | `067b0d3e72bc769c3769017a011744d6d251468c7565829364d16afcf59f4f7a` | Windows and Wine return 42 with 28 bytes on stdout and empty stderr for each case. |
+| `executable-virtual-protect` | `d1587e321c54d8ded4efffe05322370a492bccdf03229841a645954f7cf4dfd5` | Stack output, unaligned request spanning two pages, independent neighboring access, writable restoration and preserved registers. Exit 42 with empty streams. |
+| `executable-virtual-protect-fresh` | `672f22c70e7049dae862fe2ff1c642f584ae7c3c028f547e8140433fba9921a5` | A pristine writable image page reports old 8. Restoration reports old 2, and the subsequent write succeeds. Exit 42 with empty streams. |
+| `executable-virtual-protect-origin` | `aa8f3ba912620ae6da153ed1d505d34421db036eb4d8523350667296aeb06038` | After a guest write, the encoded old protection yields exit 42 on Windows and ARM64, 46 on Wine. Empty streams. |
+| `executable-virtual-protect-errors` | `77cd263ccddad0b2d522c36caec20efa4b218cf161be4e946cbeb1ecdf4b959b` | Nine requests emit 108 stdout bytes, with exit 42 and empty stderr. ARM64 matches the Windows records, including successful protection of the output itself. |
+| `executable-virtual-protect-denied` | `739c4ac1fa0ea00281d8ea74a80e0a6d60823a283bb9e39dd02090c563a05804` | Store after read-only protection. Windows exits with access violation `0xc0000005` and empty streams. Wine reports the fault through its debugger. ARM64 exits 125 with a guest write-permission fault on stderr. |
+
+The focused native regressions additionally cover checked adapter output, read-modify-write, atomic exchange, protected IAT, immutable data, executable promotion, guard requests and a second guest load base. The managed harness executes two independent occurrences from one artifact at O0 and O2. The Windows and Wine jobs validate the same producer manifest before execution. [ARM64 executable tests](../../../integration/test_executable.py) · [Process isolation tests](../../../integration/test_process.py) · [Supported transitions and ownership](../../../../docs/runtime-architecture.md#managed-guest-page-protection)
 
 ### CMP16mi acceptance and remaining compatibility work
 
@@ -151,10 +168,13 @@ A successful scalar read requires both bytes to fit one readable mapping. Two re
 | Wine `_onexit` allocation exhaustion | Parity remains unverified. |
 | PE TLS initialization and callbacks | Separate loader task covering template copying, index publication and pre-entry callbacks. |
 | TLS storage, thread attach/detach and destructors | Deferred with TEB/TLS lifecycle support. |
-| Missing Windows and CRT services | Future compatibility tasks, including `VirtualProtect`, `puts` and `__setusermatherr`. |
+| Missing Windows and CRT services | Future compatibility tasks, including `VirtualQuery`, `fwrite`, `puts` and `__setusermatherr`. |
 | GUI CRT error reporting | Detect required GUI routing at `_amsg_exit`. The message-box backend is deferred. |
 | Guest exception delivery and SEH | Separate exception-delivery task. |
 | Scalar reads across adjacent readable mappings | Separate shared guest-memory task. |
+| Dynamic code modification, JIT and self-modifying code | Future compiler/runtime research. |
+| Guard pages and full copy-on-write memory | Deferred pending exception delivery and shared/private backing semantics. |
+| VirtualQuery | Separate service consuming the original and effective page state. |
 | General dynamic indirect calls | Future compiler research. Arbitrary register calls still require target and path evidence. |
 
 ### Conventional startup responsibilities

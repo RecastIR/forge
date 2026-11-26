@@ -43,6 +43,9 @@ executable-tail-jump.exe
 executable-tib.exe
 executable-top-level-filter.exe
 executable-virtual-protect-denied.exe
+executable-virtual-protect-errors.exe
+executable-virtual-protect-fresh.exe
+executable-virtual-protect-origin.exe
 executable-virtual-protect.exe
 hello.exe
 virtual-protect-reference.exe

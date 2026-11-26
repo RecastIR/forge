@@ -366,6 +366,12 @@ namespace forge::win64 {
             "kernel32.dll", "SetUnhandledExceptionFilter", LastError::Preserve,
             FORGE_SERVICE_ADAPTER(forge_rt_set_unhandled_exception_filter), Requirement::Process);
 
+    inline constexpr auto virtualProtect =
+        bind<Value::I32, Argument{Value::Address}, Argument{Value::U64}, Argument{Value::U32},
+             Argument{Value::Address, Access::Output, Extent::Fixed, 4}>(
+            "kernel32.dll", "VirtualProtect", LastError::OnFailure,
+            FORGE_SERVICE_ADAPTER(forge_rt_virtual_protect), Requirement::Process);
+
     inline constexpr Argument startupInfoOutput{Value::Address, Access::Output, Extent::Fixed, 104};
     inline constexpr auto getStartupInfoA = bind<Value::Void, startupInfoOutput>(
         "kernel32.dll", "GetStartupInfoA", LastError::Preserve,
@@ -456,5 +462,6 @@ namespace forge::win64 {
         crtCexit,
         crtExit,
         crtSetAppType,
+        virtualProtect,
     };
 } // namespace forge::win64

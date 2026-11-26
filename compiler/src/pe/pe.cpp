@@ -282,7 +282,8 @@ namespace forge {
                                     s.PointerToRawData,
                                     s.SizeOfRawData,
                                     (s.Characteristics & COFF::IMAGE_SCN_MEM_DISCARDABLE) != 0,
-                                    (s.Characteristics & COFF::IMAGE_SCN_MEM_SHARED) != 0});
+                                    (s.Characteristics & COFF::IMAGE_SCN_MEM_SHARED) != 0,
+                                    (s.Characteristics & COFF::IMAGE_SCN_MEM_NOT_CACHED) != 0});
             }
             if (coffHeader.NumberOfSymbols && !coffHeader.PointerToSymbolTable) {
                 invalid("COFF symbol table", pe + 4, "missing file offset");

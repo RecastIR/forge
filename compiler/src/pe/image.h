@@ -28,6 +28,7 @@ namespace forge {
         std::string name, permissions;
         uint32_t rva, virtualSize, fileOffset, rawSize;
         bool discardable, shared;
+        bool noncached = false;
 
         uint32_t initializedSize() const { return std::min(virtualSize, rawSize); }
 

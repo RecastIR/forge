@@ -42,6 +42,7 @@ typedef uint32_t forge_rt_status;
 #define FORGE_RT_UNSUPPORTED_TERMINATION_REENTRY (FORGE_RT_UNSUPPORTED_SERVICE_FLAG | UINT32_C(8))
 #define FORGE_RT_UNSUPPORTED_STARTUP_TITLE (FORGE_RT_UNSUPPORTED_SERVICE_FLAG | UINT32_C(9))
 #define FORGE_RT_UNSUPPORTED_CRT_ERROR_ROUTING (FORGE_RT_UNSUPPORTED_SERVICE_FLAG | UINT32_C(10))
+#define FORGE_RT_UNSUPPORTED_PAGE_PROTECTION (FORGE_RT_UNSUPPORTED_SERVICE_FLAG | UINT32_C(11))
 #define FORGE_RT_UNSUPPORTED_CALLBACK_ARGUMENT (FORGE_RT_UNSUPPORTED_SERVICE_FLAG | UINT32_C(6))
 
 #define FORGE_RT_READ UINT32_C(1)
@@ -156,6 +157,11 @@ forge_rt_status forge_rt_get_command_line_a(forge_rt_instance *instance,
 forge_rt_status forge_rt_get_command_line_w(forge_rt_instance *instance,
                                             forge_rt_thread_token thread,
                                             uint64_t *outAddress) FORGE_RT_NOEXCEPT;
+
+forge_rt_status forge_rt_virtual_protect(forge_rt_instance *, forge_rt_thread_token,
+                                         uint64_t address, uint64_t size, uint32_t protection,
+                                         uint64_t oldProtection, int32_t *result,
+                                         forge_rt_memory_fault *fault) FORGE_RT_NOEXCEPT;
 
 /* Windows x64 STARTUPINFO output in checked, writable guest memory (104 bytes).
  * Both variants require a managed invocation and preserve the guest thread's last error. */
