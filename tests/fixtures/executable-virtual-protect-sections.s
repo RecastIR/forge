@@ -27,7 +27,10 @@ entry:
     je .Lbad
 .endif
     movl $42, %eax
+    jmp .Ldone
 .Lbad:
+    movl $1, %eax
+.Ldone:
     addq $40, %rsp
     retq
 .seh_endproc

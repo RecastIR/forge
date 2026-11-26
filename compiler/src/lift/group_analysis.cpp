@@ -513,19 +513,21 @@ namespace forge::x86 {
                 }
             };
 
-            if (!sizes.known() ||
-                std::ranges::any_of(sizes.values(), [](auto n) { return n != 0; })) {
-                select(target, [&](uint64_t va) {
-                    if (!sizes.known()) {
-                        imageMemory.protectionTarget(step, va, std::nullopt);
-                        return;
-                    }
+            const auto selectTarget = [&](std::optional<uint64_t> size) {
+                if (size != 0) {
+                    select(target,
+                           [&](uint64_t va) { imageMemory.protectionTarget(step, va, size); });
+                }
+            };
 
-                    for (const auto size : sizes.values()) {
-                        imageMemory.protectionTarget(step, va, size);
-                    }
-                });
+            if (sizes.known()) {
+                for (const auto size : sizes.values()) {
+                    selectTarget(size);
+                }
+            } else {
+                selectTarget(std::nullopt);
             }
+
             select(output,
                    [&](uint64_t va) { imageMemory.protectionOutput(step, va, outputSize); });
         }
