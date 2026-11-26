@@ -8,6 +8,8 @@ entry:
     .seh_endprologue
     cmpl $0, trace(%rip)
     jne failed
+    movl $-1, switch_table(%rip)
+    call run_switch
     call run_empty
     call run_count
     call run_one
@@ -30,9 +32,7 @@ done:
     retq
 .seh_endproc
 
-.macro runner name, table, site, after
-.seh_proc \name
-\name:
+.macro runner_frame
     pushq %rsi
     .seh_pushreg %rsi
     pushq %rbx
@@ -40,7 +40,14 @@ done:
     subq $40, %rsp
     .seh_stackalloc 40
     .seh_endprologue
+.endm
+
+.macro table_loop table, site, after, anchor=0
+.if \anchor
+    movq \table(%rip), %rdx
+.else
     leaq \table(%rip), %rdx
+.endif
     movq (%rdx), %rax
     movl %eax, %ecx
     cmpl $-1, %eax
@@ -53,18 +60,19 @@ done:
     leaq (%rdx,%rax,8), %rbx
     subq %rcx, %rax
     leaq -8(%rdx,%rax,8), %rsi
+.ifnb \site
 \site:
+.endif
+.Lcall\@:
     callq *(%rbx)
+.ifnb \after
 \after:
+.endif
     subq $8, %rbx
     cmpq %rsi, %rbx
-    jne \site
+    jne .Lcall\@
 .Ldone\@:
-    addq $40, %rsp
-    popq %rbx
-    popq %rsi
-    movl $42, %eax
-    retq
+    jmp .Lend\@
 .Lscan\@:
     xorl %eax, %eax
 .Lnext\@:
@@ -74,6 +82,23 @@ done:
     movq %r8, %rax
     jne .Lnext\@
     jmp .Lcount\@
+.Lend\@:
+.endm
+
+.macro runner_return
+    addq $40, %rsp
+    popq %rbx
+    popq %rsi
+    movl $42, %eax
+    retq
+.endm
+
+.macro runner name, table, site, after, anchor=0
+.seh_proc \name
+\name:
+    runner_frame
+    table_loop \table, \site, \after, \anchor
+    runner_return
 .seh_endproc
 .endm
 
@@ -81,6 +106,8 @@ runner run_count, count_table, count_site, after_count
 runner run_one, one_table, one_site, after_one
 runner run_empty, empty_table, empty_site, after_empty
 runner run_mixed, mixed_table, mixed_site, after_mixed
+.globl run_switch, switch_site
+runner run_switch, switch_anchor, switch_site, after_switch, 1
 
 # The inferred leaf and recorded body both update shared guest data.
 one:
@@ -181,6 +208,14 @@ tamper_scan:
     jmp run_empty
 .seh_endproc
 
+.globl overrun_switch
+.seh_proc overrun_switch
+overrun_switch:
+    .seh_endprologue
+    movl $1, switch_table+8(%rip)
+    jmp entry
+.seh_endproc
+
 .globl exclusive
 .seh_proc exclusive
 exclusive:
@@ -214,9 +249,17 @@ empty_table:
     .quad -1, 0
 mixed_table:
     .quad 2, two, terminal
+.globl switch_table
+switch_table:
+    .quad 1, 0
+    .quad 0 # readable, outside the proved one-slot table
 trace:
     .long 0
 .ifdef with_cleanup
 cleanup_marker:
     .long 0
 .endif
+.section .rdata,"dr"
+.p2align 3
+switch_anchor:
+    .quad switch_table

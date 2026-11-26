@@ -366,9 +366,10 @@ namespace forge::x86 {
             }
             const auto address = addressFact(operand, facts);
 
+            // Bounded calls already selected their header and scan bytes in analyzeGroup.
             if (collect && table && table->loadRva == s.rva) {
                 imageMemory.tableRead(s, *table);
-            } else if (collect) {
+            } else if (collect && !plan.tableInstructions.contains(s.rva)) {
                 planMemoryAccess(s, op.sourceWidth, memoryDestination(op.form) && op.op != Op::Cmp,
                                  operand, address);
             }
@@ -929,9 +930,10 @@ namespace forge::x86 {
             for (const auto &[instruction, call] : function.calls) {
                 if (const auto *table = call.table()) {
                     image.boundedTable(*function.instructionContaining(instruction), *table);
-                    auto &guards = result.functions[address].tableGuards;
-                    guards.emplace(table->scanRead, &call);
-                    guards.emplace(table->zeroGuard, &call);
+                    auto &instructions = result.functions[address].tableInstructions;
+                    instructions.emplace(table->countLoad, &call);
+                    instructions.emplace(table->scanRead, &call);
+                    instructions.emplace(table->zeroGuard, &call);
                 }
                 const auto *service = call.external();
                 if (service && service->binding.callback == win64::Callback::Cleanup) {

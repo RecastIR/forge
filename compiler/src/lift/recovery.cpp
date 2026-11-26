@@ -194,7 +194,7 @@ namespace forge::x86 {
             MappedRange code;
             RecordedCFG cfg;
             CallResolutions resolutions;
-            unsigned tableEntries = 0;
+            unsigned remainingTableEntries = 4096;
             std::exception_ptr failure;
             bool mayReturn = false;
             std::vector<CallLocation> waiting;
@@ -491,18 +491,13 @@ namespace forge::x86 {
                 pointerInitialization = image.imageInitialization();
             }
             validateCallEvidence(caller, active.code, step, step.rva);
-            auto table = recoverTableCall(active.cfg.steps(), step, operands, image,
-                                          *pointerInitialization, functionRanges());
+            auto table =
+                recoverTableCall(active.cfg.steps(), step, operands, image, *pointerInitialization,
+                                 functionRanges(), active.remainingTableEntries);
             if (!rangesIn(loaderWrittenRanges(), table.extent()).empty()) {
                 step.reject(FailureCode::ImageMemory,
                             "loader write overlaps bounded table at " + hex(table.header));
             }
-            const unsigned count = (table.last - table.first) / 8;
-            if (count > 4096 - active.tableEntries) {
-                step.reject(FailureCode::UnsupportedControlFlow,
-                            "bounded table entry budget exceeded at " + hex(table.header));
-            }
-            active.tableEntries += count;
             bool returns = false;
             for (const auto target : table.targets) {
                 returns |=

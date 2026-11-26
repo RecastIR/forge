@@ -164,7 +164,8 @@ namespace forge::x86 {
         }
 
         void readTable(BoundedTableCall &table, const Step &call, const ParsedImage &image,
-                       const ImageInitialization &init, llvm::ArrayRef<RvaRange> functions) {
+                       const ImageInitialization &init, llvm::ArrayRef<RvaRange> functions,
+                       unsigned &remainingEntries) {
             const auto *section = image.sectionAtRva(table.header);
             if (!section || (!section->immutable() && !section->writableData()) ||
                 section->shared || table.header % 8 || image.advertisesDynamicRelocations()) {
@@ -172,18 +173,18 @@ namespace forge::x86 {
                             "invalid guest pointer table at " + hex(table.header));
             }
             const auto sectionEnd = uint64_t(section->rva) + section->virtualSize;
-            const auto check = [&](uint64_t slot) {
+            const auto slotRange = [&](uint64_t slot) {
                 RvaRange field{slot, slot + 8};
                 if (field.end > sectionEnd || field.end > image.module().sizeOfImage ||
                     !rangesIn(functions, field).empty()) {
                     call.reject(FailureCode::ImageMemory,
                                 "invalid bounded table extent at " + hex(slot));
                 }
-                init.validateRelocations(field);
+                return field;
             };
 
-            check(table.header);
-            const RvaRange head{table.header, uint64_t(table.header) + 8};
+            const auto head = slotRange(table.header);
+            init.validateRelocations(head);
             if (!init.exclusionsIn(head).empty() || !init.relocationsIn(head).empty()) {
                 call.reject(FailureCode::ImageMemory,
                             "unstable bounded table header at " + hex(table.header));
@@ -191,9 +192,19 @@ namespace forge::x86 {
 
             const auto count = static_cast<uint32_t>(image.initialQword(table.header));
             table.sentinel = count == UINT32_MAX;
-            if (!table.sentinel && count > win64::maxInitializerEntries) {
-                call.reject(FailureCode::UnsupportedControlFlow,
-                            "bounded table count exceeds budget at " + hex(table.header));
+            const auto chargeEntries = [&](unsigned entries) {
+                if (entries > remainingEntries) {
+                    call.reject(FailureCode::UnsupportedControlFlow,
+                                "bounded table entry budget exceeded at " + hex(table.header));
+                }
+                remainingEntries -= entries;
+            };
+            if (!table.sentinel) {
+                if (count > win64::maxInitializerEntries) {
+                    call.reject(FailureCode::UnsupportedControlFlow,
+                                "bounded table count exceeds budget at " + hex(table.header));
+                }
+                chargeEntries(count);
             }
 
             table.first = static_cast<uint32_t>(head.end);
@@ -201,10 +212,19 @@ namespace forge::x86 {
 
             for (unsigned i = 0; table.sentinel || i < count; ++i) {
                 const uint32_t slot = table.last;
-                check(slot);
-                const RvaRange field{slot, uint64_t(slot) + 8};
+                const auto field = slotRange(slot);
                 const auto value = image.initialQword(slot);
-                if (!value && init.relocationsIn(field).empty()) {
+                const bool nullSlot = !value && init.relocationsIn(field).empty();
+                if (table.sentinel && !nullSlot) {
+                    if (i == win64::maxInitializerEntries) {
+                        call.reject(FailureCode::UnsupportedControlFlow,
+                                    "missing bounded table terminator at " + hex(slot));
+                    }
+                    chargeEntries(1);
+                }
+
+                init.validateRelocations(field);
+                if (nullSlot) {
                     if (!init.exclusionsIn(field).empty()) {
                         call.reject(FailureCode::ImageMemory,
                                     "unstable NULL table slot at " + hex(slot));
@@ -217,10 +237,6 @@ namespace forge::x86 {
                         relocatedPointerRva(call, image.module(), init, slot, value));
                 }
 
-                if (i == win64::maxInitializerEntries) {
-                    call.reject(FailureCode::UnsupportedControlFlow,
-                                "missing bounded table terminator at " + hex(slot));
-                }
                 table.last += 8;
             }
 
@@ -239,7 +255,8 @@ namespace forge::x86 {
     BoundedTableCall recoverTableCall(const std::map<uint32_t, Step> &steps, const Step &call,
                                       const InstructionOperands &ops, const ParsedImage &image,
                                       const ImageInitialization &init,
-                                      llvm::ArrayRef<RvaRange> functions) try {
+                                      llvm::ArrayRef<RvaRange> functions,
+                                      unsigned &remainingEntries) try {
         const auto lookup = [&](uint32_t rva, bool forward) -> const Step * {
             auto it = steps.lower_bound(rva);
             if (!forward) {
@@ -272,7 +289,7 @@ namespace forge::x86 {
                                loop.cursor,
                                false,
                                {}};
-        readTable(table, call, image, init, functions);
+        readTable(table, call, image, init, functions, remainingEntries);
         return table;
     } catch (InspectionError &error) {
         if (error.context.instructionRva != call.rva) {

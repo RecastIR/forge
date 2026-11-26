@@ -29,18 +29,18 @@ namespace forge::x86 {
             if (context.sourceCall) {
                 const auto &source = *context.sourceCall;
                 const auto &call = group.function(source.caller).calls.at(source.instruction);
-                if (call.table()) {
-                    return ExecutableUnresolvedCall{source.caller, source.instruction,
-                                                    context.tableTargetRva};
-                }
-                if (!call.external()) {
+                if (!call.external() && !call.table()) {
                     return ExecutableUnresolvedCall{source.caller, source.instruction,
                                                     call.guest().rva};
                 }
 
-                // A failed CALL inside the initializer has its own unresolved edge.
+                // A failed CALL inside an admitted target has its own unresolved edge.
                 if (context.instructionRva == source.instruction ||
                     !llvm::StringRef(context.opcode).starts_with("CALL")) {
+                    if (call.table()) {
+                        return ExecutableUnresolvedCall{source.caller, source.instruction,
+                                                        context.tableTargetRva};
+                    }
                     return ExecutableUnresolvedCall{source.caller, source.instruction,
                                                     context.terminationTargetRva
                                                         ? context.terminationTargetRva

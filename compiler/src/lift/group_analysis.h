@@ -11,7 +11,8 @@ namespace forge::x86 {
 
     struct FunctionPlan {
         RegisterSet modified;
-        std::map<uint32_t, const ResolvedCallSite *> tableGuards;
+        // Each proved count load, scan read and zero guard borrows its owning call site.
+        std::map<uint32_t, const ResolvedCallSite *> tableInstructions;
         llvm::DenseSet<uint32_t> stackAccesses;
     };
 

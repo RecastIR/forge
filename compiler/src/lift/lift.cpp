@@ -150,6 +150,7 @@ namespace forge {
             void lowerService(const Step &s, const x86::ExternalCallTarget &external,
                               Value *calleeRsp);
             Value *checkedTableTarget(const Step &step, const x86::BoundedTableCall &table);
+            void guardTableSlot(Value *address, RvaRange slots);
             void callTableBodies(const Step &step, const x86::BoundedTableCall &table,
                                  Value *target, Value *calleeRsp);
             void lowerCall(const Step &s, const x86::ResolvedCallSite &call);
@@ -296,17 +297,11 @@ namespace forge {
                 address = ir.CreateAdd(address, term);
             }
 
-            if (const auto guard = plan.tableGuards.find(s.rva);
-                access && guard != plan.tableGuards.end()) {
+            if (const auto guard = plan.tableInstructions.find(s.rva);
+                access && guard != plan.tableInstructions.end()) {
                 const auto &table = *guard->second->table();
                 if (table.scanRead == s.rva) {
-                    const auto firstVA = analysis.image.guestBase() + table.first;
-                    auto *offset = ir.CreateSub(address, ir.getInt64(firstVA));
-                    auto *allowed =
-                        table.sentinel
-                            ? ir.CreateICmpULE(offset, ir.getInt64(table.last - table.first))
-                            : static_cast<Value *>(ir.getFalse());
-                    memory.checks.guard(allowed, FORGE_RT_FAULT_CONTROL);
+                    guardTableSlot(address, {table.first, table.extent().end});
                 }
             }
             return address;
@@ -509,9 +504,9 @@ namespace forge {
         }
 
         void Translator::lower(const Step &s) {
-            const auto guard = plan.tableGuards.find(s.rva);
+            const auto guard = plan.tableInstructions.find(s.rva);
             SaveAndRestore origin(memory.checks.tableOrigin);
-            if (guard != plan.tableGuards.end()) {
+            if (guard != plan.tableInstructions.end()) {
                 const auto &site = *guard->second;
                 const auto &table = *site.table();
                 memory.checks.tableOrigin = (uint64_t(site.instruction) << 32) | table.header;
@@ -715,13 +710,19 @@ namespace forge {
             }
         }
 
+        void Translator::guardTableSlot(Value *address, RvaRange slots) {
+            // Both endpoints are qword-aligned, so every aligned start in the range fits.
+            auto *offset =
+                ir.CreateSub(address, ir.getInt64(analysis.image.guestBase() + slots.begin));
+            auto *inRange = ir.CreateICmpULT(offset, ir.getInt64(slots.end - slots.begin));
+            auto *aligned = ir.CreateIsNull(ir.CreateAnd(offset, ir.getInt64(7)));
+            memory.checks.guard(ir.CreateAnd(inRange, aligned), FORGE_RT_FAULT_CONTROL);
+        }
+
         Value *Translator::checkedTableTarget(const Step &s, const x86::BoundedTableCall &table) {
             const auto guestBase = analysis.image.guestBase();
             auto *address = effectiveAddress(s, 0, true);
-            auto *offset = ir.CreateSub(address, ir.getInt64(guestBase + table.first));
-            auto *inRange = ir.CreateICmpULT(offset, ir.getInt64(table.last - table.first));
-            auto *aligned = ir.CreateIsNull(ir.CreateAnd(offset, ir.getInt64(7)));
-            memory.checks.guard(ir.CreateAnd(inRange, aligned), FORGE_RT_FAULT_CONTROL);
+            guardTableSlot(address, {table.first, table.last});
             auto *value = memory.load(address, 64, false);
             auto *fault = BasicBlock::Create(ir.getContext(), "table.invalid", impl);
             auto *valid = BasicBlock::Create(ir.getContext(), "table.call", impl);

@@ -808,6 +808,94 @@ class Readiness(Workspace):
                 self.assertEqual(ctx.get("instruction_rva"), hex(expected_site), report["message"])
                 self.assertEqual(ctx.get("opcode"), "CALL64m")
                 self.assertNotIn("iat_slot_rva", ctx)
+                if mutation == "outside":
+                    self.assertEqual(ctx["table_target_rva"], hex(table))
+                    self.assertIn(dict(caller_rva=hex(symbols["run_count"]), instruction_rva=hex(site),
+                                       target_rva=hex(table)), ctx["unresolved_calls"])
+
+    def test_bounded_nested_import_failure(self):
+        original, symbols = bounded_fixture(image("bounded-cleanup"))
+        data = bytearray(original)
+        name = data.index(b"_onexit\0")
+        data[name:name + 7] = b"_absent"
+        writer = symbols["writer"]
+        offset = Layout(data).file_offset(writer)
+        inner = writer + data.index(b"\xff\x15", offset) - offset
+        ctx = self.reject(data)["context"]
+        outer = dict(caller_rva=hex(symbols["run_count"]), instruction_rva=hex(symbols["count_site"]),
+                     target_rva=hex(writer))
+        self.assertEqual((ctx["function_rva"], ctx["instruction_rva"], ctx["import_symbol"]),
+                         (hex(writer), hex(inner), "_absent"))
+        self.assertEqual((ctx["caller_rva"], ctx["call_site_rva"], ctx["table_header_rva"], ctx["table_target_rva"]),
+                         (outer["caller_rva"], outer["instruction_rva"], hex(symbols["count_table"]), hex(writer)))
+        self.assertIn(outer, ctx["calls"])
+        self.assertNotIn(outer, ctx["unresolved_calls"])
+        self.assertIn(dict(caller_rva=hex(writer), instruction_rva=hex(inner)), ctx["unresolved_calls"])
+
+    def test_bounded_table_image_selection(self):
+        original, symbols = bounded_fixture()
+        data = bytearray(original)
+        layout = Layout(data)
+        section = layout.section_table + 40 * len(layout.sections)
+        self.assertLessEqual(section + 40, layout.u32(layout.opt + 60))
+        start = layout.u32(layout.opt + 56)
+        size = 33 << 20
+        struct.pack_into("<H", data, layout.pe + 6, len(layout.sections) + 1)
+        struct.pack_into("<8sIIIIIIHHI", data, section, b".unused", size, start, 0, 0, 0, 0, 0, 0, 0x40000080)
+        struct.pack_into("<I", data, layout.opt + 56, start + size)
+        pe = self.dir / "large.exe"
+        pe.write_bytes(data)
+
+        def lift(name):
+            return run(FORGE, "lift", pe, "--rva", hex(symbols[name]), "--signature", "i64(i64,i64)",
+                       "--output", self.output, "--diagnostics-format", "json")
+
+        for name in ("run_empty", "run_one", "run_count", "run_switch"):
+            with self.subTest(name=name):
+                result = lift(name)
+                self.assertEqual(result.returncode, 0, result.stderr)
+
+        # An ordinary read through incoming RCX still requires the generic image plan.
+        offset = layout.file_offset(symbols["two"])
+        data[offset:offset + 4] = bytes.fromhex("488b01 c3")
+        pe.write_bytes(data)
+        result = lift("two")
+        self.assertEqual(result.returncode, 1)
+        self.assertEqual(json.loads(result.stderr)["code"], "LIFT_IMAGE_MEMORY")
+
+    def test_bounded_table_budgets(self):
+        original, symbols = bounded_fixture(FIXTURES / "bounded-budget.exe")
+        layout = Layout(original)
+        table = layout.file_offset(symbols["budget_table"])
+        tail = layout.file_offset(symbols["budget_tail"])
+        pe = self.dir / "budget.exe"
+        args = (FORGE, "lift", pe, "--rva", hex(entry(original)), "--signature", "i64(i64,i64)",
+                "--output", self.output, "--diagnostics-format", "json")
+        for header in (1024, 2**64 - 1):
+            data = bytearray(original)
+            struct.pack_into("<Q", data, table, header)
+            # Four sites each traverse 1,024 duplicate pointers. The final empty
+            # sentinel table can still inspect its NULL with zero allowance left.
+            pe.write_bytes(data)
+            result = run(*args)
+            self.assertEqual(result.returncode, 0, result.stderr)
+            for tail_header in (1, 2**64 - 1):
+                with self.subTest(header=header, tail=tail_header):
+                    struct.pack_into("<QQ", data, tail, tail_header, 123)  # missing DIR64
+                    pe.write_bytes(data)
+                    result = run(*args)
+                    self.assertEqual(result.returncode, 1)
+                    diagnostic = json.loads(result.stderr)
+                    self.assertIn("bounded table entry budget exceeded", diagnostic["message"])
+                    self.assertEqual(diagnostic["context"]["instruction_rva"], hex(symbols["budget_tail_site"]))
+
+        # A malformed 1,025th nonzero entry exceeds the per-list limit first.
+        data = bytearray(original)
+        struct.pack_into("<Q", data, table + 8 * 1025, 123)
+        pe.write_bytes(data)
+        result = run(*args)
+        self.assertEqual(result.returncode, 1)
+        self.assertIn("missing bounded table terminator", json.loads(result.stderr)["message"])
 
     def test_tail_cycles_report_only_admitted_edges(self):
         data = bytearray((FIXTURES / "cfg.exe").read_bytes())
@@ -1373,14 +1461,35 @@ class WindowsAppType(unittest.TestCase):
                 self.assertEqual((result.returncode, result.stdout, result.stderr), expected)
 
 
-def bounded_fixture():
-    pe = image("bounded-call")
+def bounded_fixture(pe=None):
+    if pe is None:
+        pe = image("bounded-call")
     module = json.loads(run(FORGE, "inspect", pe, "--format", "json", check=True).stdout)["modules"][0]
     symbols = {n: int(e["rva"], 16) for e in module["exports"] for n in e["names"]}
     return pe.read_bytes(), symbols
 
 
 class Console(Workspace):
+    def test_counted_scan_escape(self):
+        original, symbols = bounded_fixture()
+        layout = Layout(original)
+        header = symbols["switch_table"]
+        expected = (f"forge: bounded call RVA {symbols['switch_site']:#x} table RVA {header:#x}\n"
+                    "forge: guest control fault\n").encode()
+        # In both cases the next qword in guest memory is readable and zero.
+        # Only a NULL within the initially proved extent may terminate the scan.
+        for count in (0, 1):
+            with self.subTest(count=count):
+                data = bytearray(original)
+                struct.pack_into("<Q", data, layout.file_offset(header), count)
+                if count:
+                    struct.pack_into("<I", data, layout.opt + 16, symbols["overrun_switch"])
+                pe = self.dir / "escape.exe"
+                pe.write_bytes(data)
+                self.compile(pe)
+                result = self.program()
+                self.assertEqual((result.returncode, result.stdout, result.stderr), (125, b"", expected))
+
     def test_bounded_zero_filled_terminator(self):
         original, symbols = bounded_fixture()
         data = bytearray(original)

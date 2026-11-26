@@ -555,6 +555,38 @@ namespace {
         check(nestedLeaf, "missing metadata-free initializer shared with an ordinary guest call");
     }
 
+    void checkBoundedReturnEffects(const x86::ResolvedCallSite &site) {
+        // Two normal returns write AX and AL respectively. Only the first defines CF
+        // from scratch. Both define ZF. The third alternative has no continuation.
+        const auto targets = site.guestTargets();
+        x86::FunctionFlows flows;
+        auto &first = flows[targets[0]];
+        first.mayReturn = true;
+        first.returns.writes[0] = 0xffff;
+        first.returns.flags.generated.set(x86::CF).set(x86::ZF);
+        auto &second = flows[targets[1]];
+        second.mayReturn = true;
+        second.returns.writes[0] = 0xff;
+        second.returns.flags.generated.set(x86::ZF);
+        auto &terminal = flows[targets[2]];
+        terminal.returns.carried.fill(0);
+        terminal.returns.flags = {};
+
+        const auto effect = x86::callEffect(site, flows);
+        const auto fresh = effect.apply({});
+        x86::FlagSet zf;
+        zf.set(x86::ZF);
+        check(fresh.registers[0] == 0xff && fresh.flags == zf,
+              "bounded return defined bits missing on a returning path");
+
+        x86::Definitions incoming;
+        incoming.registers[0] = 0xff00;
+        incoming.flags.set(x86::CF);
+        const auto carried = effect.apply(incoming);
+        check(carried.registers[0] == 0xffff && carried.flags == (incoming.flags | zf),
+              "bounded return lost incoming bits carried by a returning path");
+    }
+
     void checkBoundedCalls(const fs::path &path) {
         const AnalyzedImage image(
             std::make_unique<ParsedImage>(InputFile(path), ParsePolicy::Inspection),
@@ -571,6 +603,7 @@ namespace {
         const std::vector<uint32_t> expected{exportedRva(image, "one"), exportedRva(image, "two"),
                                              exportedRva(image, "writer")};
         check(table.targets == expected, "incorrect site-specific target set");
+        checkBoundedReturnEffects(*site);
         for (const auto target : expected) {
             const auto &callee = group.function(target);
             check(!callee.callbackSource && callee.mayReturn &&
