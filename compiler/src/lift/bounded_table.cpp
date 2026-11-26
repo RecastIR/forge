@@ -163,6 +163,28 @@ namespace forge::x86 {
                     finish.next};
         }
 
+        void reserveTableEntries(const BoundedTableCall &table, const Step &call, unsigned count,
+                                 unsigned &remainingEntries) {
+            const uint64_t used = (table.last - table.first) / 8;
+            if (used + count > win64::maxInitializerEntries) {
+                if (table.sentinel) {
+                    call.reject(FailureCode::UnsupportedControlFlow,
+                                "missing bounded table terminator at " + hex(table.last));
+                }
+
+                call.reject(FailureCode::UnsupportedControlFlow,
+                            "bounded table count exceeds budget at " + hex(table.header));
+            }
+
+            if (count > remainingEntries) {
+                call.reject(FailureCode::UnsupportedControlFlow,
+                            "bounded table entry budget exceeded at " + hex(table.header));
+            }
+
+            // Discovery can continue at another site after a deferred failure.
+            remainingEntries -= count;
+        }
+
         void readTable(BoundedTableCall &table, const Step &call, const ParsedImage &image,
                        const ImageInitialization &init, llvm::ArrayRef<RvaRange> functions,
                        unsigned &remainingEntries) {
@@ -192,23 +214,11 @@ namespace forge::x86 {
 
             const auto count = static_cast<uint32_t>(image.initialQword(table.header));
             table.sentinel = count == UINT32_MAX;
-            const auto chargeEntries = [&](unsigned entries) {
-                if (entries > remainingEntries) {
-                    call.reject(FailureCode::UnsupportedControlFlow,
-                                "bounded table entry budget exceeded at " + hex(table.header));
-                }
-                remainingEntries -= entries;
-            };
-            if (!table.sentinel) {
-                if (count > win64::maxInitializerEntries) {
-                    call.reject(FailureCode::UnsupportedControlFlow,
-                                "bounded table count exceeds budget at " + hex(table.header));
-                }
-                chargeEntries(count);
-            }
-
             table.first = static_cast<uint32_t>(head.end);
             table.last = table.first;
+            if (!table.sentinel) {
+                reserveTableEntries(table, call, count, remainingEntries);
+            }
 
             for (unsigned i = 0; table.sentinel || i < count; ++i) {
                 const uint32_t slot = table.last;
@@ -216,11 +226,7 @@ namespace forge::x86 {
                 const auto value = image.initialQword(slot);
                 const bool nullSlot = !value && init.relocationsIn(field).empty();
                 if (table.sentinel && !nullSlot) {
-                    if (i == win64::maxInitializerEntries) {
-                        call.reject(FailureCode::UnsupportedControlFlow,
-                                    "missing bounded table terminator at " + hex(slot));
-                    }
-                    chargeEntries(1);
+                    reserveTableEntries(table, call, 1, remainingEntries);
                 }
 
                 init.validateRelocations(field);
