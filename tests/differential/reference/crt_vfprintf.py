@@ -3,7 +3,7 @@ import hashlib
 import json
 
 VARIANTS = ("empty", "mixed", "numbers", "pointer", "boundary", "large",
-            "null_format", "null_string", "unknown")
+            "null_format", "null_string", "unknown", "null_stream", "edges", "mapped")
 
 
 def observe(directory, destination, wine, declared, launch, windows_failure):

@@ -46,10 +46,13 @@ crt-term-recursive-order.exe
 crt-term-recursive.exe
 crt-term-register.exe
 crt-vfprintf-boundary.exe
+crt-vfprintf-edges.exe
 crt-vfprintf-empty.exe
 crt-vfprintf-large.exe
+crt-vfprintf-mapped.exe
 crt-vfprintf-mixed.exe
 crt-vfprintf-null_format.exe
+crt-vfprintf-null_stream.exe
 crt-vfprintf-null_string.exe
 crt-vfprintf-numbers.exe
 crt-vfprintf-pointer.exe

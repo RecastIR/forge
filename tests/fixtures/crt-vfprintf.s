@@ -32,7 +32,7 @@ entry:
     movl $0x80000000, %r8d
     movl $0xffffffff, %r9d
     movl $0xabcdef, 32(%rsp)
-    movl $0, 40(%rsp)
+    movq $0, 40(%rsp)
     movq $-1, 48(%rsp)
     leaq mutable(%rip), %rax
     movq %rax, 56(%rsp)
@@ -57,8 +57,25 @@ entry:
     leaq long_text(%rip), %r8
 .elseif null_format
     xorl %edx, %edx
+.elseif null_stream
+    xorl %ecx, %ecx
+.elseif edges
+    movl $0x7fffffff, %r8d
+    movl $-1, %r9d
+    movl $0, 32(%rsp)
+    movl $42, 40(%rsp)
+    movl $0xab, 48(%rsp)
+    movl $-42, 56(%rsp)
+    movl $-1, 64(%rsp)
 .endif
+.if mapped
+    leaq dynamic_fmt(%rip), %rdx
+    movb $115, 1(%rdx)
+    leaq slots(%rip), %r8
+    callq *__imp_vfprintf(%rip)
+.else
     callq emit
+.endif
     movl %eax, record(%rip)
     movl (%rsi), %eax
     movl %eax, record+4(%rip)
@@ -108,6 +125,8 @@ entry:
 fmt:
 .if mixed
     .asciz "%d|%u|%X|%%|%p|%x|%s|%s\n"
+.elseif edges
+    .asciz "%i|%08u|%.0d|%-8.5d|%#X|%+08.5i|%lx"
 .elseif numbers
     .asciz "%+07d|% -6i|%#08x|%#.0X|%ld|%I64d|%I64u|%.18I64X"
 .elseif pointer
@@ -136,3 +155,9 @@ text: .asciz "immutable"
 .data
 mutable: .asciz "mutable"
 record: .space 24
+.if mapped
+.balign 8
+slots: .quad text
+    .quad 0xaaaaaaaa80000000
+dynamic_fmt: .asciz "%?|%d"
+.endif
