@@ -14,13 +14,15 @@ VARIANTS = ("empty", "mixed", "numbers", "pointer", "boundary", "large",
 
 # Capture these producer-hashed inputs before adding their independent observations.
 PROBES = ("padding", "sign", "field_body", "trailing", "zero_pad", "precision",
-          "errno_string", "errno_slot", "literal_empty", "literal_text")
+          "errno_string", "errno_slot", "literal_empty", "literal_text", "eilseq")
 
 
 def failure_modes(variant):
     if variant in ("boundary", "large", "empty", "padding", "sign", "field_body",
                    "trailing", "zero_pad"):
         return ("broken", "short", "missing", "full")
+    if variant == "eilseq":
+        return ("prefix",)
     if variant in ("errno_string", "errno_slot"):
         return ("missing",)
     return ()

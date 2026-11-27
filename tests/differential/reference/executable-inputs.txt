@@ -47,6 +47,7 @@ crt-term-recursive.exe
 crt-term-register.exe
 crt-vfprintf-boundary.exe
 crt-vfprintf-edges.exe
+crt-vfprintf-eilseq.exe
 crt-vfprintf-empty.exe
 crt-vfprintf-errno_slot.exe
 crt-vfprintf-errno_string.exe

@@ -3,6 +3,19 @@
 .globl entry
 .seh_proc entry
 entry:
+.if literal_empty || literal_text
+    # Isolate the format's image requirements from the observer's indirect FILE reads.
+    subq $40, %rsp
+    .seh_stackalloc 40
+    .seh_endprologue
+    callq __iob_func
+    leaq 48(%rax), %rcx
+    leaq fmt(%rip), %rdx
+    movq $-1, %r8
+    callq *__imp_vfprintf(%rip)
+    addq $40, %rsp
+    retq
+.else
     pushq %rbx
     .seh_pushreg %rbx
     pushq %rsi
@@ -23,6 +36,8 @@ entry:
 .endif
 .if errno_string
     movl $0x4141, (%rsi)
+.elseif eilseq
+    movl $42, (%rsi)
 .else
     movl $37, (%rsi)
 .endif
@@ -53,8 +68,6 @@ entry:
     movl $23, %r9d
 .elseif errno_string || errno_slot
     movq %rsi, %r8
-.elseif literal_empty || literal_text
-    movq $-1, %r8
 .elseif numbers
     movl $42, %r8d
     movl $23, %r9d
@@ -69,7 +82,7 @@ entry:
     leaq mutable(%rip), %r8
     movabsq $0xfedcba9876543210, %rax
     movq %rax, 32(%rsp)
-.elseif large
+.elseif large || eilseq
     leaq long_text(%rip), %r8
 .elseif null_format
     xorl %edx, %edx
@@ -89,7 +102,7 @@ entry:
     movb $115, 1(%rdx)
     leaq slots(%rip), %r8
     callq *__imp_vfprintf(%rip)
-.elseif errno_slot || literal_empty || literal_text
+.elseif errno_slot
     callq *__imp_vfprintf(%rip)
 .else
     callq emit
@@ -137,6 +150,7 @@ entry:
     popq %rsi
     popq %rbx
     retq
+.endif
 .seh_endproc
 
 .section .rdata,"dr"
@@ -149,7 +163,7 @@ fmt:
     .asciz "%+07d|% -6i|%#08x|%#.0X|%ld|%I64d|%I64u|%.18I64X"
 .elseif pointer
     .asciz "%p|%p|%p"
-.elseif large
+.elseif large || eilseq
     .asciz "%s"
 .elseif precision
     .asciz "%.512u|%.513u|%.4096u|%4096.513u"
@@ -178,7 +192,12 @@ fmt:
 .else
     .byte 0
 .endif
-.if large
+.if eilseq
+# One complete 5119-byte CRLF transfer, then a failed flush inside the %s body.
+long_text: .byte 65
+    .fill 4095,1,10
+    .asciz "BC"
+.elseif large
 long_text: .fill 4094,1,65
     .ascii "\nBX"
     .byte 0

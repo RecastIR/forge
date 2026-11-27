@@ -122,7 +122,7 @@ def generate(output, mc, link, dlltool, clang):
         variants = ("empty", "mixed", "numbers", "pointer", "boundary", "large",
                     "null_format", "null_string", "unknown", "null_stream", "edges", "mapped",
                     "padding", "sign", "field_body", "trailing", "zero_pad", "precision",
-                    "errno_string", "errno_slot", "literal_empty", "literal_text")
+                    "errno_string", "errno_slot", "literal_empty", "literal_text", "eilseq")
         for variant in variants:
             switches = "".join(f"{name} = {int(name == variant)}\n" for name in variants)
             image(f"crt-vfprintf-{variant}.exe", switches + formatter,
