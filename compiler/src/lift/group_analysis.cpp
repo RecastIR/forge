@@ -562,7 +562,11 @@ namespace forge::x86 {
 
             if (binding.nativeSymbol == win64::crtVfprintf.nativeSymbol) {
                 if (collect) {
-                    imageMemory.formattedInputs(*function.instructionContaining(site.instruction));
+                    const auto formats =
+                        facts.serviceValue(binding, 1, entryAddresses).project(entryAddresses);
+                    imageMemory.formattedInputs(*function.instructionContaining(site.instruction),
+                                                formats.known() ? formats.values()
+                                                                : llvm::ArrayRef<uint64_t>{});
                 }
 
                 return;

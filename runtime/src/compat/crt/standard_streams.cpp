@@ -404,37 +404,82 @@ namespace {
         return FORGE_RT_OK;
     }
 
+    forge_rt_status writeFormatPart(ServiceInvocation &call, const StandardHandles &handles,
+                                    size_t index, std::span<const char> source,
+                                    FormattedOutput::Part part, int32_t &count) {
+        const auto write = [&](std::span<const char> text, uint64_t &accepted) {
+            return writeBytes(
+                call, handles, index, text.size(),
+                [&](uint64_t offset, auto bytes) {
+                    std::memcpy(bytes.data(), text.data() + offset, bytes.size());
+                    return FORGE_RT_OK;
+                },
+                accepted, WriteMode::Character);
+        };
+
+        while (!source.empty()) {
+            uint64_t accepted;
+            const auto status = write(source, accepted);
+            if (status != FORGE_RT_OK) {
+                return status;
+            }
+
+            if (accepted == source.size()) {
+                count += static_cast<int32_t>(accepted);
+                break;
+            }
+
+            count = -1;
+
+            // The legacy string writer substitutes '?' only if errno is EILSEQ
+            // after the failed character. Padding and literal writes have no retry.
+            if (part != FormattedOutput::Part::Text || call.instance->windows->crtErrno != 42) {
+                break;
+            }
+
+            source = source.subspan(accepted + 1);
+            const auto replaced = write(std::span("?", 1), accepted);
+            if (replaced != FORGE_RT_OK) {
+                return replaced;
+            }
+            count += static_cast<int32_t>(accepted);
+        }
+
+        return FORGE_RT_OK;
+    }
+
     forge_rt_status writeFormatted(ServiceInvocation &call, const StandardHandles &handles,
                                    size_t index, const FormattedOutput &output, int32_t &result) {
-        if (!handles.streams[index].descriptor) {
-            call.instance->windows->crtErrno = 9;
+        if (output.length) {
+            const auto status =
+                call.instance->windows->streams->prepareBuffer(*call.instance, index);
+            if (status != FORGE_RT_OK) {
+                return status;
+            }
         }
 
-        if (!output.length) {
-            result = 0;
-            return FORGE_RT_OK;
+        int32_t count = 0;
+        size_t begin = 0;
+        for (const auto &write : std::span(output.writes).first(output.writeCount)) {
+            const bool boundary = write.part == FormattedOutput::Part::Boundary;
+            if (boundary && count < 0) {
+                break;
+            }
+
+            const auto bytes = std::span(output.bytes).subspan(begin, write.end - begin);
+            const auto status = writeFormatPart(call, handles, index, bytes, write.part, count);
+            if (status != FORGE_RT_OK) {
+                return status;
+            }
+
+            if (boundary && count < 0) {
+                break;
+            }
+            begin = write.end;
         }
 
-        const auto reserved = call.instance->windows->streams->prepareBuffer(*call.instance, index);
-
-        if (reserved != FORGE_RT_OK) {
-            return reserved;
-        }
-
-        uint64_t accepted;
-        const auto written = writeBytes(
-            call, handles, index, output.length,
-            [&](uint64_t offset, auto bytes) {
-                std::memcpy(bytes.data(), output.bytes.data() + offset, bytes.size());
-                return FORGE_RT_OK;
-            },
-            accepted, WriteMode::Character);
-
-        if (written == FORGE_RT_OK) {
-            result = accepted == output.length ? static_cast<int32_t>(accepted) : -1;
-        }
-
-        return written;
+        result = count;
+        return FORGE_RT_OK;
     }
 
     forge_rt_status writeLine(ServiceInvocation &call, const StandardHandles &handles,
@@ -655,6 +700,11 @@ extern "C" forge_rt_status forge_rt_msvcrt_vfprintf(forge_rt_instance *instance,
 
     if (!*index || !supportedOutput(handles->streams[*index])) {
         return FORGE_RT_UNSUPPORTED_CRT_STREAM;
+    }
+
+    // _stbuf checks the descriptor before _output reads the format or any operand.
+    if (!handles->streams[*index].descriptor) {
+        windows.crtErrno = 9;
     }
 
     const auto parameters = std::tie(stream, format, arguments);

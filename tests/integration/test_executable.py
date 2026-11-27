@@ -2103,6 +2103,42 @@ class Console(Workspace):
                                                                         "short": 7}[mode])
                         check_observation("windows", variant, mode, result.returncode, stdout, result.stderr)
 
+    def test_vfprintf_literal_image_selection(self):
+        for variant, expected in (("literal_empty", b""), ("literal_text", b"plain text")):
+            data = bytearray((FIXTURES / f"crt-vfprintf-{variant}.exe").read_bytes())
+            Layout(data).add_unused_section(32 << 20, 0x40000080)
+            pe = self.dir / f"{variant}.exe"
+            pe.write_bytes(data)
+            for base in (0x140000000, 0x180000000):
+                with self.subTest(variant=variant, base=base):
+                    run(CONTRACT, "--guest-base", hex(base), pe, self.output,
+                        OPT, LLC, "/usr/bin/xcrun", *LINK, check=True)
+                    result = self.program()
+                    self.assertEqual((result.returncode, result.stdout, result.stderr),
+                                     (len(expected), expected, b""))
+
+    def test_vfprintf_conservative_image_selection(self):
+        # Either a directive or writable storage defeats the proof at the same call site.
+        pe = self.dir / "dynamic.exe"
+        data = bytearray((FIXTURES / "crt-vfprintf-literal_text.exe").read_bytes())
+        layout = Layout(data)
+        layout.add_unused_section(32 << 20, 0x40000080)
+        text = data.index(b"plain text\0")
+        section = next(rva for _, rva, size, raw in layout.sections if raw <= text < raw + size)
+        flags = layout.section_header(section) + 36
+        for case in ("directive", "mutable"):
+            with self.subTest(case=case):
+                changed = data.copy()
+                if case == "directive":
+                    changed[text:text + 2] = b"%d"
+                else:
+                    struct.pack_into("<I", changed, flags, layout.u32(flags) | 0x80000000)
+                pe.write_bytes(changed)
+                failure = self.compile(pe, success=False)
+                self.assertEqual(failure["code"], "LIFT_IMAGE_MEMORY")
+                self.assertIn("CALL64m", failure["message"])
+                self.assertIn("section .unused exceeds module limit", failure["message"])
+
     def test_crt_puts(self):
         sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "differential/reference"))
         from crt_puts import VARIANTS, check_input, check_observation

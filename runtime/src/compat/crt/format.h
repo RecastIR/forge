@@ -8,6 +8,24 @@ namespace forge::runtime {
         std::array<char, 16384> bytes;
         size_t length = 0;
 
+        // A failed character write stops one part. Only literal text between fields
+        // and left-aligned trailing padding require a nonnegative count on entry.
+        enum class Part : uint8_t { Boundary, Padding, Text };
+
+        struct Write {
+            uint16_t end;
+            Part part;
+        };
+
+        // One intervening literal and at most five parts per field, then a final literal.
+        std::array<Write, 6 * win64::crtFormatConversions + 1> writes;
+        size_t writeCount = 0;
+
+        void finishPart(Part part) {
+            static_assert(std::tuple_size_v<decltype(bytes)> <= UINT16_MAX);
+            writes[writeCount++] = {static_cast<uint16_t>(length), part};
+        }
+
         // The writer rejects inputs overlapping its live FILE or buffer before committing.
         size_t formatBytes = 0, slotBytes = 0;
 

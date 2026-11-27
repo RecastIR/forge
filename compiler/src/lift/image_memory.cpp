@@ -21,6 +21,12 @@ namespace forge::x86 {
         constexpr auto stackRange =
             GuestRange::fromOffset({GuestMemory::base}, 0, GuestMemory::capacity).value();
 
+        size_t stringTerminator(StringRef bytes, bool &literal) {
+            const size_t zero = bytes.find('\0');
+            literal = literal && !bytes.take_front(zero).contains('%');
+            return zero;
+        }
+
         Constant *immutableBytes(LLVMContext &context, const ImageBytes &bytes, uint64_t length) {
             SmallVector<Constant *> parts;
             uint64_t pos = bytes.prefix.size();
@@ -561,11 +567,12 @@ namespace forge::x86 {
         }
     }
 
-    std::optional<uint64_t> ImageMemory::firstImmutableNul(RvaRange range) {
+    std::optional<uint64_t> ImageMemory::firstImmutableNul(RvaRange range, bool &literal) {
         const auto &view = contents();
         auto holes = view.exclusionsIn(range);
         for (auto pos = range.begin; pos < range.end;) {
             if (!holes.empty() && holes.front().begin <= pos) {
+                literal = false;
                 pos = holes.front().end;
                 holes = holes.drop_front();
                 continue;
@@ -581,7 +588,8 @@ namespace forge::x86 {
                 bytes.prefix.replace(fragment.offset, fragment.bytes.size(), fragment.bytes);
             }
 
-            if (const auto zero = bytes.prefix.find('\0'); zero != std::string::npos) {
+            if (const auto zero = stringTerminator(bytes.prefix, literal);
+                zero != StringRef::npos) {
                 return pos + zero;
             }
             pos = end;
@@ -589,12 +597,15 @@ namespace forge::x86 {
         return std::nullopt;
     }
 
-    uint64_t ImageMemory::contiguousInputSize(uint64_t rva, uint64_t limit, bool string) {
+    ImageMemory::InputExtent ImageMemory::contiguousInputExtent(uint64_t rva, uint64_t limit,
+                                                                InputScan scan) {
+        const bool string = scan != InputScan::Bytes;
+        bool literal = scan == InputScan::LiteralFormat;
         uint64_t end = std::max<uint64_t>(rva, executableHeaders.size());
         if (string && rva < end) {
-            const auto zero = executableHeaders.substr(rva, limit).find('\0');
+            const auto zero = stringTerminator(executableHeaders.substr(rva, limit), literal);
             if (zero != StringRef::npos) {
-                return zero + 1;
+                return {zero + 1, literal};
             }
         }
 
@@ -608,20 +619,38 @@ namespace forge::x86 {
             const auto sectionEnd = uint64_t(section->rva) + section->virtualSize;
             const auto next = end + std::min(sectionEnd - end, limit - (end - rva));
             if (string && section->immutable()) {
-                if (const auto zero = firstImmutableNul({end, next})) {
-                    return *zero - rva + 1;
+                if (const auto zero = firstImmutableNul({end, next}, literal)) {
+                    return {*zero - rva + 1, literal};
                 }
+            } else {
+                literal = false;
             }
             end = next;
         }
-        return std::min(end - rva, limit);
+        return {std::min(end - rva, limit), false};
     }
 
-    void ImageMemory::formattedInputs(const Step &step) {
-        // A runtime format can follow a string pointer from any consumed slot. Reuse the
-        // bounded PE data planner, including its loader exclusions and backing budgets.
-        if (!formattedRead) {
+    void ImageMemory::formattedInputs(const Step &step, ArrayRef<uint64_t> formats) {
+        if (formattedRead) {
+            return;
+        }
+
+        // An unknown format can consume a slot containing a pointer to any eligible PE data.
+        if (formats.empty()) {
             formattedRead = &step;
+            return;
+        }
+
+        constexpr auto format = win64::crtVfprintf.arguments[1];
+        for (const auto va : formats) {
+            const auto extent =
+                contiguousInputExtent(va - loadBase, format.size, InputScan::LiteralFormat);
+            if (!extent.literal) {
+                formattedRead = &step;
+                return;
+            }
+
+            serviceArgument(step, va, format, extent.size);
         }
     }
 
@@ -636,9 +665,9 @@ namespace forge::x86 {
         const bool write = argument.writes();
 
         if (!size && argument.extent == win64::Extent::ElementProduct) {
-            size = contiguousInputSize(rva, UINT64_MAX, false);
+            size = contiguousInputExtent(rva, UINT64_MAX, InputScan::Bytes).size;
         } else if (!size && argument.extent == win64::Extent::CString && argument.size) {
-            size = contiguousInputSize(rva, argument.size, true);
+            size = contiguousInputExtent(rva, argument.size, InputScan::CString).size;
         }
 
         if (rva < executableHeaders.size()) {

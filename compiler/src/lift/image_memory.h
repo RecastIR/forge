@@ -70,7 +70,7 @@ namespace forge::x86 {
 
         void checkStackMapping(const Step &step) const;
         void addressTaken(const Step &step, uint64_t va);
-        void formattedInputs(const Step &step);
+        void formattedInputs(const Step &step, llvm::ArrayRef<uint64_t> formats);
         void serviceArgument(const Step &step, uint64_t va, const win64::Argument &argument,
                              std::optional<uint64_t> size);
 
@@ -118,8 +118,16 @@ namespace forge::x86 {
         enum class ExecutableSelection : uint8_t { AddressTakenSection, ContinuationBytes };
 
         const ImageInitialization &contents();
-        std::optional<uint64_t> firstImmutableNul(RvaRange range);
-        uint64_t contiguousInputSize(uint64_t rva, uint64_t limit, bool string);
+
+        enum class InputScan { Bytes, CString, LiteralFormat };
+
+        struct InputExtent {
+            uint64_t size;
+            bool literal; // An immutable NUL ends a fully known, percent-free prefix.
+        };
+
+        std::optional<uint64_t> firstImmutableNul(RvaRange range, bool &literal);
+        InputExtent contiguousInputExtent(uint64_t rva, uint64_t limit, InputScan scan);
         bool selectFunctionImport(uint64_t rva, unsigned width, bool write);
         void fixedImageAccess(const Step &step, RvaRange access, bool write);
         void selectServiceSections(const Step &step, uint64_t rva, uint64_t size, bool write);

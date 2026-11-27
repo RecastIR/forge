@@ -547,7 +547,11 @@ namespace {
             REQUIRE(call(format, table) == FORGE_RT_OK && result == 64);
             setFormat("%4096u%4096u%4096u%4096u");
             REQUIRE(call(format, table) == FORGE_RT_OK && result == 16384);
-            setFormat("%.4096u");
+            for (const auto *precision : {"%.512u", "%.513u", "%.4096u"}) {
+                setFormat(precision);
+                REQUIRE(call(format, table) == FORGE_RT_OK && result == 512);
+            }
+            setFormat("%4096.513u");
             REQUIRE(call(format, table) == FORGE_RT_OK && result == 4096);
 
             const char nul = 0;

@@ -8,6 +8,7 @@ namespace forge::runtime {
     namespace {
         using namespace win64;
         constexpr auto unsupported = FORGE_RT_UNSUPPORTED_CRT_FORMAT;
+        using Part = FormattedOutput::Part;
         using Slots = GuestBuffer<crtVfprintf.arguments[2]>;
 
         // Read only through the first NUL, even next to an unmapped page or a return slot.
@@ -177,8 +178,9 @@ namespace forge::runtime {
             }
 
             const std::string_view number(digits.data(), end);
-            const auto minDigits = pointer ? 16u : spec.precision.value_or(0);
-            size_t zeros = std::max<size_t>(number.size(), minDigits) - number.size();
+            // The legacy integer conversion buffer admits at most 512 digits.
+            const auto minDigits = pointer ? 16u : std::min(512u, spec.precision.value_or(0));
+            const size_t zeros = std::max<size_t>(number.size(), minDigits) - number.size();
             const size_t used = prefix.size() + zeros + number.size();
             const size_t field = std::max<size_t>(used, spec.width);
 
@@ -186,23 +188,33 @@ namespace forge::runtime {
                 return unsupported;
             }
 
-            size_t spaces = field - used;
+            const size_t padding = field - used;
+            const bool left = spec.flag('-');
+            const bool zeroPad = !left && spec.flag('0') && !spec.precision;
 
-            if (spec.flag('0') && !spec.flag('-') && !spec.precision) {
-                zeros += spaces;
-                spaces = 0;
+            if (!left && !zeroPad && padding) {
+                pad(out, ' ', padding);
+                out.finishPart(Part::Padding);
             }
 
-            if (!spec.flag('-')) {
-                pad(out, ' ', spaces);
+            if (!prefix.empty()) {
+                append(out, prefix);
+                out.finishPart(Part::Text);
             }
 
-            append(out, prefix);
+            if (zeroPad && padding) {
+                pad(out, '0', padding);
+                out.finishPart(Part::Padding);
+            }
+
+            // Precision zeroes and digits are one string for the legacy writer.
             pad(out, '0', zeros);
             append(out, number);
+            out.finishPart(Part::Text);
 
-            if (spec.flag('-')) {
-                pad(out, ' ', spaces);
+            if (left && padding) {
+                pad(out, ' ', padding);
+                out.finishPart(Part::Boundary);
             }
 
             return FORGE_RT_OK;
@@ -211,7 +223,11 @@ namespace forge::runtime {
         forge_rt_status render(FormattedOutput &out, const Conversion &spec, const Slots &arguments,
                                size_t &cursor) {
             if (spec.type == '%') {
-                return append(out, "%") ? FORGE_RT_OK : unsupported;
+                if (!append(out, "%")) {
+                    return unsupported;
+                }
+                out.finishPart(Part::Boundary);
+                return FORGE_RT_OK;
             }
 
             uint64_t raw;
@@ -242,7 +258,11 @@ namespace forge::runtime {
             }
 
             if (!raw) {
-                return append(out, "(null)") ? FORGE_RT_OK : unsupported;
+                if (!append(out, "(null)")) {
+                    return unsupported;
+                }
+                out.finishPart(Part::Text);
+                return FORGE_RT_OK;
             }
 
             size_t length;
@@ -252,6 +272,7 @@ namespace forge::runtime {
             if (status == FORGE_RT_OK) {
                 out.strings[out.stringCount++] = {raw, length + 1};
                 out.length += length;
+                out.finishPart(Part::Text);
             }
 
             return status;
@@ -299,6 +320,8 @@ namespace forge::runtime {
                 return unsupported;
             }
 
+            // Even an empty literal separates adjacent conversions after a write failure.
+            out.finishPart(Part::Boundary);
             const auto status = render(out, spec, arguments, cursor);
 
             if (status != FORGE_RT_OK) {
@@ -308,6 +331,10 @@ namespace forge::runtime {
             pos = spec.end;
         }
 
-        return append(out, input.substr(pos)) ? FORGE_RT_OK : unsupported;
+        if (!append(out, input.substr(pos))) {
+            return unsupported;
+        }
+        out.finishPart(Part::Boundary);
+        return FORGE_RT_OK;
     }
 } // namespace forge::runtime
