@@ -218,6 +218,7 @@ jobs:
           python -B tests/integration/test_executable.py windows-tail-jump executables
           echo "tail_jump=success" >> "$GITHUB_OUTPUT"
           python -B tests/differential/reference/crt_streams.py executables stream-observations
+          echo "crt_streams=success" >> "$GITHUB_OUTPUT"
           python -B tests/differential/reference/virtual_protect.py executables
           echo "virtual_protect=success" >> "$GITHUB_OUTPUT"
           python -B tests/integration/test_executable.py windows-startup build/fixtures/windows-x64
@@ -262,6 +263,17 @@ jobs:
         run: |
           test "$(uname -m)" = x86_64
           ./tools/test-forge.sh --executable-reference
+          image=$(python3 -B tests/differential/fixture_images.py --id reference)
+          docker run --rm --pull never --platform linux/amd64 --network none --cap-drop ALL \
+            --security-opt no-new-privileges -e FORGE_WINE=/usr/lib/wine/wine64 -e PE_MANIFEST_SHA256 \
+            -v "$PWD/build/dev/fixtures/Debug:/input:ro" -v "$PWD/tests/differential/reference:/suite:ro" \
+            --entrypoint /bin/sh "$image" -ec '
+              /usr/lib/wine/wineserver64 -p
+              "$FORGE_WINE" cmd /c ver >/dev/null
+              python3 -B /suite/crt_streams.py /input /tmp/stream-observations'
+          echo "crt_streams=success" >> "$GITHUB_OUTPUT"
+        env:
+          PE_MANIFEST_SHA256: ${{ needs.macos-dev.outputs.executable_inputs_sha256 }}
 
   differential:
     outputs:

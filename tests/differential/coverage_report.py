@@ -21,8 +21,8 @@ JOB_STAGES = {
     "macos-sanitize": ("sanitize", "sanitize_oracles"),
     "macos-presets": ("formatting", "lint", "release", "xcode_debug", "xcode_release_build", "xcode_release_ctest", "layout"),
     "windows-fixtures": ("build", "capture", "wine_tests"),
-    "windows-executable-reference": ("executable_reference",),
-    "windows-integer-reference": ("cmp16mi", "app_type", "tail_jump", "bounded_call", "virtual_protect", "startup"),
+    "windows-executable-reference": ("executable_reference", "crt_streams"),
+    "windows-integer-reference": ("cmp16mi", "app_type", "tail_jump", "bounded_call", "crt_streams", "virtual_protect", "startup"),
     "differential": ("debug", "release", "negative_tests"),
 }
 FORGE_PRODUCERS = {"debug": "macos-sanitize", "release": "macos-dev"}

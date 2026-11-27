@@ -21,6 +21,7 @@ def observe(directory, destination, wine=None):
         raise ValueError("stream reference input hash mismatch")
     destination.mkdir(parents=True, exist_ok=True)
     observed = {}
+    backend = "wine" if wine else "windows"
     if not wine:
         dll = Path(os.environ["SystemRoot"]) / "System32/msvcrt.dll"
         version = subprocess.check_output(["powershell", "-NoProfile", "-Command",
@@ -50,6 +51,12 @@ def observe(directory, destination, wine=None):
             fields = list(struct.iter_unpack("<12Q", raw))
             status = run.returncode & 0xffffffff
             observed[prefix.name] = dict(status=status, records=fields, output=summarize(stream.read_bytes()))
+            if wine and status == 5:
+                if b"page fault" not in (out.read_bytes() + err.read_bytes()).lower():
+                    raise ValueError(f"{prefix.name}: missing Wine page fault diagnostic")
+                observed[prefix.name]["output"] = "wine page fault"
+            elif case // 2 == 18:
+                observed[prefix.name]["log_suffix"] = records.read_bytes()[len(raw):].hex()
             print(prefix.name, hex(status), fields[3:], observed[prefix.name]["output"], flush=True)
     for pe_name in ("crt-stream-return.exe", "crt-stream-exit.exe", "crt-stream-state.exe", "crt-stream-sections.exe"):
         focus = (directory / pe_name).resolve()
@@ -67,14 +74,26 @@ def observe(directory, destination, wine=None):
     if not wine:
         observed.update(output_failures(pe, destination))
     (destination / "observations.json").write_text(json.dumps(observed, indent=2))
+    baseline = Path(__file__).with_name(f"crt-stream-{backend}.json")
+    expected = json.loads(baseline.read_bytes())
+    if digest != expected["observer"]:
+        raise ValueError(f"{backend}: unexpected observer PE {digest}")
+    # JSON normalizes the unpacked tuples to arrays. Both redirections must match
+    # each independently captured row, including statuses and output hashes.
+    for key, row in json.loads(json.dumps(observed)).items():
+        case = key.split("-", 1)[1] if key.startswith(("pipe-", "file-")) else key
+        if row != expected["cases"][case]:
+            raise ValueError(f"{backend} {key}: observed {row}, expected {expected['cases'][case]}")
+    print(f"{backend}: verified {len(observed)} observations")
 
 
 def output_failures(pe, directory):
     """Keep the diagnostic channel independent of the deliberately unusable stdout."""
+    import _winapi
     import msvcrt
     rows = {}
-    for name in ("missing", "broken", "short"):
-        for case in (0, 16):
+    for name in ("missing", "broken", "short", "prefix"):
+        for case in ((16,) if name == "prefix" else (0, 16)):
             with (directory / f"{name}-{case}.records").open("wb") as log:
                 if name == "missing":
                     info = subprocess.STARTUPINFO()
@@ -86,14 +105,20 @@ def output_failures(pe, directory):
                                          timeout=20)
                     output = b""
                 else:
-                    read, write = os.pipe()
+                    if name == "prefix":
+                        r_handle, w_handle = _winapi.CreatePipe(None, 16384)
+                        read = msvcrt.open_osfhandle(r_handle, os.O_RDONLY | os.O_BINARY)
+                        write = msvcrt.open_osfhandle(w_handle, os.O_WRONLY | os.O_BINARY)
+                    else:
+                        read, write = os.pipe()
                     with os.fdopen(write, "wb", buffering=0) as writer:
                         if name == "broken":
                             os.close(read)
                         else:
                             os.set_blocking(write, False)
-                            # Reserve seven physical bytes for the child. The first
-                            # translated block includes NUL, LF and CRLF.
+                            # The DLL fills a 5120-byte staging area until at least
+                            # 5119 physical bytes are ready or the input is exhausted.
+                            room = 5119 if name == "prefix" else 7
                             filled = 0
                             while filled < 1 << 20:
                                 try:
@@ -103,19 +128,19 @@ def output_failures(pe, directory):
                                 if not n:
                                     break
                                 filled += n
-                            if not 7 < filled < 1 << 20 or os.read(read, 7) != b"F" * 7:
+                            if not room < filled < 1 << 20 or os.read(read, room) != b"F" * room:
                                 raise ValueError("nonblocking pipe did not reach its capacity")
                         run = subprocess.run([pe, f"{case:02}"], stdout=writer, stderr=log, timeout=20)
                     output = b""
-                    if name == "short":
+                    if name in ("short", "prefix"):
                         with os.fdopen(read, "rb") as reader:
                             remaining = reader.read()
-                        if not remaining.startswith(b"F" * (filled - 7)):
+                        if not remaining.startswith(b"F" * (filled - room)):
                             raise ValueError("child modified pipe prefix")
-                        output = remaining[filled - 7:]
+                        output = remaining[filled - room:]
             fields = list(struct.iter_unpack("<12Q", Path(log.name).read_bytes()))
             key = f"{name}-{case}"
-            rows[key] = dict(status=run.returncode & 0xffffffff, records=fields, output=output.hex())
+            rows[key] = dict(status=run.returncode & 0xffffffff, records=fields, output=summarize(output))
             print(key, rows[key], flush=True)
     return rows
 
