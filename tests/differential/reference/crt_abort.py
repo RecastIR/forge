@@ -17,7 +17,9 @@ VARIANTS = ("direct", "buffered", "control", "initializer", "cleanup")
 def modes(variant):
     if variant == "direct":
         return ("pipe", "file", "absent-stderr", "broken-stderr")
-    if variant in ("buffered", "control"):
+    if variant == "buffered":
+        return ("pipe", "file", "merged", "broken-stderr")
+    if variant == "control":
         return ("pipe", "file", "merged")
     return ("pipe",)
 

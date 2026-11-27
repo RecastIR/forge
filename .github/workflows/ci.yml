@@ -61,7 +61,7 @@ jobs:
           BASE: ${{ github.event.pull_request.base.sha || github.event.before }}
         run: |
           if git diff --quiet "$BASE" HEAD -- .github/workflows/ci.yml \
-            'tests/fixtures/crt-abort*' tests/differential/reference/crt_abort.py tests/differential/reference/crt-abort*.json \
+            'tests/fixtures/crt-abort*' tests/differential/reference/crt_abort.py 'tests/differential/reference/crt-abort*.json' \
             tests/differential/reference/amsg-exit/capture.c 'tests/fixtures/crt-termination*' tests/fixtures/executable-startup-info.s tests/fixtures/generate.py \
             tests/differential/reference/termination tests/differential/fixtures/startup/termination \
             'compiler/src/lift/initializer_table.*' 'compiler/src/lift/recovery.*' compiler/src/lift/lift.cpp \
@@ -112,9 +112,13 @@ jobs:
         if: always()
         with:
           name: legacy-windows-observations
-          path: |
-            observations
-            abort/abort-observations
+          path: observations
+          if-no-files-found: error
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: windows-crt-abort-observations
+          path: abort/abort-observations
           if-no-files-found: error
 
   macos-sanitize:
@@ -284,6 +288,7 @@ jobs:
           for suite in crt_abort crt_streams crt_vfprintf; do
             docker run --init --rm --pull never --platform linux/amd64 --network none --cap-drop ALL \
               --security-opt no-new-privileges -e FORGE_WINE=/usr/lib/wine/wine64 -e PE_MANIFEST_SHA256 \
+              -e FORGE_REFERENCE_IMAGE="$image" -e GITHUB_RUN_ID \
               -v "$PWD/build/dev/fixtures/Debug:/input:ro" -v "$PWD/tests/differential/reference:/suite:ro" \
               -v "$RUNNER_TEMP/stream-observations:/observations" \
               --entrypoint /bin/sh "$image" -ec '
