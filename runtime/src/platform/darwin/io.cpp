@@ -4,7 +4,11 @@
 #include <climits>
 #include <csignal>
 #include <fcntl.h>
+#ifdef __APPLE__
+#include <sys/event.h>
+#else
 #include <poll.h>
+#endif
 #include <sys/ioctl.h>
 #include <sys/resource.h>
 #include <sys/socket.h>
@@ -70,26 +74,61 @@ namespace forge::runtime::darwin {
                                               : ::write(fd, bytes.data(), bytes.size());
         }
 
-        // Darwin reports queued bytes and current pipe capacity together in fstat.
-        // A closed reader must reach write(2) so callers see EPIPE.
-        std::optional<size_t> pipeSpace(int fd) {
-            pollfd state{fd, POLLOUT, 0};
-            if (::poll(&state, 1, 0) < 0 || (state.revents & (POLLERR | POLLHUP))) {
+        // A large nonblocking CRT staging block may start only when it fits.
+        // A ready result is a snapshot. Subsequent writes still account for their actual prefix.
+        std::optional<WriteProgress> checkPipeSpace(int fd, size_t requested) {
+#ifdef __APPLE__
+            const int queue = ::kqueue();
+            if (queue < 0) {
+                return WriteProgress{0, errno, true};
+            }
+
+            struct kevent change{}, event{};
+            EV_SET(&change, static_cast<uintptr_t>(fd), EVFILT_WRITE, EV_ADD, 0, 0, nullptr);
+            const timespec now{};
+            int ready;
+            do {
+                ready = ::kevent(queue, &change, 1, &event, 1, &now);
+            } while (ready < 0 && errno == EINTR);
+            const int error = errno;
+            ::close(queue);
+
+            if (ready < 0 || (event.flags & EV_ERROR)) {
+                return WriteProgress{0, ready < 0 ? error : static_cast<int>(event.data), true};
+            }
+            if (ready && !(event.flags & EV_EOF) &&
+                event.data >= static_cast<intptr_t>(requested)) {
                 return std::nullopt;
             }
-#ifdef __APPLE__
-            struct stat info{};
-            if (::fstat(fd, &info) == 0 && info.st_size >= 0 && info.st_blksize >= info.st_size) {
-                return static_cast<size_t>(info.st_blksize - info.st_size);
-            }
+
+            // A Darwin FIFO can report writable space even after its reader closes.
+            // A zero-byte write distinguishes EPIPE from a live but undersized pipe.
+            ssize_t probe;
+            do {
+                probe = ::write(fd, "", 0);
+            } while (probe < 0 && errno == EINTR);
+            return WriteProgress{0, probe < 0 ? errno : EAGAIN};
 #elif defined(F_GETPIPE_SZ)
+            pollfd state{fd, POLLOUT, 0};
+            if (::poll(&state, 1, 0) < 0) {
+                return WriteProgress{0, errno, true};
+            }
+            if (state.revents & (POLLERR | POLLHUP)) {
+                return std::nullopt; // Let the write report the native error.
+            }
+
             const auto capacity = ::fcntl(fd, F_GETPIPE_SZ);
             int used = 0;
-            if (capacity >= 0 && ::ioctl(fd, FIONREAD, &used) == 0 && capacity >= used) {
-                return static_cast<size_t>(capacity - used);
+            if (capacity < 0 || ::ioctl(fd, FIONREAD, &used) < 0) {
+                return WriteProgress{0, errno, true};
             }
-#endif
+            if (capacity - used < static_cast<intptr_t>(requested)) {
+                return WriteProgress{0, EAGAIN};
+            }
             return std::nullopt;
+#else
+            return WriteProgress{0, ENOTSUP, true};
+#endif
         }
 
         bool ignoresSignal(int signal) {
@@ -186,13 +225,15 @@ namespace forge::runtime::darwin {
     }
 
     WriteProgress Descriptor::writeSome(std::span<const uint8_t> bytes) const noexcept {
-        if (streamKind == StreamKind::Pipe) {
+        if (streamKind == StreamKind::Pipe && bytes.size() > PIPE_BUF) {
             const int flags = ::fcntl(fd, F_GETFL);
             if (flags < 0) {
-                return {0, errno};
+                return {0, errno, true};
             }
-            if ((flags & O_NONBLOCK) && pipeSpace(fd).value_or(bytes.size()) < bytes.size()) {
-                return {0, 0};
+            if (flags & O_NONBLOCK) {
+                if (const auto stopped = checkPipeSpace(fd, bytes.size())) {
+                    return *stopped;
+                }
             }
             // Atomic chunks retain the exact prefix if another host closes the reader.
             const auto limit = writeChunkSize(bytes.size());

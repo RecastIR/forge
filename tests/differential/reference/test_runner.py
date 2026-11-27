@@ -9,6 +9,7 @@ import unittest
 from unittest.mock import patch
 from zipfile import ZipFile
 
+import crt_streams
 import docker_wine
 from protocol import Capture, READY, STREAM_LIMIT, decode
 import run
@@ -68,6 +69,29 @@ class CaptureTests(unittest.TestCase):
             self.assertIn(detail, report)
         with self.assertRaisesRegex(ValueError, "byte 2"):
             run.compare(dict(exit_code=0, stdout="ab\n", stderr=""), Capture(0, b"ab", b"", "wine"))
+
+    def test_crt_crash_boundaries(self):
+        fault = 0xc0000005
+        records = bytes(3 * 96)
+        expected = {"records": [[0] * 12] * 3}
+        report = b"Unhandled exception: page fault on read access"
+        notice = b"wine: Unhandled page fault on read access"
+        for case in (26, 27):
+            def observe(wine, tail, output):
+                log = records + tail
+                out, err = (log, output) if case % 2 else (output, log)
+                return crt_streams.stream_observation(case, fault, out, err, expected, wine)
+
+            tail, output = (report, notice) if case % 2 else (notice, report)
+            self.assertEqual(observe(False, b"", b"")["output"], "")
+            self.assertEqual(observe(True, tail, output)["output"], "wine page fault")
+            for extra in (b"!", bytes(96)):
+                with self.assertRaisesRegex(ValueError, "after CRT stream records"):
+                    observe(False, extra, b"")
+                with self.assertRaisesRegex(ValueError, "debugger boundary"):
+                    observe(True, extra + tail, output)
+                with self.assertRaisesRegex(ValueError, "debugger boundary"):
+                    observe(True, tail, extra + output)
 
     def test_wire_records(self):
         header = dict(exit_code=0xffffffff, stdout_size=0, stderr_size=2, wine_version="wine-test")

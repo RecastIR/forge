@@ -358,6 +358,68 @@ namespace {
                 fileContentsEqual(secondFile.get(), "GG"));
     }
 
+    void retryStreamWrite(forge_rt_execution *execution) {
+        auto *instance = execution->instance;
+        uint64_t base = 0, elements = UINT64_MAX;
+        forge_rt_memory_fault fault{};
+        REQUIRE(forge_rt_msvcrt_iob_func(instance, execution->thread, &base) == FORGE_RT_OK);
+        const auto put = [&](uint64_t address, uint64_t size) {
+            return forge_rt_msvcrt_fwrite(instance, execution->thread, address, 1, size, base + 96,
+                                          &elements, &fault);
+        };
+
+        struct rlimit previous{};
+        REQUIRE(getrlimit(RLIMIT_FSIZE, &previous) == 0);
+        const struct rlimit one{1, previous.rlim_max};
+        REQUIRE(setrlimit(RLIMIT_FSIZE, &one) == 0);
+        auto &streams = *instance->windows->streams;
+        const auto &file = streams.files[2];
+        if (execution->rcx) {
+            // The file is already at its limit. The direct prefix fails before the tail starts.
+            REQUIRE(put(source, 4097) == FORGE_RT_OK && elements == 0 && file.base == 0);
+            const auto &reserved = streams.buffers[2];
+            REQUIRE(reserved && (file.flags & 0x20));
+            elements = UINT64_MAX;
+            REQUIRE(put(reserved->mapping.base + 1, 8) == FORGE_RT_UNSUPPORTED_CRT_STREAM);
+            REQUIRE(elements == UINT64_MAX && file.base == 0);
+            REQUIRE(put(source + 4096, 1) == FORGE_RT_OK && elements == 1);
+        } else {
+            // Fill via two calls so the previous block is buffered. Its flush accepts only 'A'.
+            REQUIRE(put(source, 1) == FORGE_RT_OK && elements == 1);
+            REQUIRE(put(source + 1, 4095) == FORGE_RT_OK && elements == 4095);
+            REQUIRE(put(source + 4096, 1) == FORGE_RT_OK && elements == 0);
+            REQUIRE((file.flags & 0x20) && file.ptr == file.base + 1 && file.count == 4095);
+        }
+
+        REQUIRE(setrlimit(RLIMIT_FSIZE, &previous) == 0);
+        execution->result = {FORGE_RT_RETURNED, FORGE_RT_OK, 42, {}, 0};
+    }
+
+    void checkStreamWriteRetries() {
+        std::array<uint8_t, 4097> bytes{'A', '\n', '\n'};
+        bytes.back() = 'Z';
+        const forge_rt_backing data{bytes.size(), bytes.data(), nullptr, 0};
+        const forge_rt_region_template row{source, bytes.size(), 0, 0, FORGE_RT_READ};
+        constexpr forge_rt_import output{"msvcrt.dll", "fwrite"};
+        auto artifact = consoleArtifact(retryStreamWrite, row);
+        artifact.size = bytes.size();
+        artifact.backings = &data;
+        artifact.imports = &output;
+        artifact.importCount = 1;
+
+        struct sigaction ignore{}, previous{};
+        ignore.sa_handler = SIG_IGN;
+        REQUIRE(sigemptyset(&ignore.sa_mask) == 0 && sigaction(SIGXFSZ, &ignore, &previous) == 0);
+        for (const bool full : {false, true}) {
+            std::unique_ptr<FILE, decltype(&std::fclose)> file(std::tmpfile(), std::fclose);
+            REQUIRE(file && (!full || write(fileno(file.get()), "!", 1) == 1));
+            const auto result = run(registeredWithStderr(artifact, fileno(file.get())), full);
+            REQUIRE(result.kind == FORGE_RT_RETURNED && result.value == 42);
+            REQUIRE(fileContentsEqual(file.get(), full ? "!Z" : "AZ"));
+        }
+        REQUIRE(sigaction(SIGXFSZ, &previous, nullptr) == 0);
+    }
+
     void pendingFatal(forge_rt_execution *execution) {
         uint64_t base = 0, count = 0;
         forge_rt_memory_fault fault{};
@@ -1074,6 +1136,7 @@ void testRuntimeConsoleProcess(const char *fatalObservations) {
     }
 
     checkStreamIdentity();
+    checkStreamWriteRetries();
     checkStreamTermination();
     checkFatalPartialWrite(31, fatal31);
     checkFatalOutputFailures();

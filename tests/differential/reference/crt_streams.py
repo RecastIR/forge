@@ -41,7 +41,8 @@ def focused_output(backend, name, directory):
 
 def launch(pe, args, wine, **streams):
     if not wine:
-        return subprocess.run([pe, *args], timeout=20, **streams)
+        with open(os.devnull, "rb") as stdin:
+            return subprocess.run([pe, *args], stdin=stdin, timeout=20, **streams)
 
     app = "Z:" + str(pe).replace("/", "\\")
     with tempfile.TemporaryDirectory() as temporary:
@@ -53,6 +54,29 @@ def launch(pe, args, wine, **streams):
             raise RuntimeError(f"Wine capture parent failed before reporting {pe.name} {args}: {run.returncode}")
         status, = struct.unpack("<I", (work / "exit.bin").read_bytes())
         return subprocess.CompletedProcess([pe, *args], status, run.stdout, run.stderr)
+
+
+def stream_observation(case, status, stdout, stderr, expected, wine):
+    record = struct.Struct("<12Q")
+    records, output = (stdout, stderr) if case % 2 else (stderr, stdout)
+    end = len(expected["records"]) * record.size
+    if len(records) < end:
+        raise ValueError("missing CRT stream records")
+    fields = list(record.iter_unpack(records[:end]))
+    suffix = records[end:]
+    row = dict(status=status, records=fields, output=summarize(output))
+    if wine and status == 0xc0000005:
+        # Wine writes the debugger report to stdout and the launch notice to stderr.
+        report, notice = (suffix, output) if case % 2 else (output, suffix)
+        if not (report.startswith(b"Unhandled exception: page fault on ") and
+                notice.startswith(b"wine: Unhandled page fault on ")):
+            raise ValueError("unexpected bytes at Wine debugger boundary")
+        row["output"] = "wine page fault"
+    elif case // 2 == 18:
+        row["log_suffix"] = suffix.hex()
+    elif suffix:
+        raise ValueError("unexpected bytes after CRT stream records")
+    return row
 
 
 def observe(directory, destination, wine=None):
@@ -86,23 +110,14 @@ def observe(directory, destination, wine=None):
                 run = launch(pe, args, wine, capture_output=True)
                 out.write_bytes(run.stdout)
                 err.write_bytes(run.stderr)
-            records, stream = (out, err) if case % 2 else (err, out)
-            raw = records.read_bytes()
-            if run.returncode not in (42, 255):
-                # The Wine debugger may also write a crash report to the child stream.
-                raw = raw[:3 * 96]
-            if case // 2 == 18:
-                raw = raw[:4 * 96]  # The native fatal diagnostic can share the log descriptor.
-            fields = list(struct.iter_unpack("<12Q", raw))
             status = run.returncode & 0xffffffff
-            observed[prefix.name] = dict(status=status, records=fields, output=summarize(stream.read_bytes()))
-            if wine and status == 0xc0000005:
-                if b"page fault" not in (out.read_bytes() + err.read_bytes()).lower():
-                    raise ValueError(f"{prefix.name}: missing Wine page fault diagnostic")
-                observed[prefix.name]["output"] = "wine page fault"
-            elif case // 2 == 18:
-                observed[prefix.name]["log_suffix"] = records.read_bytes()[len(raw):].hex()
-            print(prefix.name, hex(status), fields[3:], observed[prefix.name]["output"], flush=True)
+            try:
+                row = stream_observation(case, status, out.read_bytes(), err.read_bytes(),
+                                         expected["cases"][args[0]], wine)
+            except ValueError as exc:
+                raise ValueError(f"{prefix.name}: {exc}") from exc
+            observed[prefix.name] = row
+            print(prefix.name, hex(status), row["records"][3:], row["output"], flush=True)
     for pe_name in ("crt-stream-return.exe", "crt-stream-exit.exe", "crt-stream-state.exe", "crt-stream-sections.exe"):
         focus = (directory / pe_name).resolve()
         checksum = hashlib.sha256(focus.read_bytes()).hexdigest()
@@ -115,7 +130,7 @@ def observe(directory, destination, wine=None):
             print(key, checksum, observed[key], flush=True)
     invalid = (directory / "crt-stream-invalid.exe").resolve()
     if not wine:
-        run = subprocess.run([invalid], capture_output=True, timeout=20)
+        run = launch(invalid, [], wine, capture_output=True)
         if (run.returncode & 0xffffffff, run.stdout, run.stderr) != (0xc0000005, b"", b""):
             raise ValueError(f"invalid FILE: {run.returncode:#x} {run.stdout.hex()} {run.stderr.hex()}")
     block = (directory / "crt-stream-block.exe").resolve()
@@ -182,7 +197,7 @@ def output_failures(pe, directory, block=False):
                                 filled += n
                             if not room < filled < 1 << 20 or os.read(read, room) != b"F" * room:
                                 raise ValueError("nonblocking pipe did not reach its capacity")
-                        run = subprocess.run([pe, f"{case:02}"], stdout=writer, stderr=log, timeout=20)
+                        run = launch(pe, [f"{case:02}"], None, stdout=writer, stderr=log)
                     output = b""
                     if name in ("short", "prefix"):
                         with os.fdopen(read, "rb") as reader:

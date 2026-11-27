@@ -18,6 +18,7 @@ namespace forge::runtime::darwin {
     struct WriteProgress {
         size_t count;
         int error;
+        bool inspectionFailed = false;
     };
 
     class Descriptor {

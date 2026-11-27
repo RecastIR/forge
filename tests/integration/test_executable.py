@@ -2013,32 +2013,39 @@ class Console(Workspace):
         missing = self.program(preexec_fn=close_inputs)
         self.assertEqual((missing.returncode, missing.stdout, missing.stderr),
                          (42, b"", block_records(cases, "missing")))
-        for name in ("broken", "short", "prefix"):
-            with self.subTest(pipe=name):
-                read, write = os.pipe()
-                with os.fdopen(read, "rb") as reader, os.fdopen(write, "wb", buffering=0) as writer:
-                    if name == "broken":
-                        reader.close()
+        fifo = self.dir / "stream.fifo"
+        os.mkfifo(fifo)
+        for named in (False, True):
+            for name, room in (("broken", None), ("broken", 0), ("short", 7),
+                               ("short", 5118), ("prefix", 5119)):
+                with self.subTest(named=named, mode=name, room=room):
+                    if named:
+                        read = os.open(fifo, os.O_RDONLY | os.O_NONBLOCK)
+                        write = os.open(fifo, os.O_WRONLY)
                     else:
-                        os.set_blocking(write, False)
+                        read, write = os.pipe()
+                    with os.fdopen(read, "rb") as reader, os.fdopen(write, "wb", buffering=0) as writer:
                         filled = 0
-                        while filled < 1 << 20:
-                            n = writer.write(b"F" * 4096)
-                            if not n:
-                                break
-                            filled += n
-                        room = 7 if name == "short" else 5119
-                        self.assertLess(room, filled)
-                        self.assertLess(filled, 1 << 20)
-                        self.assertEqual(os.read(read, room), b"F" * room)
-                    result = self.program(stdout=writer)
-                    writer.close()
-                    self.assertEqual((result.returncode, result.stderr), (42, block_records(cases, name)))
-                    if name != "broken":
-                        remaining = reader.read()
-                        self.assertEqual(remaining[:filled-room], b"F" * (filled-room))
-                        wanted = "" if name == "short" else cases["prefix-16"]["output"]
-                        self.assertEqual(summarize(remaining[filled-room:]), wanted)
+                        if room is not None:
+                            os.set_blocking(write, False)
+                            while filled < 1 << 20:
+                                n = writer.write(b"F" * 512)
+                                if not n:
+                                    break
+                                filled += n
+                            self.assertLess(room, filled)
+                            self.assertLess(filled, 1 << 20)
+                            self.assertEqual(os.read(read, room), b"F" * room)
+                        if name == "broken":
+                            reader.close()
+                        result = self.program(stdout=writer)
+                        writer.close()
+                        self.assertEqual((result.returncode, result.stderr), (42, block_records(cases, name)))
+                        if name != "broken":
+                            remaining = reader.read()
+                            self.assertEqual(remaining[:filled-room], b"F" * (filled-room))
+                            wanted = "" if name == "short" else cases["prefix-16"]["output"]
+                            self.assertEqual(summarize(remaining[filled-room:]), wanted)
 
         # A one-byte native prefix is shorter than the two CRs already staged.
         # The subset cannot express the DLL's unsigned subtraction as an element count.
@@ -2048,6 +2055,14 @@ class Console(Workspace):
             result = self.program(stdout=stream, preexec_fn=lambda: resource.setrlimit(resource.RLIMIT_FSIZE, (1, 1)))
         self.assertEqual((result.returncode, limited.read_bytes()), (125, b"A"))
         self.assertIn(b"unsupported legacy MSVCRT stream operation", result.stderr)
+
+        for name in ("return", "exit"):
+            with self.subTest(buffered_flush=name):
+                self.compile(FIXTURES / f"crt-stream-{name}.exe")
+                with limited.open("wb") as stream:
+                    result = self.program(stdout=stream, preexec_fn=lambda: resource.setrlimit(resource.RLIMIT_FSIZE, (2, 2)))
+                self.assertEqual((result.returncode, limited.read_bytes(), result.stderr),
+                                 (42, b"#A", b"\r\r\nZ#"))
 
     def test_virtual_protect(self):
         pe = image("virtual-protect")

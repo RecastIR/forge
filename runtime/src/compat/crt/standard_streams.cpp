@@ -90,11 +90,11 @@ namespace {
     using Input = GuestBuffer<crtFwrite.arguments[0]>;
 
     struct Progress {
-        size_t count;
+        size_t accepted = 0;
+        size_t inserted = 0;
         forge_rt_status status = FORGE_RT_OK;
         int error = 0;
         bool shortWrite = false;
-        bool committed = false;
     };
 
     struct TextBlock {
@@ -123,45 +123,48 @@ namespace {
     Progress writeText(const StandardStream &stream, bool hostSignals, uint64_t length,
                        Reader read) {
         if (!stream.descriptor) {
-            return {0, FORGE_RT_OK, EBADF, true};
+            return {.error = EBADF, .shortWrite = true};
         }
         const auto &output = *stream.descriptor;
         if (!output.writable()) {
-            return {0, FORGE_RT_OK, EACCES, true};
+            return {.error = EACCES, .shortWrite = true};
         }
         if (!output.outputSignalsSafe(hostSignals)) {
-            return {0, FORGE_RT_HOST_CONFIGURATION};
+            return {.status = FORGE_RT_HOST_CONFIGURATION};
         }
 
         constexpr size_t limit = 5119;
         std::array<uint8_t, limit> source;
         std::array<uint8_t, limit + 1> physical;
         uint64_t offset = 0;
-        size_t accepted = 0, added = 0;
+        Progress progress;
         while (offset < length) {
             auto bytes = std::span(source).first(std::min<uint64_t>(length - offset, limit));
             const auto status = read(offset, bytes);
             if (status != FORGE_RT_OK) {
-                return {0, status};
+                progress.status = status;
+                return progress;
             }
 
             const auto block = encodeText(bytes, physical);
             offset += block.source;
-            added += block.physical - block.source;
+            progress.inserted += block.physical - block.source;
             const auto written = output.writeSome(std::span(physical).first(block.physical));
-            accepted += written.count;
+            progress.accepted += written.count;
+            if (written.inspectionFailed) {
+                progress.status =
+                    written.error == EMFILE || written.error == ENFILE || written.error == ENOMEM
+                        ? FORGE_RT_RESOURCE_EXHAUSTED
+                        : FORGE_RT_HOST_CONFIGURATION;
+                break;
+            }
             if (written.count != block.physical) {
-                // _write subtracts all CR insertions staged in this call. A positive
-                // OS prefix normally preserves errno. An underflow here cannot describe
-                // an element count in the supported subset.
-                if (accepted && accepted < added) {
-                    return {0, FORGE_RT_UNSUPPORTED_CRT_STREAM, 0, true, true};
-                }
-                return {accepted ? accepted - added : 0, FORGE_RT_OK, written.error, true,
-                        accepted != 0};
+                progress.error = written.error;
+                progress.shortWrite = true;
+                break;
             }
         }
-        return {static_cast<size_t>(length)};
+        return progress;
     }
 
     Progress flushBuffer(CrtStandardStreams &streams, const StandardHandles &handles,
@@ -169,7 +172,7 @@ namespace {
         auto &file = streams.files[index];
         const size_t pending = file.ptr - file.base;
         if (!pending) {
-            return {0};
+            return {};
         }
 
         const auto &buffer = streams.buffers[index]->bytes;
@@ -179,7 +182,7 @@ namespace {
                           std::memcpy(bytes.data(), buffer.data() + offset, bytes.size());
                           return FORGE_RT_OK;
                       });
-        if (progress.status == FORGE_RT_OK || progress.committed) {
+        if (progress.status == FORGE_RT_OK || progress.accepted) {
             // Retire this attempted buffer even on an OS error. No prefix can be replayed.
             file.ptr = file.base;
             file.count = 0;
@@ -222,7 +225,7 @@ namespace {
         }
 
         file.flags |= streamError;
-        if (!progress.committed) {
+        if (!progress.accepted) {
             instance.windows->crtErrno = crt;
         }
         return last ? forge_rt_set_last_error(&instance, thread, last) : FORGE_RT_OK;
@@ -325,7 +328,16 @@ namespace {
                                      length, [&](uint64_t offset, std::span<uint8_t> bytes) {
                                          return input.read(done + offset, bytes);
                                      });
-                done += progress.count;
+                if (progress.status != FORGE_RT_OK) {
+                    return progress.status;
+                }
+                if (progress.accepted) {
+                    // _write deducts every CR in the staged request, even on a short write.
+                    if (progress.accepted < progress.inserted) {
+                        return FORGE_RT_UNSUPPORTED_CRT_STREAM;
+                    }
+                    done += progress.accepted - progress.inserted;
+                }
             } else if (remaining < block) {
                 const auto status = startBuffer(streams, *instance.windows, index, input, done);
                 if (status != FORGE_RT_OK) {
@@ -334,9 +346,6 @@ namespace {
                 done += !progress.shortWrite;
             }
 
-            if (progress.status != FORGE_RT_OK) {
-                return progress.status;
-            }
             if (progress.shortWrite) {
                 const auto status = writeFailure(instance, thread, file, progress);
                 if (status != FORGE_RT_OK) {
@@ -437,12 +446,12 @@ extern "C" forge_rt_status forge_rt_msvcrt_fwrite(forge_rt_instance *instance,
         return FORGE_RT_UNSUPPORTED_CRT_STREAM;
     }
 
-    const auto &file = streams.files[index];
+    const auto &buffer = streams.buffers[index];
     const auto overlaps = [&](uint64_t va, uint64_t bytes) {
         return va <= source ? source - va < bytes : va - source < input->byteSize();
     };
     if (overlaps(stream, sizeof(LegacyFile)) ||
-        (file.base && overlaps(file.base, CrtStandardStreams::capacity))) {
+        (buffer && overlaps(buffer->mapping.base, buffer->mapping.size))) {
         return FORGE_RT_UNSUPPORTED_CRT_STREAM;
     }
     return writeElements(*instance, thread, *windows.standardHandles, index, *input, size,

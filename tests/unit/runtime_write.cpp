@@ -8,6 +8,7 @@
 #include <cstdlib>
 #include <fcntl.h>
 #include <optional>
+#include <sys/resource.h>
 #include <unistd.h>
 #include <utility>
 #include <vector>
@@ -85,6 +86,36 @@ namespace {
         REQUIRE(write(ends[1], "H", 1) == 1 && read(ends[0], &byte, 1) == 1 && byte == 'H');
         REQUIRE(close(ends[1]) == 0 && close(ends[0]) == 0);
     }
+
+#ifdef __APPLE__
+    void checkPipeInspectionBudget() {
+        using namespace forge::runtime::darwin;
+        int ends[2];
+        REQUIRE(pipe(ends) == 0 && fcntl(ends[1], F_SETFL, O_NONBLOCK) == 0);
+        std::optional<Descriptor> writer;
+        REQUIRE(Descriptor::capture(ends[1], writer).status == CaptureResult::Status::Captured);
+        const int free = dup(ends[1]);
+        REQUIRE(free >= 0 && close(free) == 0);
+        struct rlimit previous{};
+        REQUIRE(getrlimit(RLIMIT_NOFILE, &previous) == 0);
+        const struct rlimit exhausted{static_cast<rlim_t>(free), previous.rlim_max};
+        REQUIRE(setrlimit(RLIMIT_NOFILE, &exhausted) == 0);
+
+        const std::array<uint8_t, PIPE_BUF + 1> block{};
+        const auto stopped = writer->writeSome(block);
+        REQUIRE(setrlimit(RLIMIT_NOFILE, &previous) == 0);
+        REQUIRE(stopped.inspectionFailed && stopped.error == EMFILE && stopped.count == 0);
+        const auto written = writer->writeSome(block);
+        REQUIRE(!written.inspectionFailed && written.count == block.size() && !written.error);
+        REQUIRE(dup(ends[1]) == free && close(free) == 0);
+
+        writer.reset();
+        REQUIRE(close(ends[1]) == 0);
+        std::array<uint8_t, block.size() + 1> bytes{};
+        REQUIRE(read(ends[0], bytes.data(), bytes.size()) == static_cast<ssize_t>(block.size()));
+        REQUIRE(read(ends[0], bytes.data(), bytes.size()) == 0 && close(ends[0]) == 0);
+    }
+#endif
 
     constexpr uint64_t sourceAddress = 0x2000;
     constexpr uint32_t requestLength = PIPE_BUF * 2;
@@ -188,6 +219,9 @@ namespace {
 
 void testRuntimeWrite() {
     checkDescriptorOwnership();
+#ifdef __APPLE__
+    checkPipeInspectionBudget();
+#endif
     constexpr std::array success{Attempt{-1, EINTR}, Attempt{2, 0}, Attempt{-1, EINTR},
                                  Attempt{3, 0}};
     constexpr std::array errorAfterPrefix{Attempt{1, 0}, Attempt{2, 0}, Attempt{-1, EPIPE}};

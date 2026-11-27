@@ -217,7 +217,9 @@ jobs:
           echo "bounded_call=success" >> "$GITHUB_OUTPUT"
           python -B tests/integration/test_executable.py windows-tail-jump executables
           echo "tail_jump=success" >> "$GITHUB_OUTPUT"
-          python -B tests/differential/reference/crt_streams.py executables stream-observations
+          # A writable parent stdin must never receive a guest fwrite.
+          python -B tests/differential/reference/crt_streams.py executables stream-observations 0<> stream-probe-stdin
+          test ! -s stream-probe-stdin
           echo "crt_streams=success" >> "$GITHUB_OUTPUT"
           python -B tests/differential/reference/virtual_protect.py executables
           echo "virtual_protect=success" >> "$GITHUB_OUTPUT"
