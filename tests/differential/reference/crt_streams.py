@@ -51,7 +51,9 @@ def launch(pe, args, wine, **streams):
         run = subprocess.run([wine, r"Z:\opt\forge\capture.exe", app, "65536", "inherit"],
                              cwd=work, timeout=30, **streams)
         if run.returncode or not (work / "ready").is_file():
-            raise RuntimeError(f"Wine capture parent failed before reporting {pe.name} {args}: {run.returncode}")
+            detail = (run.stderr or b"")[-512:]
+            raise RuntimeError(f"Wine capture parent failed before reporting {pe.name} {args}: "
+                               f"exit {run.returncode}, stderr {detail!r}")
         status, = struct.unpack("<I", (work / "exit.bin").read_bytes())
         return subprocess.CompletedProcess([pe, *args], status, run.stdout, run.stderr)
 

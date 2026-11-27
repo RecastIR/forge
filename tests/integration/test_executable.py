@@ -1575,7 +1575,7 @@ class Reference(Workspace):
         import crt_vfprintf
         self.assertEqual(filenames, sorted([*expected, observer.name, denied.name, "crt-stream-invalid.exe",
                                             "crt-stream-reference.exe", *(f"crt-puts-{v}.exe" for v in VARIANTS),
-                                            *(f"crt-vfprintf-{v}.exe" for v in (*crt_vfprintf.VARIANTS, *crt_vfprintf.PROBES))]))
+                                            *(f"crt-vfprintf-{v}.exe" for v in crt_vfprintf.VARIANTS)]))
         for variant in crt_vfprintf.VARIANTS:
             pe = FIXTURES / f"crt-vfprintf-{variant}.exe"
             crt_vfprintf.check_input(pe)
@@ -2065,7 +2065,7 @@ class Console(Workspace):
 
     def test_crt_vfprintf(self):
         sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "differential/reference"))
-        from crt_vfprintf import VARIANTS, check_input, check_observation
+        from crt_vfprintf import VARIANTS, check_input, check_observation, failure_modes
         for variant in VARIANTS:
             pe = FIXTURES / f"crt-vfprintf-{variant}.exe"
             check_input(pe)
@@ -2092,16 +2092,15 @@ class Console(Workspace):
                         self.assertEqual(stdout[:16], f"{base + 0x3000:016X}".encode())
                         stdout = b"0000000140003000" + stdout[16:]
                     check_observation("windows", variant, "pipe", result.returncode, stdout, result.stderr)
-            if variant in ("empty", "boundary", "large"):
-                for mode in ("missing", "broken", "full", "short"):
-                    with self.subTest(variant=variant, mode=mode):
-                        if mode == "missing":
-                            result = self.program(preexec_fn=lambda: os.close(1))
-                            stdout = result.stdout
-                        else:
-                            result, stdout = self.run_output_pipe(mode, {"broken": None, "full": 0,
-                                                                        "short": 7}[mode])
-                        check_observation("windows", variant, mode, result.returncode, stdout, result.stderr)
+            for mode in failure_modes(variant):
+                with self.subTest(variant=variant, mode=mode):
+                    if mode == "missing":
+                        result = self.program(preexec_fn=lambda: os.close(1))
+                        stdout = result.stdout
+                    else:
+                        room = {"broken": None, "full": 0, "short": 7, "prefix": 5119}[mode]
+                        result, stdout = self.run_output_pipe(mode, room)
+                    check_observation("windows", variant, mode, result.returncode, stdout, result.stderr)
 
     def test_vfprintf_literal_image_selection(self):
         for variant, expected in (("literal_empty", b""), ("literal_text", b"plain text")):
