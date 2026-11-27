@@ -299,6 +299,108 @@ namespace {
         std::abort();
     }
 
+    void streamIdentity(forge_rt_execution *execution) {
+        const auto thread = execution->thread;
+        auto *instance = execution->instance;
+        uint64_t base = 0, elements = UINT64_MAX;
+        forge_rt_memory_fault fault{};
+        REQUIRE(forge_rt_msvcrt_iob_func(instance, 0, &base) == FORGE_RT_INVALID_THREAD);
+        REQUIRE(forge_rt_msvcrt_iob_func(instance, thread, &base) == FORGE_RT_OK && base % 8 == 0);
+        const auto output = base + 96;
+        const auto put = [&](uint64_t stream, uint64_t address, uint64_t size, uint64_t count) {
+            return forge_rt_msvcrt_fwrite(instance, thread, address, size, count, stream, &elements,
+                                          &fault);
+        };
+        for (const auto invalid : {output + 1, base + 144, UINT64_MAX, execution->rcx}) {
+            if (invalid) {
+                REQUIRE(put(invalid, source, 1, 1) == FORGE_RT_UNSUPPORTED_CRT_STREAM);
+                REQUIRE(elements == UINT64_MAX);
+            }
+        }
+        REQUIRE(put(base, source + 1, 1, 1) == FORGE_RT_GUEST_FAULT && fault.address == source + 1);
+        REQUIRE(put(output, source, 2, 1) == FORGE_RT_GUEST_FAULT);
+        REQUIRE(fault.address == source + 1 && fault.access == FORGE_RT_READ &&
+                fault.reason == FORGE_RT_FAULT_UNMAPPED && elements == UINT64_MAX);
+        REQUIRE(forge_rt_set_last_error(instance, thread, initialError) == FORGE_RT_OK);
+        for (const auto target : {uint64_t{0}, output + 1}) {
+            REQUIRE(put(target, UINT64_MAX, 2, 0) == FORGE_RT_OK && elements == 0);
+        }
+        REQUIRE(put(0, source, 1, 1) == FORGE_RT_OK && elements == 0);
+        REQUIRE(put(output, 0, 1, 1) == FORGE_RT_OK && elements == 0);
+        REQUIRE(put(output, UINT64_MAX, UINT64_MAX, 2) == FORGE_RT_OK && elements == 0);
+        REQUIRE(instance->windows->crtErrno == 22 && lastError(*execution) == initialError);
+        REQUIRE(put(output, source, 1, 1) == FORGE_RT_OK && elements == 1);
+        execution->result = {FORGE_RT_RETURNED, FORGE_RT_OK, output, {}, 0};
+        REQUIRE(forge_rt_msvcrt_iob_func(instance, thread, &base) == FORGE_RT_INVALID_STATE);
+        REQUIRE(put(output, source, 1, 1) == FORGE_RT_INVALID_STATE);
+    }
+
+    void checkStreamIdentity() {
+        constexpr forge_rt_import streams[]{{"msvcrt.dll", "__iob_func"}, {"msvcrt.dll", "fwrite"}};
+        auto artifact = consoleArtifact(streamIdentity);
+        artifact.imports = streams;
+        artifact.importCount = std::size(streams);
+        std::unique_ptr<FILE, decltype(&std::fclose)> firstFile(std::tmpfile(), std::fclose);
+        std::unique_ptr<FILE, decltype(&std::fclose)> secondFile(std::tmpfile(), std::fclose);
+        REQUIRE(firstFile && secondFile);
+        auto first = registeredWithStderr(artifact, fileno(firstFile.get()));
+        auto second = registeredWithStderr(artifact, fileno(secondFile.get()));
+        const auto original = run(first);
+        REQUIRE(original.kind == FORGE_RT_RETURNED && original.value);
+        const auto foreign = run(second, original.value);
+        REQUIRE(foreign.kind == FORGE_RT_RETURNED && foreign.value != original.value);
+        first.reset();
+        second.reset();
+        auto fresh = registeredWithStderr(artifact, fileno(secondFile.get()));
+        const auto retired = run(fresh, foreign.value);
+        REQUIRE(retired.kind == FORGE_RT_RETURNED && retired.value != foreign.value);
+        REQUIRE(fileContentsEqual(firstFile.get(), "G") &&
+                fileContentsEqual(secondFile.get(), "GG"));
+    }
+
+    void pendingFatal(forge_rt_execution *execution) {
+        uint64_t base = 0, count = 0;
+        forge_rt_memory_fault fault{};
+        REQUIRE(forge_rt_msvcrt_iob_func(execution->instance, execution->thread, &base) ==
+                FORGE_RT_OK);
+        REQUIRE(forge_rt_msvcrt_fwrite(execution->instance, execution->thread, source, 1, 1,
+                                       base + 96, &count, &fault) == FORGE_RT_OK &&
+                count == 1);
+        REQUIRE(forge_rt_msvcrt_amsg_exit(execution->instance, execution->thread, 8) ==
+                FORGE_RT_OK);
+    }
+
+    void checkStreamTermination() {
+        constexpr forge_rt_import dependencies[]{{"msvcrt.dll", "fwrite"}, fatalImport};
+        auto artifact = consoleArtifact(pendingFatal);
+        artifact.imports = dependencies;
+        artifact.importCount = std::size(dependencies);
+        std::unique_ptr<FILE, decltype(&std::fclose)> err(std::tmpfile(), std::fclose);
+        REQUIRE(err != nullptr);
+        auto fatal = registeredWithStderr(artifact, fileno(err.get()));
+        const auto result = run(fatal);
+        REQUIRE(result.kind == FORGE_RT_EXIT_PROCESS && result.value == 255);
+        REQUIRE(fileContentsEqual(
+            err.get(), "\r\nruntime error R6008\r\n- not enough space for arguments\r\nG"));
+
+        int ends[2];
+        REQUIRE(pipe(ends) == 0 && close(ends[0]) == 0);
+        struct sigaction action{}, previous{};
+        action.sa_handler = SIG_DFL;
+        REQUIRE(sigemptyset(&action.sa_mask) == 0 && sigaction(SIGPIPE, &action, &previous) == 0);
+        artifact.entry = streamIdentity;
+        auto unsafe = registeredWithStderr(artifact, ends[1]);
+        const auto stopped = run(unsafe);
+        REQUIRE(stopped.kind == FORGE_RT_RUNTIME_FAILURE &&
+                stopped.status == FORGE_RT_HOST_CONFIGURATION);
+
+        action.sa_handler = SIG_IGN;
+        REQUIRE(sigaction(SIGPIPE, &action, nullptr) == 0);
+        auto safe = registeredWithStderr(artifact, ends[1]);
+        REQUIRE(run(safe).kind == FORGE_RT_RETURNED);
+        REQUIRE(sigaction(SIGPIPE, &previous, nullptr) == 0 && close(ends[1]) == 0);
+    }
+
     void checkFatalObservation(const std::filesystem::path &observations, int32_t errorNumber) {
         const std::string prefix = errorNumber < 0 ? "" : "sweep-";
         const auto directory = observations / (prefix + std::to_string(errorNumber) + "-pipe");
@@ -971,6 +1073,8 @@ void testRuntimeConsoleProcess(const char *fatalObservations) {
         }
     }
 
+    checkStreamIdentity();
+    checkStreamTermination();
     checkFatalPartialWrite(31, fatal31);
     checkFatalOutputFailures();
     checkRedirection();

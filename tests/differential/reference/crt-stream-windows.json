@@ -1,5 +1,13 @@
 {
   "observer": "eb3a1cd042d22f6d8fba68f11ececff5e27a34bdff6d4f00e3b6da1fe586362a",
+  "inputs": {
+    "crt-stream-block.exe": "3d9a3bcfc6e44ba4a7f4fed4fbf45dba21ac082683a302e344f0acfd21b867ab",
+    "crt-stream-exit.exe": "ac4f5cebf4ac486a6f2629f0e3e042986ba30b2368f3fb113531827e126ed4f1",
+    "crt-stream-invalid.exe": "d382767c1ccbf9dda6b1c1ee2769a30c934487706bbc6a31ccec78ad3f7cdac2",
+    "crt-stream-return.exe": "b08d802d295755eb7a2ebca88c4923c36612a8786d4426d4e2affde427268161",
+    "crt-stream-sections.exe": "cf38223afffba962db29380d9267c6929caa914ab47addb229fbe9484a06570e",
+    "crt-stream-state.exe": "f1810895db71a20d5b50fe836be63534ca4822c7446658f550f1c5c16d0cd049"
+  },
   "cases": {
     "00": {"status":42,"records":[[0,0,0,1,1,0,0,257,0,0,4096,0],[0,0,0,0,0,0,0,2,1,0,0,0],[0,0,0,0,0,0,0,2,2,0,0,0],[3,37,91,1,1,6,4090,10,1,0,4096,0],[0,37,91,1,1,6,4090,10,1,0,4096,0]],"output":"237c41000d0a0d0d0a5a"},
     "01": {"status":42,"records":[[0,0,0,1,1,0,0,257,0,0,4096,0],[0,0,0,0,0,0,0,2,1,0,0,0],[0,0,0,0,0,0,0,2,2,0,0,0],[3,37,91,1,1,6,4090,10,2,0,4096,0],[0,37,91,1,1,6,4090,10,2,0,4096,0]],"output":"237c41000d0a0d0d0a5a"},

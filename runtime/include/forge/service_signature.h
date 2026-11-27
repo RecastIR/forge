@@ -25,7 +25,14 @@ namespace forge::win64 {
         Callback
     };
     enum class Access : uint8_t { None, Input, Output, InOut };
-    enum class Extent : uint8_t { None, Fixed, CountArgument, CString, InitializerEnd };
+    enum class Extent : uint8_t {
+        None,
+        Fixed,
+        CountArgument,
+        CString,
+        InitializerEnd,
+        ElementProduct
+    };
     enum class Callback : uint8_t { None, Initializer, Registration, Cleanup };
 
     // Match the compiler's per-table indirect dispatch budget.
@@ -39,6 +46,13 @@ namespace forge::win64 {
         }
 
         return last - first;
+    }
+
+    constexpr std::optional<uint64_t> elementBytes(uint64_t size, uint64_t count) {
+        if (size && count > UINT64_MAX / size) {
+            return std::nullopt;
+        }
+        return size * count;
     }
 
     constexpr std::string_view unsupportedType(Value type) {
@@ -133,6 +147,12 @@ namespace forge::win64 {
                 return arg.access == Access::Input && !arg.optional &&
                        arg.size < arguments.size() && arguments[arg.size].type == Value::Address &&
                        arguments[arg.size].access == Access::None;
+            case Extent::ElementProduct:
+                // size names the first of two consecutive Windows size_t arguments.
+                return arg.access == Access::Input && arg.size < arguments.size() &&
+                       arguments.size() - arg.size >= 2 &&
+                       arguments[arg.size].type == Value::Word &&
+                       arguments[arg.size + 1].type == Value::Word;
             case Extent::CountArgument:
                 if (arg.size < arguments.size()) {
                     const auto count = arguments[arg.size].type;
@@ -401,6 +421,15 @@ namespace forge::win64 {
         bind<Value::Address>("msvcrt.dll", "_errno", LastError::Preserve,
                              FORGE_SERVICE_ADAPTER(forge_rt_msvcrt_errno), Requirement::Process));
 
+    inline constexpr auto crtIob = processPointer(bind<Value::Address>(
+        "msvcrt.dll", "__iob_func", LastError::Preserve,
+        FORGE_SERVICE_ADAPTER(forge_rt_msvcrt_iob_func), Requirement::Process));
+    inline constexpr auto crtFwrite =
+        bind<Value::Word, Argument{Value::Address, Access::Input, Extent::ElementProduct, 1},
+             Argument{Value::Word}, Argument{Value::Word}, Argument{Value::Address}>(
+            "msvcrt.dll", "fwrite", LastError::OnFailure,
+            FORGE_SERVICE_ADAPTER(forge_rt_msvcrt_fwrite), Requirement::Process);
+
     inline constexpr auto crtGetMainArgs =
         bind<Value::I32, Argument{Value::Address, Access::Output, Extent::Fixed, 4},
              Argument{Value::Address, Access::Output, Extent::Fixed, 8},
@@ -463,5 +492,7 @@ namespace forge::win64 {
         crtExit,
         crtSetAppType,
         virtualProtect,
+        crtIob,
+        crtFwrite,
     };
 } // namespace forge::win64

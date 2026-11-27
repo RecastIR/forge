@@ -104,13 +104,18 @@ class NativeDifferentialTests(unittest.TestCase):
             self.assertEqual(load + 7 + struct.unpack_from("<i", data, load - 0xa00 + 3)[0], int(protect_slot, 16))
             self.assertNotIn({"caller_rva": hex(target + 0x460), "instruction_rva": hex(call)}, ctx["unresolved_calls"])
             fwrite_slot = int(protect_slot, 16) + (0xb0 if name == "cleanup" else 0xa8)
+            fwrite = next(s for s in crt["symbols"] if s["name"] == "fwrite")
+            self.assertEqual((fwrite["catalogued_service"], fwrite["iat_slot_rva"]), (True, hex(fwrite_slot)))
+            self.assertIn({"dll": "msvcrt.dll", "name": "fwrite"}, ctx["imports"])
             failure = target + 0x280
+            extra_import = name in ("argv", "argv_edges", "puts")
+            delta = 0xe8d if extra_import else 0xe85
             self.assertEqual((ctx["function_rva"], ctx["block_rva"], ctx["instruction_rva"],
                               ctx["opcode"], ctx["bytes"], ctx["branch_target"]),
-                             (hex(failure), hex(failure), hex(failure + 0x41),
-                              "CALL64pcrel32", "e8720e0000", failure + 0xeb8))
+                             (hex(failure), hex(failure), hex(failure + 0x5e), "CALL64pcrel32",
+                              (b"\xe8" + struct.pack("<i", delta)).hex(), failure + 0x63 + delta))
             self.assertEqual((ctx["import_dll"], ctx["import_symbol"], ctx["iat_slot_rva"]),
-                             ("msvcrt.dll", "fwrite", hex(fwrite_slot)))
+                             ("msvcrt.dll", "vfprintf", hex(fwrite_slot + (0x38 if extra_import else 0x30))))
         offset = ctx["file_offset"]
         self.assertEqual(data[offset:offset + len(bytes.fromhex(ctx["bytes"]))].hex(), ctx["bytes"])
         return report

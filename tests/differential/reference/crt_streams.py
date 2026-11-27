@@ -12,16 +12,46 @@ def summarize(data):
     return data.hex() if len(data) < 64 else f"{len(data)} bytes sha256={hashlib.sha256(data).hexdigest()}"
 
 
+def evidence(backend):
+    return json.loads(Path(__file__).with_name(f"crt-stream-{backend}.json").read_bytes())
+
+
+def block_records(cases, setup=None):
+    """Project the three independent C observations onto the assembly fixture's record layout."""
+    output = cases[f"{setup}-16" if setup else "16"]
+    initial = output["records"][:3]
+    rows = []
+    for case, index in (("06", 1), ("18", 0), (None, 1)):
+        row = (cases[case] if case else output)["records"][3]
+        rows.append(struct.pack("<Q4I", *row[:3], row[7], initial[index][8]))
+    return b"".join(rows)
+
+
+def focused_output(backend, name, directory):
+    baseline = evidence(backend)
+    pe = directory / f"crt-stream-{name}.exe"
+    if hashlib.sha256(pe.read_bytes()).hexdigest() != baseline["inputs"][pe.name]:
+        raise ValueError(f"unexpected {name} PE")
+    if name == "block":
+        return 42, b"A\0\r\n\r\r\nZ" + bytes(8186), block_records(baseline["cases"])
+    row = baseline["cases"][pe.name]
+    return row["status"], bytes.fromhex(row["stdout"]), bytes.fromhex(row["stderr"])
+
+
 def observe(directory, destination, wine=None):
     pe = (directory / "crt-stream-reference.exe").resolve()
     manifest = (directory / "SHA256SUMS").read_bytes()
     digest = hashlib.sha256(pe.read_bytes()).hexdigest()
-    if (hashlib.sha256(manifest).hexdigest() != os.environ["PE_MANIFEST_SHA256"]
-            or f"{digest}  {pe.name}" not in manifest.decode().splitlines()):
-        raise ValueError("stream reference input hash mismatch")
+    backend = "wine" if wine else "windows"
+    expected = evidence(backend)
+    if hashlib.sha256(manifest).hexdigest() != os.environ["PE_MANIFEST_SHA256"]:
+        raise ValueError("producer manifest checksum mismatch")
+    declared = {name: sha for sha, name in (line.split("  ", 1) for line in manifest.decode().splitlines())}
+    for name, checksum in {pe.name: expected["observer"], **expected["inputs"]}.items():
+        if declared.get(name) != checksum or hashlib.sha256((directory / name).read_bytes()).hexdigest() != checksum:
+            raise ValueError(f"{backend}: {name} checksum mismatch")
     destination.mkdir(parents=True, exist_ok=True)
     observed = {}
-    backend = "wine" if wine else "windows"
     if not wine:
         dll = Path(os.environ["SystemRoot"]) / "System32/msvcrt.dll"
         version = subprocess.check_output(["powershell", "-NoProfile", "-Command",
@@ -61,8 +91,6 @@ def observe(directory, destination, wine=None):
     for pe_name in ("crt-stream-return.exe", "crt-stream-exit.exe", "crt-stream-state.exe", "crt-stream-sections.exe"):
         focus = (directory / pe_name).resolve()
         checksum = hashlib.sha256(focus.read_bytes()).hexdigest()
-        if f"{checksum}  {pe_name}" not in manifest.decode().splitlines():
-            raise ValueError(f"{pe_name} checksum mismatch")
         args = [wine, focus] if wine else [focus]
         for merged in (False, True):
             run = subprocess.run(args, stdout=subprocess.PIPE,
@@ -71,30 +99,41 @@ def observe(directory, destination, wine=None):
             observed[key] = dict(status=run.returncode, stdout=run.stdout.hex(),
                                  stderr=(run.stderr or b"").hex())
             print(key, checksum, observed[key], flush=True)
+    invalid = (directory / "crt-stream-invalid.exe").resolve()
+    if not wine:
+        run = subprocess.run([invalid], capture_output=True, timeout=20)
+        if (run.returncode & 0xffffffff, run.stdout, run.stderr) != (0xc0000005, b"", b""):
+            raise ValueError(f"invalid FILE: {run.returncode:#x} {run.stdout.hex()} {run.stderr.hex()}")
+    block = (directory / "crt-stream-block.exe").resolve()
+    args = [wine, block] if wine else [block]
+    run = subprocess.run(args, capture_output=True, timeout=20)
+    if (run.returncode, run.stdout, run.stderr) != focused_output(backend, "block", directory):
+        raise ValueError(f"{backend}: direct transfer record mismatch {run.stderr.hex()}")
     if not wine:
         observed.update(output_failures(pe, destination))
+        output_failures(block, destination, block=True)
     (destination / "observations.json").write_text(json.dumps(observed, indent=2))
-    baseline = Path(__file__).with_name(f"crt-stream-{backend}.json")
-    expected = json.loads(baseline.read_bytes())
-    if digest != expected["observer"]:
-        raise ValueError(f"{backend}: unexpected observer PE {digest}")
     # JSON normalizes the unpacked tuples to arrays. Both redirections must match
     # each independently captured row, including statuses and output hashes.
+    checked = set()
     for key, row in json.loads(json.dumps(observed)).items():
         case = key.split("-", 1)[1] if key.startswith(("pipe-", "file-")) else key
+        checked.add(case)
         if row != expected["cases"][case]:
             raise ValueError(f"{backend} {key}: observed {row}, expected {expected['cases'][case]}")
+    if checked != expected["cases"].keys():
+        raise ValueError(f"{backend}: missing observations {expected['cases'].keys() - checked}")
     print(f"{backend}: verified {len(observed)} observations")
 
 
-def output_failures(pe, directory):
+def output_failures(pe, directory, block=False):
     """Keep the diagnostic channel independent of the deliberately unusable stdout."""
     import _winapi
     import msvcrt
     rows = {}
     for name in ("missing", "broken", "short", "prefix"):
-        for case in ((16,) if name == "prefix" else (0, 16)):
-            with (directory / f"{name}-{case}.records").open("wb") as log:
+        for case in ((16,) if block or name == "prefix" else (0, 16)):
+            with (directory / (("block-" if block else "") + f"{name}-{case}.records")).open("wb") as log:
                 if name == "missing":
                     info = subprocess.STARTUPINFO()
                     info.dwFlags |= subprocess.STARTF_USESTDHANDLES
@@ -138,7 +177,16 @@ def output_failures(pe, directory):
                         if not remaining.startswith(b"F" * (filled - room)):
                             raise ValueError("child modified pipe prefix")
                         output = remaining[filled - room:]
-            fields = list(struct.iter_unpack("<12Q", Path(log.name).read_bytes()))
+            raw = Path(log.name).read_bytes()
+            if block:
+                cases = evidence("windows")["cases"]
+                baseline = cases[f"{name}-16"]
+                # The C observer adds two independent Win32 markers after the CRT call.
+                wanted = "" if name == "short" else baseline["output"]
+                if (run.returncode, summarize(output), raw) != (42, wanted, block_records(cases, name)):
+                    raise ValueError(f"block {name}: {run.returncode} {summarize(output)} {raw.hex()}")
+                continue
+            fields = list(struct.iter_unpack("<12Q", raw))
             key = f"{name}-{case}"
             rows[key] = dict(status=run.returncode & 0xffffffff, records=fields, output=summarize(output))
             print(key, rows[key], flush=True)

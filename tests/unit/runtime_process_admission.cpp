@@ -5,11 +5,11 @@
 
 #include <algorithm>
 #include <array>
-
 #include <cstddef>
 #include <cstdio>
 #include <cstdlib>
 #include <new>
+#include <unistd.h>
 
 namespace {
     thread_local bool rejectAllocations = false;
@@ -193,6 +193,62 @@ namespace {
         REQUIRE(forge_rt_process_destroy(process) == FORGE_RT_OK);
     }
 
+    void streamAllocation(forge_rt_execution *execution) {
+        auto *instance = execution->instance;
+        const auto thread = execution->thread;
+        uint64_t base{}, result = 73;
+        forge_rt_memory_fault fault{};
+        REQUIRE(forge_rt_msvcrt_iob_func(instance, thread, &base) == FORGE_RT_OK);
+        const auto put = [&] {
+            return forge_rt_msvcrt_fwrite(instance, thread, imageBase, 1, 4097, base + 96, &result,
+                                          &fault);
+        };
+        const auto before = instance->reservations.size();
+        rejectAllocations = true;
+        const auto failed = put();
+        rejectAllocations = false;
+        REQUIRE(failed == FORGE_RT_RESOURCE_EXHAUSTED && result == 73);
+        REQUIRE(instance->reservations.size() == before &&
+                !instance->windows->streams->files[2].base);
+        REQUIRE(put() == FORGE_RT_OK && result == 4097);
+        returnToHost(execution);
+    }
+
+    void checkStreamAllocation() {
+        static constexpr std::array<uint8_t, 4097> bytes{'T'};
+        const forge_rt_backing backing{bytes.size(), bytes.data(), nullptr, 0};
+        const forge_rt_region_template row{imageBase, bytes.size(), 0, 0, FORGE_RT_READ};
+        const forge_rt_import stream{"msvcrt.dll", "fwrite"};
+        const forge_rt_artifact artifact{FORGE_RT_ARTIFACT_VERSION,
+                                         imageBase,
+                                         bytes.size(),
+                                         8,
+                                         8,
+                                         &backing,
+                                         1,
+                                         &row,
+                                         1,
+                                         &stream,
+                                         1,
+                                         streamAllocation};
+        auto *file = std::tmpfile();
+        REQUIRE(file);
+        const auto saved = dup(2);
+        REQUIRE(saved >= 0 && dup2(fileno(file), 2) == 2);
+        forge_rt_process *process = nullptr;
+        REQUIRE(forge_rt_process_create(FORGE_RT_ABI_VERSION, &process) == FORGE_RT_OK);
+        REQUIRE(forge_rt_process_register(process, &artifact) == FORGE_RT_OK);
+        REQUIRE(dup2(saved, 2) == 2 && close(saved) == 0);
+        forge_rt_process_result result{};
+        REQUIRE(forge_rt_process_run(process, nullptr, &result) == FORGE_RT_OK &&
+                result.value == 42);
+        REQUIRE(forge_rt_process_destroy(process) == FORGE_RT_OK);
+        std::array<uint8_t, bytes.size() + 1> actual{};
+        REQUIRE(pread(fileno(file), actual.data(), actual.size(), 0) == bytes.size());
+        REQUIRE(std::equal(bytes.begin(), bytes.end(), actual.begin()));
+        REQUIRE(std::fclose(file) == 0);
+    }
+
     void checkAdmission(bool importFunction) {
         constexpr uint64_t base = 0x1000;
         const forge_rt_backing backing{8, nullptr, nullptr, 0};
@@ -253,6 +309,7 @@ void operator delete(void *bytes) noexcept { std::free(bytes); }
 void operator delete(void *bytes, std::size_t) noexcept { std::free(bytes); }
 
 int main() {
+    checkStreamAllocation();
     checkAdmission(false);
     checkAdmission(true);
     checkProtectionAllocation(failProtectionAllocation);

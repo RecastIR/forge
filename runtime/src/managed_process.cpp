@@ -167,6 +167,7 @@ namespace {
         windows.appType.initialize(artifact,
                                    tableRows(image.execution.view.regions, artifact.regionCount));
 
+        bool crtStreams = false;
         bool standardHandles = false, commandLine = false, startupInfo = false;
         CrtImports crt{dataImports(artifact), false};
         for (const auto &import : tableRows(artifact.imports, artifact.importCount)) {
@@ -176,10 +177,13 @@ namespace {
             }
 
             const auto adapter = service->nativeSymbol;
-            if (adapter == win64::getStdHandle.nativeSymbol ||
-                adapter == win64::writeFile.nativeSymbol ||
-                (adapter == win64::crtAmsgExit.nativeSymbol &&
-                 windows.appType.value != CrtApplicationType::gui)) {
+            if (adapter == win64::crtIob.nativeSymbol || adapter == win64::crtFwrite.nativeSymbol) {
+                crtStreams = true;
+                standardHandles = true;
+            } else if (adapter == win64::getStdHandle.nativeSymbol ||
+                       adapter == win64::writeFile.nativeSymbol ||
+                       (adapter == win64::crtAmsgExit.nativeSymbol &&
+                        windows.appType.value != CrtApplicationType::gui)) {
                 standardHandles = true;
             } else if (adapter == win64::getCommandLineA.nativeSymbol ||
                        adapter == win64::getCommandLineW.nativeSymbol) {
@@ -210,6 +214,15 @@ namespace {
             windows.initializeParameters(image.instance, artifact, startup, commandLine, crt);
         if (parameters != FORGE_RT_OK) {
             return parameters;
+        }
+
+        if (crtStreams) {
+            windows.streams = std::make_unique<CrtStandardStreams>();
+            const auto status =
+                windows.streams->initialize(image.instance, *windows.standardHandles);
+            if (status != FORGE_RT_OK) {
+                return status;
+            }
         }
 
         const auto functions = functionImports(artifact);
@@ -362,7 +375,16 @@ extern "C" forge_rt_status forge_rt_process_run(forge_rt_process *process,
     }
 
     // RUNNING pins the occurrence. No lifecycle or address-space lock spans the guest call.
-    const auto result = active->image.run();
+    auto result = active->image.run();
+    // Legacy MSVCRT flushes redirected streams during DLL process detach, after
+    // returning _cexit and after any guest callbacks. Faults do not run cleanup.
+    if (active->windows.streams &&
+        (result.kind == FORGE_RT_RETURNED || result.kind == FORGE_RT_EXIT_PROCESS)) {
+        const auto status = active->windows.streams->finish(*active->windows.standardHandles);
+        if (status != FORGE_RT_OK) {
+            result = {FORGE_RT_RUNTIME_FAILURE, status, 0, {}, 0};
+        }
+    }
     // Retire the process's descriptors before publishing completion, including on a fault.
     // A host retaining the process to inspect its result can already observe pipe EOF.
     active->windows.standardHandles.reset();

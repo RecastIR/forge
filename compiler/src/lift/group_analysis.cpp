@@ -532,6 +532,26 @@ namespace forge::x86 {
                    [&](uint64_t va) { imageMemory.protectionOutput(step, va, outputSize); });
         }
 
+        std::optional<uint64_t> elementExtent(const AddressFact &widths,
+                                              const AddressFact &counts) {
+            if ((widths.known() && std::ranges::max(widths.values()) == 0) ||
+                (counts.known() && std::ranges::max(counts.values()) == 0)) {
+                return 0;
+            }
+            if (!widths.known() || !counts.known()) {
+                return std::nullopt;
+            }
+
+            uint64_t largest = 0;
+            for (const auto width : widths.values()) {
+                for (const auto count : counts.values()) {
+                    // Overflowing paths return before reading the pointer.
+                    largest = std::max(largest, win64::elementBytes(width, count).value_or(0));
+                }
+            }
+            return largest;
+        }
+
         void FunctionAnalyzer::traceServiceArguments(const ResolvedCallSite &site,
                                                      AddressFacts &facts, bool collect) const {
             const auto &binding = site.external()->binding;
@@ -558,6 +578,11 @@ namespace forge::x86 {
                 std::optional<uint64_t> size;
                 if (arg.extent == win64::Extent::Fixed) {
                     size = arg.size;
+                } else if (arg.extent == win64::Extent::ElementProduct) {
+                    const auto width = facts.serviceValue(binding, arg.size, entryAddresses);
+                    const auto count = facts.serviceValue(binding, arg.size + 1, entryAddresses);
+                    size =
+                        elementExtent(width.project(entryAddresses), count.project(entryAddresses));
                 } else if (arg.extent == win64::Extent::CountArgument) {
                     const auto count = facts.serviceValue(binding, arg.size, entryAddresses)
                                            .project(entryAddresses);
@@ -591,7 +616,8 @@ namespace forge::x86 {
                 }
 
                 for (const auto va : address.values()) {
-                    imageMemory.serviceArgument(step, va, arg.writes(), size);
+                    imageMemory.serviceArgument(step, va, arg.writes(), size,
+                                                arg.extent == win64::Extent::ElementProduct);
                 }
             }
 

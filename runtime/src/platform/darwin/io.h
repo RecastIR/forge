@@ -43,6 +43,9 @@ namespace forge::runtime::darwin {
         size_t writeChunkSize(size_t capacity) const noexcept;
         // Check signal policy once before the transfer and bound each span by writeChunkSize.
         WriteProgress write(std::span<const uint8_t> bytes) const noexcept;
+        // Preserve short output. A nonblocking pipe with insufficient free capacity
+        // returns zero progress; a disconnected reader reports its native error.
+        WriteProgress writeSome(std::span<const uint8_t> bytes) const noexcept;
 
       private:
         explicit Descriptor(int fd) : fd(fd) {}

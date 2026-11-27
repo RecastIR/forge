@@ -4,6 +4,8 @@
 #include <climits>
 #include <csignal>
 #include <fcntl.h>
+#include <poll.h>
+#include <sys/ioctl.h>
 #include <sys/resource.h>
 #include <sys/socket.h>
 #include <sys/stat.h>
@@ -61,6 +63,33 @@ namespace forge::runtime::darwin {
             }
 
             return StreamKind::OtherDevice;
+        }
+
+        ssize_t nativeWrite(int fd, StreamKind kind, std::span<const uint8_t> bytes) {
+            return kind == StreamKind::Socket ? ::send(fd, bytes.data(), bytes.size(), MSG_NOSIGNAL)
+                                              : ::write(fd, bytes.data(), bytes.size());
+        }
+
+        // Darwin reports queued bytes and current pipe capacity together in fstat.
+        // A closed reader must reach write(2) so callers see EPIPE.
+        std::optional<size_t> pipeSpace(int fd) {
+            pollfd state{fd, POLLOUT, 0};
+            if (::poll(&state, 1, 0) < 0 || (state.revents & (POLLERR | POLLHUP))) {
+                return std::nullopt;
+            }
+#ifdef __APPLE__
+            struct stat info{};
+            if (::fstat(fd, &info) == 0 && info.st_size >= 0 && info.st_blksize >= info.st_size) {
+                return static_cast<size_t>(info.st_blksize - info.st_size);
+            }
+#elif defined(F_GETPIPE_SZ)
+            const auto capacity = ::fcntl(fd, F_GETPIPE_SZ);
+            int used = 0;
+            if (capacity >= 0 && ::ioctl(fd, FIONREAD, &used) == 0 && capacity >= used) {
+                return static_cast<size_t>(capacity - used);
+            }
+#endif
+            return std::nullopt;
         }
 
         bool ignoresSignal(int signal) {
@@ -152,11 +181,32 @@ namespace forge::runtime::darwin {
 
     WriteProgress Descriptor::write(std::span<const uint8_t> bytes) const noexcept {
         return writeAll(bytes, [&](std::span<const uint8_t> remaining) {
-            if (streamKind == StreamKind::Socket) {
-                return ::send(fd, remaining.data(), remaining.size(), MSG_NOSIGNAL);
-            }
-
-            return ::write(fd, remaining.data(), remaining.size());
+            return nativeWrite(fd, streamKind, remaining);
         });
+    }
+
+    WriteProgress Descriptor::writeSome(std::span<const uint8_t> bytes) const noexcept {
+        if (streamKind == StreamKind::Pipe) {
+            const int flags = ::fcntl(fd, F_GETFL);
+            if (flags < 0) {
+                return {0, errno};
+            }
+            if ((flags & O_NONBLOCK) && pipeSpace(fd).value_or(bytes.size()) < bytes.size()) {
+                return {0, 0};
+            }
+            // Atomic chunks retain the exact prefix if another host closes the reader.
+            const auto limit = writeChunkSize(bytes.size());
+            return writeAll(bytes, [&](std::span<const uint8_t> remaining) {
+                return nativeWrite(fd, streamKind,
+                                   remaining.first(std::min(limit, remaining.size())));
+            });
+        }
+
+        ssize_t count;
+        do {
+            count = nativeWrite(fd, streamKind, bytes);
+        } while (count < 0 && errno == EINTR);
+
+        return count < 0 ? WriteProgress{0, errno} : WriteProgress{static_cast<size_t>(count), 0};
     }
 } // namespace forge::runtime::darwin

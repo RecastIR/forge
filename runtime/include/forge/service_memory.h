@@ -30,7 +30,7 @@ namespace forge::win64 {
         bool absent() const { return arg.optional && !start.value; }
 
         uint64_t byteSize() const
-            requires(arg.extent == Extent::InitializerEnd)
+            requires(arg.extent == Extent::InitializerEnd || arg.extent == Extent::ElementProduct)
         {
             return size;
         }
@@ -149,6 +149,14 @@ namespace forge::win64 {
             }
 
             return Table{GuestBuffer<arg>(call, first, *bytes)};
+        } else if constexpr (arg.extent == Extent::ElementProduct) {
+            using Buffer = std::optional<GuestBuffer<arg>>;
+            const auto bytes =
+                elementBytes(std::get<arg.size>(arguments), std::get<arg.size + 1>(arguments));
+            if (!bytes) {
+                return Buffer{};
+            }
+            return Buffer{GuestBuffer<arg>(call, first, *bytes)};
         } else {
             return GuestBuffer<arg>(call, first, size);
         }

@@ -107,7 +107,7 @@ def generate(output, mc, link, dlltool, clang):
             setup = (option + " = 1\n") if option else ""
             image("crt-stream-" + name + ".exe", setup + streams,
                   link_flags=["streams.lib", "msvcrt.dll.lib", "KERNEL32.dll.lib"])
-        for name in ("state", "sections"):
+        for name in ("state", "sections", "block"):
             image(f"crt-stream-{name}.exe", (sources / f"crt-stream-{name}.s").read_text(),
                   link_flags=["streams.lib", "msvcrt.dll.lib", "KERNEL32.dll.lib"])
         returns = (sources / "executable-return.s").read_text()

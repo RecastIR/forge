@@ -1,6 +1,7 @@
 #pragma once
 
 #include "crt/crt_parameters.h"
+#include "crt/standard_streams.h"
 #include "win32/process_parameters.h"
 #include "win32/standard_handles.h"
 
@@ -42,6 +43,7 @@ namespace forge::runtime {
         uint64_t topLevelExceptionFilter = 0;
 
         std::optional<CrtParameters> crt;
+        std::unique_ptr<CrtStandardStreams> streams;
         CrtApplicationType appType;
         int32_t crtErrno = 0;
         size_t heapUsage = 0;

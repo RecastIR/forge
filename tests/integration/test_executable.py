@@ -1488,19 +1488,9 @@ class Readiness(Workspace):
 
 
 def crt_stream_output(name, backend):
-    if name == "sections":
-        return 42, b"", b"ABCD"
-    if name == "state":
-        # Legacy x64 fields are pointer displacement, _cnt, _flag, _file, _bufsiz.
-        def pack(*fields):
-            return struct.pack("<Q4i", *fields)
-        stdin = pack(0, 0, 257, 0, 4096) if backend == "windows" else pack(0, 0, 1, 0, 0)
-        out = pack(0, 0, 2, 1, 0)
-        err = pack(0, 0, 2, 2, 0)
-        pending = pack(4, 4092, 10, 1, 4096)
-        records = stdin + out + err + struct.pack("<Qii", 2, 37, 91) + pending + err + pending
-        return 42, b"A\0\r\nB", records
-    return 42, b"#A\0\r\nB\r\r\nZ", b"\r\r\nZ#"
+    sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "differential/reference"))
+    from crt_streams import focused_output
+    return focused_output(backend, name, FIXTURES)
 
 
 class Reference(Workspace):
@@ -1543,7 +1533,7 @@ class Reference(Workspace):
             console_image("binary_stderr").name: (len(BINARY), b"", BINARY),
             console_image("nested_exit").name: (0xcafe002a, b"", b""),
         }
-        for name in ("state", "sections", "return", "exit"):
+        for name in ("state", "sections", "block", "return", "exit"):
             expected[f"crt-stream-{name}.exe"] = crt_stream_output(name, "wine")
         for prefix in ("crt-term-", "executable-startup-info-"):
             for name, observation in legacy_observations("wine", prefix).items():
@@ -1562,7 +1552,7 @@ class Reference(Workspace):
         denied = image("virtual-protect-denied")
         inputs = Path(__file__).resolve().parents[1] / "differential/reference/executable-inputs.txt"
         filenames = inputs.read_text().splitlines()
-        self.assertEqual(filenames, sorted([*expected, observer.name, denied.name, "crt-stream-reference.exe"]))
+        self.assertEqual(filenames, sorted([*expected, observer.name, denied.name, "crt-stream-invalid.exe", "crt-stream-reference.exe"]))
         for case in range(45):
             with self.subTest(case=case):
                 check_observation("wine", case, *self.capture(observer, [f"{case:02}"]))
@@ -1570,6 +1560,11 @@ class Reference(Workspace):
         print(f"{denied.name} exit={status:#x} stdout={stdout.hex()} stderr={stderr.hex()}", flush=True)
         self.assertEqual((status, stderr), (0xc0000005, b""))
         self.assertIn(b"page fault on write access to 0x0000000140003000", stdout)
+        for pe, args in ((FIXTURES / "crt-stream-invalid.exe", []),
+                         (FIXTURES / "crt-stream-reference.exe", ["28"])):
+            status, stdout, stderr = self.capture(pe, args)
+            self.assertEqual(status, 0xc0000005)
+            self.assertIn(b"page fault", (stdout + stderr).lower())
         for name in expected:
             with self.subTest(pe=name):
                 self.assertEqual(self.capture(FIXTURES / name), expected[name])
@@ -1982,6 +1977,68 @@ class Console(Workspace):
                 result = self.program()
                 self.assertEqual((result.returncode, result.stdout, result.stderr),
                                  (dict(terminal=57, all_terminal=57, shorten_mixed=42).get(target, 125), b"", expected))
+
+    def test_crt_streams(self):
+        for name in ("state", "sections", "block", "return", "exit"):
+            pe = FIXTURES / f"crt-stream-{name}.exe"
+            for base in (None, 0x180000000):
+                if base:
+                    run(CONTRACT, "--guest-base", hex(base), pe, self.output,
+                        OPT, LLC, "/usr/bin/xcrun", *LINK, check=True)
+                else:
+                    self.compile(pe)
+                result = self.program()
+                self.assertEqual((result.returncode, result.stdout, result.stderr),
+                                 crt_stream_output(name, "windows"))
+                if name in ("return", "exit"):
+                    merged = self.program(stderr=subprocess.STDOUT)
+                    self.assertEqual((merged.returncode, merged.stdout),
+                                     (42, b"#A\0\r\nB\r\r\nZ\r\r\nZ#"))
+        for name, diagnostic in (("invalid", b"unsupported legacy MSVCRT stream"),
+                                 ("fault", b"access=1 reason=2"),
+                                 ("field", b"access=2 reason=3")):
+            self.compile(FIXTURES / f"crt-stream-{name}.exe")
+            result = self.program()
+            self.assertEqual((result.returncode, result.stdout), (125, b""))
+            self.assertIn(diagnostic, result.stderr)
+
+    def test_crt_stream_failures(self):
+        sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "differential/reference"))
+        from crt_streams import block_records, evidence, summarize
+        cases = evidence("windows")["cases"]
+        self.compile(FIXTURES / "crt-stream-block.exe")
+        def close_inputs():
+            os.close(0)
+            os.close(1)
+        missing = self.program(preexec_fn=close_inputs)
+        self.assertEqual((missing.returncode, missing.stdout, missing.stderr),
+                         (42, b"", block_records(cases, "missing")))
+        for name in ("broken", "short", "prefix"):
+            with self.subTest(pipe=name):
+                read, write = os.pipe()
+                with os.fdopen(read, "rb") as reader, os.fdopen(write, "wb", buffering=0) as writer:
+                    if name == "broken":
+                        reader.close()
+                    else:
+                        os.set_blocking(write, False)
+                        filled = 0
+                        while filled < 1 << 20:
+                            n = writer.write(b"F" * 4096)
+                            if not n:
+                                break
+                            filled += n
+                        room = 7 if name == "short" else 5119
+                        self.assertLess(room, filled)
+                        self.assertLess(filled, 1 << 20)
+                        self.assertEqual(os.read(read, room), b"F" * room)
+                    result = self.program(stdout=writer)
+                    writer.close()
+                    self.assertEqual((result.returncode, result.stderr), (42, block_records(cases, name)))
+                    if name != "broken":
+                        remaining = reader.read()
+                        self.assertEqual(remaining[:filled-room], b"F" * (filled-room))
+                        wanted = "" if name == "short" else cases["prefix-16"]["output"]
+                        self.assertEqual(summarize(remaining[filled-room:]), wanted)
 
     def test_virtual_protect(self):
         pe = image("virtual-protect")

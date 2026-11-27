@@ -28,6 +28,14 @@ forge_rt_status forge_rt_msvcrt_getmainargs(forge_rt_instance *instance,
                                             int32_t *outResult,
                                             forge_rt_memory_fault *fault) FORGE_CRT_NOEXCEPT;
 
+/* Stable guest FILE array and checked, element-counted output for legacy standard streams. */
+forge_rt_status forge_rt_msvcrt_iob_func(forge_rt_instance *, forge_rt_thread_token,
+                                         uint64_t *outBase) FORGE_CRT_NOEXCEPT;
+forge_rt_status forge_rt_msvcrt_fwrite(forge_rt_instance *, forge_rt_thread_token, uint64_t source,
+                                       uint64_t size, uint64_t count, uint64_t stream,
+                                       uint64_t *outElements,
+                                       forge_rt_memory_fault *fault) FORGE_CRT_NOEXCEPT;
+
 /* Set the effective legacy CRT application type for the active process. */
 forge_rt_status forge_rt_msvcrt_set_app_type(forge_rt_instance *instance,
                                              forge_rt_thread_token thread,

@@ -49,8 +49,13 @@ entry:
     jne .Lfailed
 
 .ifdef invalid_stream
-    output 49, head, 1, 1
+    leaq head(%rip), %rcx
+    movl $1, %edx
+    movl $1, %r8d
+    movl $1, %r9d
+    callq fwrite
 .elseif bad_source
+    output 48, head, 2, 2
     leaq 96(%rsp), %rcx
     movl $1, %edx
     movl $2, %r8d
