@@ -560,6 +560,14 @@ namespace forge::x86 {
                 return;
             }
 
+            if (binding.nativeSymbol == win64::crtVfprintf.nativeSymbol) {
+                if (collect) {
+                    imageMemory.formattedInputs(*function.instructionContaining(site.instruction));
+                }
+
+                return;
+            }
+
             // Read all arguments from the incoming state, even when an earlier parameter
             // can overwrite the stack slot that supplies another parameter or its count.
             auto outgoing = facts.spills;

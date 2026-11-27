@@ -79,21 +79,23 @@ def stream_observation(case, status, stdout, stderr, expected, wine):
     return row
 
 
+def producer_inputs(directory):
+    manifest = (directory / "SHA256SUMS").read_bytes()
+    if hashlib.sha256(manifest).hexdigest() != os.environ["PE_MANIFEST_SHA256"]:
+        raise ValueError("producer manifest checksum mismatch")
+    return {name: sha for sha, name in (line.split("  ", 1) for line in manifest.decode().splitlines())}
+
+
 def observe(directory, destination, wine=None):
     pe = (directory / "crt-stream-reference.exe").resolve()
-    manifest = (directory / "SHA256SUMS").read_bytes()
     digest = hashlib.sha256(pe.read_bytes()).hexdigest()
     backend = "wine" if wine else "windows"
     expected = evidence(backend)
-    if hashlib.sha256(manifest).hexdigest() != os.environ["PE_MANIFEST_SHA256"]:
-        raise ValueError("producer manifest checksum mismatch")
-    declared = {name: sha for sha, name in (line.split("  ", 1) for line in manifest.decode().splitlines())}
+    declared = producer_inputs(directory)
     for name, checksum in {pe.name: expected["observer"], **expected["inputs"]}.items():
         if declared.get(name) != checksum or hashlib.sha256((directory / name).read_bytes()).hexdigest() != checksum:
             raise ValueError(f"{backend}: {name} checksum mismatch")
     destination.mkdir(parents=True, exist_ok=True)
-    from crt_vfprintf import observe as observe_format
-    observe_format(directory, destination, wine, declared, launch, windows_output_failure)
     from crt_puts import observe_puts
     observe_puts(directory, destination, wine, declared, launch, windows_output_failure)
     observed = {}

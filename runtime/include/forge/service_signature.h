@@ -31,7 +31,8 @@ namespace forge::win64 {
         CountArgument,
         CString,
         InitializerEnd,
-        ElementProduct
+        ElementProduct,
+        FormatArguments
     };
     enum class Callback : uint8_t { None, Initializer, Registration, Cleanup };
 
@@ -95,7 +96,8 @@ namespace forge::win64 {
         Value type;
         Access access = Access::None;
         Extent extent = Extent::None;
-        // Fixed byte count, bounded CString scan limit (including NUL), or argument index.
+        // Fixed size, CString limit including NUL, FormatArguments ceiling in bytes, or size
+        // argument index.
         unsigned size = 0;
         bool optional = false;
 
@@ -141,6 +143,8 @@ namespace forge::win64 {
             switch (arg.extent) {
             case Extent::CString:
                 return arg.access == Access::Input;
+            case Extent::FormatArguments:
+                return arg.access == Access::Input && !arg.optional && arg.size && !(arg.size % 8);
             case Extent::Fixed:
                 return arg.size != 0;
             case Extent::InitializerEnd:
@@ -430,6 +434,17 @@ namespace forge::win64 {
                                                               Extent::CString, crtPutsScanLimit}>(
         "msvcrt.dll", "puts", LastError::OnFailure, FORGE_SERVICE_ADAPTER(forge_rt_msvcrt_puts),
         Requirement::Process);
+    inline constexpr unsigned crtFormatLimit = 4096, crtFormatConversions = 64;
+    inline constexpr Argument crtFormatStringOperand{Value::Address, Access::Input, Extent::CString,
+                                                     8192};
+    inline constexpr auto crtVfprintf =
+        bind<Value::I32, Argument{Value::Address},
+             Argument{Value::Address, Access::Input, Extent::CString, crtFormatLimit},
+             Argument{Value::Address, Access::Input, Extent::FormatArguments,
+                      crtFormatConversions * 8}>("msvcrt.dll", "vfprintf", LastError::OnFailure,
+                                                 FORGE_SERVICE_ADAPTER(forge_rt_msvcrt_vfprintf),
+                                                 Requirement::Process);
+
     inline constexpr auto crtFwrite =
         bind<Value::Word, Argument{Value::Address, Access::Input, Extent::ElementProduct, 1},
              Argument{Value::Word}, Argument{Value::Word}, Argument{Value::Address}>(
@@ -501,5 +516,6 @@ namespace forge::win64 {
         crtIob,
         crtFwrite,
         crtPuts,
+        crtVfprintf,
     };
 } // namespace forge::win64

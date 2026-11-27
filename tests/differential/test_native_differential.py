@@ -112,12 +112,26 @@ class NativeDifferentialTests(unittest.TestCase):
         failure = target + 0x280
         extra_import = name in ("argv", "argv_edges", "puts")
         delta = 0xe8d if extra_import else 0xe85
+        site = failure + 0x5e
+        thunk = site + 5 + delta
+        slot = fwrite_slot + (0x38 if extra_import else 0x30)
+        self.assertIn({"dll": "msvcrt.dll", "name": "vfprintf"}, ctx["imports"])
+        formatted = next(s for s in crt["symbols"] if s["name"] == "vfprintf")
+        self.assertEqual((formatted["catalogued_service"], formatted["iat_slot_rva"]), (True, hex(slot)))
+        self.assertEqual(data[site - 0xa00:site - 0xa00 + 5], b"\xe8" + struct.pack("<i", delta))
+        self.assertEqual(data[thunk - 0xa00:thunk - 0xa00 + 6], b"\xff\x25" + struct.pack("<i", slot - thunk - 6))
+        self.assertNotIn({"caller_rva": hex(failure), "instruction_rva": hex(site),
+                          "target_rva": hex(thunk)}, ctx["unresolved_calls"])
         self.assertEqual((ctx["function_rva"], ctx["block_rva"], ctx["instruction_rva"],
                           ctx["opcode"], ctx["bytes"], ctx["branch_target"]),
-                         (hex(failure), hex(failure), hex(failure + 0x5e), "CALL64pcrel32",
-                          (b"\xe8" + struct.pack("<i", delta)).hex(), failure + 0x63 + delta))
+                         (hex(failure), hex(failure), hex(site + 5), "CALL64pcrel32",
+                          "e8280e0000", site + 10 + 0xe28))
+        abort_slot = fwrite_slot - 0x28
         self.assertEqual((ctx["import_dll"], ctx["import_symbol"], ctx["iat_slot_rva"]),
-                         ("msvcrt.dll", "vfprintf", hex(fwrite_slot + (0x38 if extra_import else 0x30))))
+                         ("msvcrt.dll", "abort", hex(abort_slot)))
+        abort_thunk = ctx["branch_target"]
+        self.assertEqual(data[abort_thunk - 0xa00:abort_thunk - 0xa00 + 6],
+                         b"\xff\x25" + struct.pack("<i", abort_slot - abort_thunk - 6))
         offset = ctx["file_offset"]
         self.assertEqual(data[offset:offset + len(bytes.fromhex(ctx["bytes"]))].hex(), ctx["bytes"])
         return report

@@ -50,7 +50,9 @@ namespace {
 
             return failureExit;
         case FORGE_RT_UNSUPPORTED:
-            if (result.status == FORGE_RT_UNSUPPORTED_CRT_STREAM) {
+            if (result.status == FORGE_RT_UNSUPPORTED_CRT_FORMAT) {
+                std::fputs("forge: unsupported legacy MSVCRT vfprintf format or limit\n", stderr);
+            } else if (result.status == FORGE_RT_UNSUPPORTED_CRT_STREAM) {
                 std::fputs("forge: unsupported legacy MSVCRT stream operation\n", stderr);
             } else if (result.status == FORGE_RT_UNSUPPORTED_PAGE_PROTECTION) {
                 std::fputs("forge: unsupported guest page protection change\n", stderr);

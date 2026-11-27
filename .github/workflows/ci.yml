@@ -221,6 +221,8 @@ jobs:
           python -B tests/differential/reference/crt_streams.py executables stream-observations 0<> stream-probe-stdin
           test ! -s stream-probe-stdin
           echo "crt_streams=success" >> "$GITHUB_OUTPUT"
+          python -B tests/differential/reference/crt_vfprintf.py executables stream-observations
+          echo "crt_vfprintf=success" >> "$GITHUB_OUTPUT"
           python -B tests/differential/reference/virtual_protect.py executables
           echo "virtual_protect=success" >> "$GITHUB_OUTPUT"
           python -B tests/integration/test_executable.py windows-startup build/fixtures/windows-x64
@@ -275,8 +277,10 @@ jobs:
             --entrypoint /bin/sh "$image" -ec '
               /usr/lib/wine/wineserver64 -p
               "$FORGE_WINE" cmd /c ver >/dev/null
-              python3 -B /suite/crt_streams.py /input /observations'
+              python3 -B /suite/crt_streams.py /input /observations
+              python3 -B /suite/crt_vfprintf.py /input /observations'
           echo "crt_streams=success" >> "$GITHUB_OUTPUT"
+          echo "crt_vfprintf=success" >> "$GITHUB_OUTPUT"
         env:
           PE_MANIFEST_SHA256: ${{ needs.macos-dev.outputs.executable_inputs_sha256 }}
 

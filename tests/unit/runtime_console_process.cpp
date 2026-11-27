@@ -401,6 +401,194 @@ namespace {
         REQUIRE(fileContentsEqual(b.get(), "B\r\nB\r\n"));
     }
 
+    void formatCallback(forge_rt_execution *view, uint64_t target) noexcept {
+        REQUIRE(target == 1);
+        constexpr size_t slot = 256;
+        constexpr auto format = FORGE_RT_STACK_BASE + slot - 3;
+        std::memcpy(view->stackBytes + slot - 3, "%d", 3);
+        std::memset(view->stackMarks + slot - 3, FORGE_RT_MARK_CONCRETE, 3);
+        std::memset(view->stackMarks + slot, FORGE_RT_MARK_CALLBACK_RETURN, 8);
+        const auto stream = view->instance->windows->streams->mapping.base + 48;
+        forge_rt_memory_fault fault{};
+        int32_t result = 89;
+        REQUIRE(forge_rt_msvcrt_vfprintf(view->instance, view->thread, stream, format,
+                                         FORGE_RT_STACK_BASE + slot, &result,
+                                         &fault) == FORGE_RT_UNSUPPORTED_CALLBACK_RETURN);
+        REQUIRE(result == 89);
+
+        // The NUL immediately before the protected return address ends this scan.
+        REQUIRE(forge_rt_msvcrt_vfprintf(view->instance, view->thread, stream, format + 2,
+                                         UINT64_MAX, &result, &fault) == FORGE_RT_OK &&
+                result == 0);
+        std::memset(view->stackMarks + slot, FORGE_RT_MARK_UNINITIALIZED, 8);
+    }
+
+    struct FormatProbe {
+        explicit FormatProbe(forge_rt_execution &execution)
+            : view(execution), instance(view.instance), thread(view.thread),
+              streams(*instance->windows->streams),
+              stream(streams.mapping.base + sizeof(forge::runtime::LegacyFile)) {
+            REQUIRE(forge_rt_current_invocation(instance, thread, &token) == FORGE_RT_OK);
+        }
+
+        forge_rt_execution &view;
+        forge_rt_instance *instance;
+        forge_rt_thread_token thread;
+        forge::runtime::CrtStandardStreams &streams;
+        uint64_t stream, heap = 0, table = 0;
+        forge_rt_invocation_token token{};
+        forge_rt_memory_fault fault{};
+        int32_t result = 73;
+        static constexpr uint64_t format = FORGE_RT_ENTRY_RSP - 512;
+        static constexpr uint64_t slots = FORGE_RT_ENTRY_RSP - 8;
+        static constexpr size_t stringLimit = forge::win64::crtFormatStringOperand.size;
+        const std::string percent = std::string(2 * forge::win64::crtFormatConversions, '%');
+
+        void write(uint64_t va, const void *data, size_t size) {
+            REQUIRE(forge_rt_write_guest(instance, thread, token, va, size, data, size, &fault) ==
+                    FORGE_RT_OK);
+        }
+
+        forge_rt_status call(uint64_t fmt, uint64_t args) {
+            return forge_rt_msvcrt_vfprintf(instance, thread, stream, fmt, args, &result, &fault);
+        }
+
+        void setFormat(const std::string &text) { write(format, text.c_str(), text.size() + 1); }
+
+        void checkAdmission(uint64_t previous) {
+            REQUIRE(forge_rt_set_last_error(instance, thread, initialError) == FORGE_RT_OK);
+            instance->windows->crtErrno = 37;
+            setFormat("%d");
+            std::thread foreign(
+                [&] { REQUIRE(call(format, slots) == FORGE_RT_INVALID_INVOCATION); });
+            foreign.join();
+
+            if (previous) {
+                REQUIRE(forge_rt_msvcrt_vfprintf(instance, thread, previous, format, slots, &result,
+                                                 &fault) == FORGE_RT_UNSUPPORTED_CRT_STREAM);
+            }
+
+            REQUIRE(call(1, slots) == FORGE_RT_GUEST_FAULT && fault.address == 1);
+            REQUIRE(call(source, slots) == FORGE_RT_GUEST_FAULT && fault.address == source + 1);
+            REQUIRE(forge_rt_msvcrt_vfprintf(instance, thread, stream + 1, format, 0, &result,
+                                             &fault) == FORGE_RT_UNSUPPORTED_CRT_STREAM);
+            REQUIRE(call(format, 0) == FORGE_RT_GUEST_FAULT && fault.address == 0);
+            REQUIRE(call(format, source) == FORGE_RT_GUEST_FAULT && fault.address == source + 1);
+            REQUIRE(call(format, FORGE_RT_ENTRY_RSP) == FORGE_RT_GUEST_FAULT &&
+                    fault.reason == FORGE_RT_FAULT_STACK);
+            REQUIRE(call(format, UINT64_MAX - 1) == FORGE_RT_GUEST_FAULT &&
+                    fault.reason == FORGE_RT_FAULT_OVERFLOW);
+
+            for (const auto *invalid : {"prefix%s%n", "%f", "%*d", "%1$d", "%ls", "%q", "%llx", "%",
+                                        "%4097d", "%.4097d", "%999999999999999999999u"}) {
+                setFormat(invalid);
+                REQUIRE(call(format, 0) == FORGE_RT_UNSUPPORTED_CRT_FORMAT);
+            }
+        }
+
+        void checkRejectedInputs() {
+            setFormat(percent + "%%");
+            REQUIRE(call(format, 0) == FORGE_RT_UNSUPPORTED_CRT_FORMAT);
+
+            REQUIRE(forge_rt_msvcrt_malloc(instance, thread, stringLimit + 1, &heap) ==
+                        FORGE_RT_OK &&
+                    heap);
+            std::string longString(stringLimit, 'A');
+            write(heap, longString.c_str(), longString.size() + 1);
+            REQUIRE(call(heap, 0) == FORGE_RT_UNSUPPORTED_CRT_FORMAT);
+            setFormat("%s");
+            write(slots, &heap, sizeof(heap));
+            REQUIRE(call(format, slots) == FORGE_RT_UNSUPPORTED_CRT_FORMAT);
+            const uint64_t bad = source + 1;
+            write(slots, &bad, sizeof(bad));
+            REQUIRE(call(format, slots) == FORGE_RT_GUEST_FAULT && fault.address == bad);
+
+            setFormat("%4096u%4096u%4096u%4096u!");
+            std::array<uint64_t, forge::win64::crtFormatConversions> values{};
+            REQUIRE(forge_rt_msvcrt_malloc(instance, thread, sizeof(values), &table) ==
+                        FORGE_RT_OK &&
+                    table);
+            const uint64_t callback = 1;
+            write(table, &callback, sizeof(callback));
+            REQUIRE(forge_rt_msvcrt_initterm(instance, thread, table, table + 8, &fault,
+                                             formatCallback) == FORGE_RT_OK);
+            write(table, values.data(), sizeof(values));
+            REQUIRE(call(format, table) == FORGE_RT_UNSUPPORTED_CRT_FORMAT);
+            REQUIRE(!streams.buffers[1] && result == 73 && lastError(view) == initialError &&
+                    instance->windows->crtErrno == 37);
+        }
+
+        void checkAcceptedInputs() {
+            setFormat(percent);
+            REQUIRE(call(format, UINT64_MAX) == FORGE_RT_OK && result == 64);
+            REQUIRE(call(stream, UINT64_MAX) == FORGE_RT_UNSUPPORTED_CRT_STREAM);
+            setFormat("%u");
+            REQUIRE(call(format, stream) == FORGE_RT_UNSUPPORTED_CRT_STREAM);
+            const uint64_t pending = streams.files[1].base;
+            write(slots, &pending, sizeof(pending));
+            setFormat("%s");
+            REQUIRE(call(format, slots) == FORGE_RT_UNSUPPORTED_CRT_STREAM);
+            setFormat("%d");
+            const int32_t integer = -19;
+            constexpr auto narrow = format + 256;
+            write(narrow, &integer, sizeof(integer));
+            REQUIRE(call(format, narrow) == FORGE_RT_OK && result == 3);
+            setFormat("%d%d");
+            REQUIRE(call(format, slots) == FORGE_RT_GUEST_FAULT &&
+                    fault.address == FORGE_RT_ENTRY_RSP);
+            REQUIRE(streams.files[1].ptr - streams.files[1].base == 67);
+            std::string integers;
+
+            for (size_t i = 0; i < forge::win64::crtFormatConversions; ++i) {
+                integers += "%d";
+            }
+
+            setFormat(integers);
+            REQUIRE(call(format, table) == FORGE_RT_OK && result == 64);
+            setFormat("%4096u%4096u%4096u%4096u");
+            REQUIRE(call(format, table) == FORGE_RT_OK && result == 16384);
+            setFormat("%.4096u");
+            REQUIRE(call(format, table) == FORGE_RT_OK && result == 4096);
+
+            const char nul = 0;
+            write(heap + stringLimit - 1, &nul, 1);
+            write(slots, &heap, sizeof(heap));
+            setFormat("%s");
+            REQUIRE(call(format, slots) == FORGE_RT_OK && result == stringLimit - 1);
+            write(heap + forge::win64::crtFormatLimit - 1, &nul, 1);
+            REQUIRE(call(heap, UINT64_MAX) == FORGE_RT_OK &&
+                    result == forge::win64::crtFormatLimit - 1);
+            REQUIRE(forge_rt_msvcrt_free(instance, thread, heap) == FORGE_RT_OK);
+            REQUIRE(forge_rt_msvcrt_free(instance, thread, table) == FORGE_RT_OK);
+        }
+    };
+
+    void formatMemory(forge_rt_execution *execution) {
+        FormatProbe probe(*execution);
+        probe.checkAdmission(execution->rcx);
+        probe.checkRejectedInputs();
+        probe.checkAcceptedInputs();
+
+        execution->result = {FORGE_RT_RETURNED, FORGE_RT_OK, probe.stream, {}, 0};
+        REQUIRE(probe.call(probe.format, 0) == FORGE_RT_INVALID_STATE);
+    }
+
+    void checkFormatMemory() {
+        constexpr forge_rt_import formatted{"msvcrt.dll", "vfprintf"};
+        auto artifact = consoleArtifact(formatMemory);
+        artifact.imports = &formatted;
+        artifact.importCount = 1;
+        std::unique_ptr<FILE, decltype(&std::fclose)> out(std::tmpfile(), std::fclose);
+        REQUIRE(out != nullptr);
+        auto first = registeredWithStream(artifact, STDOUT_FILENO, fileno(out.get()));
+        const auto previous = run(first);
+        REQUIRE(previous.kind == FORGE_RT_RETURNED && previous.value);
+        first.reset();
+        auto second = registeredWithStream(artifact, STDOUT_FILENO, fileno(out.get()));
+        const auto fresh = run(second, previous.value);
+        REQUIRE(fresh.kind == FORGE_RT_RETURNED && fresh.value != previous.value);
+    }
+
     void streamIdentity(forge_rt_execution *execution) {
         const auto thread = execution->thread;
         auto *instance = execution->instance;
@@ -476,7 +664,7 @@ namespace {
         REQUIRE(setrlimit(RLIMIT_FSIZE, &one) == 0);
         auto &streams = *instance->windows->streams;
         const auto &file = streams.files[2];
-        if (execution->rcx) {
+        if (execution->rcx == 1) {
             // The file is already at its limit. The direct prefix fails before the tail starts.
             REQUIRE(put(source, 4097) == FORGE_RT_OK && elements == 0 && file.base == 0);
             const auto &reserved = streams.buffers[2];
@@ -489,7 +677,16 @@ namespace {
             // Fill via two calls so the previous block is buffered. Its flush accepts only 'A'.
             REQUIRE(put(source, 1) == FORGE_RT_OK && elements == 1);
             REQUIRE(put(source + 1, 4095) == FORGE_RT_OK && elements == 4095);
-            REQUIRE(put(source + 4096, 1) == FORGE_RT_OK && elements == 0);
+            if (execution->rcx == 2) {
+                int32_t result = 73;
+                REQUIRE(forge_rt_msvcrt_vfprintf(instance, execution->thread, base + 96,
+                                                 source + 4096, UINT64_MAX, &result,
+                                                 &fault) == FORGE_RT_OK);
+                REQUIRE(result == -1);
+            } else {
+                REQUIRE(put(source + 4096, 1) == FORGE_RT_OK && elements == 0);
+            }
+
             REQUIRE((file.flags & 0x20) && file.ptr == file.base + 1 && file.count == 4095);
         }
 
@@ -498,24 +695,26 @@ namespace {
     }
 
     void checkStreamWriteRetries() {
-        std::array<uint8_t, 4097> bytes{'A', '\n', '\n'};
-        bytes.back() = 'Z';
+        std::array<uint8_t, 4098> bytes{'A', '\n', '\n'};
+        bytes[4096] = 'Z';
         const forge_rt_backing data{bytes.size(), bytes.data(), nullptr, 0};
         const forge_rt_region_template row{source, bytes.size(), 0, 0, FORGE_RT_READ};
-        constexpr forge_rt_import output{"msvcrt.dll", "fwrite"};
+        constexpr forge_rt_import outputs[]{{"msvcrt.dll", "fwrite"}, {"msvcrt.dll", "vfprintf"}};
         auto artifact = consoleArtifact(retryStreamWrite, row);
         artifact.size = bytes.size();
         artifact.backings = &data;
-        artifact.imports = &output;
-        artifact.importCount = 1;
+        artifact.imports = outputs;
+        artifact.importCount = std::size(outputs);
 
         struct sigaction ignore{}, previous{};
         ignore.sa_handler = SIG_IGN;
         REQUIRE(sigemptyset(&ignore.sa_mask) == 0 && sigaction(SIGXFSZ, &ignore, &previous) == 0);
-        for (const bool full : {false, true}) {
+
+        for (const uint64_t mode : {0u, 1u, 2u}) {
+            const bool full = mode == 1;
             std::unique_ptr<FILE, decltype(&std::fclose)> file(std::tmpfile(), std::fclose);
             REQUIRE(file && (!full || write(fileno(file.get()), "!", 1) == 1));
-            const auto result = run(registeredWithStderr(artifact, fileno(file.get())), full);
+            const auto result = run(registeredWithStderr(artifact, fileno(file.get())), mode);
             REQUIRE(result.kind == FORGE_RT_RETURNED && result.value == 42);
             REQUIRE(fileContentsEqual(file.get(), full ? "!Z" : "AZ"));
         }
@@ -1241,6 +1440,7 @@ void testRuntimeConsoleProcess(const char *fatalObservations) {
 
     checkStreamIdentity();
     checkPutsMemory();
+    checkFormatMemory();
     checkStreamWriteRetries();
     checkStreamTermination();
     checkFatalPartialWrite(31, fatal31);

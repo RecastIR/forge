@@ -70,6 +70,7 @@ namespace forge::x86 {
 
         void checkStackMapping(const Step &step) const;
         void addressTaken(const Step &step, uint64_t va);
+        void formattedInputs(const Step &step);
         void serviceArgument(const Step &step, uint64_t va, const win64::Argument &argument,
                              std::optional<uint64_t> size);
 
@@ -104,6 +105,7 @@ namespace forge::x86 {
         std::optional<std::vector<RvaRange>> importWrites;
         uint64_t loadBase;
         llvm::StringRef executableHeaders;
+        const Step *formattedRead = nullptr;
         const Step *indirectRead = nullptr;
         const Step *indirectWrite = nullptr;
         bool overlapsStack;

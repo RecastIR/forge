@@ -178,7 +178,8 @@ namespace {
 
             const auto adapter = service->nativeSymbol;
             if (adapter == win64::crtIob.nativeSymbol || adapter == win64::crtFwrite.nativeSymbol ||
-                adapter == win64::crtPuts.nativeSymbol) {
+                adapter == win64::crtPuts.nativeSymbol ||
+                adapter == win64::crtVfprintf.nativeSymbol) {
                 crtStreams = true;
                 standardHandles = true;
             } else if (adapter == win64::getStdHandle.nativeSymbol ||

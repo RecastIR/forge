@@ -7,6 +7,7 @@ add_library(forge_runtime STATIC
   src/core/heap.cpp
   src/compat/process_state.cpp
   src/compat/crt/standard_streams.cpp
+  src/compat/crt/format.cpp
   src/compat/crt/fatal.cpp
   src/compat/crt/initterm.cpp
   src/compat/crt/termination.cpp

@@ -617,6 +617,14 @@ namespace forge::x86 {
         return std::min(end - rva, limit);
     }
 
+    void ImageMemory::formattedInputs(const Step &step) {
+        // A runtime format can follow a string pointer from any consumed slot. Reuse the
+        // bounded PE data planner, including its loader exclusions and backing budgets.
+        if (!formattedRead) {
+            formattedRead = &step;
+        }
+    }
+
     void ImageMemory::serviceArgument(const Step &step, uint64_t va,
                                       const win64::Argument &argument,
                                       std::optional<uint64_t> size) {
@@ -969,9 +977,9 @@ namespace forge::x86 {
             }
         }
 
+        const auto *read = indirectRead ? indirectRead : formattedRead;
         for (const auto &section : source.module().sections) {
-            const auto *origin =
-                section.writableData() && indirectWrite ? indirectWrite : indirectRead;
+            const auto *origin = section.writableData() && indirectWrite ? indirectWrite : read;
 
             if (origin && (section.immutable() || section.writableData()) &&
                 section.permissions[2] != 'x' && section.virtualSize) {
@@ -984,7 +992,7 @@ namespace forge::x86 {
     std::vector<ImageMemory::Span> ImageMemory::selectedSpans() {
         auto spans = std::move(direct);
 
-        if (indirectRead || indirectWrite) {
+        if (indirectRead || indirectWrite || formattedRead) {
             addIndirectSpans(spans);
         }
 

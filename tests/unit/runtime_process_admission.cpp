@@ -205,6 +205,15 @@ namespace {
         };
         const auto before = instance->reservations.size();
         int32_t line = 73;
+        const auto format = [&] {
+            return forge_rt_msvcrt_vfprintf(instance, thread, base + 48, imageBase + 4095,
+                                            UINT64_MAX, &line, &fault);
+        };
+        rejectAllocations = true;
+        const auto formatted = format();
+        rejectAllocations = false;
+        REQUIRE(formatted == FORGE_RT_RESOURCE_EXHAUSTED && line == 73);
+        REQUIRE(instance->reservations.size() == before && !instance->windows->streams->buffers[1]);
         rejectAllocations = true;
         const auto putsStatus = forge_rt_msvcrt_puts(instance, thread, imageBase, &line, &fault);
         rejectAllocations = false;
@@ -212,6 +221,7 @@ namespace {
         REQUIRE(instance->reservations.size() == before && !instance->windows->streams->buffers[1]);
         REQUIRE(forge_rt_msvcrt_puts(instance, thread, imageBase, &line, &fault) == FORGE_RT_OK &&
                 line == 0);
+        REQUIRE(format() == FORGE_RT_OK && line == 1);
 
         const auto afterLine = instance->reservations.size();
         rejectAllocations = true;
@@ -259,13 +269,13 @@ namespace {
         REQUIRE(forge_rt_process_run(process, nullptr, &result) == FORGE_RT_OK &&
                 result.value == 42);
         REQUIRE(forge_rt_process_destroy(process) == FORGE_RT_OK);
-        std::array<uint8_t, bytes.size() + 1> actual{};
+        std::array<uint8_t, bytes.size() + 2> actual{};
         REQUIRE(pread(fileno(file), actual.data(), actual.size(), 0) == bytes.size());
         REQUIRE(std::equal(bytes.begin(), bytes.end(), actual.begin()));
-        REQUIRE(lseek(fileno(out), 0, SEEK_END) == 4098);
-        REQUIRE(pread(fileno(out), actual.data(), actual.size(), 0) == 4098);
+        REQUIRE(lseek(fileno(out), 0, SEEK_END) == 4099);
+        REQUIRE(pread(fileno(out), actual.data(), actual.size(), 0) == 4099);
         REQUIRE(std::equal(bytes.begin(), bytes.end() - 1, actual.begin()));
-        REQUIRE(actual[4096] == '\r' && actual[4097] == '\n');
+        REQUIRE(actual[4096] == '\r' && actual[4097] == '\n' && actual[4098] == 'T');
         REQUIRE(std::fclose(file) == 0 && std::fclose(out) == 0);
     }
 

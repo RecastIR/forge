@@ -1572,9 +1572,14 @@ class Reference(Workspace):
         inputs = Path(__file__).resolve().parents[1] / "differential/reference/executable-inputs.txt"
         filenames = inputs.read_text().splitlines()
         from crt_puts import VARIANTS, check_input, check_observation as check_puts
-        from crt_vfprintf import VARIANTS as format_variants
-        self.assertEqual(filenames, sorted([*(f"crt-vfprintf-{v}.exe" for v in format_variants), *expected, observer.name, denied.name, "crt-stream-invalid.exe",
-                                            "crt-stream-reference.exe", *(f"crt-puts-{v}.exe" for v in VARIANTS)]))
+        import crt_vfprintf
+        self.assertEqual(filenames, sorted([*expected, observer.name, denied.name, "crt-stream-invalid.exe",
+                                            "crt-stream-reference.exe", *(f"crt-puts-{v}.exe" for v in VARIANTS),
+                                            *(f"crt-vfprintf-{v}.exe" for v in crt_vfprintf.VARIANTS)]))
+        for variant in crt_vfprintf.VARIANTS:
+            pe = FIXTURES / f"crt-vfprintf-{variant}.exe"
+            crt_vfprintf.check_input(pe)
+            crt_vfprintf.check_observation("wine", variant, "pipe", *self.capture(pe))
         for variant in VARIANTS:
             pe = FIXTURES / f"crt-puts-{variant}.exe"
             check_input(pe)
@@ -2057,6 +2062,46 @@ class Console(Workspace):
                 self.assertEqual(remaining[:filled-room], b"F" * (filled-room))
                 output = remaining[filled-room:]
         return result, output
+
+    def test_crt_vfprintf(self):
+        sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "differential/reference"))
+        from crt_vfprintf import VARIANTS, check_input, check_observation
+        for variant in VARIANTS:
+            pe = FIXTURES / f"crt-vfprintf-{variant}.exe"
+            check_input(pe)
+            for base in (0x140000000, 0x180000000):
+                with self.subTest(variant=variant, base=base):
+                    if base == 0x140000000:
+                        self.compile(pe)
+                        result = self.program()
+                        stdout = result.stdout
+                    else:
+                        run(CONTRACT, "--guest-base", hex(base), pe, self.output,
+                            OPT, LLC, "/usr/bin/xcrun", *LINK, check=True)
+                        output = self.dir / "formatted output"
+                        with output.open("wb") as stream:
+                            result = self.program(stdout=stream)
+                        stdout = output.read_bytes()
+                    if variant == "unknown":
+                        self.assertEqual((result.returncode, stdout, result.stderr), (125, b"",
+                                         b"forge: unsupported legacy MSVCRT vfprintf format or limit\n"))
+                        continue
+                    if variant == "pointer":
+                        # Only the relocated image pointer varies. Compare its exact digits
+                        # before using the preferred-base bytes for the captured Windows row.
+                        self.assertEqual(stdout[:16], f"{base + 0x3000:016X}".encode())
+                        stdout = b"0000000140003000" + stdout[16:]
+                    check_observation("windows", variant, "pipe", result.returncode, stdout, result.stderr)
+            if variant in ("empty", "boundary", "large"):
+                for mode in ("missing", "broken", "full", "short"):
+                    with self.subTest(variant=variant, mode=mode):
+                        if mode == "missing":
+                            result = self.program(preexec_fn=lambda: os.close(1))
+                            stdout = result.stdout
+                        else:
+                            result, stdout = self.run_output_pipe(mode, {"broken": None, "full": 0,
+                                                                        "short": 7}[mode])
+                        check_observation("windows", variant, mode, result.returncode, stdout, result.stderr)
 
     def test_crt_puts(self):
         sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "differential/reference"))

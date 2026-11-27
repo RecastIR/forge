@@ -128,32 +128,40 @@ Windows Server 2022 returned −1 for null input with errno 22, preserved last e
 
 The newline probe first buffers one byte and then supplies 4,095 payload bytes. When flushing for the LF fails on a broken pipe, Windows returns zero, sets errno 22 and last error 232, and retains one pending LF. Wine returns −1, records last error 233 and has zero pending bytes. With seven bytes free, Windows returns zero with errno 28 and unchanged last error, and emits exactly CR LF at termination. A read-only Windows handle sets errno 9 and last error 5 on a failed OS write. The direct payload and LF-only failures have distinct return values on the same handle. [Windows Server 2022 measurements](https://github.com/RecastIR/forge/actions/runs/45994424624/job/140496000595) · [Wine 8 stream implementation](https://github.com/wine-mirror/wine/blob/wine-8.0/dlls/msvcrt/file.c#L4639-L4656)
 
+### Legacy vfprintf
+
+Twelve producer-hashed x64 PEs call the legacy DLL through a C variadic wrapper or a mapped guest argument list. The wrapper uses `va_start` and `va_end`. The mixed call crosses the register-to-stack boundary and writes only the low four bytes of its stack-passed 32-bit integers. The reporter records signed EAX, errno, last error, FILE flags, cursor displacement and remaining capacity. Both Windows Server 2022 (MSVCRT 7.0.20348.5756) and pinned Wine 8 ran each PE through a pipe and a regular file. ARM64 runs the same inputs at guest bases `0x140000000` and `0x180000000`. The pointer test checks the relocated address itself before comparing the rest of the Windows observation. [Compiled wrapper](../../../fixtures/crt-vfprintf.c) · [Recorded PE hashes and observations](../../reference/crt-vfprintf.json) · [Windows Server 2022 capture](https://github.com/RecastIR/forge/actions/runs/46026939471/job/140609630707)
+
+Both references print sixteen uppercase hexadecimal digits for a pointer, including sixteen zeroes for null, and print `(null)` for a null narrow string. The mixed write returns 76 logical characters, including one LF. The preceding one-byte `fwrite` leaves the stdout cursor at 77 after formatting. The direct marker still precedes the pending stdout after `_cexit`, and the final stderr drain appends the independent literal `stderr` to the binary report. For −42 with `%+08.5i`, Windows emits two spaces followed by `-00042`. Wine emits `-0000042`. Forge follows Windows. Both references print `beforeqafter` for `before%qafter`. Forge reports unsupported before writing a prefix. [Fixture and format strings](../../../fixtures/crt-vfprintf.s) · [Supported grammar and limits](../../../../docs/runtime-architecture.md#legacy-msvcrt-standard-streams)
+
+On Windows, a null format or null FILE returns −1, sets errno 22, and preserves last error 91 and the initial stdout fields. Empty output returns zero without allocating a buffer, even with a missing handle, where errno becomes 9. An ordinary 4,097-character call returns 4,097 and leaves its final character pending. If the 4,096-byte flush fails, the call returns −1, sets the stream-error bit and leaves that character pending for termination. A disconnected pipe produces errno 22 and last error 232. A full pipe or one with seven available bytes produces errno 28 and preserves last error. Missing stdout gives errno 9 with unchanged last error. ARM64 checks both the committed bytes and the pending FILE state against each Windows observation. [Reference runner](../../reference/crt_vfprintf.py) · [ARM64 comparison](../../../integration/test_executable.py)
+
 ### Startup comparison results
 
 All 16 original PEs have a writable `.CRT` section with `__xd_a` at RVA `0x9050` and `__xd_z` at `0x9058`. Both RIP-relative LEAs resolve to `0x9058`. The half-open initializer range contains zero slots. In primary Debug, the empty branch at `0x16d1` skips the loop. The qword load at `0x16d8` feeds the NULL guard and the call at `0x16e0`. The NULL path and a successful return rejoin at `0x16e2`, where RBX advances by eight. The backedge at `0x16e9` returns to the load. The older outer function sets `_CRT_MT` to 2 and calls `__mingw_TLScallback` for process attach. Thread attach traverses the range of no-argument functions. The newer MinGW implementation has a different outer function. [Linked CRT source](https://github.com/mingw-w64/mingw-w64/blob/v10.0.0/mingw-w64-crt/crt/tlssup.c) · [Later implementation](https://github.com/mingw-w64/mingw-w64/blob/9c44fc5d65f515470dbb6febac91c33c2b58edbc/mingw-w64-crt/crt/tlsdyn.c)
 
-All 16 inputs recover the direct `msvcrt.dll!fwrite` call and stop at the following `msvcrt.dll!vfprintf` thunk in MinGW’s error reporter. All 16 use `CALL64pcrel32`. The instruction bytes are `e8 8d 0e 00 00` in argv, argv_edges and puts, and `e8 85 0e 00 00` in the other affected inputs. Debug `startup/puts` also recovers the call at RVA `0x1547` (`e8 c4 11 00 00`) through thunk `0x2710` and IAT slot `0x8280`. All 16 Windows Server 2022 and pinned Wine references validate with empty stderr. Recovery and translation fail for each Forge input with `LIFT_UNSUPPORTED_CONTROL_FLOW`. Native build, publication, artifact verification, execution and stream comparison are unrun for every row. Each exit and stdout below belongs to the reference process.
+All 16 inputs recover the direct `msvcrt.dll!fwrite` and `msvcrt.dll!vfprintf` import thunks in MinGW's error reporter. The next instruction in every input is `CALL64pcrel32` to `msvcrt.dll!abort`, with bytes `e8 28 0e 00 00`. Debug argc calls `vfprintf` at RVA `0x189e` through thunk `0x2728` and IAT `0x8290`. The following table identifies each unresolved `abort` call. Debug `startup/puts` also recovers the call at RVA `0x1547` (`e8 c4 11 00 00`) through thunk `0x2710` and IAT slot `0x8280`. All 16 Windows Server 2022 and pinned Wine references validate with empty stderr. Recovery and translation fail for each Forge input with `LIFT_UNSUPPORTED_CONTROL_FLOW`. Native build, publication, artifact verification, execution and stream comparison are unrun for every row. Each exit and stdout below belongs to the reference process.
 
 The producer hashes, stored pointers for both pseudo-relocation list bounds, and the signed early-return branch were checked in each original PE. Both pointers hold the same VA in every case. Their common RVA is `0x48d0` for argv and puts, `0x4910` for argv_edges, and `0x48b0` for the other fixtures. On this startup path the relocator exits before a relocation write, `VirtualQuery`, protection change or restoration. Recovery still walks those call sites. In primary Debug, the load at `0x1bee` reads RSI from IAT slot `0x81b8` before the call at `0x1c1d`. [MinGW source](https://github.com/mingw-w64/mingw-w64/blob/v10.0.0/mingw-w64-crt/crt/pseudo-reloc.c)
 
 | Fixture | PE | Function / block RVA | Call RVA | File offset | Thunk RVA | IAT RVA | Reference exit, stdout |
 | --- | --- | --- | --- | --- | --- | --- | --- |
-| argc | Debug | 0x1840 | 0x189e | 0xe9e | 0x2728 | 0x8290 | 42, empty |
-| argc_none | Debug | 0x1840 | 0x189e | 0xe9e | 0x2728 | 0x8290 | 1, empty |
-| argv | Debug | 0x18b0 | 0x190e | 0xf0e | 0x27a0 | 0x82a0 | 42, empty |
-| argv_edges | Debug | 0x1960 | 0x19be | 0xfbe | 0x2850 | 0x82a0 | 42, empty |
-| cleanup | Debug | 0x1930 | 0x198e | 0xf8e | 0x2818 | 0x82c0 | 42, `IMBA` |
-| globals | Debug | 0x1860 | 0x18be | 0xebe | 0x2748 | 0x8290 | 42, empty |
-| puts | Debug | 0x1840 | 0x189e | 0xe9e | 0x2730 | 0x82a0 | 0, `Hello from C!\r\n` |
-| return | Debug | 0x1830 | 0x188e | 0xe8e | 0x2718 | 0x8290 | 42, empty |
-| argc | Release | 0x1810 | 0x186e | 0xe6e | 0x26f8 | 0x8290 | 42, empty |
-| argc_none | Release | 0x1810 | 0x186e | 0xe6e | 0x26f8 | 0x8290 | 1, empty |
-| argv | Release | 0x1810 | 0x186e | 0xe6e | 0x2700 | 0x82a0 | 42, empty |
-| argv_edges | Release | 0x1810 | 0x186e | 0xe6e | 0x2700 | 0x82a0 | 42, empty |
-| cleanup | Release | 0x18b0 | 0x190e | 0xf0e | 0x2798 | 0x82c0 | 42, `IMBA` |
-| globals | Release | 0x1810 | 0x186e | 0xe6e | 0x26f8 | 0x8290 | 42, empty |
-| puts | Release | 0x1810 | 0x186e | 0xe6e | 0x2700 | 0x82a0 | 0, `Hello from C!\r\n` |
-| return | Release | 0x1810 | 0x186e | 0xe6e | 0x26f8 | 0x8290 | 42, empty |
+| argc | Debug | 0x1840 | 0x18a3 | 0xea3 | 0x26d0 | 0x8238 | 42, empty |
+| argc_none | Debug | 0x1840 | 0x18a3 | 0xea3 | 0x26d0 | 0x8238 | 1, empty |
+| argv | Debug | 0x18b0 | 0x1913 | 0xf13 | 0x2740 | 0x8240 | 42, empty |
+| argv_edges | Debug | 0x1960 | 0x19c3 | 0xfc3 | 0x27f0 | 0x8240 | 42, empty |
+| cleanup | Debug | 0x1930 | 0x1993 | 0xf93 | 0x27c0 | 0x8268 | 42, `IMBA` |
+| globals | Debug | 0x1860 | 0x18c3 | 0xec3 | 0x26f0 | 0x8238 | 42, empty |
+| puts | Debug | 0x1840 | 0x18a3 | 0xea3 | 0x26d0 | 0x8240 | 0, `Hello from C!\r\n` |
+| return | Debug | 0x1830 | 0x1893 | 0xe93 | 0x26c0 | 0x8238 | 42, empty |
+| argc | Release | 0x1810 | 0x1873 | 0xe73 | 0x26a0 | 0x8238 | 42, empty |
+| argc_none | Release | 0x1810 | 0x1873 | 0xe73 | 0x26a0 | 0x8238 | 1, empty |
+| argv | Release | 0x1810 | 0x1873 | 0xe73 | 0x26a0 | 0x8240 | 42, empty |
+| argv_edges | Release | 0x1810 | 0x1873 | 0xe73 | 0x26a0 | 0x8240 | 42, empty |
+| cleanup | Release | 0x18b0 | 0x1913 | 0xf13 | 0x2740 | 0x8268 | 42, `IMBA` |
+| globals | Release | 0x1810 | 0x1873 | 0xe73 | 0x26a0 | 0x8238 | 42, empty |
+| puts | Release | 0x1810 | 0x1873 | 0xe73 | 0x26a0 | 0x8240 | 0, `Hello from C!\r\n` |
+| return | Release | 0x1810 | 0x1873 | 0xe73 | 0x26a0 | 0x8238 | 42, empty |
 
 The comparator's per-row `result.json` retains the complete structured diagnostic, including imports, call edges, unwind metadata, file offset, bytes and table evidence. The primary Debug constructor runner calls at RVA `0x15f0` and returns to `0x15f2`. The Release RVAs are `0x15c0` and `0x15c2`. The original constructor lists use a sentinel header in immutable `.text`, DIR64 entries for `register_frame_ctor` and, for cleanup, `setup`. [Regression assertions](../../test_native_differential.py)
 
@@ -195,7 +203,7 @@ A successful scalar read requires both bytes to fit one readable mapping. Two re
 | Wine `_onexit` allocation exhaustion | Parity remains unverified. |
 | PE TLS initialization and callbacks | Separate loader task covering template copying, index publication and pre-entry callbacks. |
 | TLS storage, thread attach/detach and destructors | Deferred with TEB/TLS lifecycle support. |
-| Missing Windows and CRT services | Future compatibility tasks, including `vfprintf` (variadic ABI and formatting for all 16 startup inputs), `fprintf` and `__setusermatherr`. |
+| Missing Windows and CRT services | Future compatibility tasks, including `abort` (the common recovery blocker), `fprintf` (a separate variadic entry point) and `__setusermatherr`. Further narrow conversions, floating-point, locale and wide formatting are deferred. |
 | GUI CRT error reporting | Detect required GUI routing at `_amsg_exit`. The message-box backend is deferred. |
 | Guest exception delivery and SEH | Separate exception-delivery task. |
 | Scalar reads across adjacent readable mappings | Separate shared guest-memory task. |
@@ -214,7 +222,7 @@ A successful scalar read requires both bytes to fit one readable mapping. Two re
 | Initialize the PE and its primary thread | The runtime provides process parameters, guest stack bounds and isolated mappings. The PE additionally needs a TLS template and index, followed by the two process-attach callbacks before entry. The callbacks enter a critical-section lifecycle. A successful dry recovery of a callback target does not execute a loader callback. |
 | Call the external Windows CRT | There are typed adapters for a bounded argument/heap/byte subset and four writable data exports. MSVCRT can call recovered guest initializers from bounded tables. The exit path can run admitted guest termination handlers in the managed process. The full CRT still has unrecovered dependencies. |
 | Deliver guest exceptions | The compiler reports validated entry scope, filter, handler import and continuation evidence. Running the filter on a guest exception requires the guest fault PC, exception context, guest stack unwinding and continuation. The current process fault result terminates the run. |
-| Print through stdio | `puts` remains a required external MSVCRT symbol in its own fixture. The primary fixture already imports `__iob_func`, `fprintf`, `fwrite` and `vfprintf` for CRT paths. Legacy stream identity, redirected `fwrite`, `puts` and terminal flushing now have bindings. The two formatted-output imports still require varargs and formatting support. |
+| Print through stdio | `puts` remains a required external MSVCRT symbol in its own fixture. The primary fixture already imports `__iob_func`, `fprintf`, `fwrite` and `vfprintf` for CRT paths. The process owns the legacy streams used by `fwrite`, `puts` and bounded `vfprintf`. The independent `fprintf` import still needs a variadic entry point. |
 
 Exception delivery would require preserving the faulting guest instruction, registers and stack across nested calls. TLS initialization and CRT lifetime services remain separate prerequisites. Task 13.4 stays gated on all 16 native comparisons.
 
