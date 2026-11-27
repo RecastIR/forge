@@ -266,16 +266,26 @@ jobs:
           test "$(uname -m)" = x86_64
           ./tools/test-forge.sh --executable-reference
           image=$(python3 -B tests/differential/fixture_images.py --id reference)
+          # The pinned image writes as UID 1000, independently of the hosted runner's UID.
+          install -d -m 1777 "$RUNNER_TEMP/stream-observations"
           docker run --init --rm --pull never --platform linux/amd64 --network none --cap-drop ALL \
             --security-opt no-new-privileges -e FORGE_WINE=/usr/lib/wine/wine64 -e PE_MANIFEST_SHA256 \
             -v "$PWD/build/dev/fixtures/Debug:/input:ro" -v "$PWD/tests/differential/reference:/suite:ro" \
+            -v "$RUNNER_TEMP/stream-observations:/observations" \
             --entrypoint /bin/sh "$image" -ec '
               /usr/lib/wine/wineserver64 -p
               "$FORGE_WINE" cmd /c ver >/dev/null
-              python3 -B /suite/crt_streams.py /input /tmp/stream-observations'
+              python3 -B /suite/crt_streams.py /input /observations'
           echo "crt_streams=success" >> "$GITHUB_OUTPUT"
         env:
           PE_MANIFEST_SHA256: ${{ needs.macos-dev.outputs.executable_inputs_sha256 }}
+
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: wine-puts-observations
+          path: ${{ runner.temp }}/stream-observations/puts-*
+          if-no-files-found: warn
 
   differential:
     outputs:

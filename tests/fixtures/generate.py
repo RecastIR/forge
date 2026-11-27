@@ -119,7 +119,7 @@ def generate(output, mc, link, dlltool, clang):
                               ("newline", ["newline_flush"]), ("null", ["null_input"]), ("fault", [])):
             setup = "".join(symbol + " = 1\n" for symbol in options)
             image(f"crt-puts-{name}.exe", setup + puts,
-                  link_flags=["puts.lib", "streams.lib", "msvcrt.dll.lib", "KERNEL32.dll.lib"])
+                  link_flags=["puts.lib", "streams.lib", "msvcrt.dll.lib", *memory_libraries])
         returns = (sources / "executable-return.s").read_text()
         for dll in ("KERNEL32.dll", "msvcrt.dll"):
             name = dll.split(".")[0].lower()

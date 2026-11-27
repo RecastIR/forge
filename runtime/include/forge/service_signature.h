@@ -95,7 +95,7 @@ namespace forge::win64 {
         Value type;
         Access access = Access::None;
         Extent extent = Extent::None;
-        // Fixed byte count or zero-based argument index for a count or exclusive endpoint.
+        // Fixed byte count, bounded CString scan limit (including NUL), or argument index.
         unsigned size = 0;
         bool optional = false;
 
@@ -140,7 +140,7 @@ namespace forge::win64 {
 
             switch (arg.extent) {
             case Extent::CString:
-                return arg.access == Access::Input && !arg.size;
+                return arg.access == Access::Input;
             case Extent::Fixed:
                 return arg.size != 0;
             case Extent::InitializerEnd:
@@ -424,6 +424,12 @@ namespace forge::win64 {
     inline constexpr auto crtIob = processPointer(bind<Value::Address>(
         "msvcrt.dll", "__iob_func", LastError::Preserve,
         FORGE_SERVICE_ADAPTER(forge_rt_msvcrt_iob_func), Requirement::Process));
+    // Includes the NUL. The compiler and runtime use the same readable extent.
+    inline constexpr uint64_t crtPutsScanLimit = 1024 * 1024;
+    inline constexpr auto crtPuts = bind<Value::I32, Argument{Value::Address, Access::Input,
+                                                              Extent::CString, crtPutsScanLimit}>(
+        "msvcrt.dll", "puts", LastError::OnFailure, FORGE_SERVICE_ADAPTER(forge_rt_msvcrt_puts),
+        Requirement::Process);
     inline constexpr auto crtFwrite =
         bind<Value::Word, Argument{Value::Address, Access::Input, Extent::ElementProduct, 1},
              Argument{Value::Word}, Argument{Value::Word}, Argument{Value::Address}>(
@@ -494,5 +500,6 @@ namespace forge::win64 {
         virtualProtect,
         crtIob,
         crtFwrite,
+        crtPuts,
     };
 } // namespace forge::win64

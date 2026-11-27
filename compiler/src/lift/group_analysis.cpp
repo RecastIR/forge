@@ -615,9 +615,15 @@ namespace forge::x86 {
                                     "alternatives");
                 }
 
+                uint64_t contiguousLimit = 0;
+                if (arg.extent == win64::Extent::ElementProduct) {
+                    contiguousLimit = UINT64_MAX;
+                } else if (arg.extent == win64::Extent::CString) {
+                    contiguousLimit = arg.size;
+                }
+
                 for (const auto va : address.values()) {
-                    imageMemory.serviceArgument(step, va, arg.writes(), size,
-                                                arg.extent == win64::Extent::ElementProduct);
+                    imageMemory.serviceArgument(step, va, arg.writes(), size, contiguousLimit);
                 }
             }
 

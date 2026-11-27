@@ -134,7 +134,8 @@ namespace forge::win64 {
         uint64_t size = UINT64_MAX;
         if constexpr (arg.extent == Extent::CountArgument) {
             size = std::get<arg.size>(arguments);
-        } else if constexpr (arg.extent == Extent::Fixed) {
+        } else if constexpr (arg.extent == Extent::Fixed ||
+                             (arg.extent == Extent::CString && arg.size)) {
             size = arg.size;
         }
 

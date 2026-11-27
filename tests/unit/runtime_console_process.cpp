@@ -3,6 +3,7 @@
 #include "../../runtime/src/platform/darwin/io.h"
 #include <forge/msvcrt_process.h>
 #include <forge/process.h>
+#include <forge/service_signature.h>
 
 #include <cerrno>
 #include <csignal>
@@ -211,25 +212,29 @@ namespace {
                                               1,
                                               fatalEntry};
 
-    Process registeredWithStderr(const forge_rt_artifact &artifact, int descriptor) {
-        const int saved = fcntl(STDERR_FILENO, F_DUPFD_CLOEXEC, 3);
+    Process registeredWithStream(const forge_rt_artifact &artifact, int target, int descriptor) {
+        const int saved = fcntl(target, F_DUPFD_CLOEXEC, 3);
         REQUIRE(saved >= 0 || errno == EBADF);
 
         if (descriptor >= 0) {
-            REQUIRE(dup2(descriptor, STDERR_FILENO) == STDERR_FILENO);
+            REQUIRE(dup2(descriptor, target) == target);
         } else if (saved >= 0) {
-            REQUIRE(close(STDERR_FILENO) == 0);
+            REQUIRE(close(target) == 0);
         }
 
         auto process = registered(artifact);
 
         if (saved >= 0) {
-            REQUIRE(dup2(saved, STDERR_FILENO) == STDERR_FILENO && close(saved) == 0);
+            REQUIRE(dup2(saved, target) == target && close(saved) == 0);
         } else if (descriptor >= 0) {
-            REQUIRE(close(STDERR_FILENO) == 0);
+            REQUIRE(close(target) == 0);
         }
 
         return process;
+    }
+
+    Process registeredWithStderr(const forge_rt_artifact &artifact, int descriptor) {
+        return registeredWithStream(artifact, STDERR_FILENO, descriptor);
     }
 
     void expectFatal(const Process &process, int32_t errorNumber) {
@@ -297,6 +302,103 @@ namespace {
 
         std::fprintf(stderr, "Cannot read Windows observation %s\n", path.c_str());
         std::abort();
+    }
+
+    constexpr auto scanLimit = forge::win64::crtPutsScanLimit;
+    constexpr auto highBase = UINT64_MAX - scanLimit - 4;
+
+    void putsMemory(forge_rt_execution *execution) {
+        auto *instance = execution->instance;
+        const auto thread = execution->thread;
+        forge_rt_invocation_token token{};
+        REQUIRE(forge_rt_current_invocation(instance, thread, &token) == FORGE_RT_OK);
+        int32_t result = 73;
+        forge_rt_memory_fault fault{};
+        const auto puts = [&](uint64_t address) {
+            return forge_rt_msvcrt_puts(instance, thread, address, &result, &fault);
+        };
+        REQUIRE(forge_rt_msvcrt_puts(instance, 0, 0, &result, &fault) == FORGE_RT_INVALID_THREAD);
+        std::thread outside(
+            [&] { REQUIRE(puts(0) == FORGE_RT_INVALID_INVOCATION && result == 73); });
+        outside.join();
+        REQUIRE(puts(highBase) == FORGE_RT_UNSUPPORTED_CRT_STREAM && result == 73);
+
+        struct ExpectedFault {
+            uint64_t argument, address;
+            uint32_t reason;
+        };
+
+        for (const auto &[address, invalid, reason] : std::initializer_list<ExpectedFault>{
+                 {highBase + scanLimit + 1, highBase + scanLimit + 2, FORGE_RT_FAULT_PERMISSION},
+                 {UINT64_MAX - 1, UINT64_MAX - 1, FORGE_RT_FAULT_UNMAPPED},
+                 {UINT64_MAX, UINT64_MAX, FORGE_RT_FAULT_OVERFLOW},
+                 {FORGE_RT_ENTRY_RSP, FORGE_RT_ENTRY_RSP, FORGE_RT_FAULT_STACK}}) {
+            REQUIRE(puts(address) == FORGE_RT_GUEST_FAULT && result == 73);
+            REQUIRE(fault.address == invalid && fault.access == FORGE_RT_READ &&
+                    fault.reason == reason);
+        }
+
+        auto &streams = *instance->windows->streams;
+        REQUIRE(!streams.buffers[1] && streams.files[1].flags == 2);
+        if (execution->rcx == 'A') {
+            REQUIRE(puts(highBase + 1) == FORGE_RT_OK && result == 0);
+        }
+
+        const uint8_t message[]{static_cast<uint8_t>(execution->rcx), 0};
+        const auto stack = FORGE_RT_ENTRY_RSP - sizeof(message);
+        REQUIRE(forge_rt_write_guest(instance, thread, token, stack, sizeof(message), message,
+                                     sizeof(message), &fault) == FORGE_RT_OK);
+        REQUIRE(puts(stack) == FORGE_RT_OK && result == 0);
+
+        uint64_t heap{};
+        REQUIRE(forge_rt_msvcrt_malloc(instance, thread, sizeof(message), &heap) == FORGE_RT_OK &&
+                heap);
+        REQUIRE(forge_rt_write_guest(instance, thread, token, heap, sizeof(message), message,
+                                     sizeof(message), &fault) == FORGE_RT_OK);
+        REQUIRE(puts(heap) == FORGE_RT_OK && result == 0);
+        REQUIRE(forge_rt_msvcrt_free(instance, thread, heap) == FORGE_RT_OK);
+
+        result = 73;
+        REQUIRE(puts(streams.mapping.base + sizeof(forge::runtime::LegacyFile) + 24) ==
+                    FORGE_RT_UNSUPPORTED_CRT_STREAM &&
+                result == 73);
+        if (execution->rcx == 'B') {
+            REQUIRE(puts(streams.files[1].base) == FORGE_RT_UNSUPPORTED_CRT_STREAM && result == 73);
+        }
+        execution->result = {FORGE_RT_RETURNED, FORGE_RT_OK, 42, {}, 0};
+        REQUIRE(puts(0) == FORGE_RT_INVALID_STATE && result == 73);
+    }
+
+    void checkPutsMemory() {
+        std::string bytes(scanLimit + 5, 'L');
+        bytes[scanLimit] = 0;
+        const forge_rt_backing data{bytes.size(), bytes.data(), nullptr, 0};
+        const forge_rt_region_template rows[]{
+            {highBase, scanLimit + 2, 0, 0, FORGE_RT_READ},
+            {highBase + scanLimit + 2, 1, 0, scanLimit + 2, FORGE_RT_EXECUTE},
+            {UINT64_MAX, 1, 0, scanLimit + 4, FORGE_RT_READ}};
+        constexpr forge_rt_import output{"msvcrt.dll", "puts"};
+        const forge_rt_artifact artifact{FORGE_RT_ARTIFACT_VERSION,
+                                         highBase,
+                                         bytes.size(),
+                                         0,
+                                         0,
+                                         &data,
+                                         1,
+                                         rows,
+                                         std::size(rows),
+                                         &output,
+                                         1,
+                                         putsMemory};
+
+        std::unique_ptr<FILE, decltype(&std::fclose)> a(std::tmpfile(), std::fclose);
+        std::unique_ptr<FILE, decltype(&std::fclose)> b(std::tmpfile(), std::fclose);
+        REQUIRE(a && b);
+        auto first = registeredWithStream(artifact, STDOUT_FILENO, fileno(a.get()));
+        auto second = registeredWithStream(artifact, STDOUT_FILENO, fileno(b.get()));
+        REQUIRE(run(first, 'A').value == 42 && run(second, 'B').value == 42);
+        REQUIRE(fileContentsEqual(a.get(), std::string(scanLimit - 1, 'L') + "\r\nA\r\nA\r\n"));
+        REQUIRE(fileContentsEqual(b.get(), "B\r\nB\r\n"));
     }
 
     void streamIdentity(forge_rt_execution *execution) {
@@ -922,8 +1024,10 @@ namespace {
         REQUIRE(forge_rt_leave(instance, thread, invocation) == FORGE_RT_OK);
         REQUIRE(forge_rt_destroy(instance) == FORGE_RT_OK);
 
-        constexpr forge_rt_import console[]{
-            {"KeRneL32.DLL", "WriteFile"}, {"KERNEL32.dll", "GetStdHandle"}, fatalImport};
+        constexpr forge_rt_import console[]{{"KeRneL32.DLL", "WriteFile"},
+                                            {"KERNEL32.dll", "GetStdHandle"},
+                                            fatalImport,
+                                            {"msvcrt.dll", "puts"}};
         artifact = consoleArtifact(finishCapture);
         artifact.importCount = 1;
         forge_rt_process *raw = nullptr;
@@ -1136,6 +1240,7 @@ void testRuntimeConsoleProcess(const char *fatalObservations) {
     }
 
     checkStreamIdentity();
+    checkPutsMemory();
     checkStreamWriteRetries();
     checkStreamTermination();
     checkFatalPartialWrite(31, fatal31);

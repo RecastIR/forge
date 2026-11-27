@@ -168,10 +168,6 @@ def windows_output_failure(pe, args, name, log):
         run = subprocess.run([pe, *args], startupinfo=info, close_fds=False,
                              timeout=20)
         output = b""
-    elif name == "readonly":
-        with pe.open("rb") as reader:
-            run = launch(pe, args, None, stdout=reader, stderr=log)
-        output = b""
     else:
         if name == "prefix":
             r_handle, w_handle = _winapi.CreatePipe(None, 16384)
@@ -186,7 +182,7 @@ def windows_output_failure(pe, args, name, log):
                 os.set_blocking(write, False)
                 # The DLL fills a 5120-byte staging area until at least
                 # 5119 physical bytes are ready or the input is exhausted.
-                room = 5119 if name == "prefix" else 7
+                room = {"prefix": 5119, "short": 7, "full": 0}[name]
                 filled = 0
                 while filled < 1 << 20:
                     try:
@@ -196,11 +192,11 @@ def windows_output_failure(pe, args, name, log):
                     if not n:
                         break
                     filled += n
-                if not room < filled < 1 << 20 or os.read(read, room) != b"F" * room:
+                if not room < filled < 1 << 20 or (room and os.read(read, room) != b"F" * room):
                     raise ValueError("nonblocking pipe did not reach its capacity")
             run = launch(pe, args, None, stdout=writer, stderr=log)
         output = b""
-        if name in ("short", "prefix"):
+        if name in ("short", "prefix", "full"):
             with os.fdopen(read, "rb") as reader:
                 remaining = reader.read()
             if not remaining.startswith(b"F" * (filled - room)):

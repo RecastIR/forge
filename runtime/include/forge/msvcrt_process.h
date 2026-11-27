@@ -36,6 +36,10 @@ forge_rt_status forge_rt_msvcrt_fwrite(forge_rt_instance *, forge_rt_thread_toke
                                        uint64_t *outElements,
                                        forge_rt_memory_fault *fault) FORGE_CRT_NOEXCEPT;
 
+forge_rt_status forge_rt_msvcrt_puts(forge_rt_instance *, forge_rt_thread_token, uint64_t string,
+                                     int32_t *outResult,
+                                     forge_rt_memory_fault *fault) FORGE_CRT_NOEXCEPT;
+
 /* Set the effective legacy CRT application type for the active process. */
 forge_rt_status forge_rt_msvcrt_set_app_type(forge_rt_instance *instance,
                                              forge_rt_thread_token thread,

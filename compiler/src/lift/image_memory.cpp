@@ -561,14 +561,14 @@ namespace forge::x86 {
     }
 
     void ImageMemory::serviceArgument(const Step &step, uint64_t va, bool write,
-                                      std::optional<uint64_t> size, bool contiguousInput) {
+                                      std::optional<uint64_t> size, uint64_t contiguousInputLimit) {
         if (va == 0 || va - GuestMemory::base < GuestMemory::capacity) {
             return;
         }
 
         const auto rva = va - loadBase;
 
-        if (contiguousInput && !size) {
+        if (contiguousInputLimit && !size) {
             // A successful dynamic read is bounded by the first gap in its PE backing.
             uint64_t end = std::max<uint64_t>(rva, executableHeaders.size());
             while (const auto *section = source.sectionAtRva(end)) {
@@ -577,8 +577,11 @@ namespace forge::x86 {
                     break;
                 }
                 end = uint64_t(section->rva) + section->virtualSize;
+                if (end - rva >= contiguousInputLimit) {
+                    break;
+                }
             }
-            size = end - rva;
+            size = std::min(end - rva, contiguousInputLimit);
         }
 
         if (rva < executableHeaders.size()) {

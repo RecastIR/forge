@@ -56,8 +56,18 @@ entry:
     line newlines
     write_byte 48
     movb $77, mutable(%rip)
+    leaq mutable(%rip), %rcx
+    movl $2, %edx
+    movl $2, %r8d                    # PAGE_READONLY
+    leaq 40(%rsp), %r9
+    callq VirtualProtect
+    testl %eax, %eax
+    je .Lbad
     line mutable
     write_byte 96
+    movl $37, (%rsi)
+    movl $91, %ecx
+    callq SetLastError
     leaq first+4094(%rip), %rcx
 .elseif newline_flush
     write_byte 48
@@ -68,7 +78,7 @@ entry:
     xorl %ecx, %ecx
 .else
     line one
-    movl $1, %ecx
+    leaq 0x40000000(%rsp), %rcx
 .endif
     callq puts
     movl %eax, record(%rip)
@@ -142,8 +152,10 @@ full: .fill 4095,1,78
 .endif
 .data
 record: .space 32
-mutable: .asciz "m\0!"
 .ifdef mixed
+.section .wmsg,"dw"
+mutable: .asciz "m\0!"
+.space 4096-(.-mutable)
 .section .sra,"dr"
 first: .space 4094
 .ascii "AB"

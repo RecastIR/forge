@@ -2,7 +2,7 @@
 
 #include "../../core/instance.h"
 #include "../process_state.h"
-#include "forge/service_memory.h"
+#include "../string_scan.h"
 
 #include <algorithm>
 #include <cerrno>
@@ -45,6 +45,10 @@ forge_rt_status CrtStandardStreams::initialize(forge_rt_instance &instance,
 }
 
 forge_rt_status CrtStandardStreams::prepareBuffer(forge_rt_instance &instance, size_t index) {
+    if (buffers[index]) {
+        return FORGE_RT_OK;
+    }
+
     return withInstance(&instance, [&](auto &owner) {
         auto buffer = std::make_unique<Buffer>();
         const auto va = findGuestAllocation(owner.reservations, capacity, 16);
@@ -88,6 +92,38 @@ extern "C" forge_rt_status forge_rt_msvcrt_iob_func(forge_rt_instance *instance,
 namespace {
     constexpr uint32_t streamError = 0x20;
     using Input = GuestBuffer<crtFwrite.arguments[0]>;
+
+    forge_rt_status admitOutput(ServiceInvocation &call) {
+        return withInstance(call.instance, [&](const auto &owner) {
+            const auto live = checkPendingExecution(owner, call.thread);
+            if (live != FORGE_RT_OK) {
+                return live;
+            }
+
+            if (!owner.windows->streams || !owner.windows->standardHandles) {
+                return FORGE_RT_INVALID_STATE;
+            }
+
+            call.token = owner.threads.at(call.thread).invocation;
+            return FORGE_RT_OK;
+        });
+    }
+
+    bool supportedOutput(const StandardStream &stream) {
+        return !stream.descriptor || stream.descriptor->kind() == darwin::StreamKind::RegularFile ||
+               stream.descriptor->kind() == darwin::StreamKind::Pipe;
+    }
+
+    bool aliasesOutput(const CrtStandardStreams &streams, size_t index, uint64_t source,
+                       uint64_t length) {
+        const auto overlaps = [&](uint64_t va, uint64_t size) {
+            return va <= source ? source - va < size : va - source < length;
+        };
+        const auto &buffer = streams.buffers[index];
+        return length &&
+               (overlaps(streams.mapping.base + index * sizeof(LegacyFile), sizeof(LegacyFile)) ||
+                (buffer && overlaps(buffer->mapping.base, buffer->mapping.size)));
+    }
 
     struct Progress {
         size_t accepted = 0;
@@ -231,11 +267,12 @@ namespace {
         return last ? forge_rt_set_last_error(&instance, thread, last) : FORGE_RT_OK;
     }
 
+    template <class Reader>
     forge_rt_status startBuffer(CrtStandardStreams &streams, WindowsProcessState &windows,
-                                size_t index, const Input &input, uint64_t offset) {
+                                size_t index, const Reader &read, uint64_t offset) {
         auto &file = streams.files[index];
         auto &buffer = *streams.buffers[index];
-        const auto status = input.read(offset, std::span(buffer.bytes).first(1));
+        const auto status = read(offset, std::span(buffer.bytes).first(1));
         if (status != FORGE_RT_OK) {
             return status;
         }
@@ -286,29 +323,23 @@ namespace {
 
     // Input is preflighted. The active invocation pins every mapping and descriptor
     // through these synchronous copies. Each OS write is made without the instance lock.
-    forge_rt_status writeElements(forge_rt_instance &instance, forge_rt_thread_token thread,
-                                  const StandardHandles &handles, size_t index, const Input &input,
-                                  uint64_t width, uint64_t &elements) {
-        auto &streams = *instance.windows->streams;
+    template <class Reader>
+    forge_rt_status writeBytes(ServiceInvocation &call, size_t index, uint64_t length,
+                               const Reader &read, uint64_t &accepted) {
+        auto &windows = *call.instance->windows;
+        auto &streams = *windows.streams;
+        const auto &handles = *windows.standardHandles;
         auto &file = streams.files[index];
         constexpr auto block = CrtStandardStreams::capacity;
-        // Acquire a required tail buffer before a direct prefix can reach the host.
-        // Publish its FILE fields only when the guest operation reaches that tail.
-        if (!streams.buffers[index] && input.byteSize() % block) {
-            const auto status = streams.prepareBuffer(instance, index);
-            if (status != FORGE_RT_OK) {
-                return status;
-            }
-        }
 
         uint64_t done = 0;
-        while (done < input.byteSize()) {
-            const auto remaining = input.byteSize() - done;
+        while (done < length) {
+            const auto remaining = length - done;
             if (file.count > 0) {
                 const auto n = std::min(remaining, static_cast<uint64_t>(file.count));
                 auto bytes =
                     std::span(streams.buffers[index]->bytes).subspan(file.ptr - file.base, n);
-                const auto status = input.read(done, bytes);
+                const auto status = read(done, bytes);
                 if (status != FORGE_RT_OK) {
                     return status;
                 }
@@ -323,10 +354,10 @@ namespace {
                 return progress.status;
             }
             if (!progress.shortWrite && remaining >= block) {
-                const auto length = remaining - remaining % block;
+                const auto direct = remaining - remaining % block;
                 progress = writeText(handles.streams[index], handles.hostHandlesOutputSignals,
-                                     length, [&](uint64_t offset, std::span<uint8_t> bytes) {
-                                         return input.read(done + offset, bytes);
+                                     direct, [&](uint64_t offset, std::span<uint8_t> bytes) {
+                                         return read(done + offset, bytes);
                                      });
                 if (progress.status != FORGE_RT_OK) {
                     return progress.status;
@@ -339,7 +370,7 @@ namespace {
                     done += progress.accepted - progress.inserted;
                 }
             } else if (remaining < block) {
-                const auto status = startBuffer(streams, *instance.windows, index, input, done);
+                const auto status = startBuffer(streams, windows, index, read, done);
                 if (status != FORGE_RT_OK) {
                     return status;
                 }
@@ -347,7 +378,7 @@ namespace {
             }
 
             if (progress.shortWrite) {
-                const auto status = writeFailure(instance, thread, file, progress);
+                const auto status = writeFailure(*call.instance, call.thread, file, progress);
                 if (status != FORGE_RT_OK) {
                     return status;
                 }
@@ -355,8 +386,71 @@ namespace {
             }
         }
 
-        elements = done / width;
+        accepted = done;
         return FORGE_RT_OK;
+    }
+
+    forge_rt_status writeLine(ServiceInvocation &call, uint64_t source, int32_t &result) {
+        auto &windows = *call.instance->windows;
+        if (!source) {
+            windows.crtErrno = 22;
+            result = -1;
+            return FORGE_RT_OK;
+        }
+
+        constexpr size_t stdoutIndex = 1;
+        if (!supportedOutput(windows.standardHandles->streams[stdoutIndex])) {
+            return FORGE_RT_UNSUPPORTED_CRT_STREAM;
+        }
+
+        // _stbuf checks _isatty(_fileno(stdout)) before scanning, even with a live buffer.
+        if (!windows.standardHandles->streams[stdoutIndex].descriptor) {
+            windows.crtErrno = 9;
+        }
+
+        const auto string = guestBuffer<crtPuts, 0>(call, std::tie(source));
+        uint64_t length;
+        const auto scanned =
+            scanString(string, crtPutsScanLimit, length, FORGE_RT_UNSUPPORTED_CRT_STREAM);
+        if (scanned != FORGE_RT_OK) {
+            return scanned;
+        }
+
+        auto &streams = *windows.streams;
+        if (aliasesOutput(streams, stdoutIndex, source, length)) {
+            return FORGE_RT_UNSUPPORTED_CRT_STREAM;
+        }
+
+        // Even an exact direct block needs a buffer for the following newline.
+        const auto reserved = streams.prepareBuffer(*call.instance, stdoutIndex);
+        if (reserved != FORGE_RT_OK) {
+            return reserved;
+        }
+
+        uint64_t accepted;
+        const auto payload = writeBytes(
+            call, stdoutIndex, length,
+            [&](uint64_t offset, auto bytes) { return string.read(offset, bytes); }, accepted);
+        if (payload != FORGE_RT_OK) {
+            return payload;
+        }
+        if (accepted != length) {
+            result = -1;
+            return FORGE_RT_OK;
+        }
+
+        const auto newline = writeBytes(
+            call, stdoutIndex, 1,
+            [](uint64_t, auto bytes) {
+                bytes.front() = '\n';
+                return FORGE_RT_OK;
+            },
+            accepted);
+        if (newline == FORGE_RT_OK) {
+            // Legacy Windows ignores the character writer's EOF after a complete payload.
+            result = 0;
+        }
+        return newline;
     }
 } // namespace
 
@@ -383,21 +477,12 @@ extern "C" forge_rt_status forge_rt_msvcrt_fwrite(forge_rt_instance *instance,
     }
 
     ServiceInvocation call{instance, thread, *fault};
-    const auto status = withInstance(instance, [&](const auto &owner) {
-        const auto live = checkPendingExecution(owner, thread);
-        if (live == FORGE_RT_OK) {
-            call.token = owner.threads.at(thread).invocation;
-        }
-        return live;
-    });
+    const auto status = admitOutput(call);
     if (status != FORGE_RT_OK) {
         return status;
     }
 
     auto &windows = *instance->windows;
-    if (!windows.streams || !windows.standardHandles) {
-        return FORGE_RT_INVALID_STATE;
-    }
     if (!size || !count) {
         *outElements = 0;
         return FORGE_RT_OK;
@@ -430,9 +515,7 @@ extern "C" forge_rt_status forge_rt_msvcrt_fwrite(forge_rt_instance *instance,
         return rejected;
     }
 
-    const auto &descriptor = windows.standardHandles->streams[index].descriptor;
-    if (descriptor && descriptor->kind() != darwin::StreamKind::RegularFile &&
-        descriptor->kind() != darwin::StreamKind::Pipe) {
+    if (!supportedOutput(windows.standardHandles->streams[index])) {
         return FORGE_RT_UNSUPPORTED_CRT_STREAM;
     }
 
@@ -446,14 +529,45 @@ extern "C" forge_rt_status forge_rt_msvcrt_fwrite(forge_rt_instance *instance,
         return FORGE_RT_UNSUPPORTED_CRT_STREAM;
     }
 
-    const auto &buffer = streams.buffers[index];
-    const auto overlaps = [&](uint64_t va, uint64_t bytes) {
-        return va <= source ? source - va < bytes : va - source < input->byteSize();
-    };
-    if (overlaps(stream, sizeof(LegacyFile)) ||
-        (buffer && overlaps(buffer->mapping.base, buffer->mapping.size))) {
+    if (aliasesOutput(streams, index, source, input->byteSize())) {
         return FORGE_RT_UNSUPPORTED_CRT_STREAM;
     }
-    return writeElements(*instance, thread, *windows.standardHandles, index, *input, size,
-                         *outElements);
+
+    if (input->byteSize() % CrtStandardStreams::capacity) {
+        const auto reserved = streams.prepareBuffer(*instance, index);
+        if (reserved != FORGE_RT_OK) {
+            return reserved;
+        }
+    }
+
+    uint64_t accepted;
+    const auto written = writeBytes(
+        call, index, input->byteSize(),
+        [&](uint64_t offset, auto bytes) { return input->read(offset, bytes); }, accepted);
+    if (written == FORGE_RT_OK) {
+        *outElements = accepted / size;
+    }
+    return written;
+}
+
+extern "C" forge_rt_status forge_rt_msvcrt_puts(forge_rt_instance *instance,
+                                                forge_rt_thread_token thread, uint64_t source,
+                                                int32_t *outResult,
+                                                forge_rt_memory_fault *fault) noexcept {
+    if (!outResult || !fault) {
+        return FORGE_RT_INVALID_ARGUMENT;
+    }
+
+    forge_rt_memory_fault detail{};
+    ServiceInvocation call{instance, thread, detail};
+    const auto admitted = admitOutput(call);
+    if (admitted != FORGE_RT_OK) {
+        return admitted;
+    }
+
+    const auto status = writeLine(call, source, *outResult);
+    if (status == FORGE_RT_GUEST_FAULT) {
+        *fault = detail;
+    }
+    return status;
 }

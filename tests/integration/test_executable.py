@@ -1552,9 +1552,14 @@ class Reference(Workspace):
         denied = image("virtual-protect-denied")
         inputs = Path(__file__).resolve().parents[1] / "differential/reference/executable-inputs.txt"
         filenames = inputs.read_text().splitlines()
-        from crt_puts import VARIANTS
+        from crt_puts import VARIANTS, check_input, check_observation as check_puts
         self.assertEqual(filenames, sorted([*expected, observer.name, denied.name, "crt-stream-invalid.exe",
                                             "crt-stream-reference.exe", *(f"crt-puts-{v}.exe" for v in VARIANTS)]))
+        for variant in VARIANTS:
+            pe = FIXTURES / f"crt-puts-{variant}.exe"
+            check_input(pe)
+            if variant not in ("null", "fault"):
+                check_puts("wine", variant, "pipe", *self.capture(pe))
         for case in range(45):
             with self.subTest(case=case):
                 check_observation("wine", case, *self.capture(observer, [f"{case:02}"]))
@@ -2004,6 +2009,100 @@ class Console(Workspace):
             self.assertEqual((result.returncode, result.stdout), (125, b""))
             self.assertIn(diagnostic, result.stderr)
 
+    def run_output_pipe(self, name, room, fifo=None):
+        if fifo is not None:
+            read = os.open(fifo, os.O_RDONLY | os.O_NONBLOCK)
+            write = os.open(fifo, os.O_WRONLY)
+        else:
+            read, write = os.pipe()
+        with os.fdopen(read, "rb") as reader, os.fdopen(write, "wb", buffering=0) as writer:
+            filled = 0
+            if room is not None:
+                os.set_blocking(write, False)
+                while filled < 1 << 20:
+                    n = writer.write(b"F" * 512)
+                    if not n:
+                        break
+                    filled += n
+                self.assertLess(room, filled)
+                self.assertLess(filled, 1 << 20)
+                self.assertEqual(os.read(read, room), b"F" * room)
+            if name == "broken":
+                reader.close()
+            result = self.program(stdout=writer)
+            writer.close()
+            output = b""
+            if name != "broken":
+                remaining = reader.read()
+                self.assertEqual(remaining[:filled-room], b"F" * (filled-room))
+                output = remaining[filled-room:]
+        return result, output
+
+    def test_crt_puts(self):
+        sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "differential/reference"))
+        from crt_puts import VARIANTS, check_input, check_observation
+        for variant in VARIANTS:
+            pe = FIXTURES / f"crt-puts-{variant}.exe"
+            check_input(pe)
+            for base in (None, 0x180000000):
+                with self.subTest(variant=variant, base=base):
+                    if base:
+                        run(CONTRACT, "--guest-base", hex(base), pe, self.output,
+                            OPT, LLC, "/usr/bin/xcrun", *LINK, check=True)
+                    else:
+                        self.compile(pe)
+                    if base:
+                        out = self.dir / "redirected stdout"
+                        with out.open("wb") as stream:
+                            result = self.program(stdout=stream)
+                        stdout = out.read_bytes()
+                    else:
+                        result = self.program()
+                        stdout = result.stdout
+                    if variant == "fault":
+                        self.assertEqual((result.returncode, stdout, result.stderr),
+                                         (125, b"", b"forge: guest memory fault address=0xb0000f90 access=1 reason=2\n"))
+                    else:
+                        check_observation("windows", variant, "file" if base else "pipe", result.returncode, stdout, result.stderr)
+
+    def test_crt_puts_output_failures(self):
+        import pty
+        import select
+        import socket
+        sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "differential/reference"))
+        from crt_puts import check_observation
+        for variant in ("mixed", "direct", "newline"):
+            pe = FIXTURES / f"crt-puts-{variant}.exe"
+            self.compile(pe)
+            for mode in ("missing", "readonly", "broken", "full", "short", "prefix"):
+                with self.subTest(variant=variant, mode=mode):
+                    if mode == "missing":
+                        result = self.program(preexec_fn=lambda: os.close(1))
+                        output = result.stdout
+                    elif mode == "readonly":
+                        with pe.open("rb") as reader:
+                            result = self.program(stdout=reader)
+                        output = b""
+                    else:
+                        result, output = self.run_output_pipe(mode, {"broken": None, "full": 0, "short": 7, "prefix": 5119}[mode])
+                    check_observation("windows", variant, mode, result.returncode, output, result.stderr)
+
+        self.compile(FIXTURES / "crt-puts-hello.exe")
+        diagnostic = b"forge: unsupported legacy MSVCRT stream operation\n"
+        with open(os.devnull, "wb") as device:
+            result = self.program(stdout=device)
+            self.assertEqual((result.returncode, result.stderr), (125, diagnostic))
+        master, slave = pty.openpty()
+        with os.fdopen(master, "rb") as terminal, os.fdopen(slave, "wb") as device:
+            result = self.program(stdout=device)
+            self.assertEqual((result.returncode, result.stderr), (125, diagnostic))
+            self.assertFalse(select.select([terminal], [], [], 0)[0])
+        reader, writer = socket.socketpair()
+        with reader, writer:
+            result = self.program(stdout=writer)
+            writer.shutdown(socket.SHUT_WR)
+            self.assertEqual((result.returncode, reader.recv(1), result.stderr), (125, b"", diagnostic))
+
     def test_crt_stream_failures(self):
         sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "differential/reference"))
         from crt_streams import block_records, evidence, summarize
@@ -2021,33 +2120,11 @@ class Console(Workspace):
             for name, room in (("broken", None), ("broken", 0), ("short", 7),
                                ("short", 5118), ("prefix", 5119)):
                 with self.subTest(named=named, mode=name, room=room):
-                    if named:
-                        read = os.open(fifo, os.O_RDONLY | os.O_NONBLOCK)
-                        write = os.open(fifo, os.O_WRONLY)
-                    else:
-                        read, write = os.pipe()
-                    with os.fdopen(read, "rb") as reader, os.fdopen(write, "wb", buffering=0) as writer:
-                        filled = 0
-                        if room is not None:
-                            os.set_blocking(write, False)
-                            while filled < 1 << 20:
-                                n = writer.write(b"F" * 512)
-                                if not n:
-                                    break
-                                filled += n
-                            self.assertLess(room, filled)
-                            self.assertLess(filled, 1 << 20)
-                            self.assertEqual(os.read(read, room), b"F" * room)
-                        if name == "broken":
-                            reader.close()
-                        result = self.program(stdout=writer)
-                        writer.close()
-                        self.assertEqual((result.returncode, result.stderr), (42, block_records(cases, name)))
-                        if name != "broken":
-                            remaining = reader.read()
-                            self.assertEqual(remaining[:filled-room], b"F" * (filled-room))
-                            wanted = "" if name == "short" else cases["prefix-16"]["output"]
-                            self.assertEqual(summarize(remaining[filled-room:]), wanted)
+                    result, output = self.run_output_pipe(name, room, fifo if named else None)
+                    self.assertEqual((result.returncode, result.stderr), (42, block_records(cases, name)))
+                    if name != "broken":
+                        wanted = "" if name == "short" else cases["prefix-16"]["output"]
+                        self.assertEqual(summarize(output), wanted)
 
         # A one-byte native prefix is shorter than the two CRs already staged.
         # The subset cannot express the DLL's unsigned subtraction as an element count.

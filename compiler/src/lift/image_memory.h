@@ -70,7 +70,7 @@ namespace forge::x86 {
         void checkStackMapping(const Step &step) const;
         void addressTaken(const Step &step, uint64_t va);
         void serviceArgument(const Step &step, uint64_t va, bool write,
-                             std::optional<uint64_t> size, bool contiguousInput = false);
+                             std::optional<uint64_t> size, uint64_t contiguousInputLimit = 0);
         void protectionTarget(const Step &step, uint64_t va, std::optional<uint64_t> size);
         void protectionOutput(const Step &step, uint64_t va, unsigned size);
         void boundedTable(const Step &step, const BoundedTableCall &table);

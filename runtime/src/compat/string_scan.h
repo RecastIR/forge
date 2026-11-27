@@ -8,7 +8,8 @@
 namespace forge::runtime {
     template <win64::Argument arg>
     forge_rt_status scanString(const win64::GuestBuffer<arg> &string, uint64_t limit,
-                               uint64_t &length) {
+                               uint64_t &length,
+                               forge_rt_status limitStatus = FORGE_RT_RESOURCE_EXHAUSTED) {
         std::array<uint8_t, 256> bytes{};
         for (uint64_t offset = 0; offset < limit;) {
             const auto count =
@@ -43,6 +44,6 @@ namespace forge::runtime {
 
             offset += count;
         }
-        return FORGE_RT_RESOURCE_EXHAUSTED;
+        return limitStatus;
     }
 } // namespace forge::runtime
