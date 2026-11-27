@@ -1552,7 +1552,9 @@ class Reference(Workspace):
         denied = image("virtual-protect-denied")
         inputs = Path(__file__).resolve().parents[1] / "differential/reference/executable-inputs.txt"
         filenames = inputs.read_text().splitlines()
-        self.assertEqual(filenames, sorted([*expected, observer.name, denied.name, "crt-stream-invalid.exe", "crt-stream-reference.exe"]))
+        from crt_puts import VARIANTS
+        self.assertEqual(filenames, sorted([*expected, observer.name, denied.name, "crt-stream-invalid.exe",
+                                            "crt-stream-reference.exe", *(f"crt-puts-{v}.exe" for v in VARIANTS)]))
         for case in range(45):
             with self.subTest(case=case):
                 check_observation("wine", case, *self.capture(observer, [f"{case:02}"]))

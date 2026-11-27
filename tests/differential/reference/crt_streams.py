@@ -92,6 +92,8 @@ def observe(directory, destination, wine=None):
         if declared.get(name) != checksum or hashlib.sha256((directory / name).read_bytes()).hexdigest() != checksum:
             raise ValueError(f"{backend}: {name} checksum mismatch")
     destination.mkdir(parents=True, exist_ok=True)
+    from crt_puts import observe_puts
+    observe_puts(directory, destination, wine, declared, launch, windows_output_failure)
     observed = {}
     if not wine:
         dll = Path(os.environ["SystemRoot"]) / "System32/msvcrt.dll"
@@ -154,57 +156,66 @@ def observe(directory, destination, wine=None):
     print(f"{backend}: verified {len(observed)} observations")
 
 
-def output_failures(pe, directory, block=False):
-    """Keep the diagnostic channel independent of the deliberately unusable stdout."""
+def windows_output_failure(pe, args, name, log):
     import _winapi
     import msvcrt
+    if name == "missing":
+        info = subprocess.STARTUPINFO()
+        info.dwFlags |= subprocess.STARTF_USESTDHANDLES
+        info.hStdInput = info.hStdOutput = 0
+        info.hStdError = msvcrt.get_osfhandle(log.fileno())
+        os.set_handle_inheritable(info.hStdError, True)
+        run = subprocess.run([pe, *args], startupinfo=info, close_fds=False,
+                             timeout=20)
+        output = b""
+    elif name == "readonly":
+        with pe.open("rb") as reader:
+            run = launch(pe, args, None, stdout=reader, stderr=log)
+        output = b""
+    else:
+        if name == "prefix":
+            r_handle, w_handle = _winapi.CreatePipe(None, 16384)
+            read = msvcrt.open_osfhandle(r_handle, os.O_RDONLY | os.O_BINARY)
+            write = msvcrt.open_osfhandle(w_handle, os.O_WRONLY | os.O_BINARY)
+        else:
+            read, write = os.pipe()
+        with os.fdopen(write, "wb", buffering=0) as writer:
+            if name == "broken":
+                os.close(read)
+            else:
+                os.set_blocking(write, False)
+                # The DLL fills a 5120-byte staging area until at least
+                # 5119 physical bytes are ready or the input is exhausted.
+                room = 5119 if name == "prefix" else 7
+                filled = 0
+                while filled < 1 << 20:
+                    try:
+                        n = writer.write(b"F" * 4096)
+                    except OSError:
+                        break
+                    if not n:
+                        break
+                    filled += n
+                if not room < filled < 1 << 20 or os.read(read, room) != b"F" * room:
+                    raise ValueError("nonblocking pipe did not reach its capacity")
+            run = launch(pe, args, None, stdout=writer, stderr=log)
+        output = b""
+        if name in ("short", "prefix"):
+            with os.fdopen(read, "rb") as reader:
+                remaining = reader.read()
+            if not remaining.startswith(b"F" * (filled - room)):
+                raise ValueError("child modified pipe prefix")
+            output = remaining[filled - room:]
+    return run, output
+
+
+def output_failures(pe, directory, block=False):
+    """Keep the diagnostic channel independent of the deliberately unusable stdout."""
     rows = {}
     for name in ("missing", "broken", "short", "prefix"):
         for case in ((16,) if block or name == "prefix" else (0, 16)):
             with (directory / (("block-" if block else "") + f"{name}-{case}.records")).open("wb") as log:
-                if name == "missing":
-                    info = subprocess.STARTUPINFO()
-                    info.dwFlags |= subprocess.STARTF_USESTDHANDLES
-                    info.hStdInput = info.hStdOutput = 0
-                    info.hStdError = msvcrt.get_osfhandle(log.fileno())
-                    os.set_handle_inheritable(info.hStdError, True)
-                    run = subprocess.run([pe, f"{case:02}"], startupinfo=info, close_fds=False,
-                                         timeout=20)
-                    output = b""
-                else:
-                    if name == "prefix":
-                        r_handle, w_handle = _winapi.CreatePipe(None, 16384)
-                        read = msvcrt.open_osfhandle(r_handle, os.O_RDONLY | os.O_BINARY)
-                        write = msvcrt.open_osfhandle(w_handle, os.O_WRONLY | os.O_BINARY)
-                    else:
-                        read, write = os.pipe()
-                    with os.fdopen(write, "wb", buffering=0) as writer:
-                        if name == "broken":
-                            os.close(read)
-                        else:
-                            os.set_blocking(write, False)
-                            # The DLL fills a 5120-byte staging area until at least
-                            # 5119 physical bytes are ready or the input is exhausted.
-                            room = 5119 if name == "prefix" else 7
-                            filled = 0
-                            while filled < 1 << 20:
-                                try:
-                                    n = writer.write(b"F" * 4096)
-                                except OSError:
-                                    break
-                                if not n:
-                                    break
-                                filled += n
-                            if not room < filled < 1 << 20 or os.read(read, room) != b"F" * room:
-                                raise ValueError("nonblocking pipe did not reach its capacity")
-                        run = launch(pe, [f"{case:02}"], None, stdout=writer, stderr=log)
-                    output = b""
-                    if name in ("short", "prefix"):
-                        with os.fdopen(read, "rb") as reader:
-                            remaining = reader.read()
-                        if not remaining.startswith(b"F" * (filled - room)):
-                            raise ValueError("child modified pipe prefix")
-                        output = remaining[filled - room:]
+                run, output = windows_output_failure(pe, [f"{case:02}"], name, log)
             raw = Path(log.name).read_bytes()
             if block:
                 cases = evidence("windows")["cases"]

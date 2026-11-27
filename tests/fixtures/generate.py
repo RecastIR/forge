@@ -110,6 +110,16 @@ def generate(output, mc, link, dlltool, clang):
         for name in ("state", "sections", "block"):
             image(f"crt-stream-{name}.exe", (sources / f"crt-stream-{name}.s").read_text(),
                   link_flags=["streams.lib", "msvcrt.dll.lib", "KERNEL32.dll.lib"])
+        puts_def = work / "puts.def"
+        puts_def.write_text("LIBRARY msvcrt.dll\nEXPORTS\nputs\n")
+        run(dlltool, "-m", "i386:x86-64", "-d", puts_def, "-l", "puts.lib")
+        puts = (sources / "crt-puts.s").read_text()
+        for name, options in (("hello", ["hello"]), ("mixed", ["mixed"]), ("exit", ["mixed", "crt_exit"]),
+                              ("exitprocess", ["mixed", "win_exit"]), ("direct", ["direct"]),
+                              ("newline", ["newline_flush"]), ("null", ["null_input"]), ("fault", [])):
+            setup = "".join(symbol + " = 1\n" for symbol in options)
+            image(f"crt-puts-{name}.exe", setup + puts,
+                  link_flags=["puts.lib", "streams.lib", "msvcrt.dll.lib", "KERNEL32.dll.lib"])
         returns = (sources / "executable-return.s").read_text()
         for dll in ("KERNEL32.dll", "msvcrt.dll"):
             name = dll.split(".")[0].lower()
