@@ -22,7 +22,7 @@ JOB_STAGES = {
     "macos-presets": ("formatting", "lint", "release", "xcode_debug", "xcode_release_build", "xcode_release_ctest", "layout"),
     "windows-fixtures": ("build", "capture", "wine_tests"),
     "windows-executable-reference": ("executable_reference", "crt_streams", "crt_vfprintf", "crt_abort"),
-    "windows-integer-reference": ("cmp16mi", "app_type", "tail_jump", "bounded_call", "crt_streams", "crt_vfprintf", "crt_abort", "virtual_protect", "startup"),
+    "windows-integer-reference": ("cmp16mi", "app_type", "tail_jump", "bounded_call", "crt_streams", "crt_vfprintf", "virtual_protect", "startup"),
     "differential": ("debug", "release", "negative_tests"),
 }
 FORGE_PRODUCERS = {"debug": "macos-sanitize", "release": "macos-dev"}

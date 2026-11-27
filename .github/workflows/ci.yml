@@ -61,7 +61,8 @@ jobs:
           BASE: ${{ github.event.pull_request.base.sha || github.event.before }}
         run: |
           if git diff --quiet "$BASE" HEAD -- .github/workflows/ci.yml \
-            'tests/fixtures/crt-termination*' tests/fixtures/executable-startup-info.s tests/fixtures/generate.py \
+            'tests/fixtures/crt-abort*' tests/differential/reference/crt_abort.py tests/differential/reference/crt-abort*.json \
+            tests/differential/reference/amsg-exit/capture.c 'tests/fixtures/crt-termination*' tests/fixtures/executable-startup-info.s tests/fixtures/generate.py \
             tests/differential/reference/termination tests/differential/fixtures/startup/termination \
             'compiler/src/lift/initializer_table.*' 'compiler/src/lift/recovery.*' compiler/src/lift/lift.cpp \
             compiler/src/lift/group_analysis.cpp runtime/include/forge/service_signature.h runtime/src/managed_process.cpp \
@@ -94,6 +95,14 @@ jobs:
         with:
           name: termination-inputs
           path: inputs
+      - uses: actions/download-artifact@v4
+        with:
+          name: executable-reference-inputs
+          path: executables
+      - name: Measure legacy abort
+        env:
+          PE_MANIFEST_SHA256: ${{ needs.macos-dev.outputs.executable_inputs_sha256 }}
+        run: python -B tests/differential/reference/crt_abort.py executables abort
       - name: Measure legacy system MSVCRT and startup information
         run: >-
           python -B tests/differential/reference/termination/observe.py inputs observations
@@ -103,7 +112,9 @@ jobs:
         if: always()
         with:
           name: legacy-windows-observations
-          path: observations
+          path: |
+            observations
+            abort/abort-observations
           if-no-files-found: error
 
   macos-sanitize:
@@ -221,8 +232,6 @@ jobs:
           python -B tests/differential/reference/crt_streams.py executables stream-observations 0<> stream-probe-stdin
           test ! -s stream-probe-stdin
           echo "crt_streams=success" >> "$GITHUB_OUTPUT"
-          python -B tests/differential/reference/crt_abort.py executables stream-observations
-          echo "crt_abort=success" >> "$GITHUB_OUTPUT"
           python -B tests/differential/reference/crt_vfprintf.py executables stream-observations
           echo "crt_vfprintf=success" >> "$GITHUB_OUTPUT"
           python -B tests/differential/reference/virtual_protect.py executables

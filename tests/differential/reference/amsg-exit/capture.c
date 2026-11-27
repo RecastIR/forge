@@ -150,8 +150,8 @@ int main(int argc, char **argv) {
         if (i == 1 && absent_error) {
             child[i] = NULL;
         } else if (i == 1 && merged) {
-            if (!DuplicateHandle(GetCurrentProcess(), child[0], GetCurrentProcess(), &child[i],
-                                 0, TRUE, DUPLICATE_SAME_ACCESS)) {
+            if (!DuplicateHandle(GetCurrentProcess(), child[0], GetCurrentProcess(), &child[i], 0,
+                                 TRUE, DUPLICATE_SAME_ACCESS)) {
                 fail("duplicate merged output");
             }
         } else if (pipes || broken || (i == 1 && broken_error)) {
