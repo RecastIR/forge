@@ -1572,7 +1572,8 @@ class Reference(Workspace):
         inputs = Path(__file__).resolve().parents[1] / "differential/reference/executable-inputs.txt"
         filenames = inputs.read_text().splitlines()
         from crt_puts import VARIANTS, check_input, check_observation as check_puts
-        self.assertEqual(filenames, sorted([*expected, observer.name, denied.name, "crt-stream-invalid.exe",
+        from crt_vfprintf import VARIANTS as format_variants
+        self.assertEqual(filenames, sorted([*(f"crt-vfprintf-{v}.exe" for v in format_variants), *expected, observer.name, denied.name, "crt-stream-invalid.exe",
                                             "crt-stream-reference.exe", *(f"crt-puts-{v}.exe" for v in VARIANTS)]))
         for variant in VARIANTS:
             pe = FIXTURES / f"crt-puts-{variant}.exe"

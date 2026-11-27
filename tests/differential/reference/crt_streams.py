@@ -92,6 +92,8 @@ def observe(directory, destination, wine=None):
         if declared.get(name) != checksum or hashlib.sha256((directory / name).read_bytes()).hexdigest() != checksum:
             raise ValueError(f"{backend}: {name} checksum mismatch")
     destination.mkdir(parents=True, exist_ok=True)
+    from crt_vfprintf import observe as observe_format
+    observe_format(directory, destination, wine, declared, launch, windows_output_failure)
     from crt_puts import observe_puts
     observe_puts(directory, destination, wine, declared, launch, windows_output_failure)
     observed = {}

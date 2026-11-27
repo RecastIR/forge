@@ -45,6 +45,15 @@ crt-term-recursive-exit.exe
 crt-term-recursive-order.exe
 crt-term-recursive.exe
 crt-term-register.exe
+crt-vfprintf-boundary.exe
+crt-vfprintf-empty.exe
+crt-vfprintf-large.exe
+crt-vfprintf-mixed.exe
+crt-vfprintf-null_format.exe
+crt-vfprintf-null_string.exe
+crt-vfprintf-numbers.exe
+crt-vfprintf-pointer.exe
+crt-vfprintf-unknown.exe
 executable-bounded-call.exe
 executable-bounded-cleanup.exe
 executable-cmp16mi.exe

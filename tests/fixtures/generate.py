@@ -113,6 +113,19 @@ def generate(output, mc, link, dlltool, clang):
         puts_def = work / "puts.def"
         puts_def.write_text("LIBRARY msvcrt.dll\nEXPORTS\nputs\n")
         run(dlltool, "-m", "i386:x86-64", "-d", puts_def, "-l", "puts.lib")
+        format_def = work / "format.def"
+        format_def.write_text("LIBRARY msvcrt.dll\nEXPORTS\nvfprintf\n")
+        run(dlltool, "-m", "i386:x86-64", "-d", format_def, "-l", "format.lib")
+        run(clang, "--target=x86_64-pc-windows-msvc", "-O1", "-ffreestanding",
+            "-funwind-tables", "-fno-stack-protector", "-c", sources / "crt-vfprintf.c", "-o", "emit.obj")
+        formatter = (sources / "crt-vfprintf.s").read_text()
+        variants = ("empty", "mixed", "numbers", "pointer", "boundary", "large",
+                    "null_format", "null_string", "unknown")
+        for variant in variants:
+            switches = "".join(f"{name} = {int(name == variant)}\n" for name in variants)
+            image(f"crt-vfprintf-{variant}.exe", switches + formatter,
+                  link_flags=["/dynamicbase:no", "/fixed:no", "emit.obj", "format.lib", "puts.lib",
+                              "streams.lib", "msvcrt.dll.lib", "KERNEL32.dll.lib"])
         puts = (sources / "crt-puts.s").read_text()
         for name in ("heap", "immutable", "terminators"):
             image(f"crt-puts-{name}.exe", (sources / f"crt-puts-{name}.s").read_text(),
