@@ -286,7 +286,8 @@ def hosted_report(raw_needs, current_run, revision, **paths):
         needs = {}
 
     jobs, stages, outputs = {}, {}, {}
-    for job, expected in JOB_STAGES.items():
+
+    def check_stages(job, expected):
         entry = needs.get(job)
         entry = entry if isinstance(entry, dict) else {}
         jobs[job] = entry.get("result", "missing")
@@ -301,8 +302,12 @@ def hosted_report(raw_needs, current_run, revision, **paths):
             errors.append(f"{job}: {error}")
             observed = {}
         stages[job] = {k: observed.get(k, "not_run") for k in expected}
-        if any(value != "success" for value in stages[job].values()):
-            errors.append(f"{job}: required stage failed or did not run")
+        for name, outcome in stages[job].items():
+            if outcome != "success":
+                errors.append(f"{job}: {name}={outcome}")
+
+    for job, expected in JOB_STAGES.items():
+        check_stages(job, expected)
 
     digests = {}
     for config, job in FORGE_PRODUCERS.items():
@@ -323,8 +328,7 @@ def hosted_report(raw_needs, current_run, revision, **paths):
     if capture_requested not in ("true", "false"):
         errors.append("macos-dev: missing or invalid Windows capture decision")
     if capture_requested == "true":
-        capture = needs.get("legacy-windows-capture")
-        jobs["legacy-windows-capture"] = capture.get("result", "missing") if isinstance(capture, dict) else "missing"
+        check_stages("legacy-windows-capture", ("termination", "abort"))
 
     # A gate-only rerun can consume the successful differential job's original attempt.
     # Bind its reports to that job output, the current workflow run, and the checked-out revision.

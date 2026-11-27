@@ -27,6 +27,7 @@ jobs:
       executable_inputs_sha256: ${{ steps.executables.outputs.sha256 }}
       capture_requested: ${{ steps.capture.outputs.requested }}
       termination_sha256: ${{ steps.termination.outputs.sha256 }}
+      abort_sha256: ${{ steps.abort.outputs.sha256 }}
     steps:
       - uses: actions/checkout@v6
         with:
@@ -37,7 +38,8 @@ jobs:
         env:
           BASE: ${{ github.event.pull_request.base.sha || github.event.before }}
         run: |
-          if git diff --quiet "$BASE" HEAD -- .github/workflows/ci.yml \
+          if git diff --quiet "$BASE" HEAD -- .github/workflows/ci.yml .github/actions/package-reference-inputs.sh \
+            tests/differential/reference/executable-inputs.txt \
             'tests/fixtures/crt-abort*' tests/differential/reference/crt_abort.py 'tests/differential/reference/crt-abort*.json' \
             tests/differential/reference/amsg-exit/capture.c 'tests/fixtures/crt-termination*' tests/fixtures/executable-startup-info.s tests/fixtures/generate.py \
             tests/differential/reference/termination tests/differential/fixtures/startup/termination \
@@ -57,14 +59,9 @@ jobs:
       - name: Package native executable reference inputs
         if: ${{ !cancelled() }}
         id: executables
-        working-directory: build/dev/fixtures/Debug
-        run: |
-          list="$GITHUB_WORKSPACE/tests/differential/reference/executable-inputs.txt"
-          dest="$RUNNER_TEMP/executable-inputs"
-          mkdir "$dest"
-          while IFS= read -r pe; do cp "$pe" "$dest/"; done < "$list"
-          xargs shasum -a 256 < "$list" > "$dest/SHA256SUMS"
-          echo "sha256=$(shasum -a 256 "$dest/SHA256SUMS" | cut -d' ' -f1)" >> "$GITHUB_OUTPUT"
+        run: >-
+          bash .github/actions/package-reference-inputs.sh
+          "$PWD/tests/differential/reference/executable-inputs.txt" "$RUNNER_TEMP/executable-inputs"
       - uses: actions/upload-artifact@v4
         if: ${{ !cancelled() && steps.executables.outputs.sha256 != '' }}
         with:
@@ -74,18 +71,12 @@ jobs:
           retention-days: 7
           overwrite: true
 
-      - name: Package focused Windows reference inputs
+      - name: Package Windows termination reference inputs
         id: termination
         if: ${{ !cancelled() && steps.capture.outputs.requested == 'true' }}
-        shell: bash
-        run: |
-          list="$PWD/tests/differential/reference/termination/inputs.txt"
-          dest="$RUNNER_TEMP/termination-inputs"
-          mkdir "$dest"
-          cd build/dev/fixtures/Debug
-          while IFS= read -r pe; do cp "$pe" "$dest/"; done < "$list"
-          xargs shasum -a 256 < "$list" > "$dest/SHA256SUMS"
-          echo "sha256=$(shasum -a 256 "$dest/SHA256SUMS" | cut -d' ' -f1)" >> "$GITHUB_OUTPUT"
+        run: >-
+          bash .github/actions/package-reference-inputs.sh
+          "$PWD/tests/differential/reference/termination/inputs.txt" "$RUNNER_TEMP/termination-inputs"
       - uses: actions/upload-artifact@v4
         if: ${{ !cancelled() && steps.termination.outputs.sha256 != '' }}
         with:
@@ -94,11 +85,29 @@ jobs:
           if-no-files-found: error
           overwrite: true
 
+      - name: Package Windows abort reference inputs
+        id: abort
+        if: ${{ !cancelled() && steps.capture.outputs.requested == 'true' }}
+        run: |
+          list="$RUNNER_TEMP/abort-inputs.txt"
+          grep '^crt-abort-.*\.exe$' tests/differential/reference/executable-inputs.txt > "$list"
+          bash .github/actions/package-reference-inputs.sh "$list" "$RUNNER_TEMP/abort-inputs"
+      - uses: actions/upload-artifact@v4
+        if: ${{ !cancelled() && steps.abort.outputs.sha256 != '' }}
+        with:
+          name: abort-inputs
+          path: ${{ runner.temp }}/abort-inputs
+          if-no-files-found: error
+          overwrite: true
+
   legacy-windows-capture:
     needs: macos-dev
     if: ${{ !cancelled() && needs.macos-dev.outputs.capture_requested == 'true' }}
     runs-on: windows-2022
     timeout-minutes: 10
+    outputs:
+      stages: >-
+        {"termination": "${{ steps.termination.outcome }}", "abort": "${{ steps.abort.outcome }}"}
     steps:
       - uses: actions/checkout@v6
         id: checkout
@@ -109,6 +118,7 @@ jobs:
           name: termination-inputs
           path: inputs
       - name: Measure legacy system MSVCRT and startup information
+        id: termination
         if: ${{ !cancelled() && steps.termination_inputs.outcome == 'success' }}
         run: >-
           python -B tests/differential/reference/termination/observe.py inputs observations
@@ -125,13 +135,14 @@ jobs:
         id: abort_inputs
         if: ${{ !cancelled() && steps.checkout.outcome == 'success' }}
         with:
-          name: executable-reference-inputs
-          path: executables
+          name: abort-inputs
+          path: abort-inputs
       - name: Measure legacy abort
+        id: abort
         if: ${{ !cancelled() && steps.abort_inputs.outcome == 'success' }}
         env:
-          PE_MANIFEST_SHA256: ${{ needs.macos-dev.outputs.executable_inputs_sha256 }}
-        run: python -B tests/differential/reference/crt_abort.py executables abort
+          PE_MANIFEST_SHA256: ${{ needs.macos-dev.outputs.abort_sha256 }}
+        run: python -B tests/differential/reference/crt_abort.py abort-inputs abort
       - uses: actions/upload-artifact@v4
         if: ${{ !cancelled() && steps.abort_inputs.outcome == 'success' }}
         with:
@@ -300,11 +311,13 @@ jobs:
         id: verify
         run: |
           test "$(uname -m)" = x86_64
-          ./tools/test-forge.sh --executable-reference
           image=$(python3 -B tests/differential/fixture_images.py --id reference)
           # The pinned image writes as UID 1000, independently of the hosted runner's UID.
           install -d -m 1777 "$RUNNER_TEMP/stream-observations"
+          status=0
+          ./tools/test-forge.sh --executable-reference || status=1
           for suite in crt_abort crt_streams crt_vfprintf; do
+            outcome=success
             docker run --init --rm --pull never --platform linux/amd64 --network none --cap-drop ALL \
               --security-opt no-new-privileges -e FORGE_WINE=/usr/lib/wine/wine64 -e PE_MANIFEST_SHA256 \
               -e FORGE_REFERENCE_IMAGE="$image" -e GITHUB_RUN_ID \
@@ -313,9 +326,11 @@ jobs:
               --entrypoint /bin/sh "$image" -ec '
                 /usr/lib/wine/wineserver64 -p
                 "$FORGE_WINE" cmd /c ver >/dev/null
-                python3 -B "/suite/$1.py" /input /observations' sh "$suite"
-            echo "$suite=success" >> "$GITHUB_OUTPUT"
+                python3 -B "/suite/$1.py" /input /observations' sh "$suite" || outcome=failure
+            echo "$suite=$outcome" >> "$GITHUB_OUTPUT"
+            if test "$outcome" = failure; then status=1; fi
           done
+          exit "$status"
         env:
           PE_MANIFEST_SHA256: ${{ needs.macos-dev.outputs.executable_inputs_sha256 }}
 

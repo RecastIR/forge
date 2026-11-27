@@ -737,6 +737,9 @@ namespace {
                 count == 1);
 
         if (execution->rcx) {
+            REQUIRE(forge_rt_msvcrt_fwrite(instance, thread, source, 1, 1, base + 48, &count,
+                                           &fault) == FORGE_RT_OK &&
+                    count == 1);
             REQUIRE(forge_rt_msvcrt_abort(instance, thread) == FORGE_RT_OK);
             REQUIRE(forge_rt_msvcrt_abort(instance, thread) == FORGE_RT_INVALID_STATE);
             REQUIRE(forge_rt_exit_process(instance, thread, 99) == FORGE_RT_INVALID_STATE);
@@ -745,39 +748,54 @@ namespace {
         }
     }
 
+    void checkAbortOutputFailure(const forge_rt_artifact &artifact, bool failStdout) {
+        int ends[2];
+        REQUIRE(pipe(ends) == 0);
+        std::unique_ptr<FILE, decltype(&std::fclose)> file(std::tmpfile(), std::fclose);
+        REQUIRE(file != nullptr);
+
+        const int saved = fcntl(STDOUT_FILENO, F_DUPFD_CLOEXEC, 3);
+        const int out = failStdout ? ends[1] : fileno(file.get());
+        const int err = failStdout ? fileno(file.get()) : ends[1];
+        REQUIRE(saved >= 0 && dup2(out, STDOUT_FILENO) == STDOUT_FILENO);
+        auto process = registeredWithStderr(artifact, err);
+        REQUIRE(dup2(saved, STDOUT_FILENO) == STDOUT_FILENO && close(saved) == 0);
+        REQUIRE(close(ends[1]) == 0);
+
+        // An embedder using default SIGPIPE has not authorized a write to this pipe.
+        struct sigaction policy{}, previous{};
+        policy.sa_handler = SIG_DFL;
+        REQUIRE(sigemptyset(&policy.sa_mask) == 0 && sigaction(SIGPIPE, &policy, &previous) == 0);
+        const auto aborted = run(process, 1);
+        REQUIRE(sigaction(SIGPIPE, &previous, nullptr) == 0);
+        REQUIRE(aborted.kind == FORGE_RT_EXIT_PROCESS && aborted.status == FORGE_RT_OK &&
+                aborted.value == 3);
+        forge_rt_process_state state = 0;
+        REQUIRE(forge_rt_process_get_state(process.get(), &state) == FORGE_RT_OK &&
+                state == FORGE_RT_PROCESS_EXITED);
+        REQUIRE(fileContentsEqual(file.get(), "G"));
+
+        char byte;
+        REQUIRE(fcntl(ends[0], F_SETFL, O_NONBLOCK) == 0 && read(ends[0], &byte, 1) == 0);
+        process.reset();
+        REQUIRE(read(ends[0], &byte, 1) == 0 && close(ends[0]) == 0);
+    }
+
     void checkAbortIsolation() {
         REQUIRE(forge_rt_msvcrt_abort(nullptr, 0) == FORGE_RT_INVALID_ARGUMENT);
         constexpr forge_rt_import services[]{{"msvcrt.dll", "abort"}, {"msvcrt.dll", "fwrite"}};
         auto artifact = consoleArtifact(abortOrReturn);
         artifact.imports = services;
         artifact.importCount = std::size(services);
-        int ends[2];
-        REQUIRE(pipe(ends) == 0);
-        auto first = registeredWithStderr(artifact, ends[1]);
-        REQUIRE(close(ends[1]) == 0);
         std::unique_ptr<FILE, decltype(&std::fclose)> file(std::tmpfile(), std::fclose);
         REQUIRE(file != nullptr);
-        auto second = registeredWithStderr(artifact, fileno(file.get()));
+        auto independent = registeredWithStderr(artifact, fileno(file.get()));
 
-        // An embedder using default SIGPIPE has not authorized a write to this pipe.
-        struct sigaction policy{}, previous{};
-        policy.sa_handler = SIG_DFL;
-        REQUIRE(sigemptyset(&policy.sa_mask) == 0 && sigaction(SIGPIPE, &policy, &previous) == 0);
-        const auto aborted = run(first, 1);
-        REQUIRE(sigaction(SIGPIPE, &previous, nullptr) == 0);
-        REQUIRE(aborted.kind == FORGE_RT_EXIT_PROCESS && aborted.status == FORGE_RT_OK &&
-                aborted.value == 3);
-        forge_rt_process_state state = 0;
-        REQUIRE(forge_rt_process_get_state(first.get(), &state) == FORGE_RT_OK &&
-                state == FORGE_RT_PROCESS_EXITED);
-        char byte;
-        REQUIRE(fcntl(ends[0], F_SETFL, O_NONBLOCK) == 0 && read(ends[0], &byte, 1) == 0);
-        first.reset();
-        REQUIRE(read(ends[0], &byte, 1) == 0 && close(ends[0]) == 0);
-
-        const auto returned = run(second);
+        checkAbortOutputFailure(artifact, true);
+        checkAbortOutputFailure(artifact, false);
+        const auto returned = run(independent);
         REQUIRE(returned.kind == FORGE_RT_RETURNED && returned.value == 42);
-        second.reset();
+        independent.reset();
         REQUIRE(fileContentsEqual(file.get(), "G"));
         REQUIRE(write(fileno(file.get()), "H", 1) == 1 && fileContentsEqual(file.get(), "GH"));
     }

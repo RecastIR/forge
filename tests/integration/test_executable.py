@@ -2082,28 +2082,28 @@ class Console(Workspace):
         return result, output
 
     def abort_output(self, mode):
-        if mode == "file":
-            stdout, stderr = self.dir / "stdout.bin", self.dir / "stderr.bin"
-            with stdout.open("wb") as out, stderr.open("wb") as err:
-                result = self.program(stdout=out, stderr=err)
-            return result.returncode, stdout.read_bytes(), stderr.read_bytes()
-        if mode == "merged":
-            merged = self.dir / "merged.bin"
-            with merged.open("wb") as out:
-                result = self.program(stdout=out, stderr=subprocess.STDOUT)
-            return result.returncode, merged.read_bytes(), None
-        if mode == "absent-stderr":
-            result = self.program(preexec_fn=lambda: os.close(2))
-            self.assertEqual(result.stderr, b"")
-            return result.returncode, result.stdout, None
-        if mode == "broken-stderr":
-            read, write = os.pipe()
-            os.close(read)
-            with os.fdopen(write, "wb") as writer:
-                result = self.program(stderr=writer)
-        else:
+        if mode == "pipe":
             result = self.program()
-        return result.returncode, result.stdout, result.stderr
+            return result.returncode, result.stdout, result.stderr
+
+        stdout, stderr = self.dir / "stdout.bin", self.dir / "stderr.bin"
+        with stdout.open("wb") as out:
+            if mode == "file":
+                with stderr.open("wb") as err:
+                    result = self.program(stdout=out, stderr=err)
+            elif mode == "merged":
+                result = self.program(stdout=out, stderr=subprocess.STDOUT)
+            elif mode == "absent-stderr":
+                result = self.program(stdout=out, preexec_fn=lambda: os.close(2))
+                self.assertEqual(result.stderr, b"")
+            elif mode == "broken-stderr":
+                read, write = os.pipe()
+                os.close(read)
+                with os.fdopen(write, "wb") as writer:
+                    result = self.program(stdout=out, stderr=writer)
+            else:
+                self.fail(f"unknown abort output mode {mode}")
+        return result.returncode, stdout.read_bytes(), stderr.read_bytes() if mode == "file" else None
 
     def test_legacy_abort(self):
         sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "differential/reference"))

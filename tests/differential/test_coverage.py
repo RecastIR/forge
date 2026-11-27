@@ -91,13 +91,32 @@ class CoverageTests(ArtifactSetup):
 
     def test_windows_capture_required_when_requested(self):
         needs = self.needs()
+        job = "legacy-windows-capture"
+        needs[job] = {"result": "skipped", "outputs": {}}
         self.assertEqual(self.hosted(needs)["gate"], "passed")
         needs["macos-dev"]["outputs"]["capture_requested"] = "true"
+        del needs[job]
         self.assertEqual(self.hosted(needs)["gate"], "failed")
-        for outcome in ("skipped", "failure", "success"):
+        complete = {"termination": "success", "abort": "success"}
+        for outcome in ("skipped", "failure", "cancelled", "success"):
             with self.subTest(outcome=outcome):
-                needs["legacy-windows-capture"] = {"result": outcome, "outputs": {}}
+                needs[job] = {"result": outcome, "outputs": {"stages": json.dumps(complete)}}
                 self.assertEqual(self.hosted(needs)["gate"], "passed" if outcome == "success" else "failed")
+
+        needs[job] = {"result": "success", "outputs": {}}
+        self.assertEqual(self.hosted(needs)["gate"], "failed")
+        for observer in complete:
+            for outcome in (None, "skipped", "failure", "cancelled"):
+                with self.subTest(observer=observer, outcome=outcome):
+                    stages = complete.copy()
+                    if outcome is None:
+                        del stages[observer]
+                    else:
+                        stages[observer] = outcome
+                    needs[job]["outputs"]["stages"] = json.dumps(stages)
+                    report = self.hosted(needs)
+                    self.assertEqual(report["gate"], "failed")
+                    self.assertIn(f"{job}: {observer}={outcome or 'not_run'}", report["errors"])
 
     def test_windows_capture_requires_an_explicit_decision(self):
         needs = self.needs()
