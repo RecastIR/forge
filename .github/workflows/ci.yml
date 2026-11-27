@@ -217,12 +217,20 @@ jobs:
           echo "bounded_call=success" >> "$GITHUB_OUTPUT"
           python -B tests/integration/test_executable.py windows-tail-jump executables
           echo "tail_jump=success" >> "$GITHUB_OUTPUT"
+          python -B tests/differential/reference/crt_streams.py executables stream-observations
           python -B tests/differential/reference/virtual_protect.py executables
           echo "virtual_protect=success" >> "$GITHUB_OUTPUT"
           python -B tests/integration/test_executable.py windows-startup build/fixtures/windows-x64
           echo "startup=success" >> "$GITHUB_OUTPUT"
         env:
           PE_MANIFEST_SHA256: ${{ needs.macos-dev.outputs.executable_inputs_sha256 }}
+
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: windows-crt-stream-observations
+          path: stream-observations
+          if-no-files-found: error
 
   windows-executable-reference:
     needs: macos-dev

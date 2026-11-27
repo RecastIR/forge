@@ -89,6 +89,18 @@ def generate(output, mc, link, dlltool, clang):
         run(link, "/nodefaultlib", "/timestamp:0", "/entry:entry", "/subsystem:console",
             "/out:" + reference, "reference.obj", *memory_libraries)
         (output / reference).write_bytes((work / reference).read_bytes())
+        stream_def = work / "streams.def"
+        stream_def.write_text("LIBRARY msvcrt.dll\nEXPORTS\n__iob_func\n")
+        run(dlltool, "-m", "i386:x86-64", "-d", stream_def, "-l", "streams.lib")
+        close_def = work / "close.def"
+        close_def.write_text("LIBRARY KERNEL32.dll\nEXPORTS\nCloseHandle\n")
+        run(dlltool, "-m", "i386:x86-64", "-d", close_def, "-l", "close.lib")
+        run(clang, "--target=x86_64-pc-windows-msvc", "-O1", "-ffreestanding", "-fno-stack-protector",
+            "-c", sources / "crt-stream-reference.c", "-o", "streams.obj")
+        stream_pe = "crt-stream-reference.exe"
+        run(link, "/nodefaultlib", "/timestamp:0", "/entry:entry", "/subsystem:console",
+            "/out:" + stream_pe, "streams.obj", "streams.lib", "close.lib", "msvcrt.dll.lib", "KERNEL32.dll.lib")
+        (output / stream_pe).write_bytes((work / stream_pe).read_bytes())
         returns = (sources / "executable-return.s").read_text()
         for dll in ("KERNEL32.dll", "msvcrt.dll"):
             name = dll.split(".")[0].lower()
