@@ -21,7 +21,11 @@ crt-initterm-nested_table.exe
 crt-initterm-spill.exe
 crt-initterm-terminal.exe
 crt-initterm.exe
+crt-stream-exit.exe
 crt-stream-reference.exe
+crt-stream-return.exe
+crt-stream-sections.exe
+crt-stream-state.exe
 crt-term-cexit.exe
 crt-term-exit.exe
 crt-term-nested-exit.exe

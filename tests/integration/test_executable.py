@@ -1487,6 +1487,22 @@ class Readiness(Workspace):
                          {"unwind_rva": hex(unwind), "handler_rva": hex(root)})
 
 
+def crt_stream_output(name, backend):
+    if name == "sections":
+        return 42, b"", b"ABCD"
+    if name == "state":
+        # Legacy x64 fields are pointer displacement, _cnt, _flag, _file, _bufsiz.
+        def pack(*fields):
+            return struct.pack("<Q4i", *fields)
+        stdin = pack(0, 0, 257, 0, 4096) if backend == "windows" else pack(0, 0, 1, 0, 0)
+        out = pack(0, 0, 2, 1, 0)
+        err = pack(0, 0, 2, 2, 0)
+        pending = pack(4, 4092, 10, 1, 4096)
+        records = stdin + out + err + struct.pack("<Qii", 2, 37, 91) + pending + err + pending
+        return 42, b"A\0\r\nB", records
+    return 42, b"#A\0\r\nB\r\r\nZ", b"\r\r\nZ#"
+
+
 class Reference(Workspace):
     def capture(self, source, args=()):
         suite = Path(__file__).resolve().parents[1] / "differential"
@@ -1527,6 +1543,8 @@ class Reference(Workspace):
             console_image("binary_stderr").name: (len(BINARY), b"", BINARY),
             console_image("nested_exit").name: (0xcafe002a, b"", b""),
         }
+        for name in ("state", "sections", "return", "exit"):
+            expected[f"crt-stream-{name}.exe"] = crt_stream_output(name, "wine")
         for prefix in ("crt-term-", "executable-startup-info-"):
             for name, observation in legacy_observations("wine", prefix).items():
                 expected[name] = captured_streams(observation)
