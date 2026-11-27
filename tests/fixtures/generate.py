@@ -114,6 +114,9 @@ def generate(output, mc, link, dlltool, clang):
         puts_def.write_text("LIBRARY msvcrt.dll\nEXPORTS\nputs\n")
         run(dlltool, "-m", "i386:x86-64", "-d", puts_def, "-l", "puts.lib")
         puts = (sources / "crt-puts.s").read_text()
+        for name in ("heap", "immutable", "terminators"):
+            image(f"crt-puts-{name}.exe", (sources / f"crt-puts-{name}.s").read_text(),
+                  link_flags=["puts.lib", "msvcrt.dll.lib"])
         for name, options in (("hello", ["hello"]), ("mixed", ["mixed"]), ("exit", ["mixed", "crt_exit"]),
                               ("exitprocess", ["mixed", "win_exit"]), ("direct", ["direct"]),
                               ("newline", ["newline_flush"]), ("null", ["null_input"]), ("fault", [])):

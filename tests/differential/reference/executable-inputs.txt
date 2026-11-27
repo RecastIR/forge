@@ -25,7 +25,9 @@ crt-puts-direct.exe
 crt-puts-exit.exe
 crt-puts-exitprocess.exe
 crt-puts-fault.exe
+crt-puts-heap.exe
 crt-puts-hello.exe
+crt-puts-immutable.exe
 crt-puts-mixed.exe
 crt-puts-newline.exe
 crt-puts-null.exe

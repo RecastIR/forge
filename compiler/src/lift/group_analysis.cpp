@@ -600,8 +600,13 @@ namespace forge::x86 {
                     invalidateServiceOutput(outgoing, address, entryAddresses, size);
                 }
 
+                // A failed allocation plus the same nonzero offset could alias PE data
+                // at a low guest base. Such a string still requires image provenance.
+                const auto offset = address.allocationOffset();
+                const bool heapString = arg.extent == win64::Extent::CString && arg.size &&
+                                        offset && !imageMemory.containsImageAddress(*offset);
                 if (!collect || address.stackDerived() || address.pointsToProcessStorage() ||
-                    (address.frameOffset() && !address.known())) {
+                    heapString || (address.frameOffset() && !address.known())) {
                     continue;
                 }
 
@@ -615,19 +620,31 @@ namespace forge::x86 {
                                     "alternatives");
                 }
 
-                uint64_t contiguousLimit = 0;
-                if (arg.extent == win64::Extent::ElementProduct) {
-                    contiguousLimit = UINT64_MAX;
-                } else if (arg.extent == win64::Extent::CString) {
-                    contiguousLimit = arg.size;
-                }
-
                 for (const auto va : address.values()) {
-                    imageMemory.serviceArgument(step, va, arg.writes(), size, contiguousLimit);
+                    imageMemory.serviceArgument(step, va, arg, size);
                 }
             }
 
             facts.spills = std::move(outgoing);
+        }
+
+        AddressFact serviceResult(const win64::ServiceBinding &binding, const AddressFacts &facts) {
+            if (!binding.returnsProcessStorage) {
+                return {};
+            }
+
+            const bool calloc = binding.nativeSymbol == win64::crtCalloc.nativeSymbol;
+            if (calloc || binding.nativeSymbol == win64::crtMalloc.nativeSymbol) {
+                const auto &first = facts.registers[ServiceLocation{0}.registerIndex()];
+                const auto &second = facts.registers[ServiceLocation{1}.registerIndex()];
+                if (first.known() && first.values().size() == 1 &&
+                    (!calloc || (second.known() && second.values().size() == 1))) {
+                    const auto size = win64::elementBytes(first.values().front(),
+                                                          calloc ? second.values().front() : 1);
+                    return AddressFact::processStorage(size.value_or(0));
+                }
+            }
+            return AddressFact::processStorage();
         }
 
         bool FunctionAnalyzer::traceCall(const ResolvedCallSite &site, AddressFacts &facts,
@@ -661,10 +678,9 @@ namespace forge::x86 {
                     facts.spills = {};
                 }
 
+                auto result = serviceResult(site.external()->binding, facts);
                 std::fill_n(facts.registers.begin(), callerSlots, AddressFact{});
-                if (site.external()->binding.returnsProcessStorage) {
-                    facts.registers[0] = AddressFact::processStorage();
-                }
+                facts.registers[0] = std::move(result);
                 // CALL itself overwrites the slot below the caller's RSP.
                 const auto slot = facts.registers[rspIndex].plus(AddressFact(uint64_t(0) - 8));
                 facts.spills.write(slot, 64, {});

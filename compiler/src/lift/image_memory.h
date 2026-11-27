@@ -17,8 +17,9 @@ namespace llvm {
 } // namespace llvm
 
 namespace forge::win64 {
+    struct Argument;
     struct ServiceBinding;
-}
+} // namespace forge::win64
 
 namespace forge::x86 {
     struct BoundedTableCall;
@@ -69,8 +70,13 @@ namespace forge::x86 {
 
         void checkStackMapping(const Step &step) const;
         void addressTaken(const Step &step, uint64_t va);
-        void serviceArgument(const Step &step, uint64_t va, bool write,
-                             std::optional<uint64_t> size, uint64_t contiguousInputLimit = 0);
+        void serviceArgument(const Step &step, uint64_t va, const win64::Argument &argument,
+                             std::optional<uint64_t> size);
+
+        bool containsImageAddress(uint64_t va) const {
+            return va >= loadBase && va - loadBase < source.module().sizeOfImage;
+        }
+
         void protectionTarget(const Step &step, uint64_t va, std::optional<uint64_t> size);
         void protectionOutput(const Step &step, uint64_t va, unsigned size);
         void boundedTable(const Step &step, const BoundedTableCall &table);
@@ -110,6 +116,8 @@ namespace forge::x86 {
         enum class ExecutableSelection : uint8_t { AddressTakenSection, ContinuationBytes };
 
         const ImageInitialization &contents();
+        std::optional<uint64_t> firstImmutableNul(RvaRange range);
+        uint64_t contiguousInputSize(uint64_t rva, uint64_t limit, bool string);
         bool selectFunctionImport(uint64_t rva, unsigned width, bool write);
         void fixedImageAccess(const Step &step, RvaRange access, bool write);
         void selectServiceSections(const Step &step, uint64_t rva, uint64_t size, bool write);

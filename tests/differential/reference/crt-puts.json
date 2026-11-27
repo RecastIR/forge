@@ -4,7 +4,9 @@
     "crt-puts-exit.exe": "c1c1a5be7dda3e0c44fe64cc69c1557f5dd3775bfd3349f6de19bc12fbc64167",
     "crt-puts-exitprocess.exe": "591b6436abfad717b15c9f042e9a512e65d2ea5a7cf5cc43553b99f93cd2c6a5",
     "crt-puts-fault.exe": "09d3c3de5b3edce63bb82f63894025ee09074da7a3a98b5b41e839f4b77ab808",
+    "crt-puts-heap.exe": "c47f65c1f701e702c43c029cc48f77b5607c0f0b634fb737223eafff1b4fc5ad",
     "crt-puts-hello.exe": "3fd9d9bcd050a364ec013204c29f8be83b48d24e9781f853c9ae3bff3bd35cb8",
+    "crt-puts-immutable.exe": "dd73c29a05463052cece30e704cf052a7ab8f470dcd770978a278c782097d416",
     "crt-puts-mixed.exe": "7ac27e2377d41a06edf0b852d5655e7f8ff9eb59b5f99e3441393b9c063a5889",
     "crt-puts-newline.exe": "959ed71a5441d5d1d0e1b58e2b5e951632e8d2fa03ed9cab5e8803ac88e4aa5d",
     "crt-puts-null.exe": "007883a0ca378f45001a099fab85c383c6952d5d9ca7cbfca09c2596b4ef466e"
@@ -60,10 +62,20 @@
       "stderr": "",
       "stdout": ""
     },
+    "heap": {
+      "status": 0,
+      "stderr": "",
+      "stdout": "42430d0a42430d0a"
+    },
     "hello": {
       "status": 0,
       "stderr": "",
       "stdout": "48656c6c6f2066726f6d2043210d0a"
+    },
+    "immutable": {
+      "status": 0,
+      "stderr": "",
+      "stdout": "4f4b0d0a"
     },
     "mixed": {
       "status": 42,
@@ -172,10 +184,20 @@
       "stderr": "Wine debugger notice",
       "stdout": "Wine read fault"
     },
+    "heap": {
+      "status": 0,
+      "stderr": "",
+      "stdout": "42430d0a42430d0a"
+    },
     "hello": {
       "status": 0,
       "stderr": "",
       "stdout": "48656c6c6f2066726f6d2043210d0a"
+    },
+    "immutable": {
+      "status": 0,
+      "stderr": "",
+      "stdout": "4f4b0d0a"
     },
     "mixed": {
       "status": 42,

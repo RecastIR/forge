@@ -311,6 +311,25 @@ class StartupAdmission(Workspace):
         struct.pack_into("<Q", data, Layout(data).opt + 24, 0)
         self.reject(data, "EXECUTABLE_UNSUPPORTED_STARTUP", "null guest address")
 
+    def test_unproved_heap_string_offsets(self):
+        original = (FIXTURES / "crt-puts-heap.exe").read_bytes()
+        allocate = bytes.fromhex("b9 08000000")
+        store_and_lea = bytes.fromhex("c703 41424300 488d4b01")
+        calloc_sizes = bytes.fromhex("b9 02000000 ba 04000000")
+        self.assertEqual(original.count(allocate), 1)
+        self.assertEqual(original.count(store_and_lea), 1)
+        self.assertEqual(original.count(calloc_sizes), 1)
+        for case, data, base in (
+            ("one past allocation", original.replace(store_and_lea, store_and_lea[:-1] + b"\x08"), None),
+            ("unknown size", original.replace(allocate, bytes.fromhex("4889d1 9090")), None),
+            ("overflowing product", original.replace(calloc_sizes, bytes.fromhex("48c7c1 fdffffff 4889ca")), None),
+            ("narrowed pointer", original.replace(store_and_lea, bytes.fromhex("c703 41424300 90 8d4b01")), None),
+            ("null plus offset in image", original.replace(allocate, bytes.fromhex("b9 00000200"))
+             .replace(store_and_lea, bytes.fromhex("909090 488d8b 00200100")), 0x10000),
+        ):
+            with self.subTest(case=case):
+                self.reject(data, "LIFT_IMAGE_MEMORY", "argument 1 to puts requires proven", guest_base=base)
+
     def test_loader_requirements(self):
         for name, reason in (("manifest", "manifest"), ("integrity", "signature verification")):
             with self.subTest(name=name):
@@ -2064,6 +2083,15 @@ class Console(Workspace):
                                          (125, b"", b"forge: guest memory fault address=0xb0000f90 access=1 reason=2\n"))
                     else:
                         check_observation("windows", variant, "file" if base else "pipe", result.returncode, stdout, result.stderr)
+
+    def test_crt_puts_loader_visible_terminators(self):
+        pe = FIXTURES / "crt-puts-terminators.exe"
+        for base, suffix in ((0x140000000, b""), (0x180410000, b"A\x80\x01")):
+            with self.subTest(base=base):
+                run(CONTRACT, "--guest-base", hex(base), pe, self.output, OPT, LLC, "/usr/bin/xcrun", *LINK, check=True)
+                result = self.program()
+                self.assertEqual((result.returncode, result.stdout, result.stderr),
+                                 (0, b"AB\r\n" + suffix + b"\r\n", b""))
 
     def test_crt_puts_output_failures(self):
         import pty

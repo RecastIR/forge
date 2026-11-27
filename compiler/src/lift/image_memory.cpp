@@ -556,32 +556,81 @@ namespace forge::x86 {
                         "initializer table endpoint overflows the selected guest address space");
         }
         if (first != last) {
-            serviceArgument(step, loadBase + first, false, last - first);
+            serviceArgument(step, loadBase + first, {win64::Value::Address, win64::Access::Input},
+                            last - first);
         }
     }
 
-    void ImageMemory::serviceArgument(const Step &step, uint64_t va, bool write,
-                                      std::optional<uint64_t> size, uint64_t contiguousInputLimit) {
+    std::optional<uint64_t> ImageMemory::firstImmutableNul(RvaRange range) {
+        const auto &view = contents();
+        auto holes = view.exclusionsIn(range);
+        for (auto pos = range.begin; pos < range.end;) {
+            if (!holes.empty() && holes.front().begin <= pos) {
+                pos = holes.front().end;
+                holes = holes.drop_front();
+                continue;
+            }
+
+            // Examine a bounded window of loader-visible bytes, including any
+            // relocated fragments in the otherwise zero-filled virtual tail.
+            const auto end =
+                std::min({range.end, pos + 4096, holes.empty() ? range.end : holes.front().begin});
+            auto bytes = source.imageBytes({pos, end}, view, loadBase);
+            bytes.prefix.resize(end - pos, '\0');
+            for (const auto &fragment : bytes.tail) {
+                bytes.prefix.replace(fragment.offset, fragment.bytes.size(), fragment.bytes);
+            }
+
+            if (const auto zero = bytes.prefix.find('\0'); zero != std::string::npos) {
+                return pos + zero;
+            }
+            pos = end;
+        }
+        return std::nullopt;
+    }
+
+    uint64_t ImageMemory::contiguousInputSize(uint64_t rva, uint64_t limit, bool string) {
+        uint64_t end = std::max<uint64_t>(rva, executableHeaders.size());
+        if (string && rva < end) {
+            const auto zero = executableHeaders.substr(rva, limit).find('\0');
+            if (zero != StringRef::npos) {
+                return zero + 1;
+            }
+        }
+
+        while (end - rva < limit) {
+            const auto *section = source.sectionAtRva(end);
+            if (!section || (!section->writableData() &&
+                             (!section->immutable() || section->permissions[2] == 'x'))) {
+                break;
+            }
+
+            const auto sectionEnd = uint64_t(section->rva) + section->virtualSize;
+            const auto next = end + std::min(sectionEnd - end, limit - (end - rva));
+            if (string && section->immutable()) {
+                if (const auto zero = firstImmutableNul({end, next})) {
+                    return *zero - rva + 1;
+                }
+            }
+            end = next;
+        }
+        return std::min(end - rva, limit);
+    }
+
+    void ImageMemory::serviceArgument(const Step &step, uint64_t va,
+                                      const win64::Argument &argument,
+                                      std::optional<uint64_t> size) {
         if (va == 0 || va - GuestMemory::base < GuestMemory::capacity) {
             return;
         }
 
         const auto rva = va - loadBase;
+        const bool write = argument.writes();
 
-        if (contiguousInputLimit && !size) {
-            // A successful dynamic read is bounded by the first gap in its PE backing.
-            uint64_t end = std::max<uint64_t>(rva, executableHeaders.size());
-            while (const auto *section = source.sectionAtRva(end)) {
-                if (!section->writableData() &&
-                    (!section->immutable() || section->permissions[2] == 'x')) {
-                    break;
-                }
-                end = uint64_t(section->rva) + section->virtualSize;
-                if (end - rva >= contiguousInputLimit) {
-                    break;
-                }
-            }
-            size = std::min(end - rva, contiguousInputLimit);
+        if (!size && argument.extent == win64::Extent::ElementProduct) {
+            size = contiguousInputSize(rva, UINT64_MAX, false);
+        } else if (!size && argument.extent == win64::Extent::CString && argument.size) {
+            size = contiguousInputSize(rva, argument.size, true);
         }
 
         if (rva < executableHeaders.size()) {
