@@ -31,6 +31,8 @@ namespace forge::runtime {
         int32_t value = 0;
         Origin origin = Origin::Default;
 
+        bool usesConsole() const noexcept { return origin == Origin::Default || value == console; }
+
         void initialize(const forge_rt_artifact &artifact,
                         std::span<const forge_rt_image_region> rows) noexcept;
     };

@@ -66,7 +66,8 @@ jobs:
             tests/differential/reference/termination tests/differential/fixtures/startup/termination \
             'compiler/src/lift/initializer_table.*' 'compiler/src/lift/recovery.*' compiler/src/lift/lift.cpp \
             compiler/src/lift/group_analysis.cpp runtime/include/forge/service_signature.h runtime/src/managed_process.cpp \
-            runtime/src/compat/crt/termination.cpp 'runtime/src/compat/process_state*' \
+            runtime/src/compat/crt/termination.cpp runtime/src/compat/crt/fatal.cpp \
+            'runtime/src/compat/crt/standard_streams.*' 'runtime/src/compat/process_state*' \
             'runtime/src/compat/win32/process_parameters*' runtime/src/compat/win32/startup_info.cpp; then
             exit 0
           fi

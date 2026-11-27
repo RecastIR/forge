@@ -1,7 +1,7 @@
 {
   "environment": {
     "host": "Windows-2022Server-10.0.20348-SP0",
-    "run": "46058064304",
+    "run": "46060051895",
     "launch": "DETACHED_PROCESS, STARTF_USESTDHANDLES, inherited error mode, no debugger",
     "dll": "C:\\Windows\\System32\\msvcrt.dll",
     "sha256": "dde047f12a6b954773284e058631d9939ed1ef1d0f853d4343c320774129ab6e",
@@ -49,6 +49,11 @@
     "buffered-merged": {
       "status": 3,
       "stdout": "52426f0d0a650d0a",
+      "stderr": null
+    },
+    "buffered-broken-stderr": {
+      "status": 3,
+      "stdout": "52426f0d0a",
       "stderr": null
     },
     "control-pipe": {

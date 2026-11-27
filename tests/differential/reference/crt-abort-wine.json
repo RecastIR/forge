@@ -1,7 +1,7 @@
 {
   "environment": {
-    "host": "Linux-7.0.14-linuxkit-x86_64-with-glibc2.36",
-    "run": null,
+    "host": "Linux-7.0.0-1018-aws-x86_64-with-glibc2.36",
+    "run": "46060051895",
     "launch": "DETACHED_PROCESS, STARTF_USESTDHANDLES, inherited error mode, no debugger",
     "version": "wine-8.0 (Debian 8.0~repack-4)",
     "package": "libwine:amd64\t8.0~repack-4\nwine64\t8.0~repack-4",
@@ -49,6 +49,11 @@
     "buffered-merged": {
       "status": 3,
       "stdout": "52426f0d0a650d0a",
+      "stderr": null
+    },
+    "buffered-broken-stderr": {
+      "status": 3,
+      "stdout": "52426f0d0a",
       "stderr": null
     },
     "control-pipe": {

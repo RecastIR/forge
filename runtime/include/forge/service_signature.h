@@ -484,6 +484,10 @@ namespace forge::win64 {
         "msvcrt.dll", "exit", LastError::CallbackDefined,
         FORGE_SERVICE_ADAPTER(forge_rt_msvcrt_exit), Requirement::Process, Control::Terminates);
 
+    inline constexpr auto crtAbort = bind<Value::Void>("msvcrt.dll", "abort", LastError::Preserve,
+                                                       FORGE_SERVICE_ADAPTER(forge_rt_msvcrt_abort),
+                                                       Requirement::Process, Control::Terminates);
+
     inline constexpr ServiceBinding services[] = {
         crtGetMainArgs,
         crtStrlen,
@@ -517,5 +521,6 @@ namespace forge::win64 {
         crtFwrite,
         crtPuts,
         crtVfprintf,
+        crtAbort,
     };
 } // namespace forge::win64

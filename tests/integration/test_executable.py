@@ -195,6 +195,17 @@ class Portable(Workspace):
                 if variant == "fatal":
                     self.assertIn("declare i32 @forge_rt_msvcrt_amsg_exit(ptr, i64, i32)", ir)
 
+    def test_crt_abort_calls(self):
+        sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "differential/reference"))
+        from crt_abort import VARIANTS
+        for variant in VARIANTS:
+            with self.subTest(variant=variant):
+                pe = FIXTURES / f"crt-abort-{variant}.exe"
+                ir = run(CONTRACT, pe, check=True).stdout
+                self.assertEqual("call i32 @forge_rt_msvcrt_abort(" in ir, variant != "control")
+                if variant != "control":
+                    self.assertIn("declare i32 @forge_rt_msvcrt_abort(ptr, i64)", ir)
+
     def test_artifact_ir(self):
         for name in (*NAMES, "headers"):
             with self.subTest(name=name):
@@ -1573,8 +1584,14 @@ class Reference(Workspace):
         filenames = inputs.read_text().splitlines()
         from crt_puts import VARIANTS, check_input, check_observation as check_puts
         import crt_vfprintf
-        from crt_abort import VARIANTS as abort_variants
-        self.assertEqual(filenames, sorted([*expected, *(f"crt-abort-{v}.exe" for v in abort_variants), observer.name, denied.name, "crt-stream-invalid.exe",
+        import crt_abort
+        abort = crt_abort.reference("wine")
+        crt_abort.checked_inputs(FIXTURES, abort["inputs"])
+        for variant in crt_abort.VARIANTS:
+            row = abort["cases"][variant + "-pipe"]
+            expected[f"crt-abort-{variant}.exe"] = (
+                row["status"], bytes.fromhex(row["stdout"]), bytes.fromhex(row["stderr"]))
+        self.assertEqual(filenames, sorted([*expected, observer.name, denied.name, "crt-stream-invalid.exe",
                                             "crt-stream-reference.exe", *(f"crt-puts-{v}.exe" for v in VARIANTS),
                                             *(f"crt-vfprintf-{v}.exe" for v in crt_vfprintf.VARIANTS)]))
         for variant in crt_vfprintf.VARIANTS:
@@ -2063,6 +2080,61 @@ class Console(Workspace):
                 self.assertEqual(remaining[:filled-room], b"F" * (filled-room))
                 output = remaining[filled-room:]
         return result, output
+
+    def abort_output(self, mode):
+        if mode == "file":
+            stdout, stderr = self.dir / "stdout.bin", self.dir / "stderr.bin"
+            with stdout.open("wb") as out, stderr.open("wb") as err:
+                result = self.program(stdout=out, stderr=err)
+            return result.returncode, stdout.read_bytes(), stderr.read_bytes()
+        if mode == "absent-stderr":
+            result = self.program(preexec_fn=lambda: os.close(2))
+            self.assertEqual(result.stderr, b"")
+            return result.returncode, result.stdout, None
+        if mode == "broken-stderr":
+            read, write = os.pipe()
+            os.close(read)
+            with os.fdopen(write, "wb") as writer:
+                result = self.program(stderr=writer)
+        else:
+            result = self.program(stderr=subprocess.STDOUT if mode == "merged" else subprocess.PIPE)
+        return result.returncode, result.stdout, result.stderr
+
+    def test_legacy_abort(self):
+        sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "differential/reference"))
+        import crt_abort
+        expected = crt_abort.reference("windows")
+        crt_abort.checked_inputs(FIXTURES, expected["inputs"])
+        for base in (0x140000000, 0x180000000):
+            for variant in crt_abort.VARIANTS:
+                pe = FIXTURES / f"crt-abort-{variant}.exe"
+                if base == 0x140000000:
+                    self.compile(pe)
+                else:
+                    run(CONTRACT, "--guest-base", hex(base), pe, self.output,
+                        OPT, LLC, "/usr/bin/xcrun", *LINK, check=True)
+                for mode in crt_abort.modes(variant):
+                    with self.subTest(base=hex(base), variant=variant, mode=mode):
+                        row = expected["cases"][f"{variant}-{mode}"]
+                        stderr = bytes.fromhex(row["stderr"]) if row["stderr"] is not None else None
+                        self.assertEqual(self.abort_output(mode),
+                                         (row["status"] & 255, bytes.fromhex(row["stdout"]), stderr))
+
+    def test_embedded_abort_result(self):
+        pe = FIXTURES / "crt-abort-direct.exe"
+        obj = self.dir / "abort.o"
+        run(CONTRACT, "--guest-base", "0x180000000", pe, "--object", obj, OPT, LLC, check=True)
+        _, runtime, sdk, *flags = LINK
+        run("/usr/bin/xcrun", "--sdk", sdk, "clang++", "-arch", "arm64", *flags,
+            PROCESS_HARNESS, obj, runtime, "-o", self.output, check=True)
+        output = self.dir / "stdout.bin"
+        with output.open("wb") as stream:
+            result = subprocess.run([self.output, "run", "0", "0", "0", "0"], stdout=stream,
+                                    stderr=subprocess.PIPE, timeout=10, check=True)
+        self.assertEqual(result.stderr, b"")
+        data = output.read_bytes()
+        self.assertEqual(data.count(b"RB"), 2)
+        self.assertEqual(data.replace(b"RB", b"").splitlines()[-2:], [b"exit 3"] * 2)
 
     def test_crt_vfprintf(self):
         sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "differential/reference"))

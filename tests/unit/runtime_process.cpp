@@ -188,6 +188,7 @@ namespace {
                 previous == UINT64_MAX);
         REQUIRE(forge_rt_exit_process(probe.instance, probe.thread, 17) ==
                 FORGE_RT_INVALID_INVOCATION);
+        REQUIRE(forge_rt_msvcrt_abort(probe.instance, probe.thread) == FORGE_RT_INVALID_INVOCATION);
         REQUIRE(forge_rt_msvcrt_amsg_exit(probe.instance, probe.thread, 31) ==
                 FORGE_RT_INVALID_INVOCATION);
         REQUIRE(forge_rt_msvcrt_initterm(probe.instance, probe.thread, 0, 0, &fault,
@@ -210,6 +211,7 @@ namespace {
         REQUIRE(result.kind == FORGE_RT_RETURNED && result.value == 31);
         probe.resume.count_down();
         running.join();
+        REQUIRE(forge_rt_msvcrt_abort(probe.instance, probe.thread) == FORGE_RT_INVALID_INVOCATION);
         expectState(first.get(), FORGE_RT_PROCESS_EXITED);
         rejectRun(first.get(), FORGE_RT_INVALID_STATE);
     }

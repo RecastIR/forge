@@ -28,6 +28,18 @@ def digest(path):
     return hashlib.sha256(path.read_bytes()).hexdigest()
 
 
+def reference(backend):
+    return json.loads(Path(__file__).with_name(f"crt-abort-{backend}.json").read_bytes())
+
+
+def checked_inputs(directory, expected):
+    inputs = {f"crt-abort-{variant}.exe": digest(directory / f"crt-abort-{variant}.exe")
+              for variant in VARIANTS}
+    if inputs != expected:
+        raise ValueError(f"unexpected abort probe inventory or PE hashes: {inputs}")
+    return inputs
+
+
 def guest_path(path, wine):
     return ("Z:" if wine else "") + str(path.resolve()).replace("/", "\\")
 
@@ -41,27 +53,29 @@ def observe(directory, destination, wine):
     environment = dict(host=platform.platform(), run=os.getenv("GITHUB_RUN_ID"),
                        launch="DETACHED_PROCESS, STARTF_USESTDHANDLES, inherited error mode, no debugger")
     if wine:
-        environment.update(version=subprocess.check_output([wine, "--version"], text=True).strip(),
-                           package=subprocess.check_output(["dpkg-query", "-W", "wine64", "libwine"], text=True).strip(),
+        environment.update(version=subprocess.check_output([wine, "--version"], text=True, timeout=30).strip(),
+                           image=os.getenv("FORGE_REFERENCE_IMAGE"),
+                           package=subprocess.check_output(["dpkg-query", "-W", "wine64", "libwine"], text=True, timeout=30).strip(),
                            wine_debug=os.getenv("WINEDEBUG"), dll_overrides=os.getenv("WINEDLLOVERRIDES"))
     else:
         dll = Path(os.environ["SystemRoot"]) / "System32/msvcrt.dll"
         environment.update(dll=str(dll), sha256=digest(dll), image=os.getenv("ImageVersion"),
                            version=subprocess.check_output(["powershell", "-NoProfile", "-Command",
                                "(Get-Item $env:SystemRoot/System32/msvcrt.dll).VersionInfo.FileVersion"],
-                               text=True).strip())
+                               text=True, timeout=30).strip())
 
-    inputs, rows = {}, {}
+    expected = reference(backend)
+    inputs = checked_inputs(directory, expected["inputs"])
+    if inputs != {name: sha for name, sha in declared.items() if name.startswith("crt-abort-")}:
+        raise ValueError("producer abort inventory or checksum mismatch")
+    rows = {}
     with tempfile.TemporaryDirectory() as tmp:
         parent = Path(tmp) / "capture.exe"
         source = Path(__file__).with_name("amsg-exit") / "capture.c"
         subprocess.run(["x86_64-w64-mingw32-gcc-win32" if wine else "gcc", "-std=c11", "-O2",
-                        str(source), "-o", str(parent)], check=True)
+                        str(source), "-o", str(parent)], check=True, timeout=60)
         for variant in VARIANTS:
             pe = directory / f"crt-abort-{variant}.exe"
-            inputs[pe.name] = digest(pe)
-            if declared.get(pe.name) != inputs[pe.name]:
-                raise ValueError(f"producer mismatch for {pe.name}")
             for mode in modes(variant):
                 key = f"{variant}-{mode}"
                 work = dest / key
@@ -79,6 +93,8 @@ def observe(directory, destination, wine):
                 print(backend, key, rows[key], flush=True)
     report = dict(environment=environment, inputs=inputs, cases=rows)
     (dest / "results.json").write_text(json.dumps(report, indent=2) + "\n")
+    if rows != expected["cases"]:
+        raise ValueError(f"{backend} abort observations differ from the recorded cases: {rows}")
 
 
 if __name__ == "__main__":

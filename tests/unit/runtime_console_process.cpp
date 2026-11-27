@@ -725,6 +725,63 @@ namespace {
         REQUIRE(sigaction(SIGXFSZ, &previous, nullptr) == 0);
     }
 
+    void abortOrReturn(forge_rt_execution *execution) {
+        auto *instance = execution->instance;
+        const auto thread = execution->thread;
+        REQUIRE(forge_rt_msvcrt_abort(instance, 0) == FORGE_RT_INVALID_THREAD);
+        uint64_t base = 0, count = 0;
+        forge_rt_memory_fault fault{};
+        REQUIRE(forge_rt_msvcrt_iob_func(instance, thread, &base) == FORGE_RT_OK);
+        REQUIRE(forge_rt_msvcrt_fwrite(instance, thread, source, 1, 1, base + 96, &count, &fault) ==
+                    FORGE_RT_OK &&
+                count == 1);
+
+        if (execution->rcx) {
+            REQUIRE(forge_rt_msvcrt_abort(instance, thread) == FORGE_RT_OK);
+            REQUIRE(forge_rt_msvcrt_abort(instance, thread) == FORGE_RT_INVALID_STATE);
+            REQUIRE(forge_rt_exit_process(instance, thread, 99) == FORGE_RT_INVALID_STATE);
+        } else {
+            execution->result = {FORGE_RT_RETURNED, FORGE_RT_OK, 42, {}, 0};
+        }
+    }
+
+    void checkAbortIsolation() {
+        REQUIRE(forge_rt_msvcrt_abort(nullptr, 0) == FORGE_RT_INVALID_ARGUMENT);
+        constexpr forge_rt_import services[]{{"msvcrt.dll", "abort"}, {"msvcrt.dll", "fwrite"}};
+        auto artifact = consoleArtifact(abortOrReturn);
+        artifact.imports = services;
+        artifact.importCount = std::size(services);
+        int ends[2];
+        REQUIRE(pipe(ends) == 0);
+        auto first = registeredWithStderr(artifact, ends[1]);
+        REQUIRE(close(ends[1]) == 0);
+        std::unique_ptr<FILE, decltype(&std::fclose)> file(std::tmpfile(), std::fclose);
+        REQUIRE(file != nullptr);
+        auto second = registeredWithStderr(artifact, fileno(file.get()));
+
+        // An embedder using default SIGPIPE has not authorized a write to this pipe.
+        struct sigaction policy{}, previous{};
+        policy.sa_handler = SIG_DFL;
+        REQUIRE(sigemptyset(&policy.sa_mask) == 0 && sigaction(SIGPIPE, &policy, &previous) == 0);
+        const auto aborted = run(first, 1);
+        REQUIRE(sigaction(SIGPIPE, &previous, nullptr) == 0);
+        REQUIRE(aborted.kind == FORGE_RT_EXIT_PROCESS && aborted.status == FORGE_RT_OK &&
+                aborted.value == 3);
+        forge_rt_process_state state = 0;
+        REQUIRE(forge_rt_process_get_state(first.get(), &state) == FORGE_RT_OK &&
+                state == FORGE_RT_PROCESS_EXITED);
+        char byte;
+        REQUIRE(fcntl(ends[0], F_SETFL, O_NONBLOCK) == 0 && read(ends[0], &byte, 1) == 0);
+        first.reset();
+        REQUIRE(read(ends[0], &byte, 1) == 0 && close(ends[0]) == 0);
+
+        const auto returned = run(second);
+        REQUIRE(returned.kind == FORGE_RT_RETURNED && returned.value == 42);
+        second.reset();
+        REQUIRE(fileContentsEqual(file.get(), "G"));
+        REQUIRE(write(fileno(file.get()), "H", 1) == 1 && fileContentsEqual(file.get(), "GH"));
+    }
+
     void pendingFatal(forge_rt_execution *execution) {
         uint64_t base = 0, count = 0;
         forge_rt_memory_fault fault{};
@@ -1196,6 +1253,25 @@ namespace {
         expectCaptureExhaustion(EINVAL);
         checkAddressOnlyConsoleImports();
         checkApplicationTypeIsolation();
+
+        // A direct abort needs neither descriptors nor a guest FILE array.
+        constexpr forge_rt_import abortImport{"msvcrt.dll", "abort"};
+        auto bare = fatalArtifact;
+        bare.imports = &abortImport;
+        bare.entry = [](forge_rt_execution *execution) {
+            auto *instance = execution->instance;
+            const auto thread = execution->thread;
+            REQUIRE(!instance->windows->standardHandles && !instance->windows->streams);
+            REQUIRE(forge_rt_msvcrt_set_app_type(instance, thread, 2) == FORGE_RT_OK);
+            REQUIRE(forge_rt_msvcrt_abort(instance, thread) ==
+                    FORGE_RT_UNSUPPORTED_CRT_ERROR_ROUTING);
+            REQUIRE(!execution->result.kind);
+            REQUIRE(forge_rt_msvcrt_set_app_type(instance, thread, 1) == FORGE_RT_OK);
+            REQUIRE(forge_rt_msvcrt_abort(instance, thread) == FORGE_RT_OK);
+        };
+        const auto aborted = run(registered(bare));
+        REQUIRE(aborted.kind == FORGE_RT_EXIT_PROCESS && aborted.value == 3);
+
         constexpr forge_rt_import unrelated[]{{"kernel32.dll", "ExitProcess"},
                                               {"kernel32.dll", "GetLastError"},
                                               {"other.dll", "GetStdHandle"},
@@ -1447,6 +1523,7 @@ void testRuntimeConsoleProcess(const char *fatalObservations) {
     checkFormatMemory();
     checkStreamWriteRetries();
     checkStreamTermination();
+    checkAbortIsolation();
     checkFatalPartialWrite(31, fatal31);
     checkFatalOutputFailures();
     checkRedirection();

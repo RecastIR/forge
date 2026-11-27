@@ -550,10 +550,11 @@ namespace {
 forge_rt_status CrtStandardStreams::finish(const StandardHandles &handles) noexcept {
     for (size_t i = 1; i < files.size(); ++i) {
         const auto progress = flushBuffer(*this, handles, i);
-        if (progress.status != FORGE_RT_OK) {
+        if (progress.status != FORGE_RT_OK && !preserveAbortResult) {
             return progress.status;
         }
-        if (progress.shortWrite) {
+
+        if (progress.status != FORGE_RT_OK || progress.shortWrite) {
             files[i].flags |= streamError;
         }
     }

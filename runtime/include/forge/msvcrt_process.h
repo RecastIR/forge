@@ -55,6 +55,10 @@ forge_rt_status forge_rt_msvcrt_set_app_type(forge_rt_instance *instance,
 forge_rt_status forge_rt_msvcrt_amsg_exit(forge_rt_instance *instance, forge_rt_thread_token thread,
                                           int32_t errorNumber) FORGE_CRT_NOEXCEPT;
 
+/* End the current legacy CRT guest execution. */
+forge_rt_status forge_rt_msvcrt_abort(forge_rt_instance *instance,
+                                      forge_rt_thread_token thread) FORGE_CRT_NOEXCEPT;
+
 /* Compiler-to-CRT linkage. The generated call site supplies its own trusted dispatcher.
  * Guest code supplies only the two table addresses. The borrow expires on return. */
 struct forge_rt_execution;

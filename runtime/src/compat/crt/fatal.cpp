@@ -195,9 +195,7 @@ extern "C" forge_rt_status forge_rt_msvcrt_amsg_exit(forge_rt_instance *instance
         }
 
         // Headerless host entries historically use console routing before any setter.
-        const auto &type = owner.windows->appType;
-        console = type.origin == CrtApplicationType::Origin::Default ||
-                  type.value == CrtApplicationType::console;
+        console = owner.windows->appType.usesConsole();
         return FORGE_RT_OK;
     });
 
@@ -221,4 +219,29 @@ extern "C" forge_rt_status forge_rt_msvcrt_amsg_exit(forge_rt_instance *instance
 
     return publishTerminalResult(instance, thread,
                                  {FORGE_RT_EXIT_PROCESS, FORGE_RT_OK, 255, {}, 0});
+}
+
+extern "C" forge_rt_status forge_rt_msvcrt_abort(forge_rt_instance *instance,
+                                                 forge_rt_thread_token thread) noexcept {
+    const auto admitted = withInstance(instance, [&](const auto &owner) {
+        const auto status = checkPendingExecution(owner, thread);
+        if (status != FORGE_RT_OK) {
+            return status;
+        }
+
+        return owner.windows->appType.usesConsole() ? FORGE_RT_OK
+                                                    : FORGE_RT_UNSUPPORTED_CRT_ERROR_ROUTING;
+    });
+
+    if (admitted != FORGE_RT_OK) {
+        return admitted;
+    }
+
+    const auto status =
+        publishTerminalResult(instance, thread, {FORGE_RT_EXIT_PROCESS, FORGE_RT_OK, 3, {}, 0});
+    if (status == FORGE_RT_OK && instance->windows->streams) {
+        // The synchronous caller pins the occurrence through terminal publication and retirement.
+        instance->windows->streams->preserveAbortResult = true;
+    }
+    return status;
 }

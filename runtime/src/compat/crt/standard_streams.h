@@ -39,6 +39,7 @@ namespace forge::runtime {
         };
 
         std::array<std::unique_ptr<Buffer>, 3> buffers{};
+        bool preserveAbortResult = false;
 
         forge_rt_status initialize(forge_rt_instance &instance, const StandardHandles &handles);
         forge_rt_status prepareBuffer(forge_rt_instance &instance, size_t index);

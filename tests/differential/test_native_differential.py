@@ -29,6 +29,10 @@ class NativeDifferentialTests(unittest.TestCase):
 
     def check_startup_blocker(self, manifest, config, work, slot):
         report = startup.run_case(self.forge, manifest, config, work)
+        if os.getenv("GITHUB_ACTIONS") == "true":
+            evidence = diff.BUILD / "differential/startup" / config / manifest.case["id"]
+            evidence.mkdir(parents=True, exist_ok=True)
+            (evidence / "result.json").write_bytes((work / "result.json").read_bytes())
         self.assertEqual(report.get("failure_stage"), "translation", report.get("diagnostic"))
         self.assertEqual(report["stages"], dict(reference="passed", recovery="failed", translation="failed",
                                                 native_build="not_run", publication="not_run", artifact="not_run",
@@ -122,16 +126,21 @@ class NativeDifferentialTests(unittest.TestCase):
         self.assertEqual(data[thunk - 0xa00:thunk - 0xa00 + 6], b"\xff\x25" + struct.pack("<i", slot - thunk - 6))
         self.assertNotIn({"caller_rva": hex(failure), "instruction_rva": hex(site),
                           "target_rva": hex(thunk)}, ctx["unresolved_calls"])
-        self.assertEqual((ctx["function_rva"], ctx["block_rva"], ctx["instruction_rva"],
-                          ctx["opcode"], ctx["bytes"], ctx["branch_target"]),
-                         (hex(failure), hex(failure), hex(site + 5), "CALL64pcrel32",
-                          "e8280e0000", site + 10 + 0xe28))
-        abort_slot = fwrite_slot - 0x28
-        self.assertEqual((ctx["import_dll"], ctx["import_symbol"], ctx["iat_slot_rva"]),
-                         ("msvcrt.dll", "abort", hex(abort_slot)))
-        abort_thunk = ctx["branch_target"]
+        abort_site, abort_thunk, abort_slot = site + 5, site + 10 + 0xe28, fwrite_slot - 0x28
+        self.assertIn({"dll": "msvcrt.dll", "name": "abort"}, ctx["imports"])
+        abort = next(s for s in crt["symbols"] if s["name"] == "abort")
+        self.assertEqual((abort["catalogued_service"], abort["iat_slot_rva"]), (True, hex(abort_slot)))
+        self.assertEqual(data[abort_site - 0xa00:abort_site - 0xa00 + 5], bytes.fromhex("e8280e0000"))
         self.assertEqual(data[abort_thunk - 0xa00:abort_thunk - 0xa00 + 6],
                          b"\xff\x25" + struct.pack("<i", abort_slot - abort_thunk - 6))
+        self.assertNotIn(hex(abort_site), [c["instruction_rva"] for c in ctx["unresolved_calls"]])
+
+        query_site, query_slot = failure + 0x11b, int(protect_slot, 16) + 8
+        self.assertEqual((ctx["function_rva"], ctx["block_rva"], ctx["instruction_rva"], ctx["opcode"]),
+                         (hex(failure + 0x70), hex(failure + 0xdc), hex(query_site), "CALL64m"))
+        self.assertEqual((ctx["import_dll"], ctx["import_symbol"], ctx["iat_slot_rva"]),
+                         ("KERNEL32.dll", "VirtualQuery", hex(query_slot)))
+        self.assertEqual(ctx["bytes"], (b"\xff\x15" + struct.pack("<i", query_slot - query_site - 6)).hex())
         offset = ctx["file_offset"]
         self.assertEqual(data[offset:offset + len(bytes.fromhex(ctx["bytes"]))].hex(), ctx["bytes"])
         return report
