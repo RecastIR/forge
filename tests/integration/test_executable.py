@@ -2040,6 +2040,15 @@ class Console(Workspace):
                         wanted = "" if name == "short" else cases["prefix-16"]["output"]
                         self.assertEqual(summarize(remaining[filled-room:]), wanted)
 
+        # A one-byte native prefix is shorter than the two CRs already staged.
+        # The subset cannot express the DLL's unsigned subtraction as an element count.
+        import resource
+        limited = self.dir / "one-byte-output"
+        with limited.open("wb") as stream:
+            result = self.program(stdout=stream, preexec_fn=lambda: resource.setrlimit(resource.RLIMIT_FSIZE, (1, 1)))
+        self.assertEqual((result.returncode, limited.read_bytes()), (125, b"A"))
+        self.assertIn(b"unsupported legacy MSVCRT stream operation", result.stderr)
+
     def test_virtual_protect(self):
         pe = image("virtual-protect")
         self.compile(pe)

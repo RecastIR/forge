@@ -13,7 +13,7 @@ using namespace forge::win64;
 
 forge_rt_status CrtStandardStreams::initialize(forge_rt_instance &instance,
                                                const StandardHandles &handles) {
-    constexpr uint64_t lane = UINT64_C(1) << 44;
+    constexpr uint64_t lane = UINT64_C(1) << 44U;
     constexpr uint64_t stdinOffset = 256, stride = 8192;
     static_assert(sizeof(files) <= stdinOffset && stdinOffset + capacity <= stride);
 
@@ -97,6 +97,26 @@ namespace {
         bool committed = false;
     };
 
+    struct TextBlock {
+        size_t source = 0;
+        size_t physical = 0;
+    };
+
+    TextBlock encodeText(std::span<const uint8_t> bytes, std::span<uint8_t> output) {
+        TextBlock block;
+        for (const auto c : bytes) {
+            if (c == '\n') {
+                output[block.physical++] = '\r';
+            }
+            output[block.physical++] = c;
+            ++block.source;
+            if (block.physical >= output.size() - 1) {
+                break;
+            }
+        }
+        return block;
+    }
+
     // The ANSI _write in the measured DLL starts a new OS transfer when the
     // converted staging area reaches 5119 bytes. A final LF can use byte 5120.
     template <class Reader>
@@ -125,28 +145,20 @@ namespace {
                 return {0, status};
             }
 
-            size_t n = 0;
-            for (const auto c : bytes) {
-                if (c == '\n') {
-                    physical[n++] = '\r';
-                    ++added;
-                }
-                physical[n++] = c;
-                ++offset;
-                if (n >= limit) {
-                    break;
-                }
-            }
-
-            const auto written = output.writeSome(std::span(physical).first(n));
+            const auto block = encodeText(bytes, physical);
+            offset += block.source;
+            added += block.physical - block.source;
+            const auto written = output.writeSome(std::span(physical).first(block.physical));
             accepted += written.count;
-            if (written.count != n) {
-                // _write subtracts all CR insertions staged in this call. On positive
-                // progress the CRT leaves errno alone, even when a later OS write fails.
-                const auto logical = static_cast<uint32_t>(accepted - added);
-                const size_t count =
-                    accepted && logical != UINT32_MAX ? std::min<uint64_t>(logical, length) : 0;
-                return {count, FORGE_RT_OK, written.error, true, accepted != 0};
+            if (written.count != block.physical) {
+                // _write subtracts all CR insertions staged in this call. A positive
+                // OS prefix normally preserves errno. An underflow here cannot describe
+                // an element count in the supported subset.
+                if (accepted && accepted < added) {
+                    return {0, FORGE_RT_UNSUPPORTED_CRT_STREAM, 0, true, true};
+                }
+                return {accepted ? accepted - added : 0, FORGE_RT_OK, written.error, true,
+                        accepted != 0};
             }
         }
         return {static_cast<size_t>(length)};
@@ -167,7 +179,7 @@ namespace {
                           std::memcpy(bytes.data(), buffer.data() + offset, bytes.size());
                           return FORGE_RT_OK;
                       });
-        if (progress.status == FORGE_RT_OK) {
+        if (progress.status == FORGE_RT_OK || progress.committed) {
             // Retire this attempted buffer even on an OS error. No prefix can be replayed.
             file.ptr = file.base;
             file.count = 0;
@@ -228,7 +240,7 @@ namespace {
         if (!file.base) {
             file.base = buffer.mapping.base;
             file.capacity = CrtStandardStreams::capacity;
-            file.flags |= 8;
+            file.flags |= 8U;
             if (file.file == -2) {
                 windows.crtErrno = 9;
             }
@@ -327,10 +339,10 @@ namespace {
             }
             if (progress.shortWrite) {
                 const auto status = writeFailure(instance, thread, file, progress);
-                if (status == FORGE_RT_OK) {
-                    elements = done / width;
+                if (status != FORGE_RT_OK) {
+                    return status;
                 }
-                return status;
+                break;
             }
         }
 
