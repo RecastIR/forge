@@ -134,7 +134,8 @@ static void wait_for_loader(PROCESS_INFORMATION *process) {
 }
 
 int wmain(int argc, wchar_t **argv) {
-    if (argc != 3) {
+    BOOL inherited = argc == 4 && wcscmp(argv[3], L"inherit") == 0;
+    if (argc != 3 && !inherited) {
         return 1;
     }
     // The guest supervisor has already quoted the argv vector as UTF-16LE.
@@ -159,8 +160,20 @@ int wmain(int argc, wchar_t **argv) {
     if (startup.hStdInput == INVALID_HANDLE_VALUE) {
         win_error("open fixture stdin");
     }
-    startup.hStdOutput = open_stream(&streams[0], &inherit);
-    startup.hStdError = open_stream(&streams[1], &inherit);
+    if (inherited) {
+        HANDLE self = GetCurrentProcess();
+        if (!DuplicateHandle(self, GetStdHandle(STD_OUTPUT_HANDLE), self, &streams[0].child, 0,
+                             TRUE, DUPLICATE_SAME_ACCESS) ||
+            !DuplicateHandle(self, GetStdHandle(STD_ERROR_HANDLE), self, &streams[1].child, 0, TRUE,
+                             DUPLICATE_SAME_ACCESS)) {
+            win_error("inherit redirected streams");
+        }
+        startup.hStdOutput = streams[0].child;
+        startup.hStdError = streams[1].child;
+    } else {
+        startup.hStdOutput = open_stream(&streams[0], &inherit);
+        startup.hStdError = open_stream(&streams[1], &inherit);
+    }
     PROCESS_INFORMATION process;
     if (!CreateProcessW(argv[1], command, NULL, NULL, TRUE, DEBUG_ONLY_THIS_PROCESS, NULL,
                         L"C:\\work", &startup, &process)) {
@@ -170,13 +183,16 @@ int wmain(int argc, wchar_t **argv) {
     HANDLE wait_for[3] = {process.hProcess, NULL, NULL};
     for (int i = 0; i < 2; ++i) {
         CloseHandle(streams[i].child);
+        if (inherited) {
+            continue;
+        }
         wait_for[i + 1] = CreateThread(NULL, 0, drain, &streams[i], 0, NULL);
         if (!wait_for[i + 1]) {
             win_error("start capture reader");
         }
     }
     wait_for_loader(&process);
-    if (WaitForMultipleObjects(3, wait_for, TRUE, INFINITE) != WAIT_OBJECT_0) {
+    if (WaitForMultipleObjects(inherited ? 1 : 3, wait_for, TRUE, INFINITE) != WAIT_OBJECT_0) {
         win_error("wait for fixture and streams");
     }
     DWORD status;

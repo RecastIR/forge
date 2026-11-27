@@ -6,6 +6,7 @@ from pathlib import Path
 import struct
 import subprocess
 import sys
+import tempfile
 
 
 def summarize(data):
@@ -38,6 +39,22 @@ def focused_output(backend, name, directory):
     return row["status"], bytes.fromhex(row["stdout"]), bytes.fromhex(row["stderr"])
 
 
+def launch(pe, args, wine, **streams):
+    if not wine:
+        return subprocess.run([pe, *args], timeout=20, **streams)
+
+    app = "Z:" + str(pe).replace("/", "\\")
+    with tempfile.TemporaryDirectory() as temporary:
+        work = Path(temporary)
+        (work / "command.bin").write_bytes(subprocess.list2cmdline([app, *args]).encode("utf-16-le"))
+        run = subprocess.run([wine, r"Z:\opt\forge\capture.exe", app, "65536", "inherit"],
+                             cwd=work, timeout=30, **streams)
+        if run.returncode or not (work / "ready").is_file():
+            raise RuntimeError(f"Wine capture parent failed before reporting {pe.name} {args}: {run.returncode}")
+        status, = struct.unpack("<I", (work / "exit.bin").read_bytes())
+        return subprocess.CompletedProcess([pe, *args], status, run.stdout, run.stderr)
+
+
 def observe(directory, destination, wine=None):
     pe = (directory / "crt-stream-reference.exe").resolve()
     manifest = (directory / "SHA256SUMS").read_bytes()
@@ -59,16 +76,14 @@ def observe(directory, destination, wine=None):
         print("Windows MSVCRT", version, hashlib.sha256(dll.read_bytes()).hexdigest(), digest, flush=True)
     for redirect in ("pipe", "file"):
         for case in range(48):
-            args = [pe, f"{case:02}"]
-            if wine:
-                args = [wine, *args]
+            args = [f"{case:02}"]
             prefix = destination / f"{redirect}-{case:02}"
             out, err = prefix.with_suffix(".stdout"), prefix.with_suffix(".stderr")
             if redirect == "file":
                 with out.open("wb") as stdout, err.open("wb") as stderr:
-                    run = subprocess.run(args, stdout=stdout, stderr=stderr, timeout=20)
+                    run = launch(pe, args, wine, stdout=stdout, stderr=stderr)
             else:
-                run = subprocess.run(args, capture_output=True, timeout=20)
+                run = launch(pe, args, wine, capture_output=True)
                 out.write_bytes(run.stdout)
                 err.write_bytes(run.stderr)
             records, stream = (out, err) if case % 2 else (err, out)
@@ -81,7 +96,7 @@ def observe(directory, destination, wine=None):
             fields = list(struct.iter_unpack("<12Q", raw))
             status = run.returncode & 0xffffffff
             observed[prefix.name] = dict(status=status, records=fields, output=summarize(stream.read_bytes()))
-            if wine and status == 5:
+            if wine and status == 0xc0000005:
                 if b"page fault" not in (out.read_bytes() + err.read_bytes()).lower():
                     raise ValueError(f"{prefix.name}: missing Wine page fault diagnostic")
                 observed[prefix.name]["output"] = "wine page fault"
@@ -91,10 +106,9 @@ def observe(directory, destination, wine=None):
     for pe_name in ("crt-stream-return.exe", "crt-stream-exit.exe", "crt-stream-state.exe", "crt-stream-sections.exe"):
         focus = (directory / pe_name).resolve()
         checksum = hashlib.sha256(focus.read_bytes()).hexdigest()
-        args = [wine, focus] if wine else [focus]
         for merged in (False, True):
-            run = subprocess.run(args, stdout=subprocess.PIPE,
-                                 stderr=subprocess.STDOUT if merged else subprocess.PIPE, timeout=20)
+            run = launch(focus, [], wine, stdout=subprocess.PIPE,
+                         stderr=subprocess.STDOUT if merged else subprocess.PIPE)
             key = pe_name + ("-merged" if merged else "")
             observed[key] = dict(status=run.returncode, stdout=run.stdout.hex(),
                                  stderr=(run.stderr or b"").hex())
@@ -105,8 +119,7 @@ def observe(directory, destination, wine=None):
         if (run.returncode & 0xffffffff, run.stdout, run.stderr) != (0xc0000005, b"", b""):
             raise ValueError(f"invalid FILE: {run.returncode:#x} {run.stdout.hex()} {run.stderr.hex()}")
     block = (directory / "crt-stream-block.exe").resolve()
-    args = [wine, block] if wine else [block]
-    run = subprocess.run(args, capture_output=True, timeout=20)
+    run = launch(block, [], wine, capture_output=True)
     if (run.returncode, run.stdout, run.stderr) != focused_output(backend, "block", directory):
         raise ValueError(f"{backend}: direct transfer record mismatch {run.stderr.hex()}")
     if not wine:

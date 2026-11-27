@@ -264,7 +264,7 @@ jobs:
           test "$(uname -m)" = x86_64
           ./tools/test-forge.sh --executable-reference
           image=$(python3 -B tests/differential/fixture_images.py --id reference)
-          docker run --rm --pull never --platform linux/amd64 --network none --cap-drop ALL \
+          docker run --init --rm --pull never --platform linux/amd64 --network none --cap-drop ALL \
             --security-opt no-new-privileges -e FORGE_WINE=/usr/lib/wine/wine64 -e PE_MANIFEST_SHA256 \
             -v "$PWD/build/dev/fixtures/Debug:/input:ro" -v "$PWD/tests/differential/reference:/suite:ro" \
             --entrypoint /bin/sh "$image" -ec '
