@@ -59,7 +59,7 @@ namespace {
             } else if (result.status == FORGE_RT_UNSUPPORTED_STARTUP_TITLE) {
                 std::fputs("forge: GetStartupInfoA/W requires an ASCII startup title\n", stderr);
             } else if (result.status == FORGE_RT_UNSUPPORTED_CRT_ERROR_ROUTING) {
-                std::fputs("forge: unsupported MSVCRT _amsg_exit GUI diagnostic routing\n", stderr);
+                std::fputs("forge: unsupported MSVCRT diagnostic routing\n", stderr);
             } else if (result.status == FORGE_RT_UNSUPPORTED_CRT_WILDCARDS) {
                 std::fputs("forge: unsupported MSVCRT __getmainargs wildcard expansion\n", stderr);
             } else if (result.status == FORGE_RT_UNSUPPORTED_CRT_NEW_MODE) {

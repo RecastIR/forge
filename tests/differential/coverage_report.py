@@ -319,7 +319,10 @@ def hosted_report(raw_needs, current_run, revision, **paths):
     if not matching_inputs:
         errors.append("standalone PE input checksums missing or different across macOS and Wine jobs")
 
-    if outputs["macos-dev"].get("termination_sha256"):
+    capture_requested = outputs["macos-dev"].get("capture_requested")
+    if capture_requested not in ("true", "false"):
+        errors.append("macos-dev: missing or invalid Windows capture decision")
+    if capture_requested == "true":
         capture = needs.get("legacy-windows-capture")
         jobs["legacy-windows-capture"] = capture.get("result", "missing") if isinstance(capture, dict) else "missing"
 

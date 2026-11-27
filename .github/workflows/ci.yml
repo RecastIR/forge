@@ -25,37 +25,14 @@ jobs:
       stages: ${{ steps.native.outputs.stages }}
       release_forge: ${{ steps.native.outputs.sha256 }}
       executable_inputs_sha256: ${{ steps.executables.outputs.sha256 }}
+      capture_requested: ${{ steps.capture.outputs.requested }}
       termination_sha256: ${{ steps.termination.outputs.sha256 }}
     steps:
       - uses: actions/checkout@v6
         with:
           fetch-depth: 0
-      - id: native
-        uses: ./.github/actions/native-test
-        with:
-          preset: dev
-      - name: Package the PE files exercised by the native executable tests
-        id: executables
-        working-directory: build/dev/fixtures/Debug
-        run: |
-          list="$GITHUB_WORKSPACE/tests/differential/reference/executable-inputs.txt"
-          dest="$RUNNER_TEMP/executable-inputs"
-          mkdir "$dest"
-          while IFS= read -r pe; do cp "$pe" "$dest/"; done < "$list"
-          xargs shasum -a 256 < "$list" > "$dest/SHA256SUMS"
-          echo "sha256=$(shasum -a 256 "$dest/SHA256SUMS" | cut -d' ' -f1)" >> "$GITHUB_OUTPUT"
-      - uses: actions/upload-artifact@v4
-        with:
-          name: executable-reference-inputs
-          path: ${{ runner.temp }}/executable-inputs
-          if-no-files-found: error
-          retention-days: 7
-          overwrite: true
-
-      - name: Package focused Windows reference inputs when compatibility changes
-        # Capture the producer's fixtures even when the translated comparison fails.
-        if: ${{ !cancelled() }}
-        id: termination
+      - name: Select focused Windows capture for compatibility changes
+        id: capture
         shell: bash
         env:
           BASE: ${{ github.event.pull_request.base.sha || github.event.before }}
@@ -69,8 +46,39 @@ jobs:
             runtime/src/compat/crt/termination.cpp runtime/src/compat/crt/fatal.cpp \
             'runtime/src/compat/crt/standard_streams.*' 'runtime/src/compat/process_state*' \
             'runtime/src/compat/win32/process_parameters*' runtime/src/compat/win32/startup_info.cpp; then
-            exit 0
+            echo "requested=false" >> "$GITHUB_OUTPUT"
+          else
+            echo "requested=true" >> "$GITHUB_OUTPUT"
           fi
+      - id: native
+        uses: ./.github/actions/native-test
+        with:
+          preset: dev
+      - name: Package native executable reference inputs
+        if: ${{ !cancelled() }}
+        id: executables
+        working-directory: build/dev/fixtures/Debug
+        run: |
+          list="$GITHUB_WORKSPACE/tests/differential/reference/executable-inputs.txt"
+          dest="$RUNNER_TEMP/executable-inputs"
+          mkdir "$dest"
+          while IFS= read -r pe; do cp "$pe" "$dest/"; done < "$list"
+          xargs shasum -a 256 < "$list" > "$dest/SHA256SUMS"
+          echo "sha256=$(shasum -a 256 "$dest/SHA256SUMS" | cut -d' ' -f1)" >> "$GITHUB_OUTPUT"
+      - uses: actions/upload-artifact@v4
+        if: ${{ !cancelled() && steps.executables.outputs.sha256 != '' }}
+        with:
+          name: executable-reference-inputs
+          path: ${{ runner.temp }}/executable-inputs
+          if-no-files-found: error
+          retention-days: 7
+          overwrite: true
+
+      - name: Package focused Windows reference inputs
+        id: termination
+        if: ${{ !cancelled() && steps.capture.outputs.requested == 'true' }}
+        shell: bash
+        run: |
           list="$PWD/tests/differential/reference/termination/inputs.txt"
           dest="$RUNNER_TEMP/termination-inputs"
           mkdir "$dest"
@@ -84,43 +92,53 @@ jobs:
           name: termination-inputs
           path: ${{ runner.temp }}/termination-inputs
           if-no-files-found: error
+          overwrite: true
 
   legacy-windows-capture:
     needs: macos-dev
-    if: ${{ !cancelled() && needs.macos-dev.outputs.termination_sha256 != '' }}
+    if: ${{ !cancelled() && needs.macos-dev.outputs.capture_requested == 'true' }}
     runs-on: windows-2022
     timeout-minutes: 10
     steps:
       - uses: actions/checkout@v6
+        id: checkout
       - uses: actions/download-artifact@v4
+        id: termination_inputs
+        if: ${{ !cancelled() && steps.checkout.outcome == 'success' }}
         with:
           name: termination-inputs
           path: inputs
-      - uses: actions/download-artifact@v4
-        with:
-          name: executable-reference-inputs
-          path: executables
-      - name: Measure legacy abort
-        env:
-          PE_MANIFEST_SHA256: ${{ needs.macos-dev.outputs.executable_inputs_sha256 }}
-        run: python -B tests/differential/reference/crt_abort.py executables abort
       - name: Measure legacy system MSVCRT and startup information
+        if: ${{ !cancelled() && steps.termination_inputs.outcome == 'success' }}
         run: >-
           python -B tests/differential/reference/termination/observe.py inputs observations
-          --manifest-sha256 ${{ needs.macos-dev.outputs.termination_sha256 }}
+          --manifest-sha256 "${{ needs.macos-dev.outputs.termination_sha256 }}"
           --reference tests/differential/fixtures/startup/termination/windows-raw.zip
       - uses: actions/upload-artifact@v4
-        if: always()
+        if: ${{ !cancelled() && steps.termination_inputs.outcome == 'success' }}
         with:
           name: legacy-windows-observations
           path: observations
           if-no-files-found: error
+          overwrite: true
+      - uses: actions/download-artifact@v4
+        id: abort_inputs
+        if: ${{ !cancelled() && steps.checkout.outcome == 'success' }}
+        with:
+          name: executable-reference-inputs
+          path: executables
+      - name: Measure legacy abort
+        if: ${{ !cancelled() && steps.abort_inputs.outcome == 'success' }}
+        env:
+          PE_MANIFEST_SHA256: ${{ needs.macos-dev.outputs.executable_inputs_sha256 }}
+        run: python -B tests/differential/reference/crt_abort.py executables abort
       - uses: actions/upload-artifact@v4
-        if: always()
+        if: ${{ !cancelled() && steps.abort_inputs.outcome == 'success' }}
         with:
           name: windows-crt-abort-observations
           path: abort/abort-observations
           if-no-files-found: error
+          overwrite: true
 
   macos-sanitize:
     runs-on: macos-26

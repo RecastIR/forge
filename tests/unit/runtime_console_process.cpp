@@ -1245,6 +1245,38 @@ namespace {
         REQUIRE(run(registered(artifact)).value == 57);
     }
 
+    void checkAbortRoutingWithoutDescriptors() {
+        constexpr forge_rt_import abortImport{"msvcrt.dll", "abort"};
+        forge_rt_pe_artifact pe{{{{fatalArtifact, "abort.exe"}, nullptr, 0}, nullptr, 0}, 0};
+        auto &artifact = pe.functions.crt.named.artifact;
+        artifact.version = FORGE_RT_PE_ARTIFACT_VERSION;
+        artifact.imports = &abortImport;
+        artifact.entry = [](forge_rt_execution *execution) {
+            auto *instance = execution->instance;
+            const auto thread = execution->thread;
+            REQUIRE(!instance->windows->standardHandles && !instance->windows->streams);
+
+            if (execution->rcx) {
+                for (const int type : {0, 2}) {
+                    REQUIRE(forge_rt_msvcrt_set_app_type(instance, thread, type) == FORGE_RT_OK);
+                    REQUIRE(forge_rt_msvcrt_abort(instance, thread) ==
+                            FORGE_RT_UNSUPPORTED_CRT_ERROR_ROUTING);
+                    REQUIRE(!execution->result.kind);
+                }
+
+                REQUIRE(forge_rt_msvcrt_set_app_type(instance, thread, 1) == FORGE_RT_OK);
+            }
+
+            REQUIRE(forge_rt_msvcrt_abort(instance, thread) == FORGE_RT_OK);
+        };
+
+        for (const bool useSetter : {false, true}) {
+            const auto aborted = run(registered(artifact), useSetter);
+            REQUIRE(aborted.kind == FORGE_RT_EXIT_PROCESS && aborted.status == FORGE_RT_OK &&
+                    aborted.value == 3);
+        }
+    }
+
     void checkNoDescriptorBudget() {
         struct rlimit previous{};
         REQUIRE(getrlimit(RLIMIT_NOFILE, &previous) == 0);
@@ -1254,23 +1286,7 @@ namespace {
         checkAddressOnlyConsoleImports();
         checkApplicationTypeIsolation();
 
-        // A direct abort needs neither descriptors nor a guest FILE array.
-        constexpr forge_rt_import abortImport{"msvcrt.dll", "abort"};
-        auto bare = fatalArtifact;
-        bare.imports = &abortImport;
-        bare.entry = [](forge_rt_execution *execution) {
-            auto *instance = execution->instance;
-            const auto thread = execution->thread;
-            REQUIRE(!instance->windows->standardHandles && !instance->windows->streams);
-            REQUIRE(forge_rt_msvcrt_set_app_type(instance, thread, 2) == FORGE_RT_OK);
-            REQUIRE(forge_rt_msvcrt_abort(instance, thread) ==
-                    FORGE_RT_UNSUPPORTED_CRT_ERROR_ROUTING);
-            REQUIRE(!execution->result.kind);
-            REQUIRE(forge_rt_msvcrt_set_app_type(instance, thread, 1) == FORGE_RT_OK);
-            REQUIRE(forge_rt_msvcrt_abort(instance, thread) == FORGE_RT_OK);
-        };
-        const auto aborted = run(registered(bare));
-        REQUIRE(aborted.kind == FORGE_RT_EXIT_PROCESS && aborted.value == 3);
+        checkAbortRoutingWithoutDescriptors();
 
         constexpr forge_rt_import unrelated[]{{"kernel32.dll", "ExitProcess"},
                                               {"kernel32.dll", "GetLastError"},

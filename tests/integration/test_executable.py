@@ -2087,6 +2087,11 @@ class Console(Workspace):
             with stdout.open("wb") as out, stderr.open("wb") as err:
                 result = self.program(stdout=out, stderr=err)
             return result.returncode, stdout.read_bytes(), stderr.read_bytes()
+        if mode == "merged":
+            merged = self.dir / "merged.bin"
+            with merged.open("wb") as out:
+                result = self.program(stdout=out, stderr=subprocess.STDOUT)
+            return result.returncode, merged.read_bytes(), None
         if mode == "absent-stderr":
             result = self.program(preexec_fn=lambda: os.close(2))
             self.assertEqual(result.stderr, b"")
@@ -2097,7 +2102,7 @@ class Console(Workspace):
             with os.fdopen(write, "wb") as writer:
                 result = self.program(stderr=writer)
         else:
-            result = self.program(stderr=subprocess.STDOUT if mode == "merged" else subprocess.PIPE)
+            result = self.program()
         return result.returncode, result.stdout, result.stderr
 
     def test_legacy_abort(self):
@@ -2428,25 +2433,26 @@ class Console(Workspace):
                                ("fatal-conflict", fatal), ("fatal-unusual", fatal),
                                ("fatal-gui-unknown", (255, b"", b"")), ("fatal-gui-newline", (255, b"", b"")),
                                ("fatal-gui", (125, b"",
-                                    b"forge: unsupported MSVCRT _amsg_exit GUI diagnostic routing\n"))):
+                                    b"forge: unsupported MSVCRT diagnostic routing\n"))):
             with self.subTest(mode=mode):
                 self.compile(FIXTURES / f"crt-app-type-{mode}.exe")
                 result = self.program()
                 self.assertEqual((result.returncode, result.stdout, result.stderr), expected)
 
     def test_gui_subsystem_before_setter(self):
-        # The checked Windows control calls only _amsg_exit. Change its PE subsystem
-        # to exercise initial GUI classification without launching a Windows dialog.
-        data = bytearray((FIXTURES / "crt-amsg-exit-8.exe").read_bytes())
-        subsystem = Layout(data).opt + 68
-        self.assertEqual(struct.unpack_from("<H", data, subsystem), (3,))
-        struct.pack_into("<H", data, subsystem, 2)
-        pe = self.dir / "gui.exe"
-        pe.write_bytes(data)
-        self.compile(pe)
-        result = self.program()
-        self.assertEqual((result.returncode, result.stdout, result.stderr),
-                         (125, b"", b"forge: unsupported MSVCRT _amsg_exit GUI diagnostic routing\n"))
+        # Translate a GUI copy of each console probe without launching a Windows dialog.
+        for fixture, stdout in (("crt-amsg-exit-8.exe", b""), ("crt-abort-direct.exe", b"RB")):
+            with self.subTest(fixture=fixture):
+                data = bytearray((FIXTURES / fixture).read_bytes())
+                subsystem = Layout(data).opt + 68
+                self.assertEqual(struct.unpack_from("<H", data, subsystem), (3,))
+                struct.pack_into("<H", data, subsystem, 2)
+                pe = self.dir / "gui.exe"
+                pe.write_bytes(data)
+                self.compile(pe)
+                result = self.program()
+                self.assertEqual((result.returncode, result.stdout, result.stderr),
+                                 (125, stdout, b"forge: unsupported MSVCRT diagnostic routing\n"))
 
     def test_crt_fatal_exit(self):
         for filename, observations in amsg_observations("windows").items():

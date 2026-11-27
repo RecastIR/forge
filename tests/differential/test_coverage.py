@@ -53,6 +53,7 @@ class CoverageTests(ArtifactSetup):
         digest = diff.sha256(self.forge.read_bytes())
         needs["macos-sanitize"]["outputs"]["debug_forge"] = digest
         needs["macos-dev"]["outputs"]["release_forge"] = digest
+        needs["macos-dev"]["outputs"]["capture_requested"] = "false"
         for job in ("macos-dev", "windows-executable-reference"):
             needs[job]["outputs"]["executable_inputs_sha256"] = "f" * 64
         needs["differential"]["outputs"]["evidence_run_id"] = self.run_id
@@ -88,15 +89,23 @@ class CoverageTests(ArtifactSetup):
                     self.assertEqual(report["gate"], "failed")
                     self.assertIn(f"{job}: {outcome}", report["errors"])
 
-    def test_windows_capture_required_when_its_inputs_are_published(self):
+    def test_windows_capture_required_when_requested(self):
         needs = self.needs()
         self.assertEqual(self.hosted(needs)["gate"], "passed")
-        needs["macos-dev"]["outputs"]["termination_sha256"] = "a" * 64
+        needs["macos-dev"]["outputs"]["capture_requested"] = "true"
         self.assertEqual(self.hosted(needs)["gate"], "failed")
         for outcome in ("skipped", "failure", "success"):
             with self.subTest(outcome=outcome):
                 needs["legacy-windows-capture"] = {"result": outcome, "outputs": {}}
                 self.assertEqual(self.hosted(needs)["gate"], "passed" if outcome == "success" else "failed")
+
+    def test_windows_capture_requires_an_explicit_decision(self):
+        needs = self.needs()
+        outputs = needs["macos-dev"]["outputs"]
+        del outputs["capture_requested"]
+        self.assertEqual(self.hosted(needs)["gate"], "failed")
+        outputs["capture_requested"] = "invalid"
+        self.assertEqual(self.hosted(needs)["gate"], "failed")
 
     def test_green_jobs_require_complete_stage_outputs(self):
         valid = self.needs()
