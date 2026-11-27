@@ -1,6 +1,11 @@
 console-binary_stderr.exe
 console-binary_stdout.exe
 console-nested_exit.exe
+crt-abort-buffered.exe
+crt-abort-cleanup.exe
+crt-abort-control.exe
+crt-abort-direct.exe
+crt-abort-initializer.exe
 crt-amsg-exit--1.exe
 crt-amsg-exit--2147483648.exe
 crt-amsg-exit-31.exe

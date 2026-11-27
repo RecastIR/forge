@@ -128,6 +128,17 @@ def generate(output, mc, link, dlltool, clang):
             image(f"crt-vfprintf-{variant}.exe", switches + formatter,
                   link_flags=["/dynamicbase:no", "/fixed:no", "emit.obj", "format.lib", "puts.lib",
                               "streams.lib", "msvcrt.dll.lib", "KERNEL32.dll.lib"])
+        abort_def = work / "abort.def"
+        abort_def.write_text("LIBRARY msvcrt.dll\nEXPORTS\nabort\n")
+        run(dlltool, "-m", "i386:x86-64", "-d", abort_def, "-l", "abort.lib")
+        abort_probe = (sources / "crt-abort.s").read_text()
+        for name, switches in (("direct", ()), ("buffered", ("buffered",)),
+                               ("control", ("buffered", "control")), ("initializer", ("initializer",)),
+                               ("cleanup", ("cleanup",))):
+            options = "".join(f"{flag} = {int(flag in switches)}\n" for flag in ("cleanup", "control", "buffered", "initializer"))
+            image(f"crt-abort-{name}.exe", options + abort_probe,
+                  link_flags=["/section:.CRT,RW", "abort.lib", "format.lib", "streams.lib",
+                              "msvcrt.dll.lib", "KERNEL32.dll.lib"])
         puts = (sources / "crt-puts.s").read_text()
         for name in ("heap", "immutable", "terminators"):
             image(f"crt-puts-{name}.exe", (sources / f"crt-puts-{name}.s").read_text(),

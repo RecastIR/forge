@@ -221,6 +221,8 @@ jobs:
           python -B tests/differential/reference/crt_streams.py executables stream-observations 0<> stream-probe-stdin
           test ! -s stream-probe-stdin
           echo "crt_streams=success" >> "$GITHUB_OUTPUT"
+          python -B tests/differential/reference/crt_abort.py executables stream-observations
+          echo "crt_abort=success" >> "$GITHUB_OUTPUT"
           python -B tests/differential/reference/crt_vfprintf.py executables stream-observations
           echo "crt_vfprintf=success" >> "$GITHUB_OUTPUT"
           python -B tests/differential/reference/virtual_protect.py executables
@@ -270,7 +272,7 @@ jobs:
           image=$(python3 -B tests/differential/fixture_images.py --id reference)
           # The pinned image writes as UID 1000, independently of the hosted runner's UID.
           install -d -m 1777 "$RUNNER_TEMP/stream-observations"
-          for suite in crt_streams crt_vfprintf; do
+          for suite in crt_abort crt_streams crt_vfprintf; do
             docker run --init --rm --pull never --platform linux/amd64 --network none --cap-drop ALL \
               --security-opt no-new-privileges -e FORGE_WINE=/usr/lib/wine/wine64 -e PE_MANIFEST_SHA256 \
               -v "$PWD/build/dev/fixtures/Debug:/input:ro" -v "$PWD/tests/differential/reference:/suite:ro" \
@@ -291,6 +293,7 @@ jobs:
           path: |
             ${{ runner.temp }}/stream-observations/puts-*
             ${{ runner.temp }}/stream-observations/vfprintf-*
+            ${{ runner.temp }}/stream-observations/abort-observations
           if-no-files-found: warn
 
   differential:

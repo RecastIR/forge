@@ -1573,7 +1573,8 @@ class Reference(Workspace):
         filenames = inputs.read_text().splitlines()
         from crt_puts import VARIANTS, check_input, check_observation as check_puts
         import crt_vfprintf
-        self.assertEqual(filenames, sorted([*expected, observer.name, denied.name, "crt-stream-invalid.exe",
+        from crt_abort import VARIANTS as abort_variants
+        self.assertEqual(filenames, sorted([*expected, *(f"crt-abort-{v}.exe" for v in abort_variants), observer.name, denied.name, "crt-stream-invalid.exe",
                                             "crt-stream-reference.exe", *(f"crt-puts-{v}.exe" for v in VARIANTS),
                                             *(f"crt-vfprintf-{v}.exe" for v in crt_vfprintf.VARIANTS)]))
         for variant in crt_vfprintf.VARIANTS:

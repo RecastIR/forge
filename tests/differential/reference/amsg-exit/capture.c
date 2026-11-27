@@ -111,7 +111,11 @@ int main(int argc, char **argv) {
     int broken = !strcmp(mode, "broken-pipe");
     int pipes =
         !strcmp(mode, "pipe") || !strcmp(mode, "console-pipe") || !strcmp(mode, "terminal-pipe");
-    int files = !strcmp(mode, "file");
+    // Abort runs detached, with an observable stdout even when stderr is unavailable.
+    int absent_error = !strcmp(mode, "absent-stderr");
+    int broken_error = !strcmp(mode, "broken-stderr");
+    int merged = !strcmp(mode, "merged");
+    int files = !strcmp(mode, "file") || absent_error || broken_error || merged;
     if (!attached && !pipes && !broken && !files && strcmp(mode, "invalid")) {
         return 2;
     }
@@ -143,12 +147,19 @@ int main(int argc, char **argv) {
     HANDLE child[2], readers[2] = {NULL, NULL};
     const char *streams[] = {"stdout.bin", "stderr.bin"};
     for (int i = 0; i < 2; ++i) {
-        if (pipes || broken) {
+        if (i == 1 && absent_error) {
+            child[i] = NULL;
+        } else if (i == 1 && merged) {
+            if (!DuplicateHandle(GetCurrentProcess(), child[0], GetCurrentProcess(), &child[i],
+                                 0, TRUE, DUPLICATE_SAME_ACCESS)) {
+                fail("duplicate merged output");
+            }
+        } else if (pipes || broken || (i == 1 && broken_error)) {
             if (!CreatePipe(&readers[i], &child[i], &inherit, 0) ||
                 !SetHandleInformation(readers[i], HANDLE_FLAG_INHERIT, 0)) {
                 fail("CreatePipe");
             }
-            if (broken) {
+            if (broken || broken_error) {
                 CloseHandle(readers[i]);
             }
         } else if (files) {
@@ -181,7 +192,7 @@ int main(int argc, char **argv) {
         fail("CreateProcess");
     }
     for (int i = 0; i < 2; ++i) {
-        if (child[i] != INVALID_HANDLE_VALUE) {
+        if (child[i] && child[i] != INVALID_HANDLE_VALUE) {
             CloseHandle(child[i]);
         }
     }
