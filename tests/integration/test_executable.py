@@ -1575,7 +1575,7 @@ class Reference(Workspace):
         import crt_vfprintf
         self.assertEqual(filenames, sorted([*expected, observer.name, denied.name, "crt-stream-invalid.exe",
                                             "crt-stream-reference.exe", *(f"crt-puts-{v}.exe" for v in VARIANTS),
-                                            *(f"crt-vfprintf-{v}.exe" for v in crt_vfprintf.VARIANTS)]))
+                                            *(f"crt-vfprintf-{v}.exe" for v in (*crt_vfprintf.VARIANTS, *crt_vfprintf.PROBES))]))
         for variant in crt_vfprintf.VARIANTS:
             pe = FIXTURES / f"crt-vfprintf-{variant}.exe"
             crt_vfprintf.check_input(pe)

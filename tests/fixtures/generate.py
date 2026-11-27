@@ -120,7 +120,9 @@ def generate(output, mc, link, dlltool, clang):
             "-funwind-tables", "-fno-stack-protector", "-c", sources / "crt-vfprintf.c", "-o", "emit.obj")
         formatter = (sources / "crt-vfprintf.s").read_text()
         variants = ("empty", "mixed", "numbers", "pointer", "boundary", "large",
-                    "null_format", "null_string", "unknown", "null_stream", "edges", "mapped")
+                    "null_format", "null_string", "unknown", "null_stream", "edges", "mapped",
+                    "padding", "sign", "field_body", "trailing", "zero_pad", "precision",
+                    "errno_string", "errno_slot", "literal_empty", "literal_text")
         for variant in variants:
             switches = "".join(f"{name} = {int(name == variant)}\n" for name in variants)
             image(f"crt-vfprintf-{variant}.exe", switches + formatter,

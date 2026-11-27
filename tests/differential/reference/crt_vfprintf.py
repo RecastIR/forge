@@ -12,6 +12,20 @@ VARIANTS = ("empty", "mixed", "numbers", "pointer", "boundary", "large",
             "null_format", "null_string", "unknown", "null_stream", "edges", "mapped")
 
 
+# Capture these producer-hashed inputs before adding their independent observations.
+PROBES = ("padding", "sign", "field_body", "trailing", "zero_pad", "precision",
+          "errno_string", "errno_slot", "literal_empty", "literal_text")
+
+
+def failure_modes(variant):
+    if variant in ("boundary", "large", "empty", "padding", "sign", "field_body",
+                   "trailing", "zero_pad"):
+        return ("broken", "short", "missing", "full")
+    if variant in ("errno_string", "errno_slot"):
+        return ("missing",)
+    return ()
+
+
 @cache
 def baseline():
     return json.loads(Path(__file__).with_name("crt-vfprintf.json").read_bytes())
@@ -39,14 +53,14 @@ def observe(directory, destination, wine):
     backend = "wine" if wine else "windows"
     observations = {}
 
-    for variant in VARIANTS:
+    for variant in (*VARIANTS, *PROBES):
         pe = (directory / f"crt-vfprintf-{variant}.exe").resolve()
-        digest = check_input(pe)
+        digest = check_input(pe) if variant in VARIANTS else hashlib.sha256(pe.read_bytes()).hexdigest()
         if declared.get(pe.name) != digest:
             raise ValueError(f"producer checksum mismatch for {pe.name}")
         modes = ["pipe", "file"]
-        if not wine and variant in ("boundary", "large", "empty"):
-            modes += ["broken", "short", "missing", "full"]
+        if not wine:
+            modes.extend(failure_modes(variant))
         for mode in modes:
             key = variant + "-" + mode
             prefix = destination / ("vfprintf-" + key)
@@ -62,12 +76,16 @@ def observe(directory, destination, wine):
                 with err.open("wb") as stderr:
                     run, output = windows_output_failure(pe, [], mode, stderr)
                 out.write_bytes(output)
-            row = check_observation(backend, variant, mode, run.returncode & 0xffffffff,
-                                    out.read_bytes(), err.read_bytes())
+            if variant in VARIANTS:
+                row = check_observation(backend, variant, mode, run.returncode & 0xffffffff,
+                                        out.read_bytes(), err.read_bytes())
+            else:
+                row = dict(status=run.returncode & 0xffffffff, stdout=summarize(out.read_bytes()),
+                           stderr=summarize(err.read_bytes()))
             observations[key] = dict(pe=digest, **row)
             print("vfprintf", key, observations[key], flush=True)
-    ordinary = {f"{variant}-{mode}" for variant in VARIANTS for mode in ("pipe", "file")}
-    failures = baseline()[backend].keys() - set(VARIANTS)
+    ordinary = {f"{variant}-{mode}" for variant in (*VARIANTS, *PROBES) for mode in ("pipe", "file")}
+    failures = {f"{v}-{m}" for v in (*VARIANTS, *PROBES) for m in failure_modes(v) if not wine}
     if observations.keys() != ordinary | failures:
         raise ValueError(f"{backend}: incomplete vfprintf observations")
     (destination / "vfprintf-observations.json").write_text(json.dumps(observations, indent=2))

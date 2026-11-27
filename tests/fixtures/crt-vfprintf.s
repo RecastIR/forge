@@ -21,7 +21,11 @@ entry:
     movq %rbx, %r9
     callq fwrite
 .endif
+.if errno_string
+    movl $0x4141, (%rsi)
+.else
     movl $37, (%rsi)
+.endif
     movl $91, %ecx
     callq SetLastError
     leaq fmt(%rip), %rdx
@@ -39,6 +43,18 @@ entry:
     movb $77, (%rax)
     leaq text(%rip), %rax
     movq %rax, 64(%rsp)
+.elseif precision
+    movl $42, %r8d
+    movl $42, %r9d
+    movl $42, 32(%rsp)
+    movl $42, 40(%rsp)
+.elseif padding || sign || field_body || trailing || zero_pad
+    movl $42, %r8d
+    movl $23, %r9d
+.elseif errno_string || errno_slot
+    movq %rsi, %r8
+.elseif literal_empty || literal_text
+    movq $-1, %r8
 .elseif numbers
     movl $42, %r8d
     movl $23, %r9d
@@ -72,6 +88,8 @@ entry:
     leaq dynamic_fmt(%rip), %rdx
     movb $115, 1(%rdx)
     leaq slots(%rip), %r8
+    callq *__imp_vfprintf(%rip)
+.elseif errno_slot || literal_empty || literal_text
     callq *__imp_vfprintf(%rip)
 .else
     callq emit
@@ -133,6 +151,24 @@ fmt:
     .asciz "%p|%p|%p"
 .elseif large
     .asciz "%s"
+.elseif precision
+    .asciz "%.512u|%.513u|%.4096u|%4096.513u"
+.elseif padding
+    .asciz "%4096u%4d"
+.elseif sign
+    .asciz "%4096u%+d"
+.elseif field_body
+    .asciz "%4095u%-.4dZ"
+.elseif trailing
+    .asciz "%4093u%-6dZ"
+.elseif zero_pad
+    .asciz "%4095u%+05dZ"
+.elseif errno_string
+    .asciz "%s"
+.elseif errno_slot
+    .asciz "%d"
+.elseif literal_text
+    .asciz "plain text"
 .elseif boundary
     .asciz "%4096dZ"
 .elseif unknown
