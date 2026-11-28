@@ -2150,21 +2150,7 @@ class Console(Workspace):
             for base in (0x140000000, 0x180000000):
                 with self.subTest(variant=variant, base=base):
                     if base == 0x140000000:
-                        context = self.compile(pe)["context"]
-                        called = {item["name"] for item in context["imports"]}
-                        self.assertEqual("VirtualProtect" in called, name == query.TRANSITIONS)
-                        self.assertEqual("VirtualQuery" in called, bool(markers))
-                        slot = next(s for dll in context["load_imports"] for s in dll["symbols"]
-                                    if s["name"] == "VirtualQuery")
-                        self.assertTrue(slot["catalogued_service"])
-                        # Each emitted record follows one distinctive FF 15 call in .text.
-                        data = pe.read_bytes()
-                        size, rva, _, start = Layout(data).sections[0]
-                        calls = [rva + i for i in range(size - 5)
-                                 if data[start + i:start + i + 2] == b"\xff\x15"
-                                 and rva + i + 6 + struct.unpack_from("<i", data, start + i + 2)[0]
-                                 == int(slot["iat_slot_rva"], 16)]
-                        self.assertEqual(len(calls), len(markers))
+                        self.compile(pe)
                         result = self.program()
                         stdout = result.stdout
                     else:
@@ -2356,7 +2342,24 @@ class Console(Workspace):
             for base in (0x140000000, 0x180000000):
                 with self.subTest(pe=name, base=hex(base)):
                     if base == 0x140000000:
-                        self.compile(pe)
+                        context = self.compile(pe)["context"]
+                        imported = {item["name"] for item in context["imports"]}
+                        self.assertEqual("VirtualProtect" in imported, name == query.TRANSITIONS)
+                        self.assertIn("VirtualQuery", imported)
+                        ir = run(CONTRACT, pe, check=True).stdout
+                        self.assertEqual(ir.count("call i32 @forge_rt_virtual_query("), len(markers))
+                        self.assertEqual("@image.section.protections" in ir, bool(markers))
+                        slot = next(s for dll in context["load_imports"] for s in dll["symbols"]
+                                    if s["name"] == "VirtualQuery")
+                        self.assertTrue(slot["catalogued_service"])
+                        # Each emitted record follows one distinctive FF 15 call in .text.
+                        data = pe.read_bytes()
+                        size, rva, _, start = Layout(data).sections[0]
+                        calls = [rva + i for i in range(size - 5)
+                                 if data[start + i:start + i + 2] == b"\xff\x15"
+                                 and rva + i + 6 + struct.unpack_from("<i", data, start + i + 2)[0]
+                                 == int(slot["iat_slot_rva"], 16)]
+                        self.assertEqual(len(calls), len(markers))
                     else:
                         run(CONTRACT, "--guest-base", hex(base), pe, self.output,
                             OPT, LLC, "/usr/bin/xcrun", *LINK, check=True)
