@@ -65,6 +65,10 @@ entry:
     leaq __ImageBase(%rip), %rax
     movq %rax, 64(%rsp)
     movl $39, 164(%rsp)
+.ifdef header_probe
+    query 41,__ImageBase
+    query 42,__ImageBase+4096
+.else
 .ifdef transitions
     query 31,first
     protect 2
@@ -99,6 +103,7 @@ entry:
     query 18,first
     query 19,first+4096
     query 20,first+8192
+.endif
 .endif
     cmpl $39, 164(%rsp)
     jne .Lbad

@@ -27,6 +27,7 @@ jobs:
       executable_inputs_sha256: ${{ steps.executables.outputs.sha256 }}
       capture_requested: ${{ steps.capture.outputs.requested }}
       termination_sha256: ${{ steps.termination.outputs.sha256 }}
+      query_requested: ${{ steps.capture.outputs.query_requested }}
       query_sha256: ${{ steps.query.outputs.sha256 }}
       abort_sha256: ${{ steps.abort.outputs.sha256 }}
     steps:
@@ -41,10 +42,6 @@ jobs:
         run: |
           if git diff --quiet "$BASE" HEAD -- .github/workflows/ci.yml .github/actions/package-reference-inputs.sh \
             tests/differential/reference/executable-inputs.txt \
-            'tests/fixtures/*virtual-query*' 'tests/differential/reference/virtual*query*' \
-            'runtime/src/core/page_protection.*' runtime/src/core/guest_memory.cpp runtime/src/core/process.cpp \
-            'runtime/src/compat/win32/virtual_*.cpp' runtime/include/forge/process.h runtime/include/forge/runtime.h \
-            compiler/src/lift/image_memory.cpp compiler/src/pe/pe.cpp tests/differential/coverage_report.py \
             'tests/fixtures/crt-abort*' tests/differential/reference/crt_abort.py 'tests/differential/reference/crt-abort*.json' \
             tests/differential/reference/amsg-exit/capture.c 'tests/fixtures/crt-termination*' tests/fixtures/executable-startup-info.s tests/fixtures/generate.py \
             tests/differential/reference/termination tests/differential/fixtures/startup/termination \
@@ -56,6 +53,20 @@ jobs:
             echo "requested=false" >> "$GITHUB_OUTPUT"
           else
             echo "requested=true" >> "$GITHUB_OUTPUT"
+          fi
+          if git diff --quiet "$BASE" HEAD -- .github/workflows/ci.yml .github/actions/package-reference-inputs.sh \
+            tests/fixtures/generate.py tests/differential/reference/crt_streams.py tests/differential/reference/capture.c \
+            tests/differential/reference/virtual-query-inputs.txt tests/differential/reference/virtual_query.py \
+            'compiler/src/lift/recovery.*' compiler/src/lift/group_analysis.cpp compiler/src/lift/lift.cpp \
+            runtime/src/core/registration.cpp runtime/src/managed_process.cpp runtime/src/core/instance.h \
+            runtime/include/forge/service_signature.h 'runtime/src/core/image_query.*' \
+            'tests/fixtures/*virtual-query*' 'tests/differential/reference/virtual*query*' \
+            'runtime/src/core/page_protection.*' runtime/src/core/guest_memory.cpp runtime/src/core/process.cpp \
+            'runtime/src/compat/win32/virtual_*.cpp' runtime/include/forge/process.h runtime/include/forge/runtime.h \
+            compiler/src/lift/image_memory.cpp compiler/src/pe/pe.cpp tests/differential/coverage_report.py; then
+            echo "query_requested=false" >> "$GITHUB_OUTPUT"
+          else
+            echo "query_requested=true" >> "$GITHUB_OUTPUT"
           fi
       - id: native
         uses: ./.github/actions/native-test
@@ -107,7 +118,7 @@ jobs:
 
       - name: Package VirtualQuery reference inputs
         id: query
-        if: ${{ !cancelled() && steps.capture.outputs.requested == 'true' }}
+        if: ${{ !cancelled() && steps.capture.outputs.query_requested == 'true' }}
         run: >-
           bash .github/actions/package-reference-inputs.sh
           "$PWD/tests/differential/reference/virtual-query-inputs.txt" "$RUNNER_TEMP/query-inputs"
@@ -121,7 +132,7 @@ jobs:
 
   legacy-windows-capture:
     needs: macos-dev
-    if: ${{ !cancelled() && needs.macos-dev.outputs.capture_requested == 'true' }}
+    if: ${{ !cancelled() && (needs.macos-dev.outputs.capture_requested == 'true' || needs.macos-dev.outputs.query_requested == 'true') }}
     runs-on: windows-2022
     timeout-minutes: 10
     outputs:
@@ -132,7 +143,7 @@ jobs:
         id: checkout
       - uses: actions/download-artifact@v4
         id: termination_inputs
-        if: ${{ !cancelled() && steps.checkout.outcome == 'success' }}
+        if: ${{ !cancelled() && steps.checkout.outcome == 'success' && needs.macos-dev.outputs.capture_requested == 'true' }}
         with:
           name: termination-inputs
           path: inputs
@@ -152,7 +163,7 @@ jobs:
           overwrite: true
       - uses: actions/download-artifact@v4
         id: abort_inputs
-        if: ${{ !cancelled() && steps.checkout.outcome == 'success' }}
+        if: ${{ !cancelled() && steps.checkout.outcome == 'success' && needs.macos-dev.outputs.capture_requested == 'true' }}
         with:
           name: abort-inputs
           path: abort-inputs
@@ -172,13 +183,13 @@ jobs:
 
       - uses: actions/download-artifact@v4
         id: query_inputs
-        if: ${{ !cancelled() && steps.checkout.outcome == 'success' }}
+        if: ${{ !cancelled() && steps.checkout.outcome == 'success' && needs.macos-dev.outputs.query_requested == 'true' }}
         with:
           name: query-inputs
           path: query-inputs
       - name: Verify the installed x64 Windows SDK layout
         id: sdk
-        if: ${{ !cancelled() && steps.checkout.outcome == 'success' }}
+        if: ${{ !cancelled() && steps.checkout.outcome == 'success' && needs.macos-dev.outputs.query_requested == 'true' }}
         shell: cmd
         run: |
           for /f "usebackq tokens=*" %%i in (`"%ProgramFiles(x86)%\Microsoft Visual Studio\Installer\vswhere.exe" -latest -property installationPath`) do call "%%i\VC\Auxiliary\Build\vcvars64.bat"
@@ -199,7 +210,7 @@ jobs:
 
   wine-query-capture:
     needs: macos-dev
-    if: ${{ !cancelled() && needs.macos-dev.outputs.capture_requested == 'true' }}
+    if: ${{ !cancelled() && needs.macos-dev.outputs.query_requested == 'true' }}
     runs-on: ubuntu-24.04
     outputs:
       stages: >-

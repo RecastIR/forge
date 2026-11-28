@@ -26,10 +26,14 @@ def cases():
     yield ADDRESS, [], []
     yield QUERY, [], list(range(1, 21))
     yield TRANSITIONS, [], list(range(31, 38))
-    for index in range(27):
+    for kind in ("headers", "gap"):
+        yield f"executable-virtual-query-{kind}.exe", [], [41, 42]
+    for index in range(33):
         markers = [100 + index]
-        if 10 <= index <= 14 or 23 <= index <= 25:
+        if 10 <= index <= 14 or 23 <= index <= 25 or index >= 27:
             markers.append(200 + index)
+        if index >= 30:
+            markers.append(300 + index)
         yield REFERENCE, [f"{index:02}"], markers
 
 
@@ -48,19 +52,21 @@ def decode(stdout, markers):
 
 def contract(rows, image_size):
     """Rebase only proven image VAs. Keep raw bytes (including padding) everywhere else."""
-    def image_value(va, base):
-        return va - base if base <= va < base + image_size else va
-
     normalized = []
     for row in rows:
         base = row["image"]
         window = bytearray.fromhex(row["bytes"])
+        image_fields = []
         for offset in (8, 16):
             if row["result"] >= offset:
                 va, = struct.unpack_from("<Q", window, offset)
-                struct.pack_into("<Q", window, offset, image_value(va, base))
+                if base <= va < base + image_size:
+                    struct.pack_into("<Q", window, offset, va - base)
+                    image_fields.append(offset - 8)
+        query = row["query"]
+        query = {"rva": query - base} if base <= query < base + image_size else {"va": query}
         normalized.append(dict(id=row["id"], error=row["error"], result=row["result"],
-                               query=image_value(row["query"], base), length=row["length"],
+                               query=query, length=row["length"], image_fields=image_fields,
                                bytes=window.hex()))
     return normalized
 
@@ -69,6 +75,20 @@ def image_size(pe):
     data = pe.read_bytes()
     header, = struct.unpack_from("<I", data, 60)
     return struct.unpack_from("<I", data, header + 24 + 56)[0]
+
+
+def reference(backend, directory):
+    """Derive comparable records from the retained independent child streams."""
+    evidence = json.loads((HERE / f"virtual-query-{backend}.json").read_bytes())
+    expected = dict(inputs=evidence["inputs"], cases={})
+    for name, args, markers in cases():
+        key = " ".join([name, *args])
+        child = evidence["cases"][key]
+        if child["status"] != 42 or child["stderr"]:
+            raise ValueError(f"incomplete {backend} reference for {key}")
+        rows = decode(bytes.fromhex(child["stdout"]), markers)
+        expected["cases"][key] = contract(rows, image_size(directory / name))
+    return expected
 
 
 def identity(wine):
@@ -90,7 +110,8 @@ def observe(directory, destination, wine):
     declared = producer_inputs(directory)
     names = (HERE / "virtual-query-inputs.txt").read_text().splitlines()
     inputs = {name: digest(directory / name) for name in names}
-    if inputs != declared or set(names) != {pe for pe, _, _ in cases()}:
+    if (inputs != declared or set(names) != {pe for pe, _, _ in cases()}
+            or set(names) != {path.name for path in directory.glob("*.exe")}):
         raise ValueError("query PE inventory or producer digest mismatch")
     backend = "wine" if wine else "windows"
     raw = dict(environment=identity(wine), manifest=os.environ["PE_MANIFEST_SHA256"], inputs=inputs, cases={})
@@ -113,7 +134,7 @@ def observe(directory, destination, wine):
         (destination / f"{filename}.json").write_text(json.dumps(report, indent=2) + "\n")
     if failures:
         raise ValueError("\n".join(failures))
-    expected = json.loads((HERE / f"virtual-query-{backend}.json").read_bytes())
+    expected = reference(backend, directory)
     if observed != expected:
         raise ValueError(f"{backend} VirtualQuery contract mismatch; see raw.json and observed.json")
 

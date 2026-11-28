@@ -24,6 +24,7 @@ struct Record {
     Byte bytes[64]; /* Eight bytes on each side of the result. */
     Word output;
 };
+
 _Static_assert(sizeof(struct Record) == 112, "capture record");
 
 static int measure(unsigned id, Byte *target, Byte *out, Word length, const Byte *window) {
@@ -60,57 +61,148 @@ int entry(void) {
     Byte *alloc = 0;
     Dword old;
     switch (test) {
-    case 0: target = 0; break;
-    case 1: target = (Byte *)1; break;
-    case 2: target = (Byte *)65535; break;
-    case 3: target = (Byte *)0x800000000000ULL; break;
-    case 4: target = (Byte *)-1LL; break;
-    case 5: case 6: case 7:
+    case 0:
+        target = 0;
+        break;
+    case 1:
+        target = (Byte *)1;
+        break;
+    case 2:
+        target = (Byte *)65535;
+        break;
+    case 3:
+        target = (Byte *)0x800000000000ULL;
+        break;
+    case 4:
+        target = (Byte *)-1LL;
+        break;
+    case 5:
+    case 6:
+    case 7:
         out = 0;
         window = 0;
-        if (test == 6) length = 47;
-        if (test == 7) target = (Byte *)-1LL;
+        if (test == 6) {
+            length = 47;
+        }
+        if (test == 7) {
+            target = (Byte *)-1LL;
+        }
         break;
-    case 8: case 9:
+    case 8:
+    case 9:
         out = (Byte *)immutable + 8;
         window = immutable;
-        if (test == 9) length = 0;
+        if (test == 9) {
+            length = 0;
+        }
         break;
-    case 10: case 11: case 12: case 13: case 14:
+    case 10:
+    case 11:
+    case 12:
+    case 13:
+    case 14:
         window = image + 64;
         out = image + 72;
-        if (test == 11) target = image + 4096;
-        if (test == 12) target = (Byte *)-1LL;
-        if (test == 13) length = 47;
-        if (test == 14) length = 0x10000002fULL;
+        if (test == 11) {
+            target = image + 4096;
+        }
+        if (test == 12) {
+            target = (Byte *)-1LL;
+        }
+        if (test == 13) {
+            length = 47;
+        }
+        if (test == 14) {
+            length = 0x10000002fULL;
+        }
         break;
-    case 15: case 16: case 17: case 18:
+    case 15:
+    case 16:
+    case 17:
+    case 18:
         alloc = VirtualAlloc(0, 8192, 0x3000, 4);
-        if (!alloc) return 96;
-        for (unsigned i = 0; i < 96; ++i) alloc[4096 - 64 + i] = 0x73;
-        if (!VirtualProtect(alloc + 4096, 4096, 2, &old)) return 97;
+        if (!alloc) {
+            return 96;
+        }
+        for (unsigned i = 0; i < 96; ++i) {
+            alloc[4096 - 64 + i] = 0x73;
+        }
+        if (!VirtualProtect(alloc + 4096, 4096, 2, &old)) {
+            return 97;
+        }
         out = alloc + 4096 - (test == 15 ? 48 : 47);
         window = out - 8;
-        if (test == 17) length = 47;
-        if (test == 18) target = (Byte *)-1LL;
+        if (test == 17) {
+            length = 47;
+        }
+        if (test == 18) {
+            target = (Byte *)-1LL;
+        }
         break;
-    case 19: target = (Byte *)-1LL; length = 0; break;
-    case 20: target = (Byte *)-1LL; length = 0x100000000ULL; break;
-    case 21: target = (Byte *)0x7fffffff0000ULL; break;
-    case 22: target = (Byte *)0x7ffffffeffffULL; break;
-    case 23: case 24: case 25:
-        if (!VirtualProtect(image + 4096, 4096, 2, &old)) return 97;
+    case 19:
+        target = (Byte *)-1LL;
+        length = 0;
+        break;
+    case 20:
+        target = (Byte *)-1LL;
+        length = 0x100000000ULL;
+        break;
+    case 21:
+        target = (Byte *)0x7fffffff0000ULL;
+        break;
+    case 22:
+        target = (Byte *)0x7ffffffeffffULL;
+        break;
+    case 23:
+    case 24:
+    case 25:
+        if (!VirtualProtect(image + 4096, 4096, 2, &old)) {
+            return 97;
+        }
         out = image + 4096 - 24;
         window = out - 8;
-        if (test == 24) length = 47;
-        if (test == 25) target = (Byte *)-1LL;
+        if (test == 24) {
+            length = 47;
+        }
+        if (test == 25) {
+            target = (Byte *)-1LL;
+        }
         break;
-    case 26: out = local + 9; window = out - 8; break;
-    default: return 95;
+    case 26:
+        out = local + 9;
+        window = out - 8;
+        break;
+    case 27:
+    case 28:
+    case 29:
+        out = image + 64 + (test == 27 ? 2 : test == 28 ? 4 : 8);
+        window = out - 8;
+        break;
+    case 30:
+    case 31:
+    case 32:
+        out = image + 4096 - 48;
+        window = out - 8;
+        if (test == 30 && !VirtualProtect(image + 4096, 4096, 2, &old)) {
+            return 97;
+        }
+        length = test == 32 ? (Word)-1 : 49;
+        break;
+    default:
+        return 95;
     }
-    if (!measure(100 + test, target, out, length, window)) return 98;
-    if (((test >= 10 && test <= 14) || (test >= 23 && test <= 25)) &&
-        !measure(200 + test, image, local + 8, 48, local)) return 98;
-    if (alloc && !VirtualFree(alloc, 0, 0x8000)) return 99;
+    if (!measure(100 + test, target, out, length, window)) {
+        return 98;
+    }
+    if (((test >= 10 && test <= 14) || (test >= 23 && test <= 25) || test >= 27) &&
+        !measure(200 + test, image, local + 8, 48, local)) {
+        return 98;
+    }
+    if (test >= 30 && !measure(300 + test, image + 4096, local + 8, 48, local)) {
+        return 98;
+    }
+    if (alloc && !VirtualFree(alloc, 0, 0x8000)) {
+        return 99;
+    }
     return 42;
 }

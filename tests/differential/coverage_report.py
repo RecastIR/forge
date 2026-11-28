@@ -324,11 +324,18 @@ def hosted_report(raw_needs, current_run, revision, **paths):
     if not matching_inputs:
         errors.append("standalone PE input checksums missing or different across macOS and Wine jobs")
 
-    capture_requested = outputs["macos-dev"].get("capture_requested")
-    if capture_requested not in ("true", "false"):
-        errors.append("macos-dev: missing or invalid Windows capture decision")
-    if capture_requested == "true":
-        check_stages("legacy-windows-capture", ("termination", "abort", "query", "sdk"))
+    windows_stages = []
+    for decision, observers in (("capture_requested", ("termination", "abort")),
+                                ("query_requested", ("query", "sdk"))):
+        requested = outputs["macos-dev"].get(decision)
+        if requested == "true":
+            windows_stages.extend(observers)
+        elif requested != "false":
+            errors.append(f"macos-dev: missing or invalid Windows capture decision ({decision})")
+
+    if windows_stages:
+        check_stages("legacy-windows-capture", windows_stages)
+    if outputs["macos-dev"].get("query_requested") == "true":
         check_stages("wine-query-capture", ("query",))
 
     # A gate-only rerun can consume the successful differential job's original attempt.

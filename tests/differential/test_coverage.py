@@ -54,6 +54,7 @@ class CoverageTests(ArtifactSetup):
         needs["macos-sanitize"]["outputs"]["debug_forge"] = digest
         needs["macos-dev"]["outputs"]["release_forge"] = digest
         needs["macos-dev"]["outputs"]["capture_requested"] = "false"
+        needs["macos-dev"]["outputs"]["query_requested"] = "false"
         for job in ("macos-dev", "windows-executable-reference"):
             needs[job]["outputs"]["executable_inputs_sha256"] = "f" * 64
         needs["differential"]["outputs"]["evidence_run_id"] = self.run_id
@@ -96,6 +97,7 @@ class CoverageTests(ArtifactSetup):
         self.assertEqual(self.hosted(needs)["gate"], "passed")
         needs["macos-dev"]["outputs"]["capture_requested"] = "true"
         needs["wine-query-capture"] = {"result": "success", "outputs": {"stages": '{"query": "success"}'}}
+        needs["macos-dev"]["outputs"]["query_requested"] = "true"
         del needs[job]
         self.assertEqual(self.hosted(needs)["gate"], "failed")
         complete = dict.fromkeys(("termination", "abort", "query", "sdk"), "success")
@@ -119,13 +121,28 @@ class CoverageTests(ArtifactSetup):
                     self.assertEqual(report["gate"], "failed")
                     self.assertIn(f"{job}: {observer}={outcome or 'not_run'}", report["errors"])
 
+    def test_requested_query_requires_independent_wine_capture(self):
+        needs = self.needs()
+        # An unrelated compatibility observer can be skipped when only query was selected.
+        needs["macos-dev"]["outputs"]["query_requested"] = "true"
+        windows = dict(query="success", sdk="success", termination="skipped", abort="skipped")
+        needs["legacy-windows-capture"] = {"result": "success", "outputs": {"stages": json.dumps(windows)}}
+        for job, observer in (("skipped", None), ("failure", "failure"), ("success", "skipped"),
+                              ("success", None), ("success", "success")):
+            with self.subTest(job=job, observer=observer):
+                stages = {"query": observer} if observer else {}
+                needs["wine-query-capture"] = {"result": job, "outputs": {"stages": json.dumps(stages)}}
+                self.assertEqual(self.hosted(needs)["gate"], "passed" if observer == "success" else "failed")
+
     def test_windows_capture_requires_an_explicit_decision(self):
         needs = self.needs()
         outputs = needs["macos-dev"]["outputs"]
-        del outputs["capture_requested"]
-        self.assertEqual(self.hosted(needs)["gate"], "failed")
-        outputs["capture_requested"] = "invalid"
-        self.assertEqual(self.hosted(needs)["gate"], "failed")
+        for decision in ("capture_requested", "query_requested"):
+            del outputs[decision]
+            self.assertEqual(self.hosted(needs)["gate"], "failed")
+            outputs[decision] = "invalid"
+            self.assertEqual(self.hosted(needs)["gate"], "failed")
+            outputs[decision] = "false"
 
     def test_green_jobs_require_complete_stage_outputs(self):
         valid = self.needs()
