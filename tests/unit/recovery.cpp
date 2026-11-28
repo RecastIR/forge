@@ -200,7 +200,7 @@ namespace {
                     site->continuation == step->next && site->continuation > previous &&
                     llvm::any_of(calls, [site](const auto &effect) { return effect.site == site; }),
                 "mixed call proof or continuation does not refer to the recovered site");
-            previous = site->continuation;
+            previous = site->continuation.value();
 
             if (site == incoming.back()) {
                 check(site->guest().kind == x86::CallKind::Direct && step->isDirectCall() &&
@@ -226,6 +226,26 @@ namespace {
               "recursive register call did not reuse its own function");
     }
 
+    void checkTailTransfer(const AnalyzedImage &analysis) {
+        const auto root = exportedRva(analysis, "tail_caller");
+        const auto bridge = exportedRva(analysis, "tail_only");
+        const auto reader = exportedRva(analysis, "tail_reader");
+        const RecoveredFunctionGroup group(analysis, root);
+        const auto &source = group.function(bridge);
+        const auto &block = source.graph.at(bridge);
+        const auto *edge = source.callAt(bridge);
+
+        check(block.exit == x86::Flow::TailJump && block.successors.empty() &&
+                  block.steps.size() == 1 && source.mayReturn,
+              "tail-only body requires a returning target and no local successor");
+        check(edge && edge->isTailJump() && edge->guest().kind == x86::CallKind::TailJump &&
+                  edge->guest().evidenceRva == bridge && edge->guest().rva == reader &&
+                  group.function(reader).incoming.front() == edge,
+              "tail transfer lost its location or acquired a continuation");
+        check(source.incoming.front()->continuation && group.function(root).mayReturn,
+              "caller did not resume after transitive return");
+    }
+
     void checkSelfRecursion(const AnalyzedImage &analysis) {
         const auto root = exportedRva(analysis, "call_depth");
         const RecoveredFunctionGroup recursive(analysis, root);
@@ -248,8 +268,8 @@ namespace {
         const auto &first = mutual.function(a);
         const auto &second = mutual.function(b);
         const auto *toSecond = first.callAt(a + 4);
-        const auto *toFirst = second.callAt(b + 4);
-        const auto *self = second.callAt(b + 9);
+        const auto *toFirst = second.callAt(b + 8);
+        const auto *self = second.callAt(b + 13);
         check(mutual.root() == b && mutual.functions().size() == 2 && first.incoming.size() == 1 &&
                   second.incoming.size() == 2 && toSecond && toFirst && self &&
                   first.incoming.front() == toFirst && second.incoming[0] == toSecond &&
@@ -257,6 +277,15 @@ namespace {
                   toSecond->caller == a && toSecond->guest().rva == b && toFirst->caller == b &&
                   toFirst->guest().rva == a,
               "mutual recursion lost a function or a cycle edge");
+
+        const auto loop = exportedRva(analysis, "recovery_no_base");
+        const RecoveredFunctionGroup cycle(analysis, loop);
+        const auto &only = cycle.function(loop);
+        const auto *recurse = only.callAt(loop + 4);
+        check(cycle.functions().size() == 1 && only.calls.size() == 1 && recurse &&
+                  recurse->guest().rva == loop &&
+                  !only.instructionContaining(recurse->continuation.value()),
+              "recursion without a base case reached a dead call");
     }
 
     void checkParallelEdges(const AnalyzedImage &analysis) {
@@ -458,12 +487,246 @@ namespace {
               "the recovered groups do not share the image-owned descriptor");
     }
 
+    void checkTerminalGuestCall(const fs::path &path) {
+        const AnalyzedImage analysis(
+            std::make_unique<ParsedImage>(InputFile(path), ParsePolicy::Inspection),
+            DebugInfo::Omit);
+        const RecoveredFunctionGroup group(analysis, analysis.module().entryPoint);
+        const auto &root = group.function(group.root());
+        check(root.calls.size() == 1, "expected one call from the entry to its exit helper");
+        const auto &site = root.calls.begin()->second;
+        const auto *step = root.instructionContaining(site.instruction);
+        check(!site.external() && step && step->next == site.continuation &&
+                  !root.instructionContaining(site.continuation.value()),
+              "terminal guest call must retain its return address and exclude dead instructions");
+        const auto &helper = group.function(site.guest().rva);
+        check(helper.incoming.size() == 1 && helper.incoming.front() == &site,
+              "terminal callee lost its incoming call site");
+    }
+
+    void checkInitializerTables(const fs::path &path) {
+        const AnalyzedImage analysis(
+            std::make_unique<ParsedImage>(InputFile(path), ParsePolicy::Inspection),
+            DebugInfo::Omit);
+        const RecoveredFunctionGroup group(analysis, analysis.module().entryPoint);
+        const auto &caller = group.function(group.root());
+        std::vector<std::pair<uint32_t, size_t>> observed;
+        std::map<uint32_t, const x86::ResolvedCallSite *> initializers;
+        for (const auto &[rva, site] : caller.calls) {
+            const auto *service = site.external();
+            if (!service || !service->initializers) {
+                continue;
+            }
+
+            check(service->binding.callback == win64::Callback::Initializer,
+                  "callback proof attached to an unrelated service");
+            const auto &table = *service->initializers;
+            const auto size = table.last - table.first;
+            observed.emplace_back(size / sizeof(uint64_t), table.targets.size());
+            std::set<uint32_t> slotTargets;
+            for (auto slot = table.first; slot < table.last; slot += sizeof(uint64_t)) {
+                const auto bytes = analysis.image().mapRva(slot, sizeof(uint64_t));
+                check(bytes && bytes->section.writableData(), "expected a writable table slot");
+                const auto va = llvm::support::endian::read64le(bytes->bytes.data());
+                if (va) {
+                    slotTargets.insert(static_cast<uint32_t>(va - analysis.module().imageBase));
+                }
+            }
+            check(std::ranges::equal(table.targets, slotTargets),
+                  "initializer target set differs from the source PE slots");
+            for (const auto target : slotTargets) {
+                initializers.try_emplace(target, &site);
+            }
+        }
+        const std::vector<std::pair<uint32_t, size_t>> expected{{0, 0}, {1, 0}, {1, 1}, {5, 3}};
+        check(observed == expected && initializers.size() == 3, "wrong recovered table ranges");
+
+        bool nestedLeaf = false;
+        for (const auto &[rva, function] : group.functions()) {
+            const auto origin = initializers.find(rva);
+            check(function.callbackSource ==
+                      (origin == initializers.end() ? nullptr : origin->second),
+                  "initializer origin differs from its first admitting table");
+            if (function.callbackSource && function.origin == x86::RecoveryOrigin::InferredLeaf &&
+                !function.incoming.empty()) {
+                nestedLeaf |= initializers.contains(function.incoming.front()->caller);
+            }
+        }
+        check(nestedLeaf, "missing metadata-free initializer shared with an ordinary guest call");
+    }
+
+    void checkBoundedReturnEffects(const x86::ResolvedCallSite &site) {
+        // Two normal returns write AX and AL respectively. Only the first defines CF
+        // from scratch. Both define ZF. The third alternative has no continuation.
+        const auto targets = site.guestTargets();
+        x86::FunctionFlows flows;
+        auto &first = flows[targets[0]];
+        first.mayReturn = true;
+        first.returns.writes[0] = 0xffff;
+        first.returns.flags.generated.set(x86::CF).set(x86::ZF);
+        auto &second = flows[targets[1]];
+        second.mayReturn = true;
+        second.returns.writes[0] = 0xff;
+        second.returns.flags.generated.set(x86::ZF);
+        auto &terminal = flows[targets[2]];
+        terminal.returns.carried.fill(0);
+        terminal.returns.flags = {};
+
+        const auto effect = x86::callEffect(site, flows);
+        const auto fresh = effect.apply({});
+        x86::FlagSet zf;
+        zf.set(x86::ZF);
+        check(fresh.registers[0] == 0xff && fresh.flags == zf,
+              "bounded return defined bits missing on a returning path");
+
+        x86::Definitions incoming;
+        incoming.registers[0] = 0xff00;
+        incoming.flags.set(x86::CF);
+        const auto carried = effect.apply(incoming);
+        check(carried.registers[0] == 0xffff && carried.flags == (incoming.flags | zf),
+              "bounded return lost incoming bits carried by a returning path");
+    }
+
+    void checkBoundedCalls(const fs::path &path) {
+        const AnalyzedImage image(
+            std::make_unique<ParsedImage>(InputFile(path), ParsePolicy::Inspection),
+            DebugInfo::Omit);
+        const RecoveredFunctionGroup group(image, image.module().entryPoint);
+        const auto &runner = group.function(exportedRva(image, "run_count"));
+        const auto site = runner.callAt(exportedRva(image, "count_site"));
+        check(site && site->table() && !site->external(), "missing bounded memory call");
+        const auto &table = *site->table();
+        check(table.reverse() && !table.reverse()->sentinel &&
+                  table.reverse()->header == exportedRva(image, "count_table") &&
+                  table.first == table.reverse()->header + 8 && table.last == table.first + 32 &&
+                  site->continuation == exportedRva(image, "after_count"),
+              "incorrect counted range or continuation");
+        const std::vector<uint32_t> expected{exportedRva(image, "one"), exportedRva(image, "two"),
+                                             exportedRva(image, "writer")};
+        check(table.targets == expected, "incorrect site-specific target set");
+        checkBoundedReturnEffects(*site);
+        for (const auto target : expected) {
+            const auto &callee = group.function(target);
+            check(!callee.callbackSource && callee.mayReturn &&
+                      llvm::count(callee.incoming, site) == 1,
+                  "ordinary bounded guest edge was missing or duplicated");
+        }
+        check(group.function(expected.front()).origin == x86::RecoveryOrigin::InferredLeaf,
+              "bounded call did not use the inferred-leaf proof");
+
+        const auto slot = exportedRva(image, "one_table") + 8;
+        const auto other = exportedRva(image, "unrelated_cell");
+        const auto init = image.image().imageInitialization({slot});
+        check(init.exclusionsIn({slot, slot + 8}).empty() &&
+                  !init.exclusionsIn({other, other + 8}).empty(),
+              "bounded executable pointer field exposed an unrelated fixup");
+
+        const auto &empty = group.function(exportedRva(image, "run_empty"));
+        const auto &emptyCall = empty.calls.begin()->second;
+        check(empty.mayReturn && emptyCall.table() && emptyCall.table()->reverse() &&
+                  emptyCall.table()->reverse()->sentinel && emptyCall.guestTargets().empty() &&
+                  empty.instructionContaining(emptyCall.instruction)->flow ==
+                      x86::Flow::TerminalCall,
+              "empty list needs a zero-trip exit and a terminal executed CALL");
+    }
+
+    void checkUnalignedForwardBase(const AnalyzedImage &image, const x86::ResolvedCallSite &call,
+                                   const x86::BoundedTableCall &range) {
+        // Select each runner separately so the first rejection cannot mask the empty range.
+        const RecoveredFunctionGroup runner(image, call.caller);
+        for (const auto output : {LiftOutput::Function, LiftOutput::ProcessArtifact}) {
+            try {
+                x86::analyzeGroup(runner, 0x10000001, EntryMode::WindowsX64I64Pair, true, output);
+                throw std::runtime_error("accepted unaligned forward pointer range");
+            } catch (const InspectionError &error) {
+                const auto &ctx = error.context;
+                check(error.kind == FailureCode::ImageMemory &&
+                          ctx.instructionRva == call.instruction &&
+                          ctx.tableFirstRva == range.first && ctx.tableLastRva == range.last &&
+                          ctx.pointerLoadRva == range.forward()->pointerLoad,
+                      "unaligned selected base lost its forward call evidence");
+            }
+        }
+    }
+
+    void checkForwardCalls(const fs::path &path) {
+        const AnalyzedImage image(
+            std::make_unique<ParsedImage>(InputFile(path), ParsePolicy::Inspection),
+            DebugInfo::Omit);
+        const RecoveredFunctionGroup group(image, image.module().entryPoint);
+        const auto &outer = group.function(exportedRva(image, "outer"));
+        const auto *site = outer.callAt(exportedRva(image, "many_site"));
+        check(site && site->table() && site->table()->forward(), "missing forward call proof");
+        const auto &table = *site->table();
+        const auto &proof = *table.forward();
+        check(table.first == exportedRva(image, "slots") &&
+                  table.last == exportedRva(image, "slots_end") &&
+                  proof.firstDefinition == exportedRva(image, "many_bounds") &&
+                  proof.pointerLoad == exportedRva(image, "many_load") &&
+                  outer.instructionContaining(proof.nullBranch)->relativeTarget() ==
+                      site->continuation &&
+                  outer.instructionContaining(proof.backedge)->relativeTarget() ==
+                      proof.pointerLoad,
+              "lost forward bounds, null skip or latch");
+        const auto tail = exportedRva(image, "tail_callback");
+        check(table.targets == std::vector<uint32_t>{exportedRva(image, "writer"), tail} &&
+                  group.function(tail).mayReturn && group.function(tail).incoming.size() == 1 &&
+                  group.function(tail).incoming.front() == site,
+              "incorrect deduplication or tail return");
+
+        for (const auto &[entry, function] : group.functions()) {
+            for (const auto &[instruction, call] : function.calls) {
+                if (const auto *range = call.table(); range && range->forward()) {
+                    checkUnalignedForwardBase(image, call, *range);
+                }
+            }
+        }
+    }
+
+    void checkForwardTarget(const ParsedImage &image, const ImageInitialization &init,
+                            llvm::ArrayRef<char *> args) {
+        uint32_t first = 0, last = 0, target = 0;
+        check(args.size() == 3 && !llvm::StringRef(args[0]).getAsInteger(0, first) &&
+                  !llvm::StringRef(args[1]).getAsInteger(0, last) &&
+                  !llvm::StringRef(args[2]).getAsInteger(0, target),
+              "expected forward table bounds and target RVA");
+        const auto *section = image.sectionAtRva(first);
+        const RvaRange extent{first, last};
+        check(win64::initializerRangeBytes(first, last) && section && !section->shared &&
+                  (section->immutable() || section->writableData()) &&
+                  last <= uint64_t(section->rva) + section->virtualSize &&
+                  last <= image.module().sizeOfImage && target < image.module().sizeOfImage &&
+                  !image.overlapsDirectory(extent) &&
+                  rangesIn(image.loaderWrittenRanges(), extent).empty(),
+              "invalid forward table for a reported target");
+        init.validateRelocations(extent);
+        bool found = false;
+        for (uint32_t slot = first; slot < last; slot += 8) {
+            const auto pointer = image.initialQword(slot);
+            const auto fields = init.relocationsIn({slot, uint64_t(slot) + 8});
+            if (!pointer && fields.empty()) {
+                continue;
+            }
+            check(fields.size() == 1 && fields.front()->rva == slot &&
+                      fields.front()->type == llvm::COFF::IMAGE_REL_BASED_DIR64 &&
+                      pointer >= image.module().imageBase &&
+                      pointer - image.module().imageBase < image.module().sizeOfImage,
+                  "invalid relocated slot in the reported forward table");
+            found |= pointer - image.module().imageBase == target;
+        }
+        check(found, "target lacks a relocated slot in the reported forward table");
+    }
+
     // Check PE stability for the differential runner's independently disassembled caller.
     // The first interval is code. Each following interval is a relative table.
     void checkDispatchSpans(const fs::path &path, llvm::ArrayRef<char *> bounds) {
         const auto slots =
             llvm::find_if(bounds, [](llvm::StringRef arg) { return arg == "--iat-slots"; });
-        const auto intervals = bounds.take_front(static_cast<size_t>(slots - bounds.begin()));
+        const auto beforeSlots = bounds.take_front(static_cast<size_t>(slots - bounds.begin()));
+        const auto forward = llvm::find_if(
+            beforeSlots, [](llvm::StringRef arg) { return arg == "--forward-target"; });
+        const auto intervals =
+            beforeSlots.take_front(static_cast<size_t>(forward - beforeSlots.begin()));
         check(intervals.size() >= 2 && intervals.size() % 2 == 0,
               "expected a code RVA span and optional table spans");
         ParsedImage image(InputFile(path), ParsePolicy::FunctionAnalysis);
@@ -479,14 +742,19 @@ namespace {
             check(mapped && mapped->section.immutable() &&
                       (mapped->section.permissions[2] == 'x') == (i == 0),
                   "dispatch requires stable file-backed bytes");
+            init.validateRelocations({begin, end});
             check(init.exclusionsIn({begin, end}).empty() &&
                       init.relocationsIn({begin, end}).empty(),
                   "dispatch overlaps loader-written bytes or relocations");
         }
 
+        if (forward != beforeSlots.end()) {
+            checkForwardTarget(image, init, beforeSlots.drop_front(intervals.size() + 1));
+        }
+
         if (slots != bounds.end()) {
             const RelocationIndex relocations(image.module().relocations);
-            for (const auto *arg : bounds.drop_front(intervals.size() + 1)) {
+            for (const auto *arg : bounds.drop_front(beforeSlots.size() + 1)) {
                 uint32_t rva = 0;
                 check(!llvm::StringRef(arg).getAsInteger(0, rva), "invalid IAT slot RVA");
                 const auto slot = image.importBindings().at(rva);
@@ -508,9 +776,14 @@ int main(int argc, char **argv) try {
         return 0;
     }
 
-    check(argc == 6, "expected stack.exe, leaves.exe, jump.exe, indirect.exe and last-error.exe");
+    check(argc == 10, "expected stack, leaves, jump, indirect, last-error, noreturn, CRT and "
+                      "bounded-call fixtures");
     checkGuestRanges();
     checkImportSnapshot(argv[5]);
+    checkTerminalGuestCall(argv[6]);
+    checkInitializerTables(argv[7]);
+    checkBoundedCalls(argv[8]);
+    checkForwardCalls(argv[9]);
     const AnalyzedImage analysis(
         std::make_unique<ParsedImage>(InputFile(argv[1]), ParsePolicy::Inspection),
         DebugInfo::Omit);
@@ -525,6 +798,7 @@ int main(int argc, char **argv) try {
     // Destruction of an independent decoder must leave the first group's borrows intact.
     checkRepeatedCalls(analysis, first);
     checkEntryContracts(first);
+    checkTailTransfer(analysis);
     checkSelfRecursion(analysis);
     checkMutualRecursion(analysis);
     checkParallelEdges(analysis);

@@ -36,6 +36,13 @@ namespace forge::x86 {
         return result;
     }
 
+    AddressFact AddressFact::processStorage(uint64_t allocationSize) {
+        AddressFact result;
+        result.processOffset = 0;
+        result.allocationSize = allocationSize;
+        return result;
+    }
+
     AddressFact AddressFact::computed() const {
         if (origin == FrameStack) {
             return {};
@@ -82,6 +89,12 @@ namespace forge::x86 {
             return *this;
         }
 
+        if (processOffset && processOffset == other.processOffset) {
+            auto result = *this;
+            result.allocationSize = std::min(allocationSize, other.allocationSize);
+            return result;
+        }
+
         AddressFact result;
         result.unknown =
             unknown || other.unknown || origin == FrameStack || other.origin == FrameStack;
@@ -116,6 +129,23 @@ namespace forge::x86 {
     }
 
     AddressFact AddressFact::addOffsets(const AddressFact &offsets) const {
+        if (processOffset && offsets.addresses.size() == 1) {
+            const auto delta = offsets.addresses.front();
+            if (delta == 0) {
+                return *this;
+            }
+
+            const auto offset = *processOffset + delta;
+            const bool wrapped =
+                delta <= INT64_MAX ? offset < *processOffset : offset > *processOffset;
+            if (!wrapped && offset < allocationSize) {
+                auto result = *this;
+                result.processOffset = offset;
+                return result;
+            }
+            return {};
+        }
+
         if (origin == FrameStack) {
             return offsets.origin == Constant
                        ? frameStack(*displacement + offsets.addresses.front())

@@ -17,7 +17,7 @@ import tempfile
 import time
 
 from build import CONDITIONS, FALLTHROUGH, direct_target, iat_call_slot, reachable_instructions, register_call_targets
-from caller_tables import CallerTables
+from caller_tables import CallerTables, ForwardCall, forward_call
 from comparison import describe, differences
 from lift_diagnostics import SelectedFunction, parse_diagnostic
 from manifests import FIXTURE_ID, SUITE, field, load_catalog, unique_keys
@@ -169,7 +169,8 @@ def caller_decoder(image, begin, end):
     return decode
 
 
-def verified_call_target(image, module, caller, site, forge, *, require_continuation):
+def verified_call_target(image, module, caller, site, forge, *, require_continuation,
+                         reported_range=None, expected_target=None):
     base = int(field(module, "image_base_va", str), 16)
     begin, end = base + caller.start, base + caller.end
     try:
@@ -195,8 +196,16 @@ def verified_call_target(image, module, caller, site, forge, *, require_continua
             graph = reachable_instructions(begin, decode, lambda a: begin <= a < end,
                                            lambda _: True, ordinary, end=end, indirect=tables.targets,
                                            register_calls=True, iat_call=iat_call, terminals=("ret", "ud2"))
-            registers = register_call_targets(graph, decode, encoding=encoding)
-        tables.validate(graph, forge, register_calls=bool(registers), iat_slots=slots)
+
+            def table_call(address, reg, predecessors):
+                proof = forward_call(graph, decode, base, address, reg, predecessors)
+                # Only the diagnostic about this loop may describe a bypassed guard.
+                if not proof.guarded and (require_continuation or reported_range is None or address != base + site):
+                    raise ValueError("caller edge bypasses forward pointer load or guard")
+                return proof
+
+            registers = register_call_targets(graph, decode, encoding=encoding,
+                                              forward_call=table_call)
     except (OSError, subprocess.SubprocessError) as error:
         raise ValueError(f"cannot disassemble the leaf caller: {error}") from error
 
@@ -209,7 +218,23 @@ def verified_call_target(image, module, caller, site, forge, *, require_continua
         opcode, _, operands = text.partition(" ")
         if opcode == "call" and (not require_continuation or continuation < end):
             dest = registers.get(address, direct_target(operands))
+            if isinstance(dest, ForwardCall):
+                if reported_range is not None and (dest.first, dest.last, dest.load) != reported_range:
+                    raise ValueError("forward range or load disagrees with the caller instructions")
+                if expected_target is None:
+                    if reported_range is None:
+                        raise ValueError("forward register call requires a site-specific target")
+                    # Check the caller even when the diagnostic describes a malformed range.
+                    table_target = ()
+                else:
+                    table_target = (dest.first, dest.last, expected_target)
+                tables.validate(graph, forge, register_calls=True, iat_slots=slots,
+                                forward_target=table_target)
+                return expected_target
+            if reported_range is not None:
+                raise ValueError("reported pointer range requires a forward register call")
             if dest is not None:
+                tables.validate(graph, forge, register_calls=bool(registers), iat_slots=slots)
                 return dest - base
     raise ValueError("callee disagrees with reachable direct CALL or register call evidence")
 
@@ -218,9 +243,13 @@ def resolve_leaf_window(module, analysis, image, rva, caller_rva, site, forge=DE
     caller = resolve_function(module, analysis, caller_rva, "leaf caller")
     if caller.entry_restriction() or not caller.start <= site < caller.end:
         raise ValueError("leaf call site outside eligible caller")
-    target = verified_call_target(image, module, caller, site, forge, require_continuation=True)
+    target = verified_call_target(image, module, caller, site, forge, require_continuation=True,
+                                  expected_target=rva)
     if rva != target:
         raise ValueError("callee disagrees with reachable direct CALL or register call evidence")
+
+    if any(int(row["start_rva"], 16) == rva for row in analysis["functions"]):
+        return resolve_function(module, analysis, rva, "callee")
 
     # Bound a reported location independently. No gap becomes an analysis function.
     limit = min(0xffffffff, rva + 65536)
@@ -269,6 +298,19 @@ def lift(forge, image, case, selected, ir):
         return
     if status != 1 or os.path.lexists(ir):
         raise ValueError(f"unexpected forge lift status {status} or output after failure ({log.name})")
+    try:
+        diagnostic = parse_lift_failure(log.read_bytes(), image, selected, ir, forge)
+    except ValueError as error:
+        raise ValueError(f"invalid forge lift diagnostic ({log.name}): {error}") from error
+    detail = f"{diagnostic['stage']}/{diagnostic['code']}: {diagnostic['message']} ({log.name})"
+    if diagnostic["category"] == "unsupported":
+        raise Unsupported(detail)
+    raise ValueError(detail)
+
+
+def parse_lift_failure(raw, image, selected, ir, forge):
+    work = ir.parent.parent
+
     def resolve_callee(rva, caller=None, site=None):
         module = read_json(work / "inspect.json")["modules"][0]
         analysis = read_json(work / "analysis.json")
@@ -276,18 +318,11 @@ def lift(forge, image, case, selected, ir):
             return resolve_leaf_window(module, analysis, image, rva, caller, site, forge)
         return resolve_function(module, analysis, rva, "callee")
 
-    def register_target(owner, site):
+    def register_target(owner, site, **evidence):
         module = read_json(work / "inspect.json")["modules"][0]
-        return verified_call_target(image, module, owner, site, forge, require_continuation=False)
+        return verified_call_target(image, module, owner, site, forge, require_continuation=False, **evidence)
 
-    try:
-        diagnostic = parse_diagnostic(log.read_bytes(), image, selected, ir, resolve_callee, register_target)
-    except ValueError as error:
-        raise ValueError(f"invalid forge lift diagnostic ({log.name}): {error}") from error
-    detail = f"{diagnostic['stage']}/{diagnostic['code']}: {diagnostic['message']} ({log.name})"
-    if diagnostic["category"] == "unsupported":
-        raise Unsupported(detail)
-    raise ValueError(detail)
+    return parse_diagnostic(raw, image, selected, ir, resolve_callee, register_target)
 
 
 def native_differences(wanted, actual, harness, args):

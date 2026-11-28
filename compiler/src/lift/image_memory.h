@@ -1,6 +1,7 @@
 #pragma once
 
 #include "lift/cfg.h"
+#include "lift/lift.h"
 #include "pe/image.h"
 
 #include "llvm/ADT/SmallVector.h"
@@ -15,9 +16,14 @@ namespace llvm {
     class Module;
 } // namespace llvm
 
+namespace forge::win64 {
+    struct Argument;
+    struct ServiceBinding;
+} // namespace forge::win64
+
 namespace forge::x86 {
+    struct BoundedTableCall;
     struct Continuation;
-    struct ResolvedCallSite;
     class RecoveredFunctionGroup;
 
     struct EmittedImage {
@@ -50,26 +56,40 @@ namespace forge::x86 {
 
         uint64_t loadBase = 0;
         uint32_t sizeOfImage = 0;
+        uint32_t queryHeaderSize = 0;
         std::vector<Backing> backings;
+        std::map<uint32_t, uint32_t> dataImports;
+        std::map<uint32_t, const win64::ServiceBinding *> functionImports;
     };
 
     // Selection borrows the group's steps for diagnostics and the image for section and
     // relocation data. Finishing resolves the borrows into an independently owned plan.
     class ImageMemory {
       public:
-        ImageMemory(const ParsedImage &image, uint64_t guestLoadBase, bool checkedMemory);
+        ImageMemory(const ParsedImage &image, uint64_t guestLoadBase, bool checkedMemory,
+                    EntryMode mode);
 
         void checkStackMapping(const Step &step) const;
         void addressTaken(const Step &step, uint64_t va);
-        void serviceArgument(const Step &step, uint64_t va, bool write,
+        void formattedInputs(const Step &step, llvm::ArrayRef<uint64_t> formats);
+        void serviceArgument(const Step &step, uint64_t va, const win64::Argument &argument,
                              std::optional<uint64_t> size);
+
+        bool containsImageAddress(uint64_t va) const {
+            return va >= loadBase && va - loadBase < source.module().sizeOfImage;
+        }
+
+        void protectionTarget(const Step &step, uint64_t va, std::optional<uint64_t> size);
+        void protectionOutput(const Step &step, uint64_t va, unsigned size);
+        void boundedTable(const Step &step, const BoundedTableCall &table);
+        void initializerTable(const Step &step, uint32_t first, uint32_t last);
+        bool isDataImportPointer(uint64_t va) const;
         void fixedAccess(const Step &step, uint64_t va, unsigned width, bool write);
         void tableRead(const Step &step, const RelativeTable &table);
         void computedAccess(const Step &step, std::optional<uint64_t> va, unsigned width,
                             bool write);
         void continuationAccess(const Step &step, const Continuation &origin,
-                                llvm::ArrayRef<const ResolvedCallSite *> sites, unsigned width,
-                                bool write);
+                                const RecoveredFunctionGroup &group, unsigned width, bool write);
         ImagePlan finish() &&;
 
       private:
@@ -80,19 +100,38 @@ namespace forge::x86 {
         };
 
         const ParsedImage &source;
+        std::map<uint32_t, uint32_t> dataImports;
+        std::map<uint32_t, const win64::ServiceBinding *> functionImports;
+        std::optional<RelocationIndex> importRelocations;
+        std::optional<std::vector<RvaRange>> importWrites;
         uint64_t loadBase;
+        llvm::StringRef executableHeaders;
+        const Step *formattedRead = nullptr;
         const Step *indirectRead = nullptr;
         const Step *indirectWrite = nullptr;
         bool overlapsStack;
         std::vector<Span> direct;
         std::map<uint32_t, Span> executable;
         std::set<std::tuple<uint32_t, uint64_t, unsigned, bool>> continuationAccesses;
+        std::set<uint32_t> executableDataSlots;
         std::optional<ImageInitialization> initialization;
 
         enum class ExecutableSelection : uint8_t { AddressTakenSection, ContinuationBytes };
 
         const ImageInitialization &contents();
+
+        enum class InputScan { Bytes, CString, LiteralFormat };
+
+        struct InputExtent {
+            uint64_t size;
+            bool literal; // An immutable NUL ends a fully known, percent-free prefix.
+        };
+
+        std::optional<uint64_t> firstImmutableNul(RvaRange range, bool &literal);
+        InputExtent contiguousInputExtent(uint64_t rva, uint64_t limit, InputScan scan);
+        bool selectFunctionImport(uint64_t rva, unsigned width, bool write);
         void fixedImageAccess(const Step &step, RvaRange access, bool write);
+        void selectServiceSections(const Step &step, uint64_t rva, uint64_t size, bool write);
         void selectComputed(const Step &step, uint64_t va, unsigned width, bool write,
                             ExecutableSelection executableSelection);
         void select(const Step &step, const Section &section, RvaRange access);

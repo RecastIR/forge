@@ -103,8 +103,9 @@ def command(args, log, stdout=None, *, timeout=180):
 def configure(tree, config, args):
     if (platform.system(), platform.machine()) != ("Darwin", "arm64"):
         raise ValueError("native differential execution requires macOS arm64")
-    return ["cmake", "-S", SUITE.parents[1], "-B", tree, "-DBUILD_TESTING=OFF", "-DFORGE_BUILD_CLI=OFF",
-            "-DCMAKE_TOOLCHAIN_FILE:FILEPATH=", f"-DCMAKE_BUILD_TYPE={config.capitalize()}", *args]
+    # The standalone harness and CMake's nested compiler probes both use the host toolchain.
+    return ["cmake", "-E", "env", "--unset=CMAKE_TOOLCHAIN_FILE", "cmake", "-S", SUITE.parents[1], "-B", tree,
+            "-DBUILD_TESTING=OFF", "-DFORGE_BUILD_CLI=OFF", f"-DCMAKE_BUILD_TYPE={config.capitalize()}", *args]
 
 
 def phase(name, args, log, timings=None):
@@ -185,7 +186,7 @@ def build_targets(tree, target, ir, harness, work, config, variant, timings=None
     return executable, work / OPTIMIZED_IR if variant == "o2" else ir
 
 
-def execute(executable, args, work, *, timeout=EXECUTION_TIMEOUT, limit=STREAM_LIMIT):
+def execute(executable, args, work, *, timeout=EXECUTION_TIMEOUT, limit=STREAM_LIMIT, require_zero=True):
     streams = {"stdout": bytearray(), "stderr": bytearray()}
     try:
         with tempfile.TemporaryDirectory(dir=work) as cwd, supervised(
@@ -217,7 +218,7 @@ def execute(executable, args, work, *, timeout=EXECUTION_TIMEOUT, limit=STREAM_L
                 raise ExecutionFailure("timeout", "native execution timeout") from error
             if status < 0:
                 raise ExecutionFailure("signaled", f"native harness terminated by signal {-status}", status)
-            if status:
+            if require_zero and status:
                 raise ExecutionFailure("harness_error", f"native harness exited {status}", status)
     finally:
         for name, data in streams.items():

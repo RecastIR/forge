@@ -21,6 +21,8 @@ JOB_STAGES = {
     "macos-sanitize": ("sanitize", "sanitize_oracles"),
     "macos-presets": ("formatting", "lint", "release", "xcode_debug", "xcode_release_build", "xcode_release_ctest", "layout"),
     "windows-fixtures": ("build", "capture", "wine_tests"),
+    "windows-executable-reference": ("executable_reference", "crt_streams", "crt_vfprintf", "crt_abort"),
+    "windows-integer-reference": ("cmp16mi", "app_type", "tail_jump", "bounded_call", "crt_streams", "crt_vfprintf", "virtual_protect", "startup"),
     "differential": ("debug", "release", "negative_tests"),
 }
 FORGE_PRODUCERS = {"debug": "macos-sanitize", "release": "macos-dev"}
@@ -284,7 +286,8 @@ def hosted_report(raw_needs, current_run, revision, **paths):
         needs = {}
 
     jobs, stages, outputs = {}, {}, {}
-    for job, expected in JOB_STAGES.items():
+
+    def check_stages(job, expected):
         entry = needs.get(job)
         entry = entry if isinstance(entry, dict) else {}
         jobs[job] = entry.get("result", "missing")
@@ -299,8 +302,12 @@ def hosted_report(raw_needs, current_run, revision, **paths):
             errors.append(f"{job}: {error}")
             observed = {}
         stages[job] = {k: observed.get(k, "not_run") for k in expected}
-        if any(value != "success" for value in stages[job].values()):
-            errors.append(f"{job}: required stage failed or did not run")
+        for name, outcome in stages[job].items():
+            if outcome != "success":
+                errors.append(f"{job}: {name}={outcome}")
+
+    for job, expected in JOB_STAGES.items():
+        check_stages(job, expected)
 
     digests = {}
     for config, job in FORGE_PRODUCERS.items():
@@ -309,6 +316,27 @@ def hosted_report(raw_needs, current_run, revision, **paths):
             errors.append(f"{job}: missing or invalid {config} Forge digest")
             digest = ""
         digests[config] = digest
+
+    producer_inputs = outputs["macos-dev"].get("executable_inputs_sha256")
+    wine_inputs = outputs["windows-executable-reference"].get("executable_inputs_sha256")
+    matching_inputs = (isinstance(producer_inputs, str) and re.fullmatch("[0-9a-f]{64}", producer_inputs)
+                       and producer_inputs == wine_inputs)
+    if not matching_inputs:
+        errors.append("standalone PE input checksums missing or different across macOS and Wine jobs")
+
+    windows_stages = []
+    for decision, observers in (("capture_requested", ("termination", "abort")),
+                                ("query_requested", ("query", "sdk"))):
+        requested = outputs["macos-dev"].get(decision)
+        if requested == "true":
+            windows_stages.extend(observers)
+        elif requested != "false":
+            errors.append(f"macos-dev: missing or invalid Windows capture decision ({decision})")
+
+    if windows_stages:
+        check_stages("legacy-windows-capture", windows_stages)
+    if outputs["macos-dev"].get("query_requested") == "true":
+        check_stages("wine-query-capture", ("query",))
 
     # A gate-only rerun can consume the successful differential job's original attempt.
     # Bind its reports to that job output, the current workflow run, and the checked-out revision.
@@ -323,6 +351,8 @@ def hosted_report(raw_needs, current_run, revision, **paths):
 
     report = aggregate(run_id, revision, jobs, forge_digests=digests, prerequisite_errors=errors, **paths)
     report["job_stages"] = stages
+    if matching_inputs:
+        report["executable_inputs_sha256"] = producer_inputs
     return report
 
 

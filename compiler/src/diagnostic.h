@@ -34,8 +34,11 @@ namespace forge {
     struct FailureContext {
         std::filesystem::path input, output;
         std::optional<uint32_t> entryRva, endRva, instructionRva, blockRva, functionRva;
-        // Source call evidence when the primary instruction belongs to an inferred callee.
+        // Source call evidence for an inferred leaf or a table-discovered initializer.
         std::optional<CallLocation> sourceCall;
+        std::optional<uint32_t> tableHeaderRva, tableTargetRva, tableFirstRva, tableLastRva,
+            pointerLoadRva;
+        std::optional<uint32_t> initializerTargetRva, terminationTargetRva;
         std::optional<int64_t> branchTarget;
         std::optional<uint32_t> importSlot;
         std::optional<ImportOwnershipFailure> importOwnership;

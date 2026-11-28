@@ -15,6 +15,7 @@ STACK_END = 0x70001000
 ENTRY_RSP = STACK_END - 40
 READ, WRITE = 1, 2
 OVERFLOW, UNMAPPED, PERMISSION, STACK = 1, 2, 3, 4
+R6008 = b"\r\nruntime error R6008\r\n- not enough space for arguments\r\n"
 
 
 def run(*args):
@@ -26,7 +27,8 @@ def memory(address, access, reason):
 
 
 class ProcessExecution(unittest.TestCase):
-    def exercise(self, image, entry, cases, *, base=None, imports=(), probe=False, fail_get=False):
+    def exercise(self, image, entry, cases, *, base=None, imports=(), probe=False, fail_get=False,
+                 partial_store=False, probe_app_type=False, expected_stderr=None):
         pe = (Path(FIXTURES) / image).with_suffix(".exe")
         module = json.loads(run(FORGE, "inspect", pe, "--format", "json"))["modules"][0]
         pe_entry = int(module["entry_point_rva"], 16)
@@ -40,6 +42,12 @@ class ProcessExecution(unittest.TestCase):
             if probe:
                 self.assertIn("call i32 @forge_rt_get_last_error(", ir)
                 ir = ir.replace("@forge_rt_get_last_error(", "@probe_process_get(")
+            if probe_app_type:
+                self.assertIn("call i32 @forge_rt_msvcrt_set_app_type(", ir)
+                ir = ir.replace("@forge_rt_msvcrt_set_app_type(", "@probe_process_set_app_type(")
+            if partial_store:
+                self.assertIn("call void @forge_rt_report_scalar_boundary(", ir)
+                ir = ir.replace("@forge_rt_report_scalar_boundary(", "@probe_stos_fault(")
             source.write_text(ir)
             optimized = source.with_suffix(".o2.ll")
             run(OPT, "-S", "-passes=default<O2>", source, "-o", optimized)
@@ -50,7 +58,15 @@ class ProcessExecution(unittest.TestCase):
                     run(LLC, "-filetype=obj", variant, "-o", obj)
                     run(*LINKER, DRIVER, ADAPTERS, obj, RUNTIME, "-o", exe)
                     args = [str(v) for a, b, _ in cases for v in (a, b)]
-                    lines = run(exe, "fail-get" if fail_get else "run", *args).splitlines()
+                    command = [exe, "fail-get" if fail_get else "run", *args]
+                    if expected_stderr is None:
+                        lines = run(*command).splitlines()
+                    else:
+                        # A regular file exercises embedded CRT output under the host's signal policy.
+                        with tempfile.TemporaryFile() as stderr:
+                            lines = subprocess.check_output(command, text=True, stderr=stderr, timeout=30).splitlines()
+                            stderr.seek(0)
+                            self.assertEqual(stderr.read(), expected_stderr)
                     self.assertEqual(lines[0], f"entry {base} {rva} {pe_entry}")
                     actual_imports = []
                     for line in lines[1:]:
@@ -60,6 +76,24 @@ class ProcessExecution(unittest.TestCase):
                         actual_imports.append((dll.lower(), symbol))
                     self.assertCountEqual(actual_imports, imports)
                     self.assertEqual(lines[1 + len(imports):], [answer for _, _, answer in cases])
+
+    def test_app_type_argument(self):
+        self.exercise("crt-app-type-argument", None,
+                      [(0x100000001, 0x1fffffff9, "app_type 1 app_type -7 exit 255"),
+                       (0x180000000, 0x200000002, "app_type -2147483648 app_type 2 exit 255")],
+                      imports=[("msvcrt.dll", "__set_app_type"), ("msvcrt.dll", "_amsg_exit")],
+                      probe_app_type=True, expected_stderr=R6008 * 2)
+
+    def test_app_type_fatal_routes(self):
+        # The standalone executable suite exercises the same PEs at the same RVA.
+        for variant, result, stderr in (("conflict", "exit 255", R6008),
+                                        ("gui", "unsupported CRT routing", b""),
+                                        ("gui-unknown", "exit 255", b""),
+                                        ("gui-newline", "exit 255", b"")):
+            with self.subTest(variant=variant):
+                self.exercise("crt-app-type-fatal-" + variant, None, [(0, 0, result)],
+                              imports=[("msvcrt.dll", "__set_app_type"), ("msvcrt.dll", "_amsg_exit")],
+                              expected_stderr=stderr)
 
     def test_header_entry(self):
         self.exercise("add", None, [(23, 47, "return 70"), (0, 0, "return 0"),
@@ -110,6 +144,18 @@ class ProcessExecution(unittest.TestCase):
             cases.append((boundary - 1, 2, memory(boundary - 1, READ, STACK)))
         self.exercise("stack", "scalar_boundary_prefix", cases)
 
+    def test_repeated_store_partial_fault(self):
+        self.exercise("stack", "repeat_to_address",
+                      [(ENTRY_RSP - 8, 3, memory(ENTRY_RSP, WRITE, STACK))], partial_store=True)
+
+    def test_atomic_access_contract(self):
+        pe = Path(FIXTURES) / "stack.exe"
+        module = json.loads(run(FORGE, "inspect", pe, "--format", "json"))["modules"][0]
+        section = next(section for section in module["sections"] if section["name"] == ".rdata")
+        address = int(module["image_base_va"], 16) + int(section["rva"], 16)
+        self.exercise("stack", "atomic_readonly", [(address, 1, memory(address, READ | WRITE, PERMISSION))])
+        self.exercise("stack", "atomic_unaligned", [(1, 2, "unsupported")])
+
     def test_scalar_crosses_image_intervals(self):
         source = Path(FIXTURES) / "image.exe"
         module = json.loads(run(FORGE, "inspect", source, "--format", "json"))["modules"][0]
@@ -139,6 +185,56 @@ class ProcessExecution(unittest.TestCase):
             image.write_bytes(data)
             for entry, access in (("write32", WRITE), ("update", READ | WRITE)):
                 self.exercise(image, entry, [(boundary - 2, 7, memory(boundary, access, PERMISSION))])
+
+    def test_repeated_store_after_void_service(self):
+        self.exercise("service-abi", "repeat_after_void",
+                      [(0, 0, "return 17"), (0, 1, "guard 3")],
+                      imports=[("kernel32.dll", "SetLastError")])
+
+    def test_bounded_table_calls(self):
+        self.exercise("executable-forward-call", None, [(0, 0, "return 42"), (0, 0, "return 42")],
+                      base=0x10000000, imports=[("kernel32.dll", "SetLastError"), ("kernel32.dll", "GetLastError")])
+        image = "executable-bounded-call"
+        self.exercise(image, None, [(0, 0, "return 42"), (0, 0, "return 42")], base=0x10000000)
+
+    def test_virtual_protect(self):
+        self.exercise("executable-virtual-protect", None, [(0, 0, "return 42"), (0, 0, "return 42")],
+                      base=0x10000000, imports=[("kernel32.dll", name) for name in
+                                               ("GetLastError", "SetLastError", "VirtualProtect")])
+
+    def test_tail_transfers(self):
+        image = "executable-tail-jump"
+        self.exercise(image, None, [(0, 0, "return 42"), (0, 0, "return 42")], base=0x10000000,
+                      imports=[("kernel32.dll", "SetLastError"), ("kernel32.dll", "GetLastError")])
+        self.exercise(image, "bad_register", [(0, 0, "guard 3")])
+        self.exercise(image, "nested_clobber", [(0, 0, "guard 3")])
+        self.exercise(image, "bad_stack", [(0, 0, "guard 2")])
+        self.exercise(image, "pivot", [(0, 0, "guard 3")])
+        self.exercise(image, "bad_memory", [(1, 0, memory(1, READ, UNMAPPED))])
+
+    def test_return_slot_continuations(self):
+        self.exercise("stack", "tail_nine", [(0, 0, "return 144")])
+        self.exercise("recursive-continuation", None, [(1, 0, "return 72"), (0, 0, memory(ENTRY_RSP, READ, STACK))])
+
+    def test_cmp16mi_read_boundaries(self):
+        source = Path(FIXTURES) / "executable-cmp16mi.exe"
+        module = json.loads(run(FORGE, "inspect", source, "--format", "json"))["modules"][0]
+        sections = {s["name"]: s for s in module["sections"]}
+        left, right = (int(sections[name]["rva"], 16) for name in (".worda", ".wordb"))
+        base = int(module["image_base_va"], 16)
+        boundary = base + right
+        end = boundary + sections[".wordb"]["virtual_size"]
+        data = bytearray(source.read_bytes())
+        Layout(data).abut_writable_sections(left, right)
+        with tempfile.TemporaryDirectory() as tmp:
+            pe = Path(tmp) / "adjacent.exe"
+            pe.write_bytes(data)
+            self.exercise(pe, "compare_at", [
+                (boundary - 2, 0, "Greturn 1"), (boundary + 1, 0, "Greturn 2"),
+                (end - 2, 0, "Greturn 1"), (boundary - 1, 0, "unsupported"),
+                (end - 1, 0, memory(end, READ, UNMAPPED)),
+                (ENTRY_RSP - 1, 0, memory(ENTRY_RSP, READ, STACK)),
+            ], imports=[("kernel32.dll", "GetLastError")], probe=True)
 
     def test_stack_guard_and_service_failures(self):
         getter = [("kernel32.dll", "GetLastError")]

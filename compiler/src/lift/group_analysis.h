@@ -11,6 +11,8 @@ namespace forge::x86 {
 
     struct FunctionPlan {
         RegisterSet modified;
+        // Each proved table access or count guard borrows its owning call site.
+        std::map<uint32_t, const ResolvedCallSite *> tableInstructions;
         llvm::DenseSet<uint32_t> stackAccesses;
     };
 
@@ -19,9 +21,12 @@ namespace forge::x86 {
     struct GroupAnalysis {
         FunctionFlows flows;
         std::map<uint32_t, FunctionPlan> functions;
-        bool stack = false, origins = false;
+        bool stack = false, origins = false, setsDirection = false, hasGuestCallbacks = false;
+        bool usesTermination = false, hasTailJumps = false;
         ImagePlan image;
     };
+
+    Defined entryRegisterDefinitions(EntryMode mode);
 
     // The group must outlive its proofs. Use a guest base validated for this image.
     GroupAnalysis analyzeGroup(const RecoveredFunctionGroup &group, uint64_t guestBase,

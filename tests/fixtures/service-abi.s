@@ -79,6 +79,21 @@ begin void_result
     call *__imp_SetLastError(%rip)
 finish
 
+begin repeat_after_void
+    movq %rdx, 32(%rsp)
+    movq %rdi, 48(%rsp)
+    leaq 40(%rsp), %rdi
+    movq $17, (%rdi)
+    movl $89, %eax
+    call *__imp_SetLastError(%rip)
+    # Restoring only AL leaves the rest of the clobbered register undefined.
+    movb $5, %al
+    movq 32(%rsp), %rcx
+    rep stosq
+    movq 40(%rsp), %rax
+    movq 48(%rsp), %rdi
+finish
+
 begin write_nested
     call write_stack_pointer
 finish

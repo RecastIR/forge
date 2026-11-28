@@ -51,9 +51,12 @@ namespace forge::test {
                   rejected({Value::Address, Access::Input, Extent::CountArgument, 0}));
 
     inline constexpr ServiceBinding abiServices[] = {
+        virtualProtect,
         setLastError,
         getLastError,
         stringLength,
+        crtSetAppType,
+        crtAmsgExit,
         bind<Value::I64, i32, u32>("forgeabi.dll", "Pair", LastError::Preserve,
                                    FORGE_SERVICE_ADAPTER(abiPair)),
         bind<Value::Word, word, i64, u64>("forgeabi.dll", "Triple", LastError::Preserve,

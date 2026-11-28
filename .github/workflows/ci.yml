@@ -24,14 +24,225 @@ jobs:
     outputs:
       stages: ${{ steps.native.outputs.stages }}
       release_forge: ${{ steps.native.outputs.sha256 }}
+      executable_inputs_sha256: ${{ steps.executables.outputs.sha256 }}
+      capture_requested: ${{ steps.capture.outputs.requested }}
+      termination_sha256: ${{ steps.termination.outputs.sha256 }}
+      query_requested: ${{ steps.capture.outputs.query_requested }}
+      query_sha256: ${{ steps.query.outputs.sha256 }}
+      abort_sha256: ${{ steps.abort.outputs.sha256 }}
     steps:
       - uses: actions/checkout@v6
         with:
           fetch-depth: 0
+      - name: Select focused Windows capture for compatibility changes
+        id: capture
+        shell: bash
+        env:
+          BASE: ${{ github.event.pull_request.base.sha || github.event.before }}
+        run: |
+          if git diff --quiet "$BASE" HEAD -- .github/workflows/ci.yml .github/actions/package-reference-inputs.sh \
+            tests/differential/reference/executable-inputs.txt \
+            'tests/fixtures/crt-abort*' tests/differential/reference/crt_abort.py 'tests/differential/reference/crt-abort*.json' \
+            tests/differential/reference/amsg-exit/capture.c 'tests/fixtures/crt-termination*' tests/fixtures/executable-startup-info.s tests/fixtures/generate.py \
+            tests/differential/reference/termination tests/differential/fixtures/startup/termination \
+            'compiler/src/lift/initializer_table.*' 'compiler/src/lift/recovery.*' compiler/src/lift/lift.cpp \
+            compiler/src/lift/group_analysis.cpp runtime/include/forge/service_signature.h runtime/src/managed_process.cpp \
+            runtime/src/compat/crt/termination.cpp runtime/src/compat/crt/fatal.cpp \
+            'runtime/src/compat/crt/standard_streams.*' 'runtime/src/compat/process_state*' \
+            'runtime/src/compat/win32/process_parameters*' runtime/src/compat/win32/startup_info.cpp; then
+            echo "requested=false" >> "$GITHUB_OUTPUT"
+          else
+            echo "requested=true" >> "$GITHUB_OUTPUT"
+          fi
+          if git diff --quiet "$BASE" HEAD -- .github/workflows/ci.yml .github/actions/package-reference-inputs.sh \
+            tests/fixtures/generate.py tests/differential/reference/crt_streams.py tests/differential/reference/capture.c \
+            tests/differential/reference/virtual-query-inputs.txt tests/differential/reference/virtual_query.py \
+            'compiler/src/lift/recovery.*' compiler/src/lift/group_analysis.cpp compiler/src/lift/lift.cpp \
+            runtime/src/core/registration.cpp runtime/src/managed_process.cpp runtime/src/core/instance.h \
+            runtime/include/forge/service_signature.h 'runtime/src/core/image_query.*' \
+            'tests/fixtures/*virtual-query*' 'tests/differential/reference/virtual*query*' \
+            'runtime/src/core/page_protection.*' runtime/src/core/guest_memory.cpp runtime/src/core/process.cpp \
+            'runtime/src/compat/win32/virtual_*' runtime/include/forge/process.h runtime/include/forge/runtime.h \
+            'compiler/src/lift/image_memory.*' 'compiler/src/pe/image.*' compiler/src/pe/pe.cpp \
+            runtime/src/core/process_image.h runtime/src/startup.cpp tests/differential/coverage_report.py; then
+            echo "query_requested=false" >> "$GITHUB_OUTPUT"
+          else
+            echo "query_requested=true" >> "$GITHUB_OUTPUT"
+          fi
       - id: native
         uses: ./.github/actions/native-test
         with:
           preset: dev
+      - name: Package native executable reference inputs
+        if: ${{ !cancelled() }}
+        id: executables
+        run: >-
+          bash .github/actions/package-reference-inputs.sh
+          "$PWD/tests/differential/reference/executable-inputs.txt" "$RUNNER_TEMP/executable-inputs"
+      - uses: actions/upload-artifact@v4
+        if: ${{ !cancelled() && steps.executables.outputs.sha256 != '' }}
+        with:
+          name: executable-reference-inputs
+          path: ${{ runner.temp }}/executable-inputs
+          if-no-files-found: error
+          retention-days: 7
+          overwrite: true
+
+      - name: Package Windows termination reference inputs
+        id: termination
+        if: ${{ !cancelled() && steps.capture.outputs.requested == 'true' }}
+        run: >-
+          bash .github/actions/package-reference-inputs.sh
+          "$PWD/tests/differential/reference/termination/inputs.txt" "$RUNNER_TEMP/termination-inputs"
+      - uses: actions/upload-artifact@v4
+        if: ${{ !cancelled() && steps.termination.outputs.sha256 != '' }}
+        with:
+          name: termination-inputs
+          path: ${{ runner.temp }}/termination-inputs
+          if-no-files-found: error
+          overwrite: true
+
+      - name: Package Windows abort reference inputs
+        id: abort
+        if: ${{ !cancelled() && steps.capture.outputs.requested == 'true' }}
+        run: |
+          list="$RUNNER_TEMP/abort-inputs.txt"
+          grep '^crt-abort-.*\.exe$' tests/differential/reference/executable-inputs.txt > "$list"
+          bash .github/actions/package-reference-inputs.sh "$list" "$RUNNER_TEMP/abort-inputs"
+      - uses: actions/upload-artifact@v4
+        if: ${{ !cancelled() && steps.abort.outputs.sha256 != '' }}
+        with:
+          name: abort-inputs
+          path: ${{ runner.temp }}/abort-inputs
+          if-no-files-found: error
+          overwrite: true
+
+      - name: Package VirtualQuery reference inputs
+        id: query
+        if: ${{ !cancelled() && steps.capture.outputs.query_requested == 'true' }}
+        run: >-
+          bash .github/actions/package-reference-inputs.sh
+          "$PWD/tests/differential/reference/virtual-query-inputs.txt" "$RUNNER_TEMP/query-inputs"
+      - uses: actions/upload-artifact@v4
+        if: ${{ !cancelled() && steps.query.outputs.sha256 != '' }}
+        with:
+          name: query-inputs
+          path: ${{ runner.temp }}/query-inputs
+          if-no-files-found: error
+          overwrite: true
+
+  legacy-windows-capture:
+    needs: macos-dev
+    if: ${{ !cancelled() && (needs.macos-dev.outputs.capture_requested == 'true' || needs.macos-dev.outputs.query_requested == 'true') }}
+    runs-on: windows-2022
+    timeout-minutes: 10
+    outputs:
+      stages: >-
+        {"termination": "${{ steps.termination.outcome }}", "abort": "${{ steps.abort.outcome }}", "query": "${{ steps.query.outcome }}", "sdk": "${{ steps.sdk.outcome }}"}
+    steps:
+      - uses: actions/checkout@v6
+        id: checkout
+      - uses: actions/download-artifact@v4
+        id: termination_inputs
+        if: ${{ !cancelled() && steps.checkout.outcome == 'success' && needs.macos-dev.outputs.capture_requested == 'true' }}
+        with:
+          name: termination-inputs
+          path: inputs
+      - name: Measure legacy system MSVCRT and startup information
+        id: termination
+        if: ${{ !cancelled() && steps.termination_inputs.outcome == 'success' }}
+        run: >-
+          python -B tests/differential/reference/termination/observe.py inputs observations
+          --manifest-sha256 "${{ needs.macos-dev.outputs.termination_sha256 }}"
+          --reference tests/differential/fixtures/startup/termination/windows-raw.zip
+      - uses: actions/upload-artifact@v4
+        if: ${{ !cancelled() && steps.termination_inputs.outcome == 'success' }}
+        with:
+          name: legacy-windows-observations
+          path: observations
+          if-no-files-found: error
+          overwrite: true
+      - uses: actions/download-artifact@v4
+        id: abort_inputs
+        if: ${{ !cancelled() && steps.checkout.outcome == 'success' && needs.macos-dev.outputs.capture_requested == 'true' }}
+        with:
+          name: abort-inputs
+          path: abort-inputs
+      - name: Measure legacy abort
+        id: abort
+        if: ${{ !cancelled() && steps.abort_inputs.outcome == 'success' }}
+        env:
+          PE_MANIFEST_SHA256: ${{ needs.macos-dev.outputs.abort_sha256 }}
+        run: python -B tests/differential/reference/crt_abort.py abort-inputs abort
+      - uses: actions/upload-artifact@v4
+        if: ${{ !cancelled() && steps.abort_inputs.outcome == 'success' }}
+        with:
+          name: windows-crt-abort-observations
+          path: abort/abort-observations
+          if-no-files-found: error
+          overwrite: true
+
+      - uses: actions/download-artifact@v4
+        id: query_inputs
+        if: ${{ !cancelled() && steps.checkout.outcome == 'success' && needs.macos-dev.outputs.query_requested == 'true' }}
+        with:
+          name: query-inputs
+          path: query-inputs
+      - name: Verify the installed x64 Windows SDK layout
+        id: sdk
+        if: ${{ !cancelled() && steps.checkout.outcome == 'success' && needs.macos-dev.outputs.query_requested == 'true' }}
+        shell: cmd
+        run: |
+          for /f "usebackq tokens=*" %%i in (`"%ProgramFiles(x86)%\Microsoft Visual Studio\Installer\vswhere.exe" -latest -property installationPath`) do call "%%i\VC\Auxiliary\Build\vcvars64.bat"
+          cl /nologo /std:c11 /c tests\differential\reference\virtual-query-sdk.c
+      - name: Measure VirtualQuery on Windows Server 2022
+        id: query
+        if: ${{ !cancelled() && steps.query_inputs.outcome == 'success' }}
+        env:
+          PE_MANIFEST_SHA256: ${{ needs.macos-dev.outputs.query_sha256 }}
+        run: python -B tests/differential/reference/virtual_query.py query-inputs query-observations
+      - uses: actions/upload-artifact@v4
+        if: ${{ !cancelled() && steps.query_inputs.outcome == 'success' }}
+        with:
+          name: windows-query-observations
+          path: query-observations
+          if-no-files-found: error
+          overwrite: true
+
+  wine-query-capture:
+    needs: macos-dev
+    if: ${{ !cancelled() && needs.macos-dev.outputs.query_requested == 'true' }}
+    runs-on: ubuntu-24.04
+    outputs:
+      stages: >-
+        {"query": "${{ steps.query.outcome }}"}
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/download-artifact@v4
+        with:
+          name: query-inputs
+          path: query-inputs
+      - run: make provision-fixtures
+      - name: Measure VirtualQuery on pinned Linux amd64 Wine
+        id: query
+        env:
+          PE_MANIFEST_SHA256: ${{ needs.macos-dev.outputs.query_sha256 }}
+        run: |
+          test "$(uname -m)" = x86_64
+          image=$(python3 -B tests/differential/fixture_images.py --id reference)
+          install -d -m 1777 "$RUNNER_TEMP/query-observations"
+          docker run --init --rm --pull never --platform linux/amd64 --network none --cap-drop ALL \
+            --security-opt no-new-privileges -e FORGE_WINE=/usr/lib/wine/wine64 -e PE_MANIFEST_SHA256 \
+            -e FORGE_REFERENCE_IMAGE="$image" -e GITHUB_RUN_ID -v "$PWD/query-inputs:/input:ro" \
+            -v "$PWD/tests/differential/reference:/suite:ro" -v "$RUNNER_TEMP/query-observations:/observations" \
+            --entrypoint /bin/sh "$image" -ec '/usr/lib/wine/wineserver64 -p; "$FORGE_WINE" cmd /c ver >/dev/null; python3 -B /suite/virtual_query.py /input /observations'
+      - uses: actions/upload-artifact@v4
+        if: ${{ !cancelled() && steps.query.outcome != 'skipped' }}
+        with:
+          name: wine-query-observations
+          path: ${{ runner.temp }}/query-observations
+          if-no-files-found: error
+          overwrite: true
 
   macos-sanitize:
     runs-on: macos-26
@@ -117,6 +328,115 @@ jobs:
           retention-days: 7
           overwrite: true
 
+  windows-integer-reference:
+    needs: [macos-dev, windows-fixtures]
+    runs-on: windows-2022
+    outputs:
+      stages: ${{ toJSON(steps.verify.outputs) }}
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/download-artifact@v4
+        with:
+          name: executable-reference-inputs
+          path: executables
+      - uses: actions/download-artifact@v4
+        with:
+          name: windows-x64-inputs
+          path: build
+      - name: Observe integer, CRT, page protection and startup behavior on Windows x64
+        id: verify
+        shell: bash
+        run: |
+          python -B tests/integration/test_executable.py windows-cmp16mi executables
+          echo "cmp16mi=success" >> "$GITHUB_OUTPUT"
+          python -B tests/integration/test_executable.py windows-app-type executables
+          echo "app_type=success" >> "$GITHUB_OUTPUT"
+          python -B tests/integration/test_executable.py windows-bounded-call executables
+          echo "bounded_call=success" >> "$GITHUB_OUTPUT"
+          python -B tests/integration/test_executable.py windows-tail-jump executables
+          echo "tail_jump=success" >> "$GITHUB_OUTPUT"
+          # A writable parent stdin must never receive a guest fwrite.
+          python -B tests/differential/reference/crt_streams.py executables stream-observations 0<> stream-probe-stdin
+          test ! -s stream-probe-stdin
+          echo "crt_streams=success" >> "$GITHUB_OUTPUT"
+          python -B tests/differential/reference/crt_vfprintf.py executables stream-observations
+          echo "crt_vfprintf=success" >> "$GITHUB_OUTPUT"
+          python -B tests/differential/reference/virtual_protect.py executables
+          echo "virtual_protect=success" >> "$GITHUB_OUTPUT"
+          python -B tests/integration/test_executable.py windows-startup build/fixtures/windows-x64
+          echo "startup=success" >> "$GITHUB_OUTPUT"
+        env:
+          PE_MANIFEST_SHA256: ${{ needs.macos-dev.outputs.executable_inputs_sha256 }}
+
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: windows-crt-stream-observations
+          path: stream-observations
+          if-no-files-found: error
+
+  windows-executable-reference:
+    needs: macos-dev
+    runs-on: ubuntu-24.04
+    outputs:
+      stages: ${{ toJSON(steps.verify.outputs) }}
+      executable_inputs_sha256: ${{ steps.inputs.outputs.sha256 }}
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/download-artifact@v4
+        with:
+          name: executable-reference-inputs
+          path: build/dev/fixtures/Debug
+      - name: Verify the native-tested PE set and checksums
+        id: inputs
+        working-directory: build/dev/fixtures/Debug
+        env:
+          EXPECTED_SHA256: ${{ needs.macos-dev.outputs.executable_inputs_sha256 }}
+        run: |
+          list="$GITHUB_WORKSPACE/tests/differential/reference/executable-inputs.txt"
+          find . -mindepth 1 -maxdepth 1 ! -name SHA256SUMS -printf '%f\n' | LC_ALL=C sort | diff -u "$list" -
+          xargs sha256sum < "$list" | cmp - SHA256SUMS
+          echo "$EXPECTED_SHA256  SHA256SUMS" | sha256sum --strict --check -
+          echo "sha256=$(sha256sum SHA256SUMS | cut -d' ' -f1)" >> "$GITHUB_OUTPUT"
+      - name: Prepare the pinned Wine image
+        run: make provision-fixtures
+      - name: Capture standalone PE behavior on Linux amd64
+        id: verify
+        run: |
+          test "$(uname -m)" = x86_64
+          image=$(python3 -B tests/differential/fixture_images.py --id reference)
+          # The pinned image writes as UID 1000, independently of the hosted runner's UID.
+          install -d -m 1777 "$RUNNER_TEMP/stream-observations"
+          status=0
+          ./tools/test-forge.sh --executable-reference || status=1
+          for suite in crt_abort crt_streams crt_vfprintf; do
+            outcome=success
+            docker run --init --rm --pull never --platform linux/amd64 --network none --cap-drop ALL \
+              --security-opt no-new-privileges -e FORGE_WINE=/usr/lib/wine/wine64 -e PE_MANIFEST_SHA256 \
+              -e FORGE_REFERENCE_IMAGE="$image" -e GITHUB_RUN_ID \
+              -v "$PWD/build/dev/fixtures/Debug:/input:ro" -v "$PWD/tests/differential/reference:/suite:ro" \
+              -v "$RUNNER_TEMP/stream-observations:/observations" \
+              --entrypoint /bin/sh "$image" -ec '
+                /usr/lib/wine/wineserver64 -p
+                "$FORGE_WINE" cmd /c ver >/dev/null
+                python3 -B "/suite/$1.py" /input /observations' sh "$suite" || outcome=failure
+            echo "$suite=$outcome" >> "$GITHUB_OUTPUT"
+            if test "$outcome" = failure; then status=1; fi
+          done
+          exit "$status"
+        env:
+          PE_MANIFEST_SHA256: ${{ needs.macos-dev.outputs.executable_inputs_sha256 }}
+
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: wine-crt-stream-observations
+          path: |
+            ${{ runner.temp }}/stream-observations/puts-*
+            ${{ runner.temp }}/stream-observations/vfprintf-*
+            ${{ runner.temp }}/stream-observations/abort-observations
+          if-no-files-found: warn
+
   differential:
     outputs:
       evidence_run_id: ${{ github.run_id }}-${{ github.run_attempt }}-${{ github.sha }}
@@ -182,7 +502,7 @@ jobs:
 
   regression-gate:
     if: ${{ always() }}
-    needs: [macos-dev, macos-sanitize, macos-presets, windows-fixtures, differential]
+    needs: [macos-dev, macos-sanitize, macos-presets, windows-fixtures, windows-executable-reference, windows-integer-reference, legacy-windows-capture, wine-query-capture, differential]
     runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v6

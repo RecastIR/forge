@@ -1,0 +1,20 @@
+{
+  "schema_version": 1,
+  "id": "startup/argv_edges",
+  "description": "Check guest executable identity, argument termination, empty strings, tabs, embedded quotes and trailing backslashes.",
+  "source": "fixtures/startup/argv_edges.c",
+  "binary": "crt_argv_edges.exe",
+  "args": [
+    "",
+    "a\tb",
+    "quoted\"value",
+    "two\\\\\"quotes",
+    "with space\\",
+    "plain\\"
+  ],
+  "expected": {
+    "exit_code": 42,
+    "stdout": "",
+    "stderr": ""
+  }
+}

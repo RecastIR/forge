@@ -339,6 +339,26 @@ class JumpTables(GuestExecution):
                           where["branch_target"]), ("LIFT_UNSUPPORTED_CONTROL_FLOW", hex(root+7),
                                                     "CALL64r", "ffd0", target))
 
+    def test_dynamic_relocations_prevent_tail_jump_proof(self):
+        pe = Path(IMAGE).with_name("jump-dvrt.exe")
+        data = bytearray(pe.read_bytes())
+        module = json.loads(run(FORGE, "inspect", pe, "--format", "json"))["modules"][0]
+        exports = {name: int(row["rva"], 16) for row in module["exports"] for name in row["names"]}
+        source, target = exports["entry"], exports["direct_only"]
+        offset = Layout(data).file_offset(source)
+        jump = bytes.fromhex("e9") + struct.pack("<i", target - source - 5)
+        data[offset:offset + len(jump)] = jump
+        edited = self.work / "tail-jump-dvrt.exe"
+        edited.write_bytes(data)
+        result = subprocess.run([FORGE, "lift", edited, "--rva", hex(source), "--diagnostics-format", "json",
+                                 "--output", self.work / "dvrt.ll"], capture_output=True, timeout=15)
+        self.assertEqual(result.returncode, 1)
+        error = json.loads(result.stderr)
+        where = error["context"]
+        self.assertEqual((error["code"], where["instruction_rva"], where["bytes"], where["branch_target"]),
+                         ("LIFT_UNSUPPORTED_CONTROL_FLOW", hex(source), jump.hex(), target))
+        self.assertIn("dynamically relocated", error["message"])
+
     def test_second_table_can_invalidate_first_guard(self):
         for exe in self.variants("two_tables"):
             self.expect(exe, 0, 0, 77)

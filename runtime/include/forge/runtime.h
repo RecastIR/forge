@@ -30,12 +30,32 @@ typedef uint32_t forge_rt_status;
 #define FORGE_RT_MAPPING_CONFLICT UINT32_C(8)
 #define FORGE_RT_GUEST_FAULT UINT32_C(9)
 #define FORGE_RT_INVALID_STATE UINT32_C(10)
+#define FORGE_RT_HOST_CONFIGURATION UINT32_C(11)
+/* Service status values in this family propagate as an unsupported guest operation. */
+#define FORGE_RT_UNSUPPORTED_SERVICE_FLAG UINT32_C(0x10000)
+#define FORGE_RT_UNSUPPORTED_CRT_WILDCARDS (FORGE_RT_UNSUPPORTED_SERVICE_FLAG | UINT32_C(1))
+#define FORGE_RT_UNSUPPORTED_CRT_NEW_MODE (FORGE_RT_UNSUPPORTED_SERVICE_FLAG | UINT32_C(2))
+#define FORGE_RT_UNSUPPORTED_CALLBACK_RETURN (FORGE_RT_UNSUPPORTED_SERVICE_FLAG | UINT32_C(3))
+#define FORGE_RT_UNSUPPORTED_INITIALIZER_TARGET (FORGE_RT_UNSUPPORTED_SERVICE_FLAG | UINT32_C(4))
+#define FORGE_RT_UNSUPPORTED_INITIALIZER_RANGE (FORGE_RT_UNSUPPORTED_SERVICE_FLAG | UINT32_C(5))
+#define FORGE_RT_UNSUPPORTED_TERMINATION_TARGET (FORGE_RT_UNSUPPORTED_SERVICE_FLAG | UINT32_C(7))
+#define FORGE_RT_UNSUPPORTED_TERMINATION_REENTRY (FORGE_RT_UNSUPPORTED_SERVICE_FLAG | UINT32_C(8))
+#define FORGE_RT_UNSUPPORTED_STARTUP_TITLE (FORGE_RT_UNSUPPORTED_SERVICE_FLAG | UINT32_C(9))
+#define FORGE_RT_UNSUPPORTED_CRT_ERROR_ROUTING (FORGE_RT_UNSUPPORTED_SERVICE_FLAG | UINT32_C(10))
+#define FORGE_RT_UNSUPPORTED_PAGE_PROTECTION (FORGE_RT_UNSUPPORTED_SERVICE_FLAG | UINT32_C(11))
+#define FORGE_RT_UNSUPPORTED_CRT_STREAM (FORGE_RT_UNSUPPORTED_SERVICE_FLAG | UINT32_C(12))
+#define FORGE_RT_UNSUPPORTED_CRT_FORMAT (FORGE_RT_UNSUPPORTED_SERVICE_FLAG | UINT32_C(13))
+#define FORGE_RT_UNSUPPORTED_MEMORY_QUERY (FORGE_RT_UNSUPPORTED_SERVICE_FLAG | UINT32_C(14))
+#define FORGE_RT_UNSUPPORTED_CALLBACK_ARGUMENT (FORGE_RT_UNSUPPORTED_SERVICE_FLAG | UINT32_C(6))
 
 #define FORGE_RT_READ UINT32_C(1)
 #define FORGE_RT_WRITE UINT32_C(2)
 #define FORGE_RT_EXECUTE UINT32_C(4)
 
 #define FORGE_RT_MARK_UNINITIALIZED UINT8_C(0)
+#define FORGE_RT_MARK_CALLBACK_RETURN UINT8_C(0xfd)
+/* Offset from the callback entry RSP to the end of its return slot and four home slots. */
+#define FORGE_RT_INITIALIZER_HOME_END UINT32_C(40)
 #define FORGE_RT_MARK_RETURN UINT8_C(0xfe)
 #define FORGE_RT_MARK_CONCRETE UINT8_C(0xff)
 
@@ -101,7 +121,7 @@ forge_rt_status forge_rt_destroy(forge_rt_instance *instance) FORGE_RT_NOEXCEPT;
 
 /* Thread operations on a live instance may be called concurrently. A token identifies one guest
  * thread in its owning instance. Native callers treat the token as opaque. Guest-visible Windows
- * handles belong to a separate future contract. Zero, destroyed and foreign tokens report
+ * handles have a separate representation. Zero, destroyed and foreign tokens report
  * FORGE_RT_INVALID_THREAD. A new thread's last-error value is zero. */
 forge_rt_status forge_rt_thread_create(forge_rt_instance *instance,
                                        forge_rt_thread_token *outThread) FORGE_RT_NOEXCEPT;
@@ -112,6 +132,78 @@ forge_rt_status forge_rt_set_last_error(forge_rt_instance *instance, forge_rt_th
                                         uint32_t value) FORGE_RT_NOEXCEPT;
 forge_rt_status forge_rt_get_last_error(forge_rt_instance *instance, forge_rt_thread_token thread,
                                         uint32_t *outValue) FORGE_RT_NOEXCEPT;
+/* Wait on the calling host thread. Zero yields and UINT32_MAX waits indefinitely. */
+forge_rt_status forge_rt_sleep(forge_rt_instance *instance, forge_rt_thread_token thread,
+                               uint32_t milliseconds) FORGE_RT_NOEXCEPT;
+
+/* MSVCRT byte string and memory adapters. All addresses and size_t values are guest
+ * 64-bit values. Result storage is written on success, fault storage on a guest fault. */
+forge_rt_status forge_rt_msvcrt_strlen(forge_rt_instance *, forge_rt_thread_token, uint64_t address,
+                                       uint64_t *result,
+                                       forge_rt_memory_fault *fault) FORGE_RT_NOEXCEPT;
+forge_rt_status forge_rt_msvcrt_strcmp(forge_rt_instance *, forge_rt_thread_token, uint64_t left,
+                                       uint64_t right, int32_t *result,
+                                       forge_rt_memory_fault *fault) FORGE_RT_NOEXCEPT;
+forge_rt_status forge_rt_msvcrt_strncmp(forge_rt_instance *, forge_rt_thread_token, uint64_t left,
+                                        uint64_t right, uint64_t count, int32_t *result,
+                                        forge_rt_memory_fault *fault) FORGE_RT_NOEXCEPT;
+forge_rt_status forge_rt_msvcrt_memcpy(forge_rt_instance *, forge_rt_thread_token,
+                                       uint64_t destination, uint64_t source, uint64_t count,
+                                       uint64_t *result,
+                                       forge_rt_memory_fault *fault) FORGE_RT_NOEXCEPT;
+
+/* Current managed process command line in process-owned, read-only guest storage.
+ * W returns UTF-16LE. A supports the ASCII subset. Both preserve thread last error. */
+forge_rt_status forge_rt_get_command_line_a(forge_rt_instance *instance,
+                                            forge_rt_thread_token thread,
+                                            uint64_t *outAddress) FORGE_RT_NOEXCEPT;
+forge_rt_status forge_rt_get_command_line_w(forge_rt_instance *instance,
+                                            forge_rt_thread_token thread,
+                                            uint64_t *outAddress) FORGE_RT_NOEXCEPT;
+
+forge_rt_status forge_rt_virtual_protect(forge_rt_instance *, forge_rt_thread_token,
+                                         uint64_t address, uint64_t size, uint32_t protection,
+                                         uint64_t oldProtection, int32_t *result,
+                                         forge_rt_memory_fault *fault) FORGE_RT_NOEXCEPT;
+
+/* The query VA is numeric. Only the bounded Win64 result is guest output. */
+forge_rt_status forge_rt_virtual_query(forge_rt_instance *, forge_rt_thread_token, uint64_t address,
+                                       uint64_t output, uint64_t length, uint64_t *result,
+                                       forge_rt_memory_fault *fault) FORGE_RT_NOEXCEPT;
+
+/* Windows x64 STARTUPINFO output in checked, writable guest memory (104 bytes).
+ * Both variants require a managed invocation and preserve the guest thread's last error. */
+forge_rt_status forge_rt_get_startup_info_a(forge_rt_instance *instance,
+                                            forge_rt_thread_token thread, uint64_t address,
+                                            forge_rt_memory_fault *fault) FORGE_RT_NOEXCEPT;
+forge_rt_status forge_rt_get_startup_info_w(forge_rt_instance *instance,
+                                            forge_rt_thread_token thread, uint64_t address,
+                                            forge_rt_memory_fault *fault) FORGE_RT_NOEXCEPT;
+
+/* Console services require the current managed process and a declared console dependency.
+ * An active invocation without captured standard handles reports FORGE_RT_INVALID_STATE.
+ * Guest handles and addresses are integer bits. Only the native outs are host pointers. A Win32
+ * failure delivers the guest failure value with status OK and sets the guest thread's last error.
+ */
+forge_rt_status forge_rt_get_std_handle(forge_rt_instance *instance, forge_rt_thread_token thread,
+                                        uint32_t selector, uint64_t *outHandle) FORGE_RT_NOEXCEPT;
+forge_rt_status forge_rt_write_file(forge_rt_instance *instance, forge_rt_thread_token thread,
+                                    uint64_t handle, uint64_t buffer, uint32_t length,
+                                    uint64_t written, uint64_t overlapped, int32_t *outResult,
+                                    forge_rt_memory_fault *fault) FORGE_RT_NOEXCEPT;
+
+/* Completes the current managed guest process with the given Windows DWORD.
+ * The generated call site propagates this terminal result to the process runner. */
+forge_rt_status forge_rt_exit_process(forge_rt_instance *instance, forge_rt_thread_token thread,
+                                      uint32_t exitCode) FORGE_RT_NOEXCEPT;
+
+/* Replace this managed process's top-level exception filter. Both filter values are guest
+ * addresses. Zero restores default handling. Writes outPrevious only on success. Registration
+ * preserves last error. Guest faults remain terminal. */
+forge_rt_status forge_rt_set_unhandled_exception_filter(forge_rt_instance *instance,
+                                                        forge_rt_thread_token thread,
+                                                        uint64_t guestFilter,
+                                                        uint64_t *outPrevious) FORGE_RT_NOEXCEPT;
 
 /* Read a guest NUL-terminated byte string in the current synchronous invocation.
  * A null guest address returns zero after validating the invocation. The initial service

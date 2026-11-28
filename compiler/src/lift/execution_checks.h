@@ -8,8 +8,8 @@ namespace forge::x86 {
     llvm::StructType *memoryFaultType(llvm::LLVMContext &context);
     llvm::StructType *processResultType(llvm::LLVMContext &context);
 
-    // Function entries trap. Process entries write one terminal result and unwind
-    // nested guest bodies through a failure return before executing a continuation.
+    // Function entries trap. A managed body returns false for any terminal result,
+    // propagating it through every caller before executing a guest continuation.
     class ExecutionChecks {
       public:
         explicit ExecutionChecks(llvm::IRBuilder<> &builder) : ir(builder) {}
@@ -18,11 +18,17 @@ namespace forge::x86 {
 
         bool managed() const { return result != nullptr; }
 
+        uint64_t tableOrigin = 0;
         void guard(llvm::Value *condition, uint32_t fault = FORGE_RT_FAULT_ABI);
+        void requireSupported(llvm::Value *condition, forge_rt_status status = FORGE_RT_OK);
+        void unsupported(forge_rt_status status);
         void scalarBoundary(llvm::Value *condition, llvm::Value *address, unsigned size,
                             uint32_t access, bool stack);
+        llvm::Value *processScalar(llvm::Value *imageBytes, llvm::Value *address, unsigned size,
+                                   uint32_t access);
         void stackMarks(llvm::Value *allowed, llvm::Value *offset, uint32_t access);
         void service(llvm::Value *status, llvm::Value *detail);
+        void propagatePending();
         void propagate(llvm::Value *returned);
         void fail(uint32_t fault);
         void complete(llvm::Value *rax);
@@ -34,6 +40,8 @@ namespace forge::x86 {
         llvm::Value *field(unsigned index);
         void onFailure(llvm::Value *condition, llvm::function_ref<void()> record);
         void recordFault(uint32_t fault);
+        void annotateScalarFault();
+        void recordUnsupported(forge_rt_status status);
         void returnFailure();
     };
 } // namespace forge::x86

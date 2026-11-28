@@ -128,6 +128,37 @@ class Discovery(Case):
                     self.assertIn(b"unsupported unwind version 7", p.stderr)
                 self.invoke("inspect", image, "--strict")
 
+    def test_truncated_unwind_handler_rva(self):
+        original = (FIXTURES / "executable-return.exe").read_bytes()
+        layout = Layout(original)
+        record = layout.file_offset(layout.directory(3)[0])
+        entry, _, unwind = struct.unpack_from("<III", original, record)
+        header = layout.file_offset(unwind)
+        section = layout.section_header(unwind)
+        image = self.dir / "truncated-handler.exe"
+        output = self.dir / "output"
+
+        # One code slot ends at byte six. The handler RVA begins at byte eight.
+        for flags, extent in ((1, 8), (2, 11)):
+            with self.subTest(flags=flags, extent=extent):
+                data = bytearray(original)
+                data[header:header + 4] = bytes((1 | (flags << 3), 1, 1, 0))
+                data[header + 4:header + 6] = bytes((1, 0x30))  # UWOP_PUSH_NONVOL RBX
+                struct.pack_into("<I", data, section + 8, unwind - layout.u32(section + 12) + extent)
+                image.write_bytes(data)
+
+                result = self.analyze(image, "--strict", code=3)
+                function, = result["functions"]
+                self.assertEqual((function["status"], function["liftable"]), ("invalid", False))
+                finding, = result["diagnostics"]
+                self.assertEqual(finding["code"], "INVALID_FUNCTION_RECORD")
+                self.assertIn("truncated unwind handler RVA", finding["message"])
+                for selection in (("--rva", hex(entry)), ("--executable",)):
+                    failure = self.invoke("lift", image, *selection, "--output", output,
+                                          "--diagnostics-format", "json", code=1)
+                    self.assertEqual(json.loads(failure.stderr)["code"], "ENTRY_INVALID_START")
+                    self.assertFalse(output.exists())
+
     def test_recover_readable_conflicts(self):
         data = bytearray((FIXTURES / "arithmetic.exe").read_bytes())
         info = Layout(data)
@@ -251,6 +282,50 @@ class Discovery(Case):
 
 
 class Lift(Case):
+    def test_guarded_readonly_callback(self):
+        original = (FIXTURES / "executable-guarded-call.exe").read_bytes()
+        layout = Layout(original)
+        entry = layout.u32(layout.opt + 16)
+        start = layout.file_offset(entry)
+        call = original.index(bytes.fromhex("ff d0"), start)
+        slot = entry + 11 + struct.unpack_from("<i", original, start + 7)[0]
+        base = struct.unpack_from("<Q", original, layout.opt + 24)[0]
+        cell = struct.unpack_from("<Q", original, layout.file_offset(slot))[0] - base
+        target = struct.unpack_from("<Q", original, layout.file_offset(cell))[0] - base
+        image, output = self.dir / "callback.exe", self.dir / "callback.ll"
+        args = ("lift", image, "--rva", hex(entry), "--signature", "i64(i64,i64)", "--output", output)
+        image.write_bytes(original)
+        self.invoke(*args)
+        self.assertIn(f"call void @forge_guest_{target:x}", output.read_text())
+
+        # JE lands immediately after CALL. A backedge discovered after the call
+        # must invalidate the chain even though the first traversal is sound.
+        self.assertEqual(original[call+2:call+7], bytes.fromhex("48 83 c4 28 c3"))
+        edits = [
+            ("alternate predecessor", call + 2, bytes.fromhex("75 fc c3"), "bypasses"),
+            ("argument clobbers eax", call - 2, bytes.fromhex("31 c0"), "register call"),
+            ("setup writes ebx", call - 2, bytes.fromhex("31 db"), "register call"),
+            ("null guard reversed", start + 17, b"\x75", "register call"),
+            ("target outside image", layout.file_offset(cell), struct.pack("<Q", base-1), "outside the image"),
+        ]
+        flags = layout.section_header(slot) + 36
+        edits.append(("writable cells", flags, struct.pack("<I", layout.u32(flags) | 0x80000000),
+                      "stable read-only pointer"))
+        reloc = layout.file_offset(layout.directory(5)[0])
+        page, size = struct.unpack_from("<II", original, reloc)
+        for location in (slot, cell):
+            field = next(i for i in range(reloc + 8, reloc + size, 2)
+                         if struct.unpack_from("<H", original, i)[0] == (0xa000 | (location - page)))
+            edits.append((f"missing DIR64 at {location:x}", field, b"\0\0", "exact DIR64"))
+        edits.append(("overlapping fixups", field, struct.pack("<H", 0xa000 | (slot - page)),
+                      "overlapping base relocations"))
+        for name, off, patch, detail in edits:
+            with self.subTest(name=name):
+                data = bytearray(original)
+                data[off:off+len(patch)] = patch
+                image.write_bytes(data)
+                self.assertIn(detail.encode(), self.invoke(*args, code=1).stderr)
+
     def test_signatureless_state_alignment(self):
         output = self.dir / "state.ll"
         self.invoke("lift", FIXTURES / "arithmetic.exe", "--rva", "0x1000", "--output", output)
@@ -378,7 +453,7 @@ class Lift(Case):
                 ("48 8b 45 00 c3", "undefined incoming RBP"),
                 ("f3 c3", "prefix"), ("48 48 89 c8 c3", "prefix"),
                 ("ff d0 c3", "unsupported"), ("ff e0", "unsupported"),
-                ("b8 01 00 00 00 31 c0", "outside"), ("eb 05", "outside"), ("74 01 48 89 c8 c3", "enters an instruction"),
+                ("b8 01 00 00 00 31 c0", "outside"), ("eb 06", "interior"), ("74 01 48 89 c8 c3", "enters an instruction"),
                 ("75 02 31 c0 c3", "flags"), ("e8 00 00 00 00", "unsupported"),
                 ("4c 89 c0 c3", "undefined incoming R8"), ("c3", "undefined RAX"),
                 ("48 29 c8 c3", "undefined incoming RAX"), ("44 29 c1 c3", "undefined incoming R8"),
@@ -447,6 +522,7 @@ class Lift(Case):
                 lift(code)
 
         lift("68 ff ff", "LIFT_INVALID_ENCODING", category="invalid_input")
+        lift("66 81 38 4d", "LIFT_INVALID_ENCODING", category="invalid_input")
 
         # The RIZ spelling in a SIB with a redundant scale has no index.
         lift("48 89 4c 64 08 48 8b 44 64 08 c3")
@@ -457,6 +533,12 @@ class Lift(Case):
         for code, failure in (
                 ("66 50 c3", "LIFT_UNSUPPORTED_PREFIX"),
                 ("66 c9 c3", "LIFT_UNSUPPORTED_PREFIX"),
+                ("66 83 38 ff c3", "LIFT_UNSUPPORTED_PREFIX"),  # CMP16mi8 sign-extends imm8.
+                ("66 66 81 38 4d 5a c3", "LIFT_UNSUPPORTED_PREFIX"),
+                ("67 66 81 38 4d 5a c3", "LIFT_UNSUPPORTED_PREFIX"),
+                ("f2 48 ab c3", "LIFT_UNSUPPORTED_PREFIX"),
+                ("67 f3 48 ab c3", "LIFT_UNSUPPORTED_PREFIX"),
+                ("f3 ab c3", "LIFT_UNSUPPORTED_PREFIX"),
                 ("8f 01 c3", "LIFT_UNSUPPORTED_INSTRUCTION"),
                 ("c2 08 00", "LIFT_UNSUPPORTED_CONTROL_FLOW"),
                 ("cb", "LIFT_UNSUPPORTED_CONTROL_FLOW"),
@@ -591,12 +673,52 @@ class Lift(Case):
                                      (hex(source), hex(source), hex(source), layout.file_offset(source),
                                       branch.hex(), target))
 
-        # Jumping to the same proven function entry remains an unsupported tail jump.
+        def jump(at, target):
+            return b"\xe9" + struct.pack("<i", target - at - 5)
+
         data = bytearray(original)
-        write_body(data, caller, b"\xe9" + struct.pack("<i", helper - (caller + 5)))
-        jump = diagnose(data)
-        self.assertEqual((jump["code"], jump["context"]["branch_target"], jump["context"]["opcode"]),
-                         ("LIFT_UNSUPPORTED_CONTROL_FLOW", helper, "JMP_4"))
+        write_body(data, helper, bytes.fromhex("48 89 c8 c3"))
+        write_body(data, caller, jump(caller, helper))
+        image.write_bytes(data)
+        self.invoke(*args)
+        self.assertIn(f"musttail call void @forge_guest_{helper:x}(", output.read_text())
+
+        for code, detail in (("c3", "undefined RAX"), ("74 00 89 c8 c3", "flags"),
+                             ("4c 89 c0 c3", "undefined incoming R8")):
+            with self.subTest(target_body=code):
+                write_body(data, helper, bytes.fromhex(code))
+                failure = diagnose(data)
+                self.assertIn(detail, failure["message"])
+        write_body(data, helper, bytes.fromhex("48 89 c8 c3"))
+
+        for target, detail in ((helper + 1, "interior"), (helper + 3, "interior"),
+                               (layout.directory(3)[0], "outside executable")):
+            with self.subTest(tail_target=target):
+                write_body(data, caller, jump(caller, target))
+                failure = diagnose(data)
+                self.assertIn(detail, failure["message"])
+                ctx = failure["context"]
+                self.assertEqual((ctx["instruction_rva"], ctx["branch_target"], ctx["bytes"]),
+                                 (hex(caller), target, jump(caller, target).hex()))
+
+        for target_body in (jump(helper, caller), call(helper, caller) + b"\xc3"):
+            write_body(data, helper, target_body)
+            write_body(data, caller, jump(caller, helper))
+            failure = diagnose(data)
+            self.assertIn("recursive cross-function tail transfer", failure["message"])
+            self.assertEqual(failure["context"]["opcode"], "JMP_4")
+
+        for overlap in (True, False):
+            data = bytearray(original)
+            write_body(data, caller, jump(caller, helper))
+            if overlap:
+                struct.pack_into("<III", data, records + 12, helper + 1, helper_end, unwind)
+            else:
+                data[records:records + 12] = data[records + 12:records + 24]
+            failure = diagnose(data)
+            self.assertIn("unambiguous" if overlap else "unwind-backed", failure["message"])
+            self.assertEqual((failure["context"]["instruction_rva"], failure["context"]["branch_target"]),
+                             (hex(caller), helper))
         write_body(data, caller, bytes.fromhex("ff d1"))
         indirect = diagnose(data)
         self.assertEqual((indirect["code"], indirect["context"]["opcode"]),
@@ -824,6 +946,8 @@ class Lift(Case):
         self.assertEqual((diagnostic["code"], diagnostic["context"]["opcode"],
                           diagnostic["context"]["branch_target"]),
                          ("LIFT_UNSUPPORTED_CONTROL_FLOW", "CALL64pcrel32", target))
+        self.assertEqual((diagnostic["context"]["import_dll"], diagnostic["context"]["import_symbol"],
+                          int(diagnostic["context"]["iat_slot_rva"], 16)), ("Physics.DLL", "Named", slot))
 
     def test_flag_missing_at_forward_join(self):
         image = FIXTURES / "arithmetic.exe"
@@ -959,19 +1083,39 @@ class Lift(Case):
         reloc = layout.file_offset(layout.directory(5)[0])
         struct.pack_into("<I", data, reloc, witness & ~0xfff)
         struct.pack_into("<H", data, reloc + 8, 0x1000 | (witness & 0xfff))
-        call = b"\xe8" + struct.pack("<i", callee - caller - 5)
         start = layout.file_offset(caller)
-        data[start:start + 6] = call + b"\xc3"
         program = self.dir / "relocated-callee.exe"
+        for opcode in (0xe8, 0xe9):
+            with self.subTest(opcode=opcode):
+                transfer = bytes([opcode]) + struct.pack("<i", callee - caller - 5)
+                data[start:start + 6] = transfer + b"\xc3"
+                program.write_bytes(data)
+                p = self.invoke("lift", program, "--rva", hex(caller), "--output", self.dir / "calls.ll",
+                                "--diagnostics-format", "json", code=1)
+                failure = json.loads(p.stderr)
+                self.assertEqual(failure["code"], "LIFT_UNSUPPORTED_CONTROL_FLOW")
+                self.assertIn(f"base relocation at {witness:#x}", failure["message"])
+                context = failure["context"]
+                self.assertEqual((context["instruction_rva"], context["branch_target"], context["bytes"]),
+                                 (hex(caller), callee, transfer.hex()))
+
+        # Put the TLS directory in file padding and its four-byte index inside the target.
+        data = bytearray((FIXTURES / "image.exe").read_bytes())
+        section = layout.section_header(layout.directory(3)[0])
+        size, rva, raw_size, raw = struct.unpack_from("<IIII", data, section + 8)
+        self.assertGreaterEqual(raw_size - size, 40)
+        struct.pack_into("<I", data, section + 8, size + 40)
+        struct.pack_into("<II", data, layout.directories + 9 * 8, rva + size, 40)
+        base, = struct.unpack_from("<Q", data, layout.opt + 24)
+        struct.pack_into("<QQQQII", data, raw + size, 0, 0, base + callee, 0, 0, 0)
+        data[start:start + 5] = transfer
         program.write_bytes(data)
-        p = self.invoke("lift", program, "--rva", hex(caller), "--output", self.dir / "calls.ll",
-                        "--diagnostics-format", "json", code=1)
-        failure = json.loads(p.stderr)
-        self.assertEqual(failure["code"], "LIFT_UNSUPPORTED_CONTROL_FLOW")
-        self.assertIn(f"base relocation at {witness:#x}", failure["message"])
-        context = failure["context"]
-        self.assertEqual((context["instruction_rva"], context["branch_target"], context["bytes"]),
-                         (hex(caller), callee, call.hex()))
+        result = self.invoke("lift", program, "--rva", hex(caller), "--output", self.dir / "calls.ll",
+                             "--diagnostics-format", "json", code=1)
+        failure = json.loads(result.stderr)
+        self.assertIn("loader-written", failure["message"])
+        self.assertEqual((failure["context"]["instruction_rva"], failure["context"]["branch_target"]),
+                         (hex(caller), callee))
 
 
 if __name__ == "__main__":

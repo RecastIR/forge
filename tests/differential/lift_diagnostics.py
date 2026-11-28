@@ -98,6 +98,27 @@ def validate_context(context, stage, category, code, image, selected, ir, resolv
         raise ValueError("invalid call target diagnostic lacks a resolved call site")
     if context.get("opcode") == "CALL64r" and "bytes" not in context:
         raise ValueError("register call diagnostic lacks instruction bytes")
+    local_range = False
+    range_fields = ("table_first_rva", "table_last_rva", "pointer_load_rva")
+    if (instruction_failure or code == "LIFT_FUNCTION_SIZE") and any(key in context for key in range_fields):
+        proof = tuple(context_rva(context, key) for key in range_fields)
+        target = context_rva(context, "table_target_rva") if "table_target_rva" in context else None
+        local_range = owner.start <= proof[2] < owner.end
+        if local_range:
+            if context.get("opcode") != "CALL64r":
+                raise ValueError("forward range requires a register call")
+            table_owner, site = owner, context_rva(context, "instruction_rva")
+            if "branch_target" in context and target != context["branch_target"]:
+                raise ValueError("forward call target disagrees with its branch target")
+        else:
+            if "call_site_rva" not in allowed or target != owner.start:
+                raise ValueError("forward range lacks its incoming call edge")
+            table_owner = resolve_callee(context_rva(context, "caller_rva"))
+            site = context_rva(context, "call_site_rva")
+        if register_target is None:
+            raise ValueError("forward range requires independent caller evidence")
+        register_target(table_owner, site, reported_range=proof, expected_target=target)
+        allowed.update((*range_fields, "table_target_rva"))
     if code == "LIFT_INVALID_BRANCH_TARGET" and (context.get("opcode") != "JMP64r"
             or not {"instruction_rva", "branch_target", "bytes"} <= context.keys()):
         raise ValueError("invalid branch target diagnostic lacks a dispatch site")
@@ -178,7 +199,7 @@ def validate_context(context, stage, category, code, image, selected, ir, resolv
         if context.get("opcode") == "CALL64r":
             if not register_call_encoding(encoded, rejected_prefix=code == "LIFT_UNSUPPORTED_PREFIX"):
                 raise ValueError("invalid register call encoding")
-            if code == "LIFT_INVALID_CALL_TARGET" and (register_target is None
+            if code == "LIFT_INVALID_CALL_TARGET" and not local_range and (register_target is None
                     or register_target(owner, instruction) != context["branch_target"]):
                 raise ValueError("call target disagrees with the reachable RIP-relative LEA")
         elif code == "LIFT_INVALID_CALL_TARGET":
@@ -193,7 +214,7 @@ def validate_context(context, stage, category, code, image, selected, ir, resolv
                 raise ValueError("instruction bytes disagree with the PE snapshot")
 
 
-def parse_diagnostic(raw, image, selected, ir, resolve_callee=None, register_target=None):
+def decode_diagnostic(raw):
     if not raw.endswith(b"\n") or raw.count(b"\n") != 1:
         raise ValueError("expected one newline-terminated JSON record")
     try:
@@ -204,14 +225,22 @@ def parse_diagnostic(raw, image, selected, ir, resolve_callee=None, register_tar
         raise ValueError("unsupported diagnostic schema version")
     if diagnostic.keys() != {"schema_version", "stage", "category", "code", "message", "context"}:
         raise ValueError("unexpected diagnostic fields")
-    kind = field(diagnostic, "stage", str), field(diagnostic, "category", str)
-    if field(diagnostic, "code", str) not in FAILURE_KINDS.get(kind, ()):
-        raise ValueError("unrecognized diagnostic stage, category and code combination")
+    for key in ("stage", "category", "code"):
+        field(diagnostic, key, str)
+    field(diagnostic, "context", dict)
     message = field(diagnostic, "message", str)
     if not message.strip():
         raise ValueError("empty diagnostic message")
     # Escaped unpaired surrogates can survive JSON parsing but cannot be reported as UTF-8.
     message.encode("utf-8")
-    validate_context(field(diagnostic, "context", dict), *kind, diagnostic["code"], image,
+    return diagnostic
+
+
+def parse_diagnostic(raw, image, selected, ir, resolve_callee=None, register_target=None):
+    diagnostic = decode_diagnostic(raw)
+    kind = diagnostic["stage"], diagnostic["category"]
+    if diagnostic["code"] not in FAILURE_KINDS.get(kind, ()):
+        raise ValueError("unrecognized diagnostic stage, category and code combination")
+    validate_context(diagnostic["context"], *kind, diagnostic["code"], image,
                      selected, ir, resolve_callee, register_target)
     return diagnostic

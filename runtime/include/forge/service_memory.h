@@ -29,8 +29,14 @@ namespace forge::win64 {
       public:
         bool absent() const { return arg.optional && !start.value; }
 
+        uint64_t byteSize() const
+            requires(arg.extent == Extent::InitializerEnd || arg.extent == Extent::ElementProduct)
+        {
+            return size;
+        }
+
         forge_rt_status validate() const
-            requires(arg.extent != Extent::CString)
+            requires(arg.extent != Extent::CString && arg.extent != Extent::FormatArguments)
         {
             constexpr uint32_t access = (arg.access != Access::Output ? FORGE_RT_READ : 0u) |
                                         (arg.writes() ? FORGE_RT_WRITE : 0u);
@@ -83,7 +89,14 @@ namespace forge::win64 {
             return write(offset, {reinterpret_cast<const uint8_t *>(&value), sizeof(T)});
         }
 
+        auto stringOperand(GuestAddress address) const
+            requires(arg.extent == Extent::FormatArguments)
+        {
+            return GuestBuffer<crtFormatStringOperand>(call, address, crtFormatStringOperand.size);
+        }
+
       private:
+        template <Argument> friend class GuestBuffer;
         template <const ServiceBinding &binding, size_t position, class... Args>
         friend auto guestBuffer(ServiceInvocation &, const std::tuple<Args...> &);
 
@@ -128,10 +141,32 @@ namespace forge::win64 {
         uint64_t size = UINT64_MAX;
         if constexpr (arg.extent == Extent::CountArgument) {
             size = std::get<arg.size>(arguments);
-        } else if constexpr (arg.extent == Extent::Fixed) {
+        } else if constexpr (arg.extent == Extent::Fixed || arg.extent == Extent::FormatArguments ||
+                             (arg.extent == Extent::CString && arg.size)) {
             size = arg.size;
         }
 
-        return GuestBuffer<arg>(call, {std::get<position>(arguments)}, size);
+        const GuestAddress first{std::get<position>(arguments)};
+
+        if constexpr (arg.extent == Extent::InitializerEnd) {
+            using Table = std::optional<GuestBuffer<arg>>;
+            const auto bytes = initializerRangeBytes(first.value, std::get<arg.size>(arguments));
+
+            if (!bytes) {
+                return Table{};
+            }
+
+            return Table{GuestBuffer<arg>(call, first, *bytes)};
+        } else if constexpr (arg.extent == Extent::ElementProduct) {
+            using Buffer = std::optional<GuestBuffer<arg>>;
+            const auto bytes =
+                elementBytes(std::get<arg.size>(arguments), std::get<arg.size + 1>(arguments));
+            if (!bytes) {
+                return Buffer{};
+            }
+            return Buffer{GuestBuffer<arg>(call, first, *bytes)};
+        } else {
+            return GuestBuffer<arg>(call, first, size);
+        }
     }
 } // namespace forge::win64

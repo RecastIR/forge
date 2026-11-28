@@ -53,6 +53,10 @@ class CoverageTests(ArtifactSetup):
         digest = diff.sha256(self.forge.read_bytes())
         needs["macos-sanitize"]["outputs"]["debug_forge"] = digest
         needs["macos-dev"]["outputs"]["release_forge"] = digest
+        needs["macos-dev"]["outputs"]["capture_requested"] = "false"
+        needs["macos-dev"]["outputs"]["query_requested"] = "false"
+        for job in ("macos-dev", "windows-executable-reference"):
+            needs[job]["outputs"]["executable_inputs_sha256"] = "f" * 64
         needs["differential"]["outputs"]["evidence_run_id"] = self.run_id
         return needs
 
@@ -86,6 +90,60 @@ class CoverageTests(ArtifactSetup):
                     self.assertEqual(report["gate"], "failed")
                     self.assertIn(f"{job}: {outcome}", report["errors"])
 
+    def test_windows_capture_required_when_requested(self):
+        needs = self.needs()
+        job = "legacy-windows-capture"
+        needs[job] = {"result": "skipped", "outputs": {}}
+        self.assertEqual(self.hosted(needs)["gate"], "passed")
+        needs["macos-dev"]["outputs"]["capture_requested"] = "true"
+        needs["wine-query-capture"] = {"result": "success", "outputs": {"stages": '{"query": "success"}'}}
+        needs["macos-dev"]["outputs"]["query_requested"] = "true"
+        del needs[job]
+        self.assertEqual(self.hosted(needs)["gate"], "failed")
+        complete = dict.fromkeys(("termination", "abort", "query", "sdk"), "success")
+        for outcome in ("skipped", "failure", "cancelled", "success"):
+            with self.subTest(outcome=outcome):
+                needs[job] = {"result": outcome, "outputs": {"stages": json.dumps(complete)}}
+                self.assertEqual(self.hosted(needs)["gate"], "passed" if outcome == "success" else "failed")
+
+        needs[job] = {"result": "success", "outputs": {}}
+        self.assertEqual(self.hosted(needs)["gate"], "failed")
+        for observer in complete:
+            for outcome in (None, "skipped", "failure", "cancelled"):
+                with self.subTest(observer=observer, outcome=outcome):
+                    stages = complete.copy()
+                    if outcome is None:
+                        del stages[observer]
+                    else:
+                        stages[observer] = outcome
+                    needs[job]["outputs"]["stages"] = json.dumps(stages)
+                    report = self.hosted(needs)
+                    self.assertEqual(report["gate"], "failed")
+                    self.assertIn(f"{job}: {observer}={outcome or 'not_run'}", report["errors"])
+
+    def test_requested_query_requires_independent_wine_capture(self):
+        needs = self.needs()
+        # An unrelated compatibility observer can be skipped when only query was selected.
+        needs["macos-dev"]["outputs"]["query_requested"] = "true"
+        windows = dict(query="success", sdk="success", termination="skipped", abort="skipped")
+        needs["legacy-windows-capture"] = {"result": "success", "outputs": {"stages": json.dumps(windows)}}
+        for job, observer in (("skipped", None), ("failure", "failure"), ("success", "skipped"),
+                              ("success", None), ("success", "success")):
+            with self.subTest(job=job, observer=observer):
+                stages = {"query": observer} if observer else {}
+                needs["wine-query-capture"] = {"result": job, "outputs": {"stages": json.dumps(stages)}}
+                self.assertEqual(self.hosted(needs)["gate"], "passed" if observer == "success" else "failed")
+
+    def test_windows_capture_requires_an_explicit_decision(self):
+        needs = self.needs()
+        outputs = needs["macos-dev"]["outputs"]
+        for decision in ("capture_requested", "query_requested"):
+            del outputs[decision]
+            self.assertEqual(self.hosted(needs)["gate"], "failed")
+            outputs[decision] = "invalid"
+            self.assertEqual(self.hosted(needs)["gate"], "failed")
+            outputs[decision] = "false"
+
     def test_green_jobs_require_complete_stage_outputs(self):
         valid = self.needs()
         for job, required in coverage.JOB_STAGES.items():
@@ -104,6 +162,22 @@ class CoverageTests(ArtifactSetup):
                 needs = copy.deepcopy(valid)
                 needs["macos-presets"]["outputs"] = outputs
                 self.assertEqual(self.hosted(needs)["gate"], "failed")
+
+    def test_wine_requires_the_native_tested_pe_inputs(self):
+        valid = self.needs()
+        self.assertEqual(self.hosted(valid)["executable_inputs_sha256"], "f" * 64)
+        for job in ("macos-dev", "windows-executable-reference"):
+            for value in (None, "invalid", "0" * 64):
+                with self.subTest(job=job, value=value):
+                    needs = copy.deepcopy(valid)
+                    if value is None:
+                        del needs[job]["outputs"]["executable_inputs_sha256"]
+                    else:
+                        needs[job]["outputs"]["executable_inputs_sha256"] = value
+                    report = self.hosted(needs)
+                    self.assertEqual(report["gate"], "failed")
+                    self.assertNotIn("executable_inputs_sha256", report)
+                    self.assertTrue(any("standalone PE input checksums" in error for error in report["errors"]))
 
     def test_both_tested_binaries_are_required(self):
         for config, job in (("debug", "macos-sanitize"), ("release", "macos-dev")):

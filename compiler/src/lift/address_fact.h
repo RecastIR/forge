@@ -42,11 +42,17 @@ namespace forge::x86 {
         // Widened symbolic alternatives must survive a loop join even though
         // they authorize no new executable bytes.
         bool tracksSpill() const {
-            return !unknown || displacement || !returns.empty() || widenedReturns;
+            return !unknown || displacement || !returns.empty() || widenedReturns || processOffset;
         }
 
         static AddressFact frameStack(uint64_t offset = 0);
         static AddressFact continuation(uint32_t callee);
+        // The offset is also the possible numeric VA when allocation returned NULL.
+        static AddressFact processStorage(uint64_t allocationSize = 0);
+
+        bool pointsToProcessStorage() const { return processOffset == 0; }
+
+        std::optional<uint64_t> allocationOffset() const { return processOffset; }
 
         std::optional<uint64_t> frameOffset() const { return displacement; }
 
@@ -71,6 +77,8 @@ namespace forge::x86 {
         bool unknown = true;
         // Widening is absorbing at a join, including on a loop backedge.
         bool widenedReturns = false;
+        std::optional<uint64_t> processOffset;
+        uint64_t allocationSize = 0;
 
         void includeAddress(uint64_t va);
         void includeReturn(Continuation source);

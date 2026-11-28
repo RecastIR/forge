@@ -222,6 +222,22 @@ namespace {
         }
     }
 
+    void checkWordCompare(IntegerSemantics &semantics, IRBuilder<> &ir) {
+        const auto cmp = integerInstruction("CMP16mi");
+        if (!cmp || cmp->op != Op::Cmp || cmp->form != Form::MemoryImmediate || cmp->width != 16 ||
+            cmp->sourceWidth != 16 || integerInstruction("CMP16mi8") ||
+            integerInstruction("CMP32mi")) {
+            throw std::runtime_error("incorrect CMP memory/immediate forms");
+        }
+
+        semantics.arithmetic(cmp->op, ir.getInt16(0x8000), ir.getInt16(0x7fff));
+        expectFlags(semantics.flags, 0x810, 0x8d5,
+                    "word comparison with overflow and nibble borrow");
+        semantics.arithmetic(cmp->op, ir.getInt16(0), ir.getInt16(0x8000));
+        expectFlags(semantics.flags, 0x885, 0x8d5,
+                    "word comparison with carry and signed overflow");
+    }
+
     void check() {
         LLVMContext context;
         Module module("integer-tests", context);
@@ -230,6 +246,7 @@ namespace {
         IRBuilder<> ir(BasicBlock::Create(context, "entry", fn));
         IntegerSemantics semantics(ir);
         checkWideCarry(semantics, ir);
+        checkWordCompare(semantics, ir);
         constexpr unsigned all = 0x8d5;
         constexpr unsigned status = 0xc4;
 

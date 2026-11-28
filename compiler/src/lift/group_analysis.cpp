@@ -42,18 +42,21 @@ namespace forge::x86 {
         };
 
         struct CallInputs {
-            AddressFact rsp;
-            std::array<AddressFact, 4> arguments;
+            // Frame offsets use the original return slot, including across tail transfers.
+            AddressFact frameRsp;
+            bool callbackFrame = false;
+            AddressFacts facts;
+
+            explicit CallInputs(AddressFact frameRsp) : frameRsp(std::move(frameRsp)) {
+                facts.registers[rspIndex] = AddressFact::frameStack();
+            }
 
             bool merge(const CallInputs &other) {
-                const auto before = *this;
-                rsp = rsp.join(other.rsp);
-
-                for (size_t i = 0; i < arguments.size(); ++i) {
-                    arguments[i] = arguments[i].join(other.arguments[i]);
-                }
-
-                return rsp != before.rsp || arguments != before.arguments;
+                const auto rsp = frameRsp.join(other.frameRsp);
+                const bool changed = rsp != frameRsp || (other.callbackFrame && !callbackFrame);
+                callbackFrame |= other.callbackFrame;
+                frameRsp = rsp;
+                return facts.merge(other.facts, frameRsp) || changed;
             }
         };
 
@@ -97,6 +100,15 @@ namespace forge::x86 {
                         pending.insert(caller);
                     }
 
+                    // Another alternative may already have resumed the caller past this
+                    // site and suspended it at a later call in the same block.
+                    for (const auto *site : sites) {
+                        if (site->table() && site->guestTargets().size() > 1 &&
+                            functions.contains(site->caller)) {
+                            functions.at(site->caller).restart = true;
+                            pending.insert(site->caller);
+                        }
+                    }
                     state.waiting.clear();
                     return;
                 }
@@ -126,15 +138,16 @@ namespace forge::x86 {
           public:
             FunctionAnalyzer(const RecoveredFunctionGroup &group, uint32_t rva,
                              const InstructionOperands &operands, ImageMemory &imageMemory,
-                             FunctionPlan &plan)
+                             FunctionPlan &plan, const std::vector<uint32_t> &terminationTargets)
                 : group(group), function(group.function(rva)), rva(rva), operands(operands),
-                  imageMemory(imageMemory), plan(plan) {}
+                  imageMemory(imageMemory), plan(plan), terminationTargets(terminationTargets) {}
 
             void summarizeFunction(FunctionFlow &flow);
             void analyzeAddresses(CallAddresses &calls);
             void collectAddresses(CallAddresses &calls);
             bool accessesMemory = false;
             bool tracksOrigins = false;
+            bool setsDirection = false;
 
           private:
             const RecoveredFunctionGroup &group;
@@ -143,7 +156,9 @@ namespace forge::x86 {
             const InstructionOperands &operands;
             ImageMemory &imageMemory;
             FunctionPlan &plan;
+            const std::vector<uint32_t> &terminationTargets;
             AddressFact entryAddresses;
+            bool callbackFrame = false;
             std::map<uint32_t, AddressFacts> blockAddresses;
 
             struct AddressCursor {
@@ -154,14 +169,17 @@ namespace forge::x86 {
             std::map<uint32_t, AddressCursor> suspendedBlocks;
             void recordWrite(DefinitionEffect &state, RegisterView view);
             void requireMemory(const Step &s);
-            void planMemoryAccess(const Step &s, const IntegerInstruction &op,
+            void planMemoryAccess(const Step &s, unsigned width, bool write,
                                   const AddressOperand &operand, const AddressFact &address);
             void traceStackInstruction(const Step &s, StackOp op, AddressFacts &facts) const;
             AddressFact integerFact(const Step &s, const IntegerInstruction &op, RegisterView dest,
                                     const AddressFacts &facts) const;
             void traceInteger(const Step &s, const IntegerInstruction &op, AddressFacts &facts,
                               bool collect, const std::optional<RelativeTable> &table);
+            void traceRepeatedStore(const Step &s, AddressFacts &facts, bool collect);
             AddressFact savedAddress(const AddressFacts &facts, const AddressFact &address) const;
+            void traceProtectionArguments(const ResolvedCallSite &site, AddressFacts &facts,
+                                          bool collect) const;
             void traceServiceArguments(const ResolvedCallSite &site, AddressFacts &facts,
                                        bool collect) const;
             bool traceCall(const ResolvedCallSite &site, AddressFacts &facts, CallAddresses &calls,
@@ -245,13 +263,19 @@ namespace forge::x86 {
             return dest.width == 64 ? sum : sum.masked(dest.mask());
         }
 
-        void FunctionAnalyzer::planMemoryAccess(const Step &s, const IntegerInstruction &op,
+        void FunctionAnalyzer::planMemoryAccess(const Step &s, unsigned width, bool write,
                                                 const AddressOperand &operand,
                                                 const AddressFact &address) {
-            const bool write = memoryDestination(op.form) && op.op != Op::Cmp;
+            if (callbackFrame && address.frameOffset()) {
+                const auto offset = std::bit_cast<int64_t>(*address.frameOffset());
+                if (offset > int64_t{GuestMemory::initializerHomeEnd} - width / 8) {
+                    s.reject(FailureCode::UnsupportedControlFlow,
+                             "initializer has no incoming Windows x64 stack arguments");
+                }
+            }
 
             if (!operand.base && !operand.index) {
-                imageMemory.fixedAccess(s, operand.displacement, op.sourceWidth, write);
+                imageMemory.fixedAccess(s, operand.displacement, width, write);
                 return;
             }
 
@@ -261,12 +285,11 @@ namespace forge::x86 {
             }
 
             for (const auto &origin : address.continuations()) {
-                imageMemory.continuationAccess(s, origin, group.function(origin.callee).incoming,
-                                               op.sourceWidth, write);
+                imageMemory.continuationAccess(s, origin, group, width, write);
             }
 
             if (address.hasUnknown()) {
-                imageMemory.computedAccess(s, std::nullopt, op.sourceWidth, write);
+                imageMemory.computedAccess(s, std::nullopt, width, write);
             }
 
             auto onStack = [](uint64_t va) {
@@ -279,7 +302,7 @@ namespace forge::x86 {
             }
 
             for (auto va : address.values()) {
-                imageMemory.computedAccess(s, va, op.sourceWidth, write);
+                imageMemory.computedAccess(s, va, width, write);
             }
         }
 
@@ -337,19 +360,32 @@ namespace forge::x86 {
             }
 
             const auto operand = operands.decodeAddress(s, memoryOperand(s, op), true);
+            if (operand.gsRelative) {
+                // The NT_TIB self pointer is read from process-owned guest memory.
+                auto dest = operands.destination(s, op);
+                facts.registers[dest.index] = {};
+                return;
+            }
             const auto address = addressFact(operand, facts);
 
+            // The call-site proof already selected the guest bytes for each bounded access.
             if (collect && table && table->loadRva == s.rva) {
                 imageMemory.tableRead(s, *table);
-            } else if (collect) {
-                planMemoryAccess(s, op, operand, address);
+            } else if (collect && !plan.tableInstructions.contains(s.rva)) {
+                planMemoryAccess(s, op.sourceWidth, memoryDestination(op.form) && op.op != Op::Cmp,
+                                 operand, address);
             }
 
             if (writesRegister(op)) {
                 auto dest = operands.destination(s, op);
-                facts.registers[dest.index] = op.op == Op::Mov && dest.width == 64
-                                                  ? savedAddress(facts, address)
-                                                  : AddressFact{};
+                AddressFact value;
+                if (op.op == Op::Mov && op.sourceWidth == 64 && dest.width == 64) {
+                    value = !operand.base && !operand.index &&
+                                    imageMemory.isDataImportPointer(operand.displacement)
+                                ? AddressFact::processStorage()
+                                : savedAddress(facts, address);
+                }
+                facts.registers[dest.index] = std::move(value);
             } else if (memoryDestination(op.form) && op.op != Op::Cmp) {
                 AddressFact stored;
 
@@ -411,22 +447,167 @@ namespace forge::x86 {
             }
         }
 
+        void FunctionAnalyzer::traceRepeatedStore(const Step &s, AddressFacts &facts,
+                                                  bool collect) {
+            auto &destination = facts.registers[stringDestination.index];
+            auto &count = facts.registers[repeatCount.index];
+            const auto starts = destination.project(entryAddresses);
+            const auto counts = count.project(entryAddresses);
+            const auto largest = counts.known() ? *llvm::max_element(counts.values()) : UINT64_MAX;
+            count = AddressFact(0);
+
+            if (!largest) {
+                return;
+            }
+
+            // A bounded count can touch either side of RDI depending on DF. Preserve
+            // disjoint saved addresses, and select the stack path only when every
+            // qword of both possible traversals is within the guest stack.
+            if (largest <= GuestMemory::capacity / 8) {
+                const uint64_t size = largest * 8;
+                const auto lowest = destination.plus(AddressFact(8 - size));
+                invalidateServiceOutput(facts.spills, lowest, entryAddresses, size);
+                invalidateServiceOutput(facts.spills, destination, entryAddresses, size);
+
+                if (collect && starts.known() && llvm::all_of(starts.values(), [&](uint64_t va) {
+                        const auto offset = va - GuestMemory::base;
+                        return offset >= size - 8 && offset <= GuestMemory::capacity - size;
+                    })) {
+                    plan.stackAccesses.insert(s.rva);
+                }
+            } else {
+                facts.spills = {};
+            }
+
+            if (collect && !plan.stackAccesses.contains(s.rva)) {
+                imageMemory.computedAccess(s, std::nullopt, 64, true);
+            }
+
+            const auto forward = destination.plus(counts.times(8));
+            destination = forward.joinInFrame(destination.plus(counts.times(uint64_t{0} - 8)),
+                                              entryAddresses);
+        }
+
+        void FunctionAnalyzer::traceProtectionArguments(const ResolvedCallSite &site,
+                                                        AddressFacts &facts, bool collect) const {
+            const auto &binding = site.external()->binding;
+            const bool change = binding.nativeSymbol == win64::virtualProtect.nativeSymbol;
+            // Read the incoming arguments before invalidating spills the service may overwrite.
+            const unsigned outIndex = change ? 3 : 1;
+            const auto outputSize = binding.arguments[outIndex].size;
+            const auto sizes =
+                facts.serviceValue(binding, change ? 1 : 2, entryAddresses).project(entryAddresses);
+            if (!change && sizes.known() && std::ranges::max(sizes.values()) < outputSize) {
+                return;
+            }
+
+            const auto target =
+                change ? facts.serviceValue(binding, 0, entryAddresses) : AddressFact{};
+            const auto output = facts.serviceValue(binding, outIndex, entryAddresses);
+            invalidateServiceOutput(facts.spills, output, entryAddresses, outputSize);
+            if (!collect) {
+                return;
+            }
+
+            const auto &step = *function.instructionContaining(site.instruction);
+            const auto select = [&](const AddressFact &address, auto known) {
+                if (address.known()) {
+                    for (const auto va : address.values()) {
+                        known(va);
+                    }
+                } else if (!address.stackDerived() && !address.pointsToProcessStorage() &&
+                           !address.frameOffset()) {
+                    imageMemory.computedAccess(step, std::nullopt, 8, true);
+                }
+            };
+
+            select(output,
+                   [&](uint64_t va) { imageMemory.protectionOutput(step, va, outputSize); });
+            if (!change) {
+                // VirtualQuery describes a VA, even when the program has no byte access there.
+                return;
+            }
+
+            const auto selectTarget = [&](std::optional<uint64_t> size) {
+                if (size != 0) {
+                    select(target,
+                           [&](uint64_t va) { imageMemory.protectionTarget(step, va, size); });
+                }
+            };
+
+            if (sizes.known()) {
+                for (const auto size : sizes.values()) {
+                    selectTarget(size);
+                }
+            } else {
+                selectTarget(std::nullopt);
+            }
+        }
+
+        std::optional<uint64_t> elementExtent(const AddressFact &widths,
+                                              const AddressFact &counts) {
+            if ((widths.known() && std::ranges::max(widths.values()) == 0) ||
+                (counts.known() && std::ranges::max(counts.values()) == 0)) {
+                return 0;
+            }
+            if (!widths.known() || !counts.known()) {
+                return std::nullopt;
+            }
+
+            uint64_t largest = 0;
+            for (const auto width : widths.values()) {
+                for (const auto count : counts.values()) {
+                    // Overflowing paths return before reading the pointer.
+                    largest = std::max(largest, win64::elementBytes(width, count).value_or(0));
+                }
+            }
+            return largest;
+        }
+
         void FunctionAnalyzer::traceServiceArguments(const ResolvedCallSite &site,
                                                      AddressFacts &facts, bool collect) const {
             const auto &binding = site.external()->binding;
+            if (binding.nativeSymbol == win64::virtualProtect.nativeSymbol ||
+                binding.nativeSymbol == win64::virtualQuery.nativeSymbol) {
+                traceProtectionArguments(site, facts, collect);
+                return;
+            }
+
+            if (binding.nativeSymbol == win64::crtVfprintf.nativeSymbol) {
+                if (collect) {
+                    const auto formats =
+                        facts.serviceValue(binding, 1, entryAddresses).project(entryAddresses);
+                    imageMemory.formattedInputs(*function.instructionContaining(site.instruction),
+                                                formats.known() ? formats.values()
+                                                                : llvm::ArrayRef<uint64_t>{});
+                }
+
+                return;
+            }
+
             // Read all arguments from the incoming state, even when an earlier parameter
             // can overwrite the stack slot that supplies another parameter or its count.
             auto outgoing = facts.spills;
-
             for (size_t i = 0; i < binding.arguments.size(); ++i) {
                 const auto arg = binding.arguments[i];
                 if (arg.access == win64::Access::None || (!collect && !arg.writes())) {
                     continue;
                 }
 
+                if (arg.extent == win64::Extent::InitializerEnd) {
+                    // Recovery proves both bounds, including bounds read through
+                    // immutable pointer cells. The whole table is selected at the site.
+                    continue;
+                }
+
                 std::optional<uint64_t> size;
                 if (arg.extent == win64::Extent::Fixed) {
                     size = arg.size;
+                } else if (arg.extent == win64::Extent::ElementProduct) {
+                    const auto width = facts.serviceValue(binding, arg.size, entryAddresses);
+                    const auto count = facts.serviceValue(binding, arg.size + 1, entryAddresses);
+                    size =
+                        elementExtent(width.project(entryAddresses), count.project(entryAddresses));
                 } else if (arg.extent == win64::Extent::CountArgument) {
                     const auto count = facts.serviceValue(binding, arg.size, entryAddresses)
                                            .project(entryAddresses);
@@ -444,8 +625,13 @@ namespace forge::x86 {
                     invalidateServiceOutput(outgoing, address, entryAddresses, size);
                 }
 
-                if (!collect || address.stackDerived() ||
-                    (address.frameOffset() && !address.known())) {
+                // A failed allocation plus the same nonzero offset could alias PE data
+                // at a low guest base. Such a string still requires image provenance.
+                const auto offset = address.allocationOffset();
+                const bool heapString = arg.extent == win64::Extent::CString && arg.size &&
+                                        offset && !imageMemory.containsImageAddress(*offset);
+                if (!collect || address.stackDerived() || address.pointsToProcessStorage() ||
+                    heapString || (address.frameOffset() && !address.known())) {
                     continue;
                 }
 
@@ -454,16 +640,36 @@ namespace forge::x86 {
                     step.reject(FailureCode::ImageMemory,
                                 "argument " + std::to_string(i + 1) + " to " +
                                     std::string(binding.name) +
-                                    " requires proven image/stack provenance or bounded address "
+                                    " requires proven image/stack provenance, process storage or "
+                                    "bounded address "
                                     "alternatives");
                 }
 
                 for (const auto va : address.values()) {
-                    imageMemory.serviceArgument(step, va, arg.writes(), size);
+                    imageMemory.serviceArgument(step, va, arg, size);
                 }
             }
 
             facts.spills = std::move(outgoing);
+        }
+
+        AddressFact serviceResult(const win64::ServiceBinding &binding, const AddressFacts &facts) {
+            if (!binding.returnsProcessStorage) {
+                return {};
+            }
+
+            const bool calloc = binding.nativeSymbol == win64::crtCalloc.nativeSymbol;
+            if (calloc || binding.nativeSymbol == win64::crtMalloc.nativeSymbol) {
+                const auto &first = facts.registers[ServiceLocation{0}.registerIndex()];
+                const auto &second = facts.registers[ServiceLocation{1}.registerIndex()];
+                if (first.known() && first.values().size() == 1 &&
+                    (!calloc || (second.known() && second.values().size() == 1))) {
+                    const auto size = win64::elementBytes(first.values().front(),
+                                                          calloc ? second.values().front() : 1);
+                    return AddressFact::processStorage(size.value_or(0));
+                }
+            }
+            return AddressFact::processStorage();
         }
 
         bool FunctionAnalyzer::traceCall(const ResolvedCallSite &site, AddressFacts &facts,
@@ -471,7 +677,35 @@ namespace forge::x86 {
             if (site.external()) {
                 traceServiceArguments(site, facts, collect);
 
+                std::span<const uint32_t> targets;
+                if (const auto &table = site.external()->initializers) {
+                    targets = table->targets;
+                } else if (site.external()->binding.callback == win64::Callback::Cleanup) {
+                    targets = terminationTargets;
+                }
+
+                if (!targets.empty()) {
+                    if (!collect) {
+                        // Relative to the guest caller's pre-CALL RSP, the imported
+                        // CALL and native callback frame both consume stack space.
+                        const auto rsp = facts.registers[rspIndex]
+                                             .project(entryAddresses)
+                                             .plus(AddressFact(uint64_t(0) - 8 -
+                                                               GuestMemory::initializerFrameSize));
+                        for (auto target : targets) {
+                            CallInputs callback(rsp);
+                            callback.callbackFrame = true;
+                            calls.enter(target, callback);
+                        }
+                    }
+
+                    // A callback can change guest storage through aliases.
+                    facts.spills = {};
+                }
+
+                auto result = serviceResult(site.external()->binding, facts);
                 std::fill_n(facts.registers.begin(), callerSlots, AddressFact{});
+                facts.registers[0] = std::move(result);
                 // CALL itself overwrites the slot below the caller's RSP.
                 const auto slot = facts.registers[rspIndex].plus(AddressFact(uint64_t(0) - 8));
                 facts.spills.write(slot, 64, {});
@@ -479,32 +713,42 @@ namespace forge::x86 {
             }
 
             if (!collect) {
-                CallInputs inputs;
-                inputs.rsp = facts.registers[rspIndex]
-                                 .project(entryAddresses)
-                                 .plus(AddressFact(uint64_t(0) - 8));
-
-                for (size_t i = 0; i < inputs.arguments.size(); ++i) {
-                    inputs.arguments[i] = facts.registers[i + 1].project(entryAddresses);
+                if (site.isTailJump()) {
+                    CallInputs inputs(entryAddresses);
+                    inputs.callbackFrame = callbackFrame;
+                    inputs.facts = facts;
+                    calls.enter(site.guest().rva, inputs);
+                } else {
+                    const auto rsp = facts.registers[rspIndex]
+                                         .project(entryAddresses)
+                                         .plus(AddressFact(uint64_t(0) - 8));
+                    CallInputs inputs(rsp);
+                    for (size_t i = 1; i <= 4; ++i) {
+                        inputs.facts.registers[i] = facts.registers[i].project(entryAddresses);
+                    }
+                    for (const auto target : site.guestTargets()) {
+                        calls.enter(target, inputs);
+                    }
                 }
-
-                calls.enter(site.guest().rva, inputs);
             }
 
-            auto &callee = calls.functions.at(site.guest().rva);
-
-            if (!callee.returned) {
-                if (!collect) {
+            std::optional<AddressFact> returned;
+            for (const auto target : site.guestTargets()) {
+                auto &callee = calls.functions.at(target);
+                if (callee.returned) {
+                    returned = returned ? returned->join(*callee.returned) : *callee.returned;
+                } else if (!collect) {
                     callee.waiting.emplace(site.caller, site.block);
                 }
-
+            }
+            if (!returned) {
                 return false;
             }
 
             // Checked returns preserve RSP and nonvolatiles. Any other volatile
             // or saved stack value can have changed through a register or alias.
             std::fill_n(facts.registers.begin(), callerSlots, AddressFact{});
-            facts.registers[0] = *callee.returned;
+            facts.registers[0] = *returned;
             facts.spills = {};
             return true;
         }
@@ -525,6 +769,27 @@ namespace forge::x86 {
 
                 if (auto stack = stackInstruction(s.opcode)) {
                     traceStackInstruction(s, *stack, facts);
+                    continue;
+                }
+
+                if (s.isRepeatedQwordStore()) {
+                    traceRepeatedStore(s, facts, collect);
+                    continue;
+                }
+
+                if (s.isAtomicExchange()) {
+                    const auto operand =
+                        operands.decodeAddress(s, s.isLockedCompareExchange() ? 0 : 2, true);
+                    const auto address = addressFact(operand, facts);
+                    if (collect) {
+                        planMemoryAccess(s, 64, true, operand, address);
+                    }
+
+                    const auto dest = s.isLockedCompareExchange()
+                                          ? RegisterView{0, 64}
+                                          : operands.reg(s, s.inst.getOperand(0), 64);
+                    facts.registers[dest.index] = {};
+                    facts.spills.write(address, 64, {});
                     continue;
                 }
 
@@ -572,13 +837,9 @@ namespace forge::x86 {
                 suspendedBlocks.clear();
                 pending = {rva};
 
-                entryAddresses = state.entry.rsp;
-                auto &registers = blockAddresses[rva].registers;
-                const auto &arguments = state.entry.arguments;
-                std::copy(arguments.begin(), arguments.end(), registers.begin() + 1);
-                registers[rspIndex] = incoming.empty()
-                                          ? AddressFact(GuestMemory::entryRsp, AddressFact::Stack)
-                                          : AddressFact::frameStack();
+                entryAddresses = state.entry.frameRsp;
+                callbackFrame = state.entry.callbackFrame;
+                blockAddresses[rva] = state.entry.facts;
             }
 
             while (!pending.empty()) {
@@ -596,7 +857,7 @@ namespace forge::x86 {
                     continue;
                 }
 
-                if (block.exit == Flow::Return) {
+                if (block.exit == Flow::Return || block.exit == Flow::TailJump) {
                     calls.recordReturn(rva, cursor.facts.registers[0].project(entryAddresses),
                                        incoming);
                 }
@@ -622,6 +883,32 @@ namespace forge::x86 {
         }
 
         void FunctionAnalyzer::summarize(const Step &s, DefinitionEffect &state) {
+            setsDirection |= s.opcode == "STD";
+
+            if (s.isAtomicExchange()) {
+                requireMemory(s);
+                const auto compare = s.isLockedCompareExchange();
+                const auto dest =
+                    compare ? RegisterView{0, 64} : operands.reg(s, s.inst.getOperand(0), 64);
+                recordWrite(state, dest);
+                if (compare) {
+                    state.flags.generated.set();
+                    state.flags.carried.set();
+                }
+
+                return;
+            }
+
+            if (s.isRepeatedQwordStore()) {
+                requireMemory(s);
+                // A successful nonempty operation consumes RDI before updating it;
+                // a zero count preserves its original bits and origin marks.
+                plan.modified.set(stringDestination.index);
+                tracksOrigins = true;
+                recordWrite(state, repeatCount);
+                return;
+            }
+
             if (auto op = stackInstruction(s.opcode)) {
                 requireMemory(s);
                 tracksOrigins = true;
@@ -686,7 +973,14 @@ namespace forge::x86 {
                 try {
                     for (const auto &s : block.steps) {
                         if (const auto *site = function.callAt(s.rva)) {
-                            requireMemory(s);
+                            if (!site->isTailJump()) {
+                                requireMemory(s);
+                            }
+                            if (const auto *service = site->external();
+                                service && service->initializers) {
+                                const auto &table = *service->initializers;
+                                imageMemory.initializerTable(s, table.first, table.last);
+                            }
                             effects.calls.push_back({site, std::exchange(effects.tail, {})});
                         } else {
                             summarize(s, effects.tail);
@@ -698,13 +992,53 @@ namespace forge::x86 {
                 }
             }
         }
+
+        void propagateTailWrites(const RecoveredFunctionGroup &group, GroupAnalysis &result) {
+            // One real guest frame covers every tail successor. Only writes along such
+            // edges extend its capture set; ordinary callees validate their own returns.
+            std::set<uint32_t> changed;
+            for (const auto &[rva, function] : group.functions()) {
+                if (llvm::any_of(function.incoming,
+                                 [](const auto *site) { return site->isTailJump(); })) {
+                    result.hasTailJumps = true;
+                    changed.insert(rva);
+                }
+            }
+
+            while (!changed.empty()) {
+                const auto rva = changed.extract(changed.begin()).value();
+                for (const auto *site : group.function(rva).incoming) {
+                    if (site->isTailJump()) {
+                        auto &modified = result.functions.at(site->caller).modified;
+                        const auto merged = modified | result.functions.at(rva).modified;
+                        if (modified != merged) {
+                            modified = merged;
+                            changed.insert(site->caller);
+                        }
+                    }
+                }
+            }
+        }
     } // namespace
+
+    Defined entryRegisterDefinitions(EntryMode mode) {
+        Defined registers{};
+        registers[rspIndex] = UINT64_MAX;
+
+        if (mode == EntryMode::RegisterState) {
+            std::fill_n(registers.begin(), callerSlots, UINT64_MAX);
+        } else if (mode == EntryMode::WindowsX64I64Pair) {
+            registers[1] = registers[2] = UINT64_MAX;
+        }
+
+        return registers;
+    }
 
     GroupAnalysis analyzeGroup(const RecoveredFunctionGroup &group, uint64_t guestBase,
                                EntryMode mode, bool checkedMemory, LiftOutput output) try {
         GroupAnalysis result;
         ImageMemory image(group.image(), guestBase,
-                          checkedMemory || output == LiftOutput::ProcessArtifact);
+                          checkedMemory || output == LiftOutput::ProcessArtifact, mode);
 
         if (output == LiftOutput::ProcessArtifact) {
             const auto &root = group.function(group.root());
@@ -714,28 +1048,64 @@ namespace forge::x86 {
         const InstructionOperands operands(group.registers(), guestBase);
         std::map<uint32_t, FunctionAnalyzer> analyzers;
 
+        std::set<uint32_t> retainedTargets;
+        for (const auto &[address, function] : group.functions()) {
+            for (const auto &[instruction, call] : function.calls) {
+                if (const auto *table = call.table()) {
+                    image.boundedTable(*function.instructionContaining(instruction), *table);
+                    auto &instructions = result.functions[address].tableInstructions;
+                    if (const auto *reverse = table->reverse()) {
+                        instructions.emplace(reverse->countLoad, &call);
+                        instructions.emplace(reverse->scanRead, &call);
+                        instructions.emplace(reverse->zeroGuard, &call);
+                    } else {
+                        const auto &forward = *table->forward();
+                        instructions.emplace(forward.pointerLoad, &call);
+
+                        if (forward.slotStore) {
+                            instructions.emplace(*forward.slotStore, &call);
+                        }
+                    }
+                }
+
+                const auto *service = call.external();
+                if (service && service->binding.callback == win64::Callback::Cleanup) {
+                    result.usesTermination = true;
+                }
+
+                if (service && service->registration) {
+                    result.usesTermination = true;
+                    for (const auto &[origin, target] : service->registration->targets) {
+                        if (target) {
+                            retainedTargets.insert(target);
+                        }
+                    }
+                }
+            }
+        }
+        const std::vector<uint32_t> terminationTargets(retainedTargets.begin(),
+                                                       retainedTargets.end());
+
         for (const auto &[address, function] : group.functions()) {
             auto &analyzer = analyzers
                                  .try_emplace(address, group, address, operands, image,
-                                              result.functions[address])
+                                              result.functions[address], terminationTargets)
                                  .first->second;
             analyzer.summarizeFunction(result.flows[address]);
             result.stack |= analyzer.accessesMemory;
             result.origins |= analyzer.tracksOrigins;
+            result.setsDirection |= analyzer.setsDirection;
+            result.hasGuestCallbacks |= function.callbackSource != nullptr;
         }
 
-        Definitions initial;
-        initial.registers[rspIndex] = UINT64_MAX;
-
-        if (mode == EntryMode::RegisterState) {
-            std::fill_n(initial.registers.begin(), callerSlots, UINT64_MAX);
-        } else {
-            initial.registers[1] = initial.registers[2] = UINT64_MAX;
-        }
-
-        proveCallFlow(group, result.flows, initial);
+        propagateTailWrites(group, result);
+        proveCallFlow(group, result.flows, {entryRegisterDefinitions(mode), {}});
         CallAddresses calls;
-        calls.enter(group.root(), {AddressFact(GuestMemory::entryRsp), {}});
+        CallInputs root{AddressFact(GuestMemory::entryRsp)};
+        if (group.function(group.root()).incoming.empty()) {
+            root.facts.registers[rspIndex] = AddressFact(GuestMemory::entryRsp, AddressFact::Stack);
+        }
+        calls.enter(group.root(), root);
 
         while (!calls.pending.empty()) {
             const auto address = calls.pending.extract(calls.pending.begin()).value();

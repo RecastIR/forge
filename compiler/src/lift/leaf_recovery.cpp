@@ -7,25 +7,25 @@
 namespace forge::x86 {
     using namespace llvm;
 
-    namespace {
-        // Ineligible records also fence inference. An empty or reversed record claims its start.
-        std::vector<RvaRange> recordedRanges(const AnalyzedImage &analysis) {
-            std::vector<RvaRange> ranges;
+    // Ineligible records also fence inference. An empty or reversed record claims its start.
+    std::vector<RvaRange> recordedFunctionRanges(const AnalyzedImage &analysis) {
+        std::vector<RvaRange> ranges;
 
-            for (const auto &f : analysis.functions()) {
-                const uint64_t begin = f.record.begin;
-                const uint64_t end = std::max<uint64_t>(begin + 1, f.record.end);
+        for (const auto &f : analysis.functions()) {
+            const uint64_t begin = f.record.begin;
+            const uint64_t end = std::max<uint64_t>(begin + 1, f.record.end);
 
-                if (!ranges.empty() && begin <= ranges.back().end) {
-                    ranges.back().end = std::max(ranges.back().end, end);
-                } else {
-                    ranges.push_back({begin, end});
-                }
+            if (!ranges.empty() && begin <= ranges.back().end) {
+                ranges.back().end = std::max(ranges.back().end, end);
+            } else {
+                ranges.push_back({begin, end});
             }
-
-            return ranges;
         }
 
+        return ranges;
+    }
+
+    namespace {
         // Reachable blocks have contiguous instructions. This temporary index stores their
         // exclusive ends and owner RVAs. Gaps between blocks remain available to other candidates.
         struct BlockIndex {
@@ -100,7 +100,8 @@ namespace forge::x86 {
             std::map<uint32_t, RecoveredFunction> &functions;
             const std::map<uint32_t, const ResolvedCallSite *> &deferred;
             ArrayRef<RvaRange> recorded;
-            ArrayRef<RvaRange> loaderWrites;
+            ArrayRef<RvaRange> thunks;
+            ArrayRef<RvaRange> loaderWrites, tableData;
             const MCDisassembler &dis;
             const MCInstrInfo &instructions;
             const InstructionOperands operands;
@@ -109,7 +110,7 @@ namespace forge::x86 {
             std::string ownerEvidence(uint32_t rva) const;
             MappedRange window(uint32_t rva) const;
             ControlFlowGraph decode(uint32_t target, const MappedRange &code) const;
-            void recover(const ResolvedCallSite &call);
+            void recover(uint32_t target, const ResolvedCallSite &call);
         };
 
         std::string LeafRecovery::ownerEvidence(uint32_t rva) const {
@@ -152,6 +153,15 @@ namespace forge::x86 {
         ControlFlowGraph LeafRecovery::decode(uint32_t target, const MappedRange &code) const try {
             bool returned = false;
             auto validate = [&](const Step &step, Flow flow) {
+                if (!rangesIn(tableData, {step.rva, step.next}).empty()) {
+                    step.reject(FailureCode::InvalidCallTarget,
+                                "leaf instruction overlaps bounded pointer table");
+                }
+                if (!rangesIn(thunks, {step.rva, step.next}).empty()) {
+                    step.reject(FailureCode::UnsupportedControlFlow,
+                                "candidate overlaps a proven import thunk");
+                }
+
                 if (const auto *span = occupied.overlap(step.rva, step.next)) {
                     step.reject(FailureCode::UnsupportedControlFlow,
                                 "candidate overlaps decoded function " +
@@ -225,9 +235,7 @@ namespace forge::x86 {
             throw failure;
         }
 
-        void LeafRecovery::recover(const ResolvedCallSite &call) try {
-            const auto target = call.guest().rva;
-
+        void LeafRecovery::recover(uint32_t target, const ResolvedCallSite &call) try {
             if (const auto *span = occupied.overlap(target, uint64_t(target) + 1)) {
                 const auto *step = functions.at(span->owner).instructionContaining(target);
 
@@ -247,6 +255,7 @@ namespace forge::x86 {
             auto graph = decode(target, code);
             auto &leaf = functions.try_emplace(target, target, RecoveryOrigin::InferredLeaf, code)
                              .first->second;
+            leaf.mayReturn = true;
             leaf.graph = std::move(graph);
             occupied.add(leaf);
         } catch (InspectionError &error) {
@@ -256,7 +265,7 @@ namespace forge::x86 {
             if (error.context.functionRva || localEdge ||
                 (error.kind != FailureCode::InvalidCallTarget &&
                  error.kind != FailureCode::UnsupportedControlFlow)) {
-                error.context.functionRva = call.guest().rva;
+                error.context.functionRva = target;
                 error.context.sourceCall = CallLocation{call.caller, call.instruction};
                 throw;
             }
@@ -264,10 +273,11 @@ namespace forge::x86 {
             // Keep call-target diagnostics anchored to the original CALL, including its bytes.
             const auto *site = functions.at(call.caller).instructionContaining(call.instruction);
             try {
+                const auto destination =
+                    call.external() ? site->directCallTarget() : std::optional<int64_t>{target};
                 site->reject(error.kind,
-                             "cannot recover leaf at " + hex(call.guest().rva) + ": " +
-                                 error.what(),
-                             call.guest().rva);
+                             "cannot recover leaf at " + hex(target) + ": " + error.what(),
+                             destination);
             } catch (InspectionError &failure) {
                 failure.context.blockRva = call.block;
 
@@ -283,14 +293,17 @@ namespace forge::x86 {
     void recoverLeaves(const ValidatedEntry &entry,
                        std::map<uint32_t, RecoveredFunction> &functions,
                        const std::map<uint32_t, const ResolvedCallSite *> &deferred,
-                       ArrayRef<RvaRange> loaderWrites, const MCDisassembler &dis,
-                       const MCInstrInfo &instructions, const MCRegisterInfo &regs) {
-        const auto ranges = recordedRanges(entry.analysis);
+                       ArrayRef<RvaRange> recorded, ArrayRef<RvaRange> thunks,
+                       ArrayRef<RvaRange> loaderWrites, ArrayRef<RvaRange> tableData,
+                       const MCDisassembler &dis, const MCInstrInfo &instructions,
+                       const MCRegisterInfo &regs) {
         LeafRecovery recovery{entry,
                               functions,
                               deferred,
-                              ranges,
+                              recorded,
+                              thunks,
                               loaderWrites,
+                              tableData,
                               dis,
                               instructions,
                               InstructionOperands(regs, entry.analysis.module().imageBase),
@@ -301,7 +314,16 @@ namespace forge::x86 {
         }
 
         for (const auto &[rva, call] : deferred) {
-            recovery.recover(*call);
+            try {
+                recovery.recover(rva, *call);
+            } catch (InspectionError &error) {
+                if (call->table()) {
+                    call->annotateTableFailure(error.context, rva);
+                } else if (call->external()) {
+                    call->annotateCallbackFailure(error.context, rva);
+                }
+                throw;
+            }
         }
     }
 } // namespace forge::x86

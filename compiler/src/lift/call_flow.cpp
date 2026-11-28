@@ -56,7 +56,19 @@ namespace forge::x86 {
     DefinitionEffect callEffect(const ResolvedCallSite &site, const FunctionFlows &flows) {
         const auto *external = site.external();
         if (!external) {
-            return flows.at(site.guest().rva).returns;
+            if (!site.table()) {
+                return flows.at(site.guest().rva).returns;
+            }
+            DefinitionEffect result;
+            result.writes.fill(UINT64_MAX);
+            result.flags.generated.set();
+            for (const auto target : site.guestTargets()) {
+                const auto &flow = flows.at(target);
+                if (flow.mayReturn) {
+                    result.intersect(flow.returns);
+                }
+            }
+            return result;
         }
 
         DefinitionEffect result;
@@ -85,8 +97,8 @@ namespace forge::x86 {
 
             for (const auto &call : block.calls) {
                 result.append(call.prefix);
-                if (!call.site->external()) {
-                    visit(call.site->guest().rva, result);
+                for (const auto target : call.site->guestTargets()) {
+                    visit(target, result);
                 }
 
                 result.append(callEffect(*call.site, flows));
@@ -98,7 +110,8 @@ namespace forge::x86 {
 
         // Meet over finite paths to RET. Starting at the greatest effect makes a
         // recursive cycle wait for its base cases instead of inventing an exit.
-        DefinitionEffect returnEffect(const RecoveredFunction &recovered, FunctionFlow &function,
+        DefinitionEffect returnEffect(const RecoveredFunctionGroup &group,
+                                      const RecoveredFunction &recovered, FunctionFlow &function,
                                       const FunctionFlows &flows) {
             std::set<uint32_t> pending;
 
@@ -116,7 +129,10 @@ namespace forge::x86 {
                                           [](uint32_t, const DefinitionEffect &) {});
                 const auto &block = recovered.graph.at(address);
 
-                if (block.exit == Flow::Return) {
+                if (block.exit == Flow::Return ||
+                    (block.exit == Flow::TailJump &&
+                     group.function(recovered.callAt(block.steps.back().rva)->guest().rva)
+                         .mayReturn)) {
                     returns.intersect(out);
                 }
 
@@ -139,6 +155,7 @@ namespace forge::x86 {
         std::set<uint32_t> pending;
 
         for (auto &[address, function] : flows) {
+            function.mayReturn = group.function(address).mayReturn;
             function.returns = top();
             pending.insert(address);
         }
@@ -147,7 +164,7 @@ namespace forge::x86 {
             const auto address = pending.extract(pending.begin()).value();
             auto &function = flows.at(address);
             const auto &recovered = group.function(address);
-            const auto returns = returnEffect(recovered, function, flows);
+            const auto returns = returnEffect(group, recovered, function, flows);
 
             if (function.returns != returns) {
                 function.returns = returns;
@@ -167,6 +184,16 @@ namespace forge::x86 {
         }
 
         flows.at(group.root()).entry = initial;
+
+        // Native CRT calls supply no register arguments or arithmetic flags. Meet this
+        // entry with ordinary callers' definitions when one body has both kinds of edge.
+        Definitions initializer{};
+        initializer.registers[rspIndex] = UINT64_MAX;
+        for (const auto &[address, function] : group.functions()) {
+            if (function.callbackSource) {
+                flows.at(address).entry.intersect(initializer);
+            }
+        }
 
         while (!pending.empty()) {
             const auto address = pending.extract(pending.begin()).value();

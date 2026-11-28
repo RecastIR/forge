@@ -1,4 +1,5 @@
 #include "lift/cfg.h"
+#include "lift/guarded_call.h"
 #include "lift/integer.h"
 #include "lift/jump_table.h"
 #include "lift/operands.h"
@@ -7,6 +8,7 @@
 #include "llvm/MC/MCContext.h"
 #include "llvm/MC/MCDisassembler/MCDisassembler.h"
 #include "llvm/MC/MCInstrInfo.h"
+#include "llvm/Support/Endian.h"
 
 #include <algorithm>
 #include <set>
@@ -14,15 +16,22 @@
 namespace forge::x86 {
     using namespace llvm;
 
-    void Step::reject(FailureCode kind, const Twine &reason, std::optional<int64_t> target,
-                      std::optional<uint32_t> importSlot,
-                      const std::optional<ImportOwnershipFailure> &ownership) const {
+    InspectionError Step::errorAtInstruction(FailureCode kind, const Twine &reason,
+                                             FailureContext context) const {
         auto encoded = toHex(bytes, true);
         InspectionError failure(hex(rva) + ": " + (opcode + " [" + encoded + "]: " + reason).str(),
                                 kind);
-        failure.context.instructionRva = rva;
-        failure.context.opcode = opcode.str();
-        failure.context.bytes = std::move(encoded);
+        context.instructionRva = rva;
+        context.opcode = opcode.str();
+        context.bytes = std::move(encoded);
+        failure.context = std::move(context);
+        return failure;
+    }
+
+    void Step::reject(FailureCode kind, const Twine &reason, std::optional<int64_t> target,
+                      std::optional<uint32_t> importSlot,
+                      const std::optional<ImportOwnershipFailure> &ownership) const {
+        auto failure = errorAtInstruction(kind, reason);
         failure.context.branchTarget = target;
         failure.context.importSlot = importSlot;
         failure.context.importOwnership = ownership;
@@ -52,7 +61,22 @@ namespace forge::x86 {
         }
 
         void checkPrefix(const Step &s) {
+            if (s.isRepeatedQwordStore()) {
+                return;
+            }
+
             auto encoding = arrayRefFromStringRef(s.bytes);
+            if (s.isLockedCompareExchange()) {
+                encoding = encoding.drop_front();
+            }
+
+            // GS + REX.W MOV r64,[disp32] with no base/index and NT_TIB.Self at +0x30.
+            if (s.opcode == "MOV64rm" && encoding.size() == 9 && encoding[0] == 0x65 &&
+                (encoding[1] & 0xfbU) == 0x48 && encoding[2] == 0x8b &&
+                (encoding[3] & 0xc7U) == 4 && encoding[4] == 0x25 &&
+                llvm::support::endian::read32le(encoding.data() + 5) == 0x30) {
+                encoding = encoding.drop_front();
+            }
             if (encoding.front() == 0x66) {
                 auto instruction = x86::integerInstruction(s.opcode);
 
@@ -91,6 +115,20 @@ namespace forge::x86 {
             }
 
             auto opcode = info.getName(inst.getOpcode());
+            // LLVM MC decodes LOCK as a separate pseudo-instruction. Keep the prefix
+            // and its supported operation in one instruction extent and one CFG step.
+            if (opcode == "LOCK_PREFIX" && size == 1 && tail.size() > 1) {
+                MCInst following;
+                uint64_t extra = 0;
+                if (dis.getInstruction(following, extra, arrayRefFromStringRef(tail.drop_front()),
+                                       uint64_t(rva) + 1, nulls()) == MCDisassembler::Success &&
+                    extra && extra < 15 && info.getName(following.getOpcode()) == "CMPXCHG64rm") {
+                    inst = std::move(following);
+                    opcode = info.getName(inst.getOpcode());
+                    size += extra;
+                }
+            }
+
             return {rva, static_cast<uint32_t>(rva + size), std::move(inst), opcode,
                     tail.take_front(size)};
         }
@@ -112,6 +150,10 @@ namespace forge::x86 {
                 return Flow::Indirect;
             }
 
+            if (recordedExtent && s.isMemoryCall()) {
+                return Flow::Fallthrough;
+            }
+
             const auto &desc = info.get(s.inst.getOpcode());
             if (!recordedExtent && desc.isIndirectBranch()) {
                 s.reject(FailureCode::UnsupportedControlFlow,
@@ -119,8 +161,7 @@ namespace forge::x86 {
                          "requires a validated unwind-backed function extent");
             }
 
-            if (desc.isCall() && !s.isDirectCall() &&
-                !(recordedExtent && (s.isRegisterCall() || s.isMemoryCall()))) {
+            if (desc.isCall() && !s.isDirectCall() && !(recordedExtent && s.isRegisterCall())) {
                 s.reject(FailureCode::UnsupportedControlFlow, "unsupported indirect or far call");
             }
 
@@ -134,11 +175,21 @@ namespace forge::x86 {
         class Discovery {
           public:
             Discovery(StringRef bytes, uint32_t begin, const MCDisassembler &dis,
-                      const MCInstrInfo &info, LeafStepCheck validateLeaf, JumpTableReader *tables)
+                      const MCInstrInfo &info, LeafStepCheck validateLeaf, JumpTableReader *tables,
+                      bool registerImports)
                 : bytes(bytes), begin(begin), end(begin + static_cast<uint32_t>(bytes.size())),
-                  dis(dis), info(info), validateLeaf(validateLeaf), tables(tables) {}
+                  dis(dis), info(info), validateLeaf(validateLeaf), tables(tables),
+                  registerImports(registerImports) {
+                leaders.emplace(begin, Leader{begin, true, {}});
+                pending.push_back(begin);
+            }
 
-            ControlFlowGraph run();
+            const std::map<uint32_t, Step> &steps() const { return decoded; }
+
+            bool advance(CallFlow classify);
+            void resume(uint32_t instruction);
+            bool hasBypassedProof() const;
+            ControlFlowGraph finish();
 
           private:
             StringRef bytes;
@@ -147,6 +198,8 @@ namespace forge::x86 {
             const MCInstrInfo &info;
             LeafStepCheck validateLeaf;
             JumpTableReader *tables;
+            bool registerImports;
+            bool returned = false;
             std::map<uint32_t, Step> decoded;
 
             struct TableEdges {
@@ -155,9 +208,15 @@ namespace forge::x86 {
             };
 
             std::map<uint32_t, TableEdges> resolved;
+            std::vector<std::pair<uint32_t, uint32_t>> registerProofs;
+            std::multimap<uint32_t, uint32_t> branchPredecessors;
+            std::vector<uint32_t> registerImportCalls;
             std::set<uint32_t> unresolved;
             unsigned tableEntries = 0;
             void resolve(uint32_t site);
+            std::optional<uint32_t> tableBypass(uint32_t site, const RelativeTable &proof) const;
+            std::optional<uint32_t> registerBypass(uint32_t producer, uint32_t call) const;
+            std::optional<uint32_t> unprovenRegisterImport() const;
             void validateGuards() const;
 
             using TableOrigin = std::pair<uint32_t, unsigned>; // Dispatch RVA, entry index.
@@ -170,15 +229,18 @@ namespace forge::x86 {
 
             std::map<uint32_t, Leader> leaders;
             std::vector<uint32_t> pending;
+            std::set<uint32_t> boundedCalls;
             void schedule(const Step &s, int64_t address, bool explicitEntry,
                           std::optional<unsigned> index = {});
-            void recordEdges(const Step &s, Flow flow);
-            void trace(uint32_t start);
+            std::optional<int64_t> registerTarget(Step &call);
+            void recordEdges(Step &s, CallFlow classify);
+            void trace(uint32_t start, CallFlow classify);
             [[noreturn]] void rejectTableTarget(TableOrigin origin, const Twine &reason) const;
             std::optional<TableOrigin> overlapOrigin(std::optional<TableOrigin> origin,
                                                      uint32_t instruction) const;
             [[noreturn]] void overlap(uint32_t target, uint32_t instruction) const;
             ControlFlowGraph partition();
+            void annotate(InspectionError &error) const;
         };
 
         void Discovery::schedule(const Step &s, int64_t address, bool explicitEntry,
@@ -199,6 +261,10 @@ namespace forge::x86 {
             auto [found, inserted] = leaders.try_emplace(target, Leader{s.rva, explicitEntry, {}});
             auto &leader = found->second;
             leader.explicitEntry |= explicitEntry;
+
+            if (registerImports && explicitEntry) {
+                branchPredecessors.emplace(target, s.rva);
+            }
 
             if (index) {
                 TableOrigin origin{s.rva, *index};
@@ -244,8 +310,7 @@ namespace forge::x86 {
 
                 const auto &previous = (--before)->second;
 
-                if (previous.next != instruction ||
-                    control(previous, info, true) != Flow::Fallthrough) {
+                if (previous.next != instruction || previous.flow != Flow::Fallthrough) {
                     return origin;
                 }
 
@@ -268,30 +333,87 @@ namespace forge::x86 {
                           reason, target);
         }
 
-        void Discovery::recordEdges(const Step &s, Flow flow) {
-            if (s.isRegisterCall()) {
-                // Trace has decoded the entire interval from this leader to CALL. An
-                // impossible prefix must fail before we attempt to decode its continuation.
-                // Later branch or table targets can still split this provisional block.
-                const auto leader = std::prev(leaders.upper_bound(s.rva))->first;
-                const auto first = std::make_reverse_iterator(decoded.find(s.rva));
-                const auto stop = std::make_reverse_iterator(decoded.find(leader));
-                const auto producer =
-                    std::find_if(first, stop, [](const auto &row) { return !isNoop(row.second); });
-                const InstructionOperands operands(*dis.getContext().getRegisterInfo(), 0);
-                operands.registerCallRva(s, producer == stop ? nullptr : &producer->second);
-            } else if (flow == Flow::Indirect) {
-                unresolved.insert(s.rva);
-            } else if (flow == Flow::Conditional || flow == Flow::Jump) {
-                schedule(s, int64_t(s.next) + s.inst.getOperand(0).getImm(), true);
+        std::optional<int64_t> Discovery::registerTarget(Step &call) {
+            const auto &regs = *dis.getContext().getRegisterInfo();
+            const InstructionOperands operands(regs, 0);
+            // Only the current block can supply a direct LEA. Later branch or table
+            // edges may split this provisional block and must still validate at publication.
+            const auto leader = std::prev(leaders.upper_bound(call.rva))->first;
+            const auto first = std::make_reverse_iterator(decoded.find(call.rva));
+            const auto stop = std::make_reverse_iterator(decoded.find(leader));
+            const auto producer =
+                std::find_if(first, stop, [](const auto &row) { return !isNoop(row.second); });
+            const bool lea = producer != stop && producer->second.opcode == "LEA64r";
+            if (!lea) {
+                call.guardedPointerCall = recognizeGuardedPointerCall(decoded, call, operands);
+                if (call.guardedPointerCall) {
+                    registerProofs.emplace_back(call.guardedPointerCall->producer, call.rva);
+                    return {};
+                }
+            }
 
-                if (flow == Flow::Conditional) {
+            if (registerImports && (!lea || producer->second.inst.getOperand(0).getReg() !=
+                                                call.inst.getOperand(0).getReg())) {
+                call.registerImportSlot =
+                    reachingImportSlot(decoded, branchPredecessors, call, info, regs);
+                if (call.registerImportSlot) {
+                    registerImportCalls.push_back(call.rva);
+                    return {};
+                }
+            }
+
+            // A skip edge to the continuation permits deferred inspection of the full loop.
+            // It supplies no target evidence by itself.
+            const auto continuation = leaders.find(call.next);
+            if (tables && !lea && continuation != leaders.end() &&
+                continuation->second.explicitEntry) {
+                call.forwardTableCandidate = true;
+                return {};
+            }
+
+            const auto proof =
+                operands.leaCallTarget(call, producer == stop ? nullptr : &producer->second);
+            registerProofs.emplace_back(proof.producer, call.rva);
+            return proof.target;
+        }
+
+        void Discovery::recordEdges(Step &s, CallFlow classify) {
+            if (s.isRegisterCall()) {
+                const auto target = registerTarget(s);
+                if (s.forwardTableCandidate) {
+                    boundedCalls.insert(s.rva);
+                    s.flow = Flow::TerminalCall;
+                } else {
+                    s.flow = classify(s, target);
+                }
+            } else if (classify && s.isMemoryCall() &&
+                       !InstructionOperands(*dis.getContext().getRegisterInfo(), 0).ripRva(s, 0)) {
+                // Bounds can originate on another branch which has not yet been traced.
+                boundedCalls.insert(s.rva);
+                s.flow = Flow::TerminalCall;
+            } else if (classify && (s.isDirectCall() || s.isMemoryCall())) {
+                s.flow = classify(s, s.directCallTarget());
+            } else if (s.flow == Flow::Return) {
+                returned = true;
+            } else if (s.flow == Flow::Indirect) {
+                unresolved.insert(s.rva);
+            } else if (s.flow == Flow::Conditional || s.flow == Flow::Jump) {
+                const auto target = s.relativeTarget();
+                if (classify && s.flow == Flow::Jump && (target < begin || target >= end)) {
+                    s.flow = Flow::TailJump;
+                    returned |= classify(s, target) == Flow::Fallthrough;
+                    return;
+                }
+
+                schedule(s, target, true);
+
+                if (s.flow == Flow::Conditional) {
                     schedule(s, s.next, false);
                 }
             }
         }
 
-        void Discovery::trace(uint32_t start) try {
+        void Discovery::trace(uint32_t start, CallFlow classify) try {
             for (auto rva = start; rva < end;) {
                 auto after = decoded.lower_bound(rva);
                 if (after != decoded.end() && after->first == rva) {
@@ -318,15 +440,16 @@ namespace forge::x86 {
                 }
 
                 checkPrefix(s);
-                auto flow = control(s, info, tables != nullptr);
+                s.flow = control(s, info, tables != nullptr);
+
                 if (validateLeaf) {
-                    validateLeaf(s, flow);
+                    validateLeaf(s, s.flow);
                 }
 
                 auto &step = decoded.emplace_hint(after, rva, std::move(s))->second;
-                recordEdges(step, flow);
+                recordEdges(step, classify);
 
-                if (flow != Flow::Fallthrough) {
+                if (step.flow != Flow::Fallthrough) {
                     return;
                 }
 
@@ -368,21 +491,88 @@ namespace forge::x86 {
             }
         }
 
-        void Discovery::validateGuards() const {
+        std::optional<uint32_t> Discovery::tableBypass(uint32_t site,
+                                                       const RelativeTable &proof) const {
             // Only sequential execution from CMP may reach its JA and the dispatch prefix.
             // Include edges discovered through other tables and case/loop backedges.
-            for (const auto &[site, edges] : resolved) {
-                const auto stop = leaders.upper_bound(site);
-                const auto alternate =
-                    std::find_if(leaders.upper_bound(edges.proof.compareRva), stop,
-                                 [](const auto &leader) { return leader.second.explicitEntry; });
+            const auto stop = leaders.upper_bound(site);
+            const auto alternate =
+                std::find_if(leaders.upper_bound(proof.compareRva), stop,
+                             [](const auto &leader) { return leader.second.explicitEntry; });
+            return alternate == stop ? std::nullopt : std::optional(alternate->first);
+        }
 
-                if (alternate != stop) {
+        std::optional<uint32_t> Discovery::registerBypass(uint32_t producer, uint32_t call) const {
+            const bool guarded = decoded.at(call).guardedPointerCall.has_value();
+            // The null guard deliberately creates a fallthrough leader. Any explicit
+            // edge into the middle, including one discovered after CALL, bypasses evidence.
+            for (auto it = leaders.upper_bound(producer); it != leaders.end() && it->first <= call;
+                 ++it) {
+                if (!guarded || it->second.explicitEntry) {
+                    return it->first;
+                }
+            }
+            return {};
+        }
+
+        std::optional<uint32_t> Discovery::unprovenRegisterImport() const {
+            // An edge discovered after the first visit can carry a different definition,
+            // including through a resumed guest call or a newly resolved jump table.
+            for (auto site : registerImportCalls) {
+                const auto &call = decoded.at(site);
+                if (reachingImportSlot(decoded, branchPredecessors, call, info,
+                                       *dis.getContext().getRegisterInfo()) !=
+                    call.registerImportSlot) {
+                    return site;
+                }
+            }
+
+            return {};
+        }
+
+        bool Discovery::hasBypassedProof() const {
+            if (unprovenRegisterImport()) {
+                return true;
+            }
+
+            for (const auto &[producer, call] : registerProofs) {
+                if (registerBypass(producer, call)) {
+                    return true;
+                }
+            }
+
+            return llvm::any_of(resolved, [&](const auto &table) {
+                return tableBypass(table.first, table.second.proof).has_value();
+            });
+        }
+
+        void Discovery::validateGuards() const {
+            if (auto site = unprovenRegisterImport()) {
+                const auto &call = decoded.at(*site);
+                call.reject(
+                    FailureCode::UnsupportedControlFlow,
+                    "register call does not retain the same IAT load on every incoming path", {},
+                    call.registerImportSlot);
+            }
+
+            for (const auto &[producer, call] : registerProofs) {
+                if (!decoded.at(call).guardedPointerCall) {
+                    continue;
+                }
+
+                if (const auto bypass = registerBypass(producer, call)) {
+                    decoded.at(call).reject(
+                        FailureCode::UnsupportedControlFlow,
+                        "edge bypasses indirect call pointer proof at " + hex(*bypass), *bypass);
+                }
+            }
+            for (const auto &[site, edges] : resolved) {
+                if (auto alternate = tableBypass(site, edges.proof)) {
                     decoded.at(site).reject(FailureCode::UnsupportedControlFlow,
                                             edges.proof.describe() +
                                                 ": unproven bounds: edge bypasses proof at " +
-                                                hex(alternate->first),
-                                            alternate->first);
+                                                hex(*alternate),
+                                            *alternate);
                 }
             }
         }
@@ -395,10 +585,9 @@ namespace forge::x86 {
 
                 for (;;) {
                     auto &step = block.steps.emplace_back(std::move(it->second));
-                    block.exit = control(step, info, tables != nullptr);
+                    block.exit = step.flow;
                     if (block.exit == Flow::Jump || block.exit == Flow::Conditional) {
-                        block.successors.push_back(static_cast<uint32_t>(
-                            int64_t(step.next) + step.inst.getOperand(0).getImm()));
+                        block.successors.push_back(static_cast<uint32_t>(step.relativeTarget()));
                     }
 
                     if (block.exit == Flow::Indirect) {
@@ -432,17 +621,22 @@ namespace forge::x86 {
             return graph;
         }
 
-        ControlFlowGraph Discovery::run() try {
+        bool Discovery::advance(CallFlow classify) try {
             if (bytes.size() > maxFunctionBytes) {
                 throw InspectionError(hex(begin) +
                                           ": experimental lift limit is 64 KiB per function",
                                       FailureCode::FunctionSize);
             }
 
-            leaders.emplace(begin, Leader{begin, true, {}});
-            pending.push_back(begin);
-
-            while (!pending.empty() || !unresolved.empty()) {
+            while (!pending.empty() || !unresolved.empty() || !boundedCalls.empty()) {
+                if (pending.empty() && unresolved.empty()) {
+                    const auto site = boundedCalls.extract(boundedCalls.begin()).value();
+                    auto &step = decoded.at(site);
+                    if (classify(step, {}) == Flow::Fallthrough) {
+                        resume(site);
+                    }
+                    continue;
+                }
                 if (pending.empty()) {
                     resolve(unresolved.extract(unresolved.begin()).value());
                     continue;
@@ -450,28 +644,71 @@ namespace forge::x86 {
 
                 const auto start = pending.back();
                 pending.pop_back();
-                trace(start);
+                trace(start, classify);
             }
 
+            return returned;
+        } catch (InspectionError &error) {
+            annotate(error);
+            throw;
+        }
+
+        void Discovery::annotate(InspectionError &error) const {
+            if (error.context.instructionRva) {
+                const auto leader = std::prev(leaders.upper_bound(*error.context.instructionRva));
+                error.context.blockRva = leader->first;
+            }
+        }
+
+        void Discovery::resume(uint32_t instruction) {
+            auto &call = decoded.at(instruction);
+            if (call.flow == Flow::TailJump) {
+                returned = true;
+                return;
+            }
+
+            call.flow = Flow::Fallthrough;
+
+            if (call.next < end && !decoded.contains(call.next)) {
+                pending.push_back(call.next);
+            }
+        }
+
+        ControlFlowGraph Discovery::finish() try {
             validateGuards();
             return partition();
         } catch (InspectionError &error) {
-            if (error.context.instructionRva) {
-                auto leader = std::prev(leaders.upper_bound(*error.context.instructionRva));
-                error.context.blockRva = leader->first;
-            }
-
+            annotate(error);
             throw;
         }
+
     } // namespace
+
+    struct RecordedCFG::State : Discovery {
+        using Discovery::Discovery;
+    };
+
+    RecordedCFG::RecordedCFG(StringRef bytes, uint32_t begin, const MCDisassembler &dis,
+                             const MCInstrInfo &info, JumpTableReader &tables, bool registerImports)
+        : state(std::make_unique<State>(bytes, begin, dis, info, nullptr, &tables,
+                                        registerImports)) {}
+
+    RecordedCFG::~RecordedCFG() = default;
+
+    bool RecordedCFG::advance(CallFlow classify) { return state->advance(classify); }
+
+    void RecordedCFG::resume(uint32_t instruction) { state->resume(instruction); }
+
+    const std::map<uint32_t, Step> &RecordedCFG::steps() const & { return state->steps(); }
+
+    bool RecordedCFG::hasBypassedProof() const { return state->hasBypassedProof(); }
+
+    ControlFlowGraph RecordedCFG::finish() { return state->finish(); }
 
     ControlFlowGraph discoverCFG(StringRef bytes, uint32_t begin, const MCDisassembler &dis,
                                  const MCInstrInfo &info, LeafStepCheck validateLeaf) {
-        return Discovery(bytes, begin, dis, info, validateLeaf, nullptr).run();
-    }
-
-    ControlFlowGraph discoverCFG(StringRef bytes, uint32_t begin, const MCDisassembler &dis,
-                                 const MCInstrInfo &info, JumpTableReader &tables) {
-        return Discovery(bytes, begin, dis, info, {}, &tables).run();
+        Discovery discovery(bytes, begin, dis, info, validateLeaf, nullptr, false);
+        discovery.advance({});
+        return discovery.finish();
     }
 } // namespace forge::x86

@@ -230,6 +230,17 @@ namespace {
             std::make_unique<ParsedImage>(InputFile(fixture), ParsePolicy::FunctionAnalysis),
             DebugInfo::Omit);
         const auto &image = analysis.module();
+        ExecutableReadiness readiness;
+
+        try {
+            generateExecutableIR(analysis, image.imageBase + 1, context, readiness);
+            throw std::runtime_error("accepted a misaligned executable guest load base");
+        } catch (const InspectionError &error) {
+            check(error.kind == FailureCode::ExecutableStartup && readiness.entryRecovered &&
+                      std::string_view(error.what()).find("alignment") != std::string_view::npos,
+                  "misaligned executable guest load base lost its startup diagnostic");
+        }
+
         const uint64_t topFit = UINT64_MAX - (image.sizeOfImage - 1);
         LiftRequest request{image.entryPoint, EntryMode::WindowsX64I64Pair, topFit};
         request.checkedMemory = true;

@@ -1,5 +1,5 @@
 #include "lift/execution_context.h"
-#include "lift/image_memory.h"
+#include "lift/group_analysis.h"
 
 #include "llvm/IR/Module.h"
 #include "llvm/Transforms/Utils/ModuleUtils.h"
@@ -12,10 +12,13 @@ namespace forge::x86 {
     static_assert(std::extent_v<decltype(forge_rt_execution::registers)> == registerCount);
     static_assert(std::extent_v<decltype(forge_rt_execution::registerMarks)> == registerCount);
     static_assert(std::extent_v<decltype(forge_rt_execution::flags)> == FlagCount);
+    static_assert(offsetof(forge_rt_execution, directionFlag) ==
+                  offsetof(forge_rt_execution, flags) + FlagCount);
 
     ContextLayout::ContextLayout(LLVMContext &context, bool origins, bool stack, bool runtime,
-                                 bool process)
-        : origins(origins), stack(stack), runtime(runtime), process(process) {
+                                 bool process, bool callbacks, bool tailJumps)
+        : origins(origins), stack(stack), runtime(runtime), process(process), callbacks(callbacks),
+          tailJumps(tailJumps) {
         const auto registers = [&](unsigned count) {
             return ArrayType::get(Type::getInt64Ty(context), count);
         };
@@ -28,13 +31,14 @@ namespace forge::x86 {
             type = StructType::get(pointer, word, pointer, pointer, pointer, word, word,
                                    processResultType(context), registers(registerCount),
                                    registers(registerCount),
-                                   ArrayType::get(Type::getInt8Ty(context), FlagCount));
+                                   ArrayType::get(Type::getInt8Ty(context), FlagCount + 1));
             return;
         }
 
         auto *stackType =
             ArrayType::get(Type::getInt8Ty(context), stack ? GuestMemory::capacity : 0);
-        auto *flagType = ArrayType::get(Type::getInt1Ty(context), FlagCount);
+        // Keep the following byte-backed guest stack naturally aligned for qword atomics.
+        auto *flagType = ArrayType::get(Type::getInt1Ty(context), alignTo(FlagCount + 1, 8));
         SmallVector<Type *> fields{registers(registerCount), registers(origins ? registerCount : 0),
                                    flagType, stackType, stackType};
         if (runtime) {
@@ -43,6 +47,21 @@ namespace forge::x86 {
         }
 
         type = StructType::get(context, fields);
+    }
+
+    CallInst *ContextLayout::callBody(IRBuilder<> &ir, Function &body, Value *execution,
+                                      Value *frameRsp, Value *ceiling, uint32_t origin) const {
+        SmallVector<Value *, 4> args{execution};
+        if (callbacks) {
+            args.push_back(ceiling);
+        }
+        if (tailJumps) {
+            args.push_back(frameRsp);
+        }
+        if (body.arg_size() > args.size()) {
+            args.push_back(ir.getInt64(origin));
+        }
+        return ir.CreateCall(&body, args);
     }
 
     ContextView::ContextView(IRBuilder<> &ir, const ContextLayout &layout, Value *context) {
@@ -60,12 +79,14 @@ namespace forge::x86 {
             registers = field(8, "registers");
             marks = layout.origins ? field(9, "register.marks") : nullptr;
             flags = field(10, "flags");
+            directionFlag = ir.CreateInBoundsGEP(ir.getInt8Ty(), flags, ir.getInt32(FlagCount));
             return;
         }
 
         registers = field(0, "registers");
         marks = layout.origins ? field(1, "register.marks") : nullptr;
         flags = field(2, "flags");
+        directionFlag = ir.CreateInBoundsGEP(ir.getInt1Ty(), flags, ir.getInt32(FlagCount));
         instance = layout.runtime ? field(5, "runtime.instance") : nullptr;
         thread = layout.runtime ? field(6, "runtime.thread") : nullptr;
         bytes = layout.stack ? field(3, "stack.bytes") : nullptr;
@@ -77,9 +98,9 @@ namespace forge::x86 {
             return ir.CreateInBoundsGEP(ir.getInt64Ty(), array, ir.getInt32(i));
         }
 
-        uint64_t entryMarks(unsigned index) {
+        uint64_t entryMarks(unsigned index, const Defined &definitions) {
             if (index <= rspIndex) {
-                return UINT64_MAX;
+                return definitions[index];
             }
 
             uint64_t marks = 0;
@@ -93,7 +114,9 @@ namespace forge::x86 {
         }
 
         void initializeRegisters(IRBuilder<> &ir, const ContextView &context, Value *state,
-                                 ArrayRef<Value *> arguments) {
+                                 ArrayRef<Value *> arguments, EntryMode mode) {
+            const auto definitions = entryRegisterDefinitions(mode);
+
             for (unsigned i = 0; i < registerCount; ++i) {
                 Value *value = ir.getInt64(0);
 
@@ -110,13 +133,15 @@ namespace forge::x86 {
                 ir.CreateStore(value, slot(ir, context.registers, i));
 
                 if (context.marks) {
-                    ir.CreateStore(ir.getInt64(entryMarks(i)), slot(ir, context.marks, i));
+                    ir.CreateStore(ir.getInt64(entryMarks(i, definitions)),
+                                   slot(ir, context.marks, i));
                 }
             }
 
             // These backing bits can cross a flag-preserving callee. The data-flow
             // proof independently excludes any guest observation of an undefined bit.
-            auto *flags = ArrayType::get(ir.getInt1Ty(), FlagCount);
+            // The Windows ABI supplies a clear direction flag on external entry.
+            auto *flags = ArrayType::get(ir.getInt1Ty(), FlagCount + 1);
             ir.CreateStore(ConstantAggregateZero::get(flags), context.flags);
         }
 
@@ -229,9 +254,60 @@ namespace forge::x86 {
         }
     }
 
+    Function *emitInitializerThunk(Function &body, const ContextLayout &layout,
+                                   RegisterSet modified) {
+        auto &module = *body.getParent();
+        IRBuilder<> ir(module.getContext());
+        auto *type = FunctionType::get(ir.getVoidTy(), ir.getPtrTy(), false);
+        auto *thunk = Function::Create(type, Function::InternalLinkage,
+                                       body.getName() + "_initializer", module);
+        ir.SetInsertPoint(BasicBlock::Create(ir.getContext(), "entry", thunk));
+        auto *execution = thunk->getArg(0);
+        const ContextView context(ir, layout, execution);
+        GuestMemory memory(ir);
+        memory.bind(context.bytes, context.validity, nullptr, context.regions);
+        memory.checks.bind(context.result);
+
+        auto *rspSlot = slot(ir, context.registers, rspIndex);
+        auto *serviceRsp = ir.CreateLoad(ir.getInt64Ty(), rspSlot);
+        auto *callbackRsp = memory.pushInitializerReturn(serviceRsp);
+        ir.CreateStore(callbackRsp, rspSlot);
+        std::array<Value *, registerCount> callerMarks{};
+        if (context.marks) {
+            ir.CreateMemSet(context.marks, ir.getInt8(FORGE_RT_MARK_UNINITIALIZED),
+                            callerSlots * sizeof(uint64_t), Align(1));
+            // A nonvolatile can have a concrete caller value. At a no-argument entry
+            // it may be saved and restored, but cannot serve as a supplied parameter.
+            for (unsigned i = rspIndex + 1; i < registerCount; ++i) {
+                auto *mark = slot(ir, context.marks, i);
+                callerMarks[i] = ir.CreateLoad(ir.getInt64Ty(), mark);
+                ir.CreateStore(ir.getInt64(entryMarks(i, {})), mark);
+            }
+        }
+
+        const auto saved = captureNonvolatiles(ir, context, modified);
+        auto *ceiling = ir.CreateAdd(callbackRsp, ir.getInt64(GuestMemory::initializerHomeEnd));
+        memory.checks.propagate(layout.callBody(ir, body, execution, callbackRsp, ceiling));
+        if (context.marks) {
+            auto *marks = ir.CreateLoad(ir.getInt64Ty(), slot(ir, context.marks, rspIndex));
+            memory.checks.guard(ir.CreateICmpEQ(marks, ir.getInt64(UINT64_MAX)));
+        }
+
+        memory.popInitializerReturn(ir.CreateLoad(ir.getInt64Ty(), rspSlot), callbackRsp);
+        checkNonvolatiles(ir, memory, context, saved);
+        if (context.marks) {
+            for (unsigned i = rspIndex + 1; i < registerCount; ++i) {
+                ir.CreateStore(callerMarks[i], slot(ir, context.marks, i));
+            }
+        }
+        ir.CreateStore(serviceRsp, rspSlot);
+        ir.CreateRetVoid();
+        return thunk;
+    }
+
     Function *emitProcessEntry(Function &body, const RecoveredFunctionGroup &group,
                                const ContextLayout &layout, const ImagePlan &image,
-                               RegisterSet modified) {
+                               RegisterSet modified, EntryMode mode) {
         auto &module = *body.getParent();
         IRBuilder<> ir(module.getContext());
         auto *type = FunctionType::get(ir.getVoidTy(), ir.getPtrTy(), false);
@@ -248,10 +324,12 @@ namespace forge::x86 {
                                   ir.CreateStructGEP(layout.type, execution, 5, "entry.rcx"));
         auto *rdx = ir.CreateLoad(ir.getInt64Ty(),
                                   ir.CreateStructGEP(layout.type, execution, 6, "entry.rdx"));
-        initializeRegisters(ir, context, nullptr, {rcx, rdx});
+        initializeRegisters(ir, context, nullptr, {rcx, rdx}, mode);
 
         const auto saved = captureNonvolatiles(ir, context, modified);
-        memory.checks.propagate(ir.CreateCall(&body, execution));
+        auto *ceiling = ir.getInt64(GuestMemory::base + GuestMemory::capacity);
+        memory.checks.propagate(
+            layout.callBody(ir, body, execution, ir.getInt64(GuestMemory::entryRsp), ceiling));
         checkOuterReturn(ir, memory, context, saved, true);
         checkResultRegister(ir, memory, context);
         memory.checks.complete(ir.CreateLoad(ir.getInt64Ty(), context.registers));
@@ -271,7 +349,8 @@ namespace forge::x86 {
             adapter = Function::Create(type, Function::ExternalLinkage, "forge_lifted_with_runtime",
                                        module);
         } else {
-            adapter = Function::Create(body.getFunctionType(), Function::InternalLinkage,
+            auto *type = FunctionType::get(ir.getVoidTy(), ir.getPtrTy(), false);
+            adapter = Function::Create(type, Function::InternalLinkage,
                                        "forge_lifted_" + utohexstr(rva, true), module);
             appendToUsed(module, {adapter});
             state = adapter->getArg(0);
@@ -288,7 +367,7 @@ namespace forge::x86 {
             ir.CreateStore(adapter->getArg(1), context.thread);
         }
 
-        initializeRegisters(ir, context, state, arguments);
+        initializeRegisters(ir, context, state, arguments, mode);
         GuestMemory memory(ir);
         const auto emitted = image.emit(module, ir, checkedMemory);
 
@@ -305,7 +384,7 @@ namespace forge::x86 {
 
         const bool typed = mode == EntryMode::WindowsX64I64Pair;
         const auto saved = captureNonvolatiles(ir, context, typed ? modified : RegisterSet{});
-        ir.CreateCall(&body, invocation);
+        layout.callBody(ir, body, invocation, ir.getInt64(GuestMemory::entryRsp), nullptr);
 
         checkOuterReturn(ir, memory, context, saved, layout.stack || modified[rspIndex]);
 

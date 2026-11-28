@@ -1,0 +1,13 @@
+{
+  "schema_version": 1,
+  "id": "startup/globals",
+  "description": "Read the initial data and zero-filled storage, then write and read back a process-local global.",
+  "source": "fixtures/startup/globals.c",
+  "binary": "crt_globals.exe",
+  "args": [],
+  "expected": {
+    "exit_code": 42,
+    "stdout": "",
+    "stderr": ""
+  }
+}

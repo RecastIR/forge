@@ -7,14 +7,34 @@ import sys
 import tempfile
 import unittest
 from unittest.mock import patch
+from zipfile import ZipFile
 
+import crt_puts
+import crt_streams
 import docker_wine
 from protocol import Capture, READY, STREAM_LIMIT, decode
 import run
 import fixture_images
+from termination import observe
 
 
 class CaptureTests(unittest.TestCase):
+    def test_full_startup_title(self):
+        archives = Path(__file__).resolve().parents[1] / "fixtures/startup/termination"
+        for backend, root in (("windows", "D:\\a\\forge\\forge\\inputs"), ("wine", "Z:\\inputs")):
+            archive = archives / f"{backend}-raw.zip"
+            with ZipFile(archive) as raw:
+                capture = json.loads(raw.read("results.json"))
+            title = root + "\\crt-observe-startup.exe"
+            observe.verify(capture, archive, title)
+            for mode in ("clear", "captured"):
+                for row in capture["observations"][f"crt-observe-startup-{mode}"]["startup"]:
+                    with self.subTest(backend=backend, mode=mode):
+                        row["text"][2] = "C:\\Unexpected\\crt-observe-startup.exe"
+                        with self.assertRaisesRegex(ValueError, "differs from launch path"):
+                            observe.verify(capture, archive, title)
+                        row["text"][2] = title
+
     def test_prepared_image_is_local_and_matches_inputs(self):
         def inspect(args, **kwargs):
             self.assertEqual(args[:3], ["docker", "image", "inspect"])
@@ -50,6 +70,65 @@ class CaptureTests(unittest.TestCase):
             self.assertIn(detail, report)
         with self.assertRaisesRegex(ValueError, "byte 2"):
             run.compare(dict(exit_code=0, stdout="ab\n", stderr=""), Capture(0, b"ab", b"", "wine"))
+
+    def test_crt_crash_boundaries(self):
+        fault = 0xc0000005
+        records = bytes(3 * 96)
+        expected = {"records": [[0] * 12] * 3}
+        report = b"Unhandled exception: page fault on read access"
+        notice = b"wine: Unhandled page fault on read access"
+        for case in (26, 27):
+            def observe(wine, tail, output):
+                log = records + tail
+                out, err = (log, output) if case % 2 else (output, log)
+                return crt_streams.stream_observation(case, fault, out, err, expected, wine)
+
+            tail, output = (report, notice) if case % 2 else (notice, report)
+            self.assertEqual(observe(False, b"", b"")["output"], "")
+            self.assertEqual(observe(True, tail, output)["output"], "wine page fault")
+            for extra in (b"!", bytes(96)):
+                with self.assertRaisesRegex(ValueError, "after CRT stream records"):
+                    observe(False, extra, b"")
+                with self.assertRaisesRegex(ValueError, "debugger boundary"):
+                    observe(True, extra + tail, output)
+
+    def test_puts_wine_fault_identity(self):
+        # Compact pinned-Wine transcript with an arbitrary stack and module base.
+        report = (b"Unhandled exception: page fault on read access to 0x40001008 in 64-bit code\n"
+                  b"Register dump:\n rcx:40001008\nStack dump:\n0x0ff8:  123 50001048\n"
+                  b"Backtrace:\n=>0 0x100 strlen(str=\"\") in msvcrt (0)\n"
+                  b"  3 0x200 puts+0xe(s=\"\") in msvcrt (0)\n"
+                  b"  4 0x50001048 in crt-puts-fault (+0x1048) (0)\n")
+        notice = b"wine: Unhandled page fault on read access to 40001008 at address 100 (thread 0020), starting debugger...\n"
+        def verify(stdout, stderr):
+            crt_puts.check_observation("wine", "fault", "pipe", 0xc0000005, stdout, stderr)
+
+        verify(report, notice)
+        for stdout, stderr in (
+            (report.replace(b"40001008", b"1", 1), notice.replace(b"40001008", b"1")),
+            (report.replace(b"40001008", b"2"), notice.replace(b"40001008", b"2")),
+            (report.replace(b"+0x1048", b"+0x1030"), notice),
+            (report.replace(b"123 50001048", b"123 456"), notice),
+            (report.replace(b"strlen(", b"memcpy("), notice),
+        ):
+            with self.subTest(stdout=stdout), self.assertRaises(ValueError):
+                verify(stdout, stderr)
+
+    def test_puts_matrix_completeness(self):
+        for backend, count in (("windows", 38), ("wine", 26)):
+            expected = crt_puts.expected_modes(backend)
+            rows = {f"{variant}-{mode}": {} for variant, modes in expected.items() for mode in modes}
+            self.assertEqual(len(rows), count)
+            crt_puts.check_coverage(rows, expected)
+            for key in ("hello-file", "mixed-full" if backend == "windows" else "mixed-broken"):
+                incomplete = rows.copy()
+                del incomplete[key]
+                with self.assertRaisesRegex(ValueError, key):
+                    crt_puts.check_coverage(incomplete, expected)
+            with self.assertRaisesRegex(ValueError, "hello-short"):
+                crt_puts.check_coverage(rows | {"hello-short": {}}, expected)
+                with self.assertRaisesRegex(ValueError, "debugger boundary"):
+                    observe(True, tail, extra + output)
 
     def test_wire_records(self):
         header = dict(exit_code=0xffffffff, stdout_size=0, stderr_size=2, wine_version="wine-test")

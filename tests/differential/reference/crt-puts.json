@@ -1,0 +1,238 @@
+{
+  "inputs": {
+    "crt-puts-direct.exe": "d1a999e018f8cd3b0a7435734b5b2eca357193e8c318547c8be28e181781d5ab",
+    "crt-puts-exit.exe": "c1c1a5be7dda3e0c44fe64cc69c1557f5dd3775bfd3349f6de19bc12fbc64167",
+    "crt-puts-exitprocess.exe": "591b6436abfad717b15c9f042e9a512e65d2ea5a7cf5cc43553b99f93cd2c6a5",
+    "crt-puts-fault.exe": "09d3c3de5b3edce63bb82f63894025ee09074da7a3a98b5b41e839f4b77ab808",
+    "crt-puts-heap.exe": "c47f65c1f701e702c43c029cc48f77b5607c0f0b634fb737223eafff1b4fc5ad",
+    "crt-puts-hello.exe": "3fd9d9bcd050a364ec013204c29f8be83b48d24e9781f853c9ae3bff3bd35cb8",
+    "crt-puts-immutable.exe": "dd73c29a05463052cece30e704cf052a7ab8f470dcd770978a278c782097d416",
+    "crt-puts-mixed.exe": "7ac27e2377d41a06edf0b852d5655e7f8ff9eb59b5f99e3441393b9c063a5889",
+    "crt-puts-newline.exe": "959ed71a5441d5d1d0e1b58e2b5e951632e8d2fa03ed9cab5e8803ac88e4aa5d",
+    "crt-puts-null.exe": "007883a0ca378f45001a099fab85c383c6952d5d9ca7cbfca09c2596b4ef466e"
+  },
+  "windows": {
+    "direct": {
+      "status": 42,
+      "stderr": "00000000250000005b0000000a0000000100000000000000ff0f000001000000",
+      "stdout": "8196 bytes sha256=a1249281bf7d88548e918e869698bd972a52dbde60a1358d947f08456d8f2bd6"
+    },
+    "direct-broken": {
+      "status": 42,
+      "stderr": "ffffffff16000000e80000002200000000000000000000000000000001000000",
+      "stdout": ""
+    },
+    "direct-full": {
+      "status": 42,
+      "stderr": "ffffffff1c0000005b0000002200000000000000000000000000000001000000",
+      "stdout": ""
+    },
+    "direct-missing": {
+      "status": 42,
+      "stderr": "ffffffff090000005b00000022000000000000000000000000000000feffffff",
+      "stdout": ""
+    },
+    "direct-prefix": {
+      "status": 42,
+      "stderr": "ffffffff250000005b0000002200000000000000000000000000000001000000",
+      "stdout": "5119 bytes sha256=e77ddfb5f6d1a562f012dc95fa5f002500b9140e21ffb139085c669623a9e472"
+    },
+    "direct-readonly": {
+      "status": 42,
+      "stderr": "ffffffff09000000050000002200000000000000000000000000000001000000",
+      "stdout": ""
+    },
+    "direct-short": {
+      "status": 42,
+      "stderr": "ffffffff1c0000005b0000002200000000000000000000000000000001000000",
+      "stdout": ""
+    },
+    "exit": {
+      "status": 42,
+      "stderr": "00000000250000005b0000000a0000001200000000000000ee0f0000010000005b",
+      "stdout": "235b0d0a510d0a410d0d0a420d0a0d0a5b4d0d0a414243440d0a"
+    },
+    "exitprocess": {
+      "status": 42,
+      "stderr": "00000000250000005b0000000a0000001200000000000000ee0f0000010000005b",
+      "stdout": "235b0d0a510d0a410d0d0a420d0a0d0a5b4d0d0a414243440d0a"
+    },
+    "fault": {
+      "status": 3221225477,
+      "stderr": "",
+      "stdout": ""
+    },
+    "heap": {
+      "status": 0,
+      "stderr": "",
+      "stdout": "42430d0a42430d0a"
+    },
+    "hello": {
+      "status": 0,
+      "stderr": "",
+      "stdout": "48656c6c6f2066726f6d2043210d0a"
+    },
+    "immutable": {
+      "status": 0,
+      "stderr": "",
+      "stdout": "4f4b0d0a"
+    },
+    "mixed": {
+      "status": 42,
+      "stderr": "00000000250000005b0000000a0000001200000000000000ee0f0000010000005b",
+      "stdout": "235b0d0a510d0a410d0d0a420d0a0d0a5b4d0d0a414243440d0a"
+    },
+    "mixed-broken": {
+      "status": 42,
+      "stderr": "00000000250000005b0000000a0000001200000000000000ee0f0000010000005b",
+      "stdout": ""
+    },
+    "mixed-full": {
+      "status": 42,
+      "stderr": "00000000250000005b0000000a0000001200000000000000ee0f0000010000005b",
+      "stdout": ""
+    },
+    "mixed-missing": {
+      "status": 42,
+      "stderr": "00000000090000005b0000000a0000001200000000000000ee0f0000feffffff5b",
+      "stdout": ""
+    },
+    "mixed-prefix": {
+      "status": 42,
+      "stderr": "00000000250000005b0000000a0000001200000000000000ee0f0000010000005b",
+      "stdout": "235b0d0a510d0a410d0d0a420d0a0d0a5b4d0d0a414243440d0a"
+    },
+    "mixed-readonly": {
+      "status": 42,
+      "stderr": "00000000250000005b0000000a0000001200000000000000ee0f0000010000005b",
+      "stdout": ""
+    },
+    "mixed-short": {
+      "status": 42,
+      "stderr": "00000000250000005b0000000a0000001200000000000000ee0f0000010000005b",
+      "stdout": "23"
+    },
+    "newline": {
+      "status": 42,
+      "stderr": "00000000250000005b0000000a0000000100000000000000ff0f000001000000",
+      "stdout": "4098 bytes sha256=a8533faefca0639038101d567914cbc8efec495fdbc43a4063be67a795adba9b"
+    },
+    "newline-broken": {
+      "status": 42,
+      "stderr": "0000000016000000e80000002a0000000100000000000000ff0f000001000000",
+      "stdout": ""
+    },
+    "newline-full": {
+      "status": 42,
+      "stderr": "000000001c0000005b0000002a0000000100000000000000ff0f000001000000",
+      "stdout": ""
+    },
+    "newline-missing": {
+      "status": 42,
+      "stderr": "00000000090000005b0000002a0000000100000000000000ff0f0000feffffff",
+      "stdout": ""
+    },
+    "newline-prefix": {
+      "status": 42,
+      "stderr": "00000000250000005b0000000a0000000100000000000000ff0f000001000000",
+      "stdout": "4098 bytes sha256=a8533faefca0639038101d567914cbc8efec495fdbc43a4063be67a795adba9b"
+    },
+    "newline-readonly": {
+      "status": 42,
+      "stderr": "0000000009000000050000002a0000000100000000000000ff0f000001000000",
+      "stdout": ""
+    },
+    "newline-short": {
+      "status": 42,
+      "stderr": "000000001c0000005b0000002a0000000100000000000000ff0f000001000000",
+      "stdout": "0d0a"
+    },
+    "null": {
+      "status": 42,
+      "stderr": "ffffffff160000005b0000000200000000000000000000000000000001000000",
+      "stdout": ""
+    }
+  },
+  "wine": {
+    "direct": {
+      "status": 42,
+      "stderr": "00000000250000005b0000000a0000000100000000000000ff0f000001000000",
+      "stdout": "8196 bytes sha256=a1249281bf7d88548e918e869698bd972a52dbde60a1358d947f08456d8f2bd6"
+    },
+    "direct-broken": {
+      "status": 42,
+      "stderr": "ffffffff16000000e90000002200000000000000000000000000000001000000",
+      "stdout": ""
+    },
+    "direct-readonly": {
+      "status": 42,
+      "stderr": "ffffffff09000000060000002200000000000000000000000000000001000000",
+      "stdout": ""
+    },
+    "exit": {
+      "status": 42,
+      "stderr": "00000000250000005b0000000a0000001200000000000000ee0f0000010000005b",
+      "stdout": "235b0d0a510d0a410d0d0a420d0a0d0a5b4d0d0a414243440d0a"
+    },
+    "exitprocess": {
+      "status": 42,
+      "stderr": "00000000250000005b0000000a0000001200000000000000ee0f0000010000005b",
+      "stdout": "235b0d0a510d0a410d0d0a420d0a0d0a5b4d0d0a414243440d0a"
+    },
+    "fault": {
+      "status": 3221225477,
+      "stderr": "Wine debugger notice",
+      "stdout": "Wine read fault"
+    },
+    "heap": {
+      "status": 0,
+      "stderr": "",
+      "stdout": "42430d0a42430d0a"
+    },
+    "hello": {
+      "status": 0,
+      "stderr": "",
+      "stdout": "48656c6c6f2066726f6d2043210d0a"
+    },
+    "immutable": {
+      "status": 0,
+      "stderr": "",
+      "stdout": "4f4b0d0a"
+    },
+    "mixed": {
+      "status": 42,
+      "stderr": "00000000250000005b0000000a0000001200000000000000ee0f0000010000005b",
+      "stdout": "235b0d0a510d0a410d0d0a420d0a0d0a5b4d0d0a414243440d0a"
+    },
+    "mixed-broken": {
+      "status": 42,
+      "stderr": "00000000250000005b0000000a0000001200000000000000ee0f0000010000005b",
+      "stdout": ""
+    },
+    "mixed-readonly": {
+      "status": 42,
+      "stderr": "00000000250000005b0000000a0000001200000000000000ee0f0000010000005b",
+      "stdout": ""
+    },
+    "newline": {
+      "status": 42,
+      "stderr": "00000000250000005b0000000a0000000100000000000000ff0f000001000000",
+      "stdout": "4098 bytes sha256=a8533faefca0639038101d567914cbc8efec495fdbc43a4063be67a795adba9b"
+    },
+    "newline-broken": {
+      "status": 42,
+      "stderr": "ffffffff16000000e90000002a00000000000000000000000000000001000000",
+      "stdout": ""
+    },
+    "newline-readonly": {
+      "status": 42,
+      "stderr": "ffffffff09000000060000002a00000000000000000000000000000001000000",
+      "stdout": ""
+    },
+    "null": {
+      "status": 3221225477,
+      "stderr": "Wine debugger notice",
+      "stdout": "Wine read fault"
+    }
+  }
+}

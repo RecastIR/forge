@@ -12,6 +12,7 @@ import unittest
 from unittest.mock import patch
 
 import differential as diff
+import startup
 from calculate_driver_cases import CASES as CALCULATE_INPUTS
 
 CASE = "arithmetic/add_i64"
@@ -25,6 +26,270 @@ class NativeDifferentialTests(unittest.TestCase):
     def setUp(self):
         self.tmp = diff.BUILD / "tmp"
         self.tmp.mkdir(parents=True, exist_ok=True)
+
+    def check_startup_blocker(self, manifest, config, work, slot):
+        report = startup.run_case(self.forge, manifest, config, work)
+        if os.getenv("GITHUB_ACTIONS") == "true":
+            evidence = diff.BUILD / "differential/startup" / config / manifest.case["id"]
+            evidence.mkdir(parents=True, exist_ok=True)
+            (evidence / "result.json").write_bytes((work / "result.json").read_bytes())
+        self.assertEqual(report.get("failure_stage"), "translation", report.get("diagnostic"))
+        self.assertEqual(report["stages"], dict(reference="passed", recovery="failed", translation="failed",
+                                                native_build="not_run", publication="not_run", artifact="not_run",
+                                                execution="not_run", comparison="not_run"))
+        self.assertFalse(os.path.lexists(work / "translated"))
+        record = report["compiler_diagnostic"]
+        self.assertEqual((record["stage"], record["category"], record["code"]),
+                         ("lifting", "unsupported", "LIFT_UNSUPPORTED_CONTROL_FLOW"))
+        ctx = record["context"]
+        self.assertIs(ctx["entry_recovered"], True)
+        self.assertIs(ctx["recovery_complete"], False)
+        self.assertEqual(ctx["entry_rva"], "0x14d0")
+        self.assertIn({"dll": "msvcrt.dll", "name": "__set_app_type"}, ctx["imports"])
+        crt = next(d for d in ctx["load_imports"] if d["dll"].lower() == "msvcrt.dll")
+        setter = next(s for s in crt["symbols"] if s["name"] == "__set_app_type")
+        self.assertEqual((setter["iat_slot_rva"], setter["catalogued_service"]), (slot, True))
+
+        # Check the original setter thunk against its IAT slot independently of the
+        # later blocker. All eight PEs place .text at RVA 0x1000, file offset 0x600.
+        data = (diff.BINARIES / config / manifest.case["binary"]).read_bytes()
+        self.assertEqual(data[0x644:0x649], bytes.fromhex("66 81 38 4d 5a"))
+        self.assertEqual(data[0x672], 0xe8)
+        thunk = 0x1077 + struct.unpack_from("<i", data, 0x673)[0]
+        offset = thunk - 0x1000 + 0x600
+        self.assertEqual(data[offset:offset + 2], b"\xff\x25")
+        self.assertEqual(thunk + 6 + struct.unpack_from("<i", data, offset + 2)[0], int(slot, 16))
+        self.assertNotIn({"caller_rva": "0x1010", "instruction_rva": "0x1072", "target_rva": hex(thunk)},
+                         ctx["unresolved_calls"])
+
+        name = manifest.case["id"].split("/")[1]
+        if name == "puts" and config == "debug":
+            self.assertIn({"dll": "msvcrt.dll", "name": "puts"}, ctx["imports"])
+            puts = next(symbol for symbol in crt["symbols"] if symbol["name"] == "puts")
+            self.assertEqual((puts["catalogued_service"], puts["iat_slot_rva"]), (True, "0x8280"))
+            self.assertEqual(data[0xb47:0xb4c], bytes.fromhex("e8c4110000"))
+            self.assertEqual(0x154c + struct.unpack_from("<i", data, 0xb48)[0], 0x2710)
+            self.assertEqual(data[0x1d10:0x1d12], bytes.fromhex("ff25"))
+            self.assertEqual(0x2716 + struct.unpack_from("<i", data, 0x1d12)[0], 0x8280)
+
+        debug = {"argc": 0x1630, "argc_none": 0x1630, "argv": 0x16a0, "argv_edges": 0x1750,
+                 "cleanup": 0x1720, "globals": 0x1650, "puts": 0x1630, "return": 0x1620}
+        root = debug[name] if config == "debug" else (0x16a0 if name == "cleanup" else 0x1600)
+        target = root - 0x70
+        self.assertIn({"caller_rva": hex(root), "instruction_rva": hex(root + 0x1a),
+                       "target_rva": hex(target)}, ctx["tail_transfers"])
+        # Independently read .text's sentinel, relocated targets and terminator.
+        headers = {"argc": (0x2780, 0x2780), "argc_none": (0x2780, 0x2780),
+                   "argv": (0x2800, 0x27e0), "argv_edges": (0x28b0, 0x2870),
+                   "cleanup": (0x2870, 0x2850), "globals": (0x27a0, 0x27a0),
+                   "puts": (0x2790, 0x2780), "return": (0x2770, 0x2770)}
+        header = headers[name][config == "release"]
+        count = 2 if name == "cleanup" else 1
+        words = struct.unpack_from(f"<{count + 2}Q", data, 0x600 + header - 0x1000)
+        self.assertEqual((words[0], words[-1]), (2**64 - 1, 0))
+        targets = sorted(w - 0x140000000 for w in words[1:-1])
+        self.assertEqual(ctx["bounded_calls"], [
+            dict(caller_rva=hex(target), instruction_rva=hex(target + 0x30),
+                 first_rva=hex(header + 8), last_rva=hex(header + 8 * (count + 1)),
+                 initial_target_rvas=list(map(hex, targets))),
+            dict(caller_rva=hex(target + 0xd0), instruction_rva=hex(target + 0x120),
+                 pointer_load_rva=hex(target + 0x118), first_rva="0x9058", last_rva="0x9058",
+                 initial_target_rvas=[])])
+        protect_slot = {"argc": "0x81b8", "argc_none": "0x81b8", "argv": "0x81c0",
+                        "argv_edges": "0x81c0", "cleanup": "0x81e0", "globals": "0x81b8",
+                        "puts": "0x81c0", "return": "0x81b8"}[name]
+        self.assertIn({"dll": "kernel32.dll", "name": "VirtualProtect"}, ctx["imports"])
+        kernel = next(d for d in ctx["load_imports"] if d["dll"].lower() == "kernel32.dll")
+        protect = next(s for s in kernel["symbols"] if s["name"] == "VirtualProtect")
+        self.assertEqual((protect["iat_slot_rva"], protect["catalogued_service"]), (protect_slot, True))
+        # The admitted register call still reads RSI from this precise IAT slot.
+        call = target + 0x65d
+        self.assertEqual(data[call - 0xa00:call - 0xa00 + 2], bytes.fromhex("ff d6"))
+        load = call - 0x2f
+        self.assertEqual(data[load - 0xa00:load - 0xa00 + 3], bytes.fromhex("48 8b 35"))
+        self.assertEqual(load + 7 + struct.unpack_from("<i", data, load - 0xa00 + 3)[0], int(protect_slot, 16))
+        self.assertNotIn({"caller_rva": hex(target + 0x460), "instruction_rva": hex(call)}, ctx["unresolved_calls"])
+        fwrite_slot = int(protect_slot, 16) + (0xb0 if name == "cleanup" else 0xa8)
+        fwrite = next(s for s in crt["symbols"] if s["name"] == "fwrite")
+        self.assertEqual((fwrite["catalogued_service"], fwrite["iat_slot_rva"]), (True, hex(fwrite_slot)))
+        self.assertIn({"dll": "msvcrt.dll", "name": "fwrite"}, ctx["imports"])
+        failure = target + 0x280
+        extra_import = name in ("argv", "argv_edges", "puts")
+        delta = 0xe8d if extra_import else 0xe85
+        site = failure + 0x5e
+        thunk = site + 5 + delta
+        slot = fwrite_slot + (0x38 if extra_import else 0x30)
+        self.assertIn({"dll": "msvcrt.dll", "name": "vfprintf"}, ctx["imports"])
+        formatted = next(s for s in crt["symbols"] if s["name"] == "vfprintf")
+        self.assertEqual((formatted["catalogued_service"], formatted["iat_slot_rva"]), (True, hex(slot)))
+        self.assertEqual(data[site - 0xa00:site - 0xa00 + 5], b"\xe8" + struct.pack("<i", delta))
+        self.assertEqual(data[thunk - 0xa00:thunk - 0xa00 + 6], b"\xff\x25" + struct.pack("<i", slot - thunk - 6))
+        self.assertNotIn({"caller_rva": hex(failure), "instruction_rva": hex(site),
+                          "target_rva": hex(thunk)}, ctx["unresolved_calls"])
+        abort_site, abort_thunk, abort_slot = site + 5, site + 10 + 0xe28, fwrite_slot - 0x28
+        self.assertIn({"dll": "msvcrt.dll", "name": "abort"}, ctx["imports"])
+        abort = next(s for s in crt["symbols"] if s["name"] == "abort")
+        self.assertEqual((abort["catalogued_service"], abort["iat_slot_rva"]), (True, hex(abort_slot)))
+        self.assertEqual(data[abort_site - 0xa00:abort_site - 0xa00 + 5], bytes.fromhex("e8280e0000"))
+        self.assertEqual(data[abort_thunk - 0xa00:abort_thunk - 0xa00 + 6],
+                         b"\xff\x25" + struct.pack("<i", abort_slot - abort_thunk - 6))
+        self.assertNotIn(hex(abort_site), [c["instruction_rva"] for c in ctx["unresolved_calls"]])
+
+        query_site, query_slot = failure + 0x11b, int(protect_slot, 16) + 8
+        query = next(s for s in kernel["symbols"] if s["name"] == "VirtualQuery")
+        self.assertEqual((query["catalogued_service"], query["iat_slot_rva"]), (True, hex(query_slot)))
+        self.assertIn({"dll": "kernel32.dll", "name": "VirtualQuery"}, ctx["imports"])
+        self.assertEqual(data[query_site - 0xa00:query_site - 0xa00 + 6],
+                         b"\xff\x15" + struct.pack("<i", query_slot - query_site - 6))
+        self.assertNotIn(hex(query_site), [c["instruction_rva"] for c in ctx["unresolved_calls"]])
+
+        # __mingw_setusermatherr saves its argument then jumps to a linker thunk.
+        tail = query_site + 0x46c
+        self.assertEqual((ctx["function_rva"], ctx["block_rva"], ctx["instruction_rva"], ctx["opcode"]),
+                         (hex(tail - 7), hex(tail - 7), hex(tail), "JMP_4"))
+        self.assertEqual((ctx["bytes"], ctx["file_offset"]), ("e9dc080000", tail - 0xa00))
+        self.assertEqual(data[tail - 0xa00:tail - 0xa00 + 5], bytes.fromhex(ctx["bytes"]))
+        thunk = tail + 5 + 0x8dc
+        symbol = next(s for s in crt["symbols"] if s["name"] == "__setusermatherr")
+        slot = int(symbol["iat_slot_rva"], 16)
+        self.assertEqual(data[thunk - 0xa00:thunk - 0xa00 + 6], b"\xff\x25" + struct.pack("<i", slot - thunk - 6))
+        return report
+
+    def test_other_conventional_startup_blockers(self):
+        slots = {"argc_none": "0x81f0", "argv": "0x81f8", "argv_edges": "0x81f8", "cleanup": "0x8220",
+                 "globals": "0x81f0", "puts": "0x81f8", "return": "0x81f0"}
+        manifests = {m.case["id"]: m for m in diff.load_catalog()}
+        for name, slot in slots.items():
+            for config in ("debug", "release"):
+                with self.subTest(name=name, config=config), tempfile.TemporaryDirectory(dir=self.tmp) as tmp:
+                    self.check_startup_blocker(manifests["startup/" + name], config, Path(tmp), slot)
+
+    def test_conventional_startup_readiness(self):
+        manifest = next(m for m in diff.load_catalog() if m.case["id"] == "startup/argc")
+        # Independent llvm-readobj import/header and llvm-objdump .CRT/disassembly
+        # observations for these two reproducible PEs. TLS callback order matters.
+        inputs = {
+            "debug": ("e2192c63caae30f8dfe5697c3bec3888abcb7831cd7fe33a0f07c09309b0bfb6",
+                      ["0x140001690", "0x140001660"]),
+            "release": ("d21038a0b109685d0946014d2a1982a7464bcec35565996f42db000449233aaa",
+                        ["0x140001660", "0x140001630"]),
+        }
+        imports = {
+            "kernel32.dll": "DeleteCriticalSection EnterCriticalSection GetLastError GetStartupInfoA "
+                            "InitializeCriticalSection LeaveCriticalSection SetUnhandledExceptionFilter Sleep "
+                            "TlsGetValue VirtualProtect VirtualQuery __C_specific_handler",
+            "msvcrt.dll": "__getmainargs __initenv __iob_func __set_app_type __setusermatherr _acmdln "
+                          "_amsg_exit _cexit _commode _fmode _initterm _onexit abort calloc exit fprintf "
+                          "free fwrite malloc memcpy signal strlen strncmp vfprintf",
+        }
+        for config, (digest, callbacks) in inputs.items():
+            with self.subTest(config=config), tempfile.TemporaryDirectory(dir=self.tmp) as tmp:
+                work = Path(tmp)
+                report = self.check_startup_blocker(manifest, config, work, "0x81f0")
+                self.assertEqual(report["binary_sha256"], digest)
+                context = report["compiler_diagnostic"]["context"]
+                self.assertIn({"caller_rva": "0x1180", "instruction_rva": "0x142a",
+                               "first_rva": "0x9000", "last_rva": "0x9010",
+                               "initial_target_rvas": ["0x1130"]}, context["initializer_tables"])
+                unresolved = context["unresolved_calls"]
+                self.assertIn({"caller_rva": "0x1180", "instruction_rva": "0x1494",
+                               "first_rva": "0x9018", "last_rva": "0x9028",
+                               "initial_target_rvas": ["0x1010"]}, context["initializer_tables"])
+                for dll, symbol, site in (("kernel32.dll", "GetStartupInfoA", "0x1453"),
+                                          ("kernel32.dll", "Sleep", "0x11e6"),
+                                          ("kernel32.dll", "SetUnhandledExceptionFilter", "0x1258"),
+                                          ("msvcrt.dll", "_amsg_exit", "0x140c"),
+                                          ("msvcrt.dll", "_cexit", "0x1460"),
+                                          ("msvcrt.dll", "exit", "0x14a8"),
+                                          ("msvcrt.dll", "_initterm", "0x142a"),
+                                          ("msvcrt.dll", "_initterm", "0x1494")):
+                    self.assertIn({"dll": dll, "name": symbol}, context["imports"])
+                    self.assertNotIn(site, [c["instruction_rva"] for c in unresolved])
+                pe = diff.BINARIES / config / manifest.case["binary"]
+                data = pe.read_bytes()
+                call_bytes = "e891120000" if config == "debug" else "e861120000"
+                self.assertEqual(data[0xa2a:0xa2f], bytes.fromhex(call_bytes))
+                # llvm-objdump and llvm-readobj place the original R12 load and register CALL
+                # in the pinned .text section at file offsets 0x7c8 and 0x7e6.
+                self.assertEqual(data[0x7c8:0x7cf], bytes.fromhex("4c8b25d96f0000"))
+                self.assertEqual(data[0x7e6:0x7e9], bytes.fromhex("41ffd4"))
+                # RCX receives the relocated filter from .rdata, then RAX is saved after the IAT call.
+                self.assertEqual(data[0x851:0x85e], bytes.fromhex("488b0d68320000 ff15426f0000"))
+                self.assertEqual(data[0x86c:0x86f], bytes.fromhex("488902"))
+                filter_va, = struct.unpack_from("<Q", data, 0x24c0)
+                self.assertEqual(filter_va, 0x140001dd0 if config == "debug" else 0x140001da0)
+                scope = context["entry_unwind_handler"]["c_specific_handler"]["scope"]
+                self.assertEqual((scope["begin_rva"], scope["end_rva"], scope["filter_rva"]),
+                                 ("0x14d4", "0x14e7", "0x1dd0" if config == "debug" else "0x1da0"))
+                tls = context["tls"]
+                self.assertEqual((tls["raw_data_start_va"], tls["raw_data_end_va"], tls["index_va"]),
+                                 ("0x14000a000", "0x14000a008", "0x14000708c"))
+                self.assertEqual(tls["callback_vas"], callbacks)
+                self.assertIn("unsupported", tls["limitation"])
+                directories = context["load_imports"]
+                crt = next(d for d in directories if d["dll"].lower() == "msvcrt.dll")
+                fatal = next(s for s in crt["symbols"] if s["name"] == "_amsg_exit")
+                self.assertEqual(fatal["iat_slot_rva"], "0x8208")
+                self.assertIs(fatal["catalogued_service"], True)
+                initializer = next(s for s in crt["symbols"] if s["name"] == "_initterm")
+                self.assertEqual(initializer["iat_slot_rva"], "0x8228")
+                self.assertIs(initializer["catalogued_service"], True)
+                self.assertCountEqual([d["dll"].lower() for d in directories], imports)
+                for directory in directories:
+                    self.assertIs(directory["delayed"], False)
+                    self.assertCountEqual([s["name"] for s in directory["symbols"]],
+                                          imports[directory["dll"].lower()].split())
+
+    def test_both_conventional_initializer_tables(self):
+        sys.path.insert(0, str(diff.SUITE.parent / "integration"))
+        from pe_layout import Layout
+        sys.path.pop(0)
+
+        original = (diff.BINARIES / "debug/crt_argc.exe").read_bytes()
+        # Isolate each original argument sequence, import call and table. The startup
+        # comparison above uses the untouched PE and reaches the second table’s initializer.
+        with tempfile.TemporaryDirectory(dir=self.tmp) as tmp:
+            pe, output = Path(tmp) / "probe.exe", Path(tmp) / "translated"
+            for start, site, slot in ((0x141c, 0x142a, 0x9008), (0x1480, 0x1494, 0x9020)):
+                for invalid in (False, True):
+                    with self.subTest(site=hex(site), invalid=invalid):
+                        data = bytearray(original)
+                        layout = Layout(data)
+                        entry = layout.file_offset(0x1180)
+                        data[entry:entry+5] = b"\xe9" + struct.pack("<i", start - 0x1185)
+                        data[layout.file_offset(site + 5)] = 0xc3
+                        if invalid:
+                            struct.pack_into("<Q", data, layout.file_offset(slot), 0x140009000)
+                        pe.write_bytes(data)
+                        result = subprocess.run([self.forge, "lift", pe, "--executable", "--output", output,
+                                                 "--diagnostics-format", "json"], capture_output=True, timeout=30)
+                        record = startup.compiler_diagnostic(result.stderr, result.returncode, pe, output)
+                        ctx = record["context"]
+                        if not invalid:
+                            first, last, target = ((0x9000, 0x9010, 0x1130) if site == 0x142a
+                                                   else (0x9018, 0x9028, 0x1010))
+                            self.assertIn({"caller_rva": "0x1180", "instruction_rva": hex(site),
+                                           "first_rva": hex(first), "last_rva": hex(last),
+                                           "initial_target_rvas": [hex(target)]},
+                                          ctx["initializer_tables"])
+                        if invalid:
+                            self.assertEqual((record["code"], ctx["instruction_rva"]),
+                                             ("LIFT_INVALID_CALL_TARGET", hex(site)))
+                        elif site == 0x142a:
+                            self.assertIs(ctx["recovery_complete"], True)
+                            self.assertIn({"dll": "msvcrt.dll", "name": "__getmainargs"}, ctx["imports"])
+                        else:
+                            self.assertEqual((record["code"], ctx["function_rva"], ctx["instruction_rva"],
+                                              ctx["opcode"], ctx["bytes"]),
+                                             ("LIFT_UNSUPPORTED_CONTROL_FLOW", "0x1dc0", "0x1dc7",
+                                              "JMP_4", "e9dc080000"))
+                            self.assertIn({"dll": "msvcrt.dll", "name": "__set_app_type"}, ctx["imports"])
+                            self.assertEqual(ctx["branch_target"], 0x26a8)
+                            self.assertIn({"caller_rva": "0x1010", "instruction_rva": "0x10ff",
+                                           "target_rva": "0x1dc0"}, ctx["calls"])
+                            self.assertIn("tail jump requires an unwind-backed function entry", record["message"])
+                            self.assertFalse(any(edge["instruction_rva"] == "0x1dc7"
+                                                 for edge in ctx["tail_transfers"]))
 
     def test_lstrlen_rebased_reference(self):
         fixture = "imports/lstrlen"

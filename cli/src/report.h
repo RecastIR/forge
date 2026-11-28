@@ -10,6 +10,7 @@ namespace forge {
     struct InspectionError;
     struct Report;
     struct LiftRequest;
+    struct ExecutableReadiness;
 
     struct ReportOptions {
         bool json = false, strict = false;
@@ -24,4 +25,9 @@ namespace forge {
                       llvm::raw_ostream &err);
     void printLiftDiagnostic(const InspectionError &error, const std::filesystem::path &input,
                              LiftRequest request, llvm::raw_ostream &out);
+    void printExecutableDiagnostic(const ExecutableReadiness &readiness,
+                                   const std::filesystem::path &input,
+                                   const std::filesystem::path &output,
+                                   const InspectionError *failure, bool json,
+                                   llvm::raw_ostream &out);
 } // namespace forge

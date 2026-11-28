@@ -1,0 +1,85 @@
+{
+  "environment": {
+    "host": "Windows-2022Server-10.0.20348-SP0",
+    "run": "46060051895",
+    "launch": "DETACHED_PROCESS, STARTF_USESTDHANDLES, inherited error mode, no debugger",
+    "dll": "C:\\Windows\\System32\\msvcrt.dll",
+    "sha256": "dde047f12a6b954773284e058631d9939ed1ef1d0f853d4343c320774129ab6e",
+    "image": "20261123.376.1",
+    "version": "7.0.20348.5756 (WinBuild.160101.0800)"
+  },
+  "inputs": {
+    "crt-abort-direct.exe": "6720ba3c1853da2d3bf2a0f30a4d6e4c066fc1545f2f8bd2385f2c226506381b",
+    "crt-abort-buffered.exe": "ea914abd25e163bf970ab3f5f8f175091e822ab7192dab2152812c7853de90cf",
+    "crt-abort-control.exe": "07016eb7f8264ed642eaa59adcef325818150554c50bdd53a7662f49af108a3c",
+    "crt-abort-initializer.exe": "9a2632ed4a1fbf8c65d7212b8d8106756dd6d411595a9253c3efb5fa90caa73b",
+    "crt-abort-cleanup.exe": "b375e7e8580f92d4ef7a9614579132c4aba79ba8a4a9dbab35e1c5f6358d56e2"
+  },
+  "cases": {
+    "direct-pipe": {
+      "status": 3,
+      "stdout": "5242",
+      "stderr": ""
+    },
+    "direct-file": {
+      "status": 3,
+      "stdout": "5242",
+      "stderr": ""
+    },
+    "direct-absent-stderr": {
+      "status": 3,
+      "stdout": "5242",
+      "stderr": null
+    },
+    "direct-broken-stderr": {
+      "status": 3,
+      "stdout": "5242",
+      "stderr": null
+    },
+    "buffered-pipe": {
+      "status": 3,
+      "stdout": "52426f0d0a",
+      "stderr": "650d0a"
+    },
+    "buffered-file": {
+      "status": 3,
+      "stdout": "52426f0d0a",
+      "stderr": "650d0a"
+    },
+    "buffered-merged": {
+      "status": 3,
+      "stdout": "52426f0d0a650d0a",
+      "stderr": null
+    },
+    "buffered-broken-stderr": {
+      "status": 3,
+      "stdout": "52426f0d0a",
+      "stderr": null
+    },
+    "control-pipe": {
+      "status": 3,
+      "stdout": "5242486f0d0a",
+      "stderr": "650d0a"
+    },
+    "control-file": {
+      "status": 3,
+      "stdout": "5242486f0d0a",
+      "stderr": "650d0a"
+    },
+    "control-merged": {
+      "status": 3,
+      "stdout": "5242486f0d0a650d0a",
+      "stderr": null
+    },
+    "initializer-pipe": {
+      "status": 3,
+      "stdout": "5242",
+      "stderr": ""
+    },
+    "cleanup-pipe": {
+      "status": 3,
+      "stdout": "5242",
+      "stderr": ""
+    }
+  }
+}

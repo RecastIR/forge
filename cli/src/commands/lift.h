@@ -1,6 +1,7 @@
 #pragma once
 
 #include "lift/lift.h"
+#include "output/executable.h"
 
 #include "llvm/Support/raw_ostream.h"
 
@@ -15,8 +16,11 @@ namespace forge::cli {
         std::filesystem::path input, output;
         LiftRequest request{0, EntryMode::RegisterState};
         bool jsonDiagnostics = false;
+        bool executable = false;
+        ExecutableToolchain toolchain;
     };
 
+    ExecutableToolchain executableTools();
     void registerLift(CLI::App &app, LiftOptions &options, int &status);
     int executeLift(const LiftOptions &options, llvm::raw_ostream &err);
 } // namespace forge::cli

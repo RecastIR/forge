@@ -3,6 +3,7 @@
 #include "forge/guest_range.h"
 #include "forge/process.h"
 #include "lift/address_fact.h"
+#include "lift/executable.h"
 #include "lift/memory.h"
 #include "lift/recovery.h"
 
@@ -19,6 +20,12 @@ namespace forge::x86 {
         constexpr uint64_t writableLimit = 256ULL * 1024 * 1024;
         constexpr auto stackRange =
             GuestRange::fromOffset({GuestMemory::base}, 0, GuestMemory::capacity).value();
+
+        size_t stringTerminator(StringRef bytes, bool &literal) {
+            const size_t zero = bytes.find('\0');
+            literal = literal && !bytes.take_front(zero).contains('%');
+            return zero;
+        }
 
         Constant *immutableBytes(LLVMContext &context, const ImageBytes &bytes, uint64_t length) {
             SmallVector<Constant *> parts;
@@ -336,22 +343,77 @@ namespace forge::x86 {
                                             ir.getInt64(fragments.size())});
         }
 
-        SmallVector<Constant *> processImports(llvm::Module &module,
-                                               const RecoveredFunctionGroup &group) {
-            std::set<std::pair<std::string_view, std::string_view>> names;
+        struct ProtectionMetadata {
+            SmallVector<Constant *> sections, loaderPages;
+            bool refinesSection = false;
+        };
 
-            for (const auto &[rva, function] : group.functions()) {
-                for (const auto &[site, call] : function.calls) {
-                    if (const auto *service = call.external()) {
-                        names.emplace(service->binding.dll, service->binding.name);
-                    }
-                }
+        void appendLoaderPages(ProtectionMetadata &metadata, RvaRange section,
+                               ArrayRef<RvaRange> writes, IRBuilder<> &ir) {
+            constexpr uint64_t mask = FORGE_RT_GUEST_PAGE_SIZE - 1;
+            std::vector<RvaRange> pages;
+            for (const auto write : writes) {
+                const auto first = std::max(section.begin, write.begin) & ~mask;
+                const auto last = (std::min(section.end, write.end) - 1) | mask;
+                pages.push_back({first, last + 1});
             }
 
+            const auto runs = mergeRanges(std::move(pages));
+            metadata.refinesSection |= runs.size() > 1 || runs.front().begin > section.begin ||
+                                       runs.back().end < section.end;
+            for (const auto run : runs) {
+                metadata.loaderPages.push_back(ConstantStruct::getAnon(
+                    {ir.getInt32(static_cast<uint32_t>(run.begin)),
+                     ir.getInt32(static_cast<uint32_t>((run.end - 1) & ~mask))}));
+            }
+        }
+
+        ProtectionMetadata protectionSections(const ParsedImage &image, IRBuilder<> &ir,
+                                              bool query) {
+            SmallVector<const Section *> ordered;
+            for (const auto &section : image.module().sections) {
+                if (section.virtualSize) {
+                    ordered.push_back(&section);
+                }
+            }
+            std::ranges::sort(ordered, {}, &Section::rva);
+
+            const RelocationIndex relocations(image.module().relocations);
+            auto writes = query ? image.loaderWrittenRanges() : std::vector<RvaRange>{};
+            const auto fixups = relocations.footprints();
+            writes.insert(writes.end(), fixups.begin(), fixups.end());
+            writes = mergeRanges(std::move(writes));
+            ProtectionMetadata metadata;
+            for (const auto *section : ordered) {
+                const RvaRange extent{section->rva, uint64_t{section->rva} + section->virtualSize};
+                const auto affected = rangesIn(writes, extent);
+                const uint32_t flags =
+                    (affected.empty() ? 0U : FORGE_RT_LOADER_MAY_WRITE) |
+                    (section->permissions[0] == 'r' ? FORGE_RT_READ : 0U) |
+                    (section->permissions[1] == 'w' ? FORGE_RT_WRITE : 0U) |
+                    (section->permissions[2] == 'x' ? FORGE_RT_EXECUTE : 0U) |
+                    (section->shared || section->discardable || section->noncached
+                         ? FORGE_RT_FIXED_PROTECTION
+                         : 0U);
+                if (query &&
+                    flags == (FORGE_RT_READ | FORGE_RT_WRITE | FORGE_RT_LOADER_MAY_WRITE) &&
+                    section->rva % FORGE_RT_GUEST_PAGE_SIZE == 0) {
+                    appendLoaderPages(metadata, extent, affected, ir);
+                }
+                metadata.sections.push_back(ConstantStruct::getAnon(
+                    {ir.getInt32(section->rva), ir.getInt32(section->virtualSize),
+                     ir.getInt32(flags)}));
+            }
+            return metadata;
+        }
+
+        SmallVector<Constant *>
+        processImports(llvm::Module &module,
+                       const std::set<std::pair<std::string_view, std::string_view>> &required) {
             IRBuilder<> ir(module.getContext());
             SmallVector<Constant *> imports;
 
-            for (const auto &[dll, name] : names) {
+            for (const auto &[dll, name] : required) {
                 imports.push_back(ConstantStruct::getAnon(
                     {ir.CreateGlobalString(dll, "service.dll", 0, &module),
                      ir.CreateGlobalString(name, "service.name", 0, &module)}));
@@ -360,10 +422,95 @@ namespace forge::x86 {
             return imports;
         }
 
+        struct EmittedImportSlots {
+            SmallVector<Constant *> data;
+            SmallVector<Constant *> functions;
+        };
+
+        EmittedImportSlots
+        emitImportSlots(llvm::Module &module, uint64_t loadBase,
+                        const std::map<uint32_t, uint32_t> &dataImports,
+                        const std::map<uint32_t, const win64::ServiceBinding *> &functionImports,
+                        SmallVectorImpl<Constant *> &storage,
+                        SmallVectorImpl<forge_rt_region_template> &rows) {
+            EmittedImportSlots slots;
+            const auto count = dataImports.size() + functionImports.size();
+            if (!count) {
+                return slots;
+            }
+
+            IRBuilder<> ir(module.getContext());
+            const auto index = storage.size();
+            storage.push_back(processBacking(module, ir, count * importSlotWidth, {}, true));
+            for (const auto &[rva, kind] : dataImports) {
+                rows.push_back({loadBase + rva, importSlotWidth, index,
+                                slots.data.size() * importSlotWidth, FORGE_RT_READ});
+                slots.data.push_back(
+                    ConstantStruct::getAnon({ir.getInt32(rva), ir.getInt32(kind)}));
+            }
+
+            for (const auto &[rva, service] : functionImports) {
+                const auto offset = (slots.data.size() + slots.functions.size()) * importSlotWidth;
+                rows.push_back({loadBase + rva, importSlotWidth, index, offset, FORGE_RT_READ});
+                auto *target = ConstantStruct::getAnon(
+                    {ir.CreateGlobalString(service->dll, "service.dll", 0, &module),
+                     ir.CreateGlobalString(service->name, "service.name", 0, &module)});
+                slots.functions.push_back(ConstantStruct::getAnon({ir.getInt32(rva), target}));
+            }
+
+            std::ranges::sort(rows, {}, &forge_rt_region_template::start);
+            return slots;
+        }
+
+        bool validImportPointerSlot(const ParsedImage &image, uint32_t rva,
+                                    const RelocationIndex &relocations) {
+            const auto *section = image.sectionAtRva(rva);
+            const uint64_t end = uint64_t(rva) + importSlotWidth;
+            return section && !section->discardable && section->permissions[0] == 'r' &&
+                   section->permissions[2] != 'x' &&
+                   end <= uint64_t(section->rva) + section->virtualSize &&
+                   !relocations.firstOverlap({rva, end});
+        }
+
+        std::map<uint32_t, uint32_t> dataImportSlots(const ParsedImage &image,
+                                                     const RelocationIndex &relocations) {
+            std::map<uint32_t, uint32_t> slots;
+
+            for (const auto &descriptor : image.importBindings().entries()) {
+                for (size_t i = 0; i < descriptor.symbols.size(); ++i) {
+                    const auto &symbol = descriptor.symbols[i];
+                    const auto kind = crtDataExport(descriptor, symbol);
+                    if (!kind) {
+                        continue;
+                    }
+
+                    const auto rva =
+                        descriptor.addressTableRva + static_cast<uint32_t>(i * importSlotWidth);
+                    if (!validImportPointerSlot(image, rva, relocations)) {
+                        InspectionError failure("invalid data import slot for " + descriptor.name +
+                                                    "!" + symbol.name + " at RVA " + hex(rva),
+                                                FailureCode::ExecutableStartup);
+                        failure.context.importDll = descriptor.name;
+                        failure.context.importSymbol = symbol.name;
+                        failure.context.importSlot = rva;
+                        throw failure;
+                    }
+
+                    slots.emplace(rva, *kind);
+                }
+            }
+            return slots;
+        }
     } // namespace
 
-    ImageMemory::ImageMemory(const ParsedImage &image, uint64_t guestLoadBase, bool checkedMemory)
-        : source(image), loadBase(guestLoadBase) {
+    ImageMemory::ImageMemory(const ParsedImage &image, uint64_t guestLoadBase, bool checkedMemory,
+                             EntryMode mode)
+        : source(image), loadBase(guestLoadBase),
+          executableHeaders(mode == EntryMode::PeEntry ? image.headerBytes() : StringRef{}) {
+        if (mode == EntryMode::PeEntry) {
+            dataImports =
+                dataImportSlots(image, importRelocations.emplace(image.module().relocations));
+        }
         if (checkedMemory) {
             // The process reserves the entire image, even when no resolver rows are emitted.
             const auto size = image.module().sizeOfImage;
@@ -394,7 +541,7 @@ namespace forge::x86 {
 
     const ImageInitialization &ImageMemory::contents() {
         if (!initialization) {
-            initialization = source.imageInitialization();
+            initialization = source.imageInitialization(executableDataSlots);
         }
 
         return *initialization;
@@ -419,14 +566,161 @@ namespace forge::x86 {
         }
     }
 
-    void ImageMemory::serviceArgument(const Step &step, uint64_t va, bool write,
+    void ImageMemory::boundedTable(const Step &step, const BoundedTableCall &table) {
+        const auto extent = table.extent();
+        if (extent.end > UINT64_MAX - loadBase) {
+            step.reject(FailureCode::ImageMemory,
+                        "bounded table overflows the selected guest address space");
+        }
+
+        if (table.forward() && ((loadBase + extent.begin) % 8 || (loadBase + extent.end) % 8)) {
+            step.reject(FailureCode::ImageMemory,
+                        "unaligned forward pointer range at selected image base " + hex(loadBase));
+        }
+
+        if (extent.begin == extent.end) {
+            return;
+        }
+
+        const auto &section = *source.sectionAtRva(extent.begin);
+        if (section.permissions[2] == 'x') {
+            for (uint32_t slot = table.first; slot < table.last; slot += 8) {
+                executableDataSlots.insert(slot);
+            }
+        }
+        select(step, section, table.extent());
+    }
+
+    void ImageMemory::initializerTable(const Step &step, uint32_t first, uint32_t last) {
+        if (last > UINT64_MAX - loadBase) {
+            step.reject(FailureCode::ImageMemory,
+                        "initializer table endpoint overflows the selected guest address space");
+        }
+        if (first != last) {
+            serviceArgument(step, loadBase + first, {win64::Value::Address, win64::Access::Input},
+                            last - first);
+        }
+    }
+
+    std::optional<uint64_t> ImageMemory::firstImmutableNul(RvaRange range, bool &literal) {
+        const auto &view = contents();
+        auto holes = view.exclusionsIn(range);
+        for (auto pos = range.begin; pos < range.end;) {
+            if (!holes.empty() && holes.front().begin <= pos) {
+                literal = false;
+                pos = holes.front().end;
+                holes = holes.drop_front();
+                continue;
+            }
+
+            // Examine a bounded window of loader-visible bytes, including any
+            // relocated fragments in the otherwise zero-filled virtual tail.
+            const auto end =
+                std::min({range.end, pos + 4096, holes.empty() ? range.end : holes.front().begin});
+            auto bytes = source.imageBytes({pos, end}, view, loadBase);
+            bytes.prefix.resize(end - pos, '\0');
+            for (const auto &fragment : bytes.tail) {
+                bytes.prefix.replace(fragment.offset, fragment.bytes.size(), fragment.bytes);
+            }
+
+            if (const auto zero = stringTerminator(bytes.prefix, literal);
+                zero != StringRef::npos) {
+                return pos + zero;
+            }
+            pos = end;
+        }
+        return std::nullopt;
+    }
+
+    ImageMemory::InputExtent ImageMemory::contiguousInputExtent(uint64_t rva, uint64_t limit,
+                                                                InputScan scan) {
+        const bool string = scan != InputScan::Bytes;
+        bool literal = scan == InputScan::LiteralFormat;
+        uint64_t end = std::max<uint64_t>(rva, executableHeaders.size());
+        if (string && rva < end) {
+            const auto zero = stringTerminator(executableHeaders.substr(rva, limit), literal);
+            if (zero != StringRef::npos) {
+                return {zero + 1, literal};
+            }
+        }
+
+        while (end - rva < limit) {
+            const auto *section = source.sectionAtRva(end);
+            if (!section || (!section->writableData() &&
+                             (!section->immutable() || section->permissions[2] == 'x'))) {
+                break;
+            }
+
+            const auto sectionEnd = uint64_t(section->rva) + section->virtualSize;
+            const auto next = end + std::min(sectionEnd - end, limit - (end - rva));
+            if (string && section->immutable()) {
+                if (const auto zero = firstImmutableNul({end, next}, literal)) {
+                    return {*zero - rva + 1, literal};
+                }
+            } else {
+                literal = false;
+            }
+            end = next;
+        }
+        return {std::min(end - rva, limit), false};
+    }
+
+    void ImageMemory::formattedInputs(const Step &step, ArrayRef<uint64_t> formats) {
+        if (formattedRead) {
+            return;
+        }
+
+        // An unknown format can consume a slot containing a pointer to any eligible PE data.
+        if (formats.empty()) {
+            formattedRead = &step;
+            return;
+        }
+
+        constexpr auto format = win64::crtVfprintf.arguments[1];
+        for (const auto va : formats) {
+            const auto extent =
+                contiguousInputExtent(va - loadBase, format.size, InputScan::LiteralFormat);
+            if (!extent.literal) {
+                formattedRead = &step;
+                return;
+            }
+
+            serviceArgument(step, va, format, extent.size);
+        }
+    }
+
+    void ImageMemory::serviceArgument(const Step &step, uint64_t va,
+                                      const win64::Argument &argument,
                                       std::optional<uint64_t> size) {
         if (va == 0 || va - GuestMemory::base < GuestMemory::capacity) {
             return;
         }
 
         const auto rva = va - loadBase;
+        const bool write = argument.writes();
+
+        if (!size && argument.extent == win64::Extent::ElementProduct) {
+            size = contiguousInputExtent(rva, UINT64_MAX, InputScan::Bytes).size;
+        } else if (!size && argument.extent == win64::Extent::CString && argument.size) {
+            size = contiguousInputExtent(rva, argument.size, InputScan::CString).size;
+        }
+
+        if (rva < executableHeaders.size()) {
+            if (write) {
+                step.reject(FailureCode::ImageMemory,
+                            "output argument at guest VA " + hex(va) +
+                                " requires writable PE data or the guest stack");
+            }
+
+            if (size && *size > executableHeaders.size() - rva) {
+                selectServiceSections(step, rva, *size, false);
+            }
+
+            return;
+        }
+
         const auto *section = source.sectionAtRva(rva);
+
         if (!section || section->permissions[2] == 'x' ||
             (!section->immutable() && !section->writableData())) {
             step.reject(
@@ -448,6 +742,7 @@ namespace forge::x86 {
         }
 
         const uint64_t end = uint64_t(section->rva) + section->virtualSize;
+
         if (!size) {
             // Unbounded counts and mutable terminators can reach anywhere in this section.
             select(step, *section, {section->rva, end});
@@ -459,8 +754,58 @@ namespace forge::x86 {
             return;
         }
 
-        // Each backing belongs to one PE section. A bounded transfer may touch several,
-        // including a valid subrange after a gap. finish() preserves protected holes.
+        selectServiceSections(step, rva, *size, write);
+    }
+
+    void ImageMemory::protectionTarget(const Step &step, uint64_t va,
+                                       std::optional<uint64_t> size) {
+        const uint64_t imageSize = source.module().sizeOfImage;
+        constexpr uint64_t mask = FORGE_RT_GUEST_PAGE_SIZE - 1;
+        const uint64_t first = (va & ~mask) - loadBase;
+        const uint64_t rva = va - loadBase;
+        if (first >= imageSize || rva >= imageSize) {
+            return;
+        }
+
+        if (size) {
+            if (!*size || *size > imageSize - rva || *size - 1 > UINT64_MAX - va) {
+                return;
+            }
+
+            const auto last = ((va + (*size - 1)) | mask) - loadBase;
+            if (last < imageSize) {
+                selectServiceSections(step, first, last - first + 1, true);
+            }
+            return;
+        }
+
+        // Starting in known image storage bounds even a dynamic count: protection cannot
+        // succeed past the first gap or ineligible section.
+        auto next = first;
+        while (const auto *section = source.sectionAtRva(next)) {
+            if (!section->writableData()) {
+                break;
+            }
+
+            const auto end = uint64_t{section->rva} + section->virtualSize;
+            select(step, *section, {next, end});
+            next = end;
+        }
+    }
+
+    void ImageMemory::protectionOutput(const Step &step, uint64_t va, unsigned size) {
+        if (!size || size - 1 > UINT64_MAX - va || va + (size - 1) < loadBase) {
+            return;
+        }
+
+        const auto first = std::max(va, loadBase);
+        selectServiceSections(step, first - loadBase, size - (first - va), true);
+    }
+
+    // A bounded transfer may touch several sections, including a valid subrange after a gap.
+    // finish() preserves protected holes in each selected backing.
+    void ImageMemory::selectServiceSections(const Step &step, uint64_t rva, uint64_t size,
+                                            bool write) {
         for (const auto &part : source.module().sections) {
             if (!part.writableData() &&
                 (write || !part.immutable() || part.permissions[2] == 'x')) {
@@ -470,8 +815,9 @@ namespace forge::x86 {
             const uint64_t first = std::max<uint64_t>(rva, part.rva);
             const uint64_t limit = uint64_t(part.rva) + part.virtualSize;
             const uint64_t skip = first - rva;
-            if (first < limit && skip < *size) {
-                select(step, part, {first, first + std::min(limit - first, *size - skip)});
+
+            if (first < limit && skip < size) {
+                select(step, part, {first, first + std::min(limit - first, size - skip)});
             }
         }
     }
@@ -490,7 +836,44 @@ namespace forge::x86 {
         }
 
         const auto rva = va - loadBase;
+        if (selectFunctionImport(rva, width, write)) {
+            return;
+        }
+
         fixedImageAccess(step, {rva, rva + bytes}, write);
+    }
+
+    bool ImageMemory::selectFunctionImport(uint64_t rva, unsigned width, bool write) {
+        if (!importRelocations || rva > UINT32_MAX || width != 64 || write) {
+            return false;
+        }
+
+        const auto slot = static_cast<uint32_t>(rva);
+        if (functionImports.contains(slot)) {
+            return true;
+        }
+
+        const auto imported = source.importBindings().at(slot);
+        if (!imported || imported->descriptor.delayed || imported->descriptor.bound) {
+            return false;
+        }
+
+        const auto *service = findService(win64::services, imported->descriptor, imported->symbol);
+        if (!service) {
+            return false;
+        }
+
+        if (!importWrites) {
+            importWrites = source.loaderWrittenRanges();
+        }
+
+        if (!validImportPointerSlot(source, slot, *importRelocations) ||
+            imported->unstableIdentityRva(*importRelocations, *importWrites)) {
+            return false;
+        }
+
+        functionImports.emplace(slot, service);
+        return true;
     }
 
     void ImageMemory::tableRead(const Step &step, const RelativeTable &table) {
@@ -498,7 +881,27 @@ namespace forge::x86 {
                          false);
     }
 
+    bool ImageMemory::isDataImportPointer(uint64_t va) const {
+        const auto rva = va - loadBase;
+        return rva <= UINT32_MAX && dataImports.contains(static_cast<uint32_t>(rva));
+    }
+
     void ImageMemory::fixedImageAccess(const Step &step, RvaRange access, bool write) {
+        // The loader publishes these validated pointer cells separately from the raw IAT.
+        if (!write && access.end - access.begin == importSlotWidth && access.begin <= UINT32_MAX &&
+            dataImports.contains(static_cast<uint32_t>(access.begin))) {
+            return;
+        }
+
+        if (access.begin < executableHeaders.size() && access.end <= executableHeaders.size()) {
+            if (write) {
+                step.reject(FailureCode::ImageMemory,
+                            "write to immutable PE headers at VA " + hex(loadBase + access.begin));
+            }
+
+            return;
+        }
+
         const auto *section = source.sectionAtRva(access.begin);
 
         if (!section || (!section->immutable() && !section->writableData()) ||
@@ -555,17 +958,25 @@ namespace forge::x86 {
     }
 
     void ImageMemory::continuationAccess(const Step &step, const Continuation &origin,
-                                         llvm::ArrayRef<const ResolvedCallSite *> sites,
-                                         unsigned width, bool write) {
-        // Repeated reads in a high-fan-in helper need only one expansion of its
-        // call sites. The first selecting step owns the budget diagnostic.
-        if (!continuationAccesses.emplace(origin.callee, origin.offset, width, write).second) {
-            return;
-        }
+                                         const RecoveredFunctionGroup &group, unsigned width,
+                                         bool write) {
+        // Only CALL creates a return address. Tail predecessors share this slot.
+        // The cache also deduplicates common predecessors across readers and diamonds.
+        SmallVector<uint32_t> pending{origin.callee};
+        while (!pending.empty()) {
+            const auto reader = pending.pop_back_val();
+            if (!continuationAccesses.emplace(reader, origin.offset, width, write).second) {
+                continue;
+            }
 
-        for (const auto *site : sites) {
-            selectComputed(step, loadBase + site->continuation + origin.offset, width, write,
-                           ExecutableSelection::ContinuationBytes);
+            for (const auto *site : group.function(reader).incoming) {
+                if (site->isTailJump()) {
+                    pending.push_back(site->caller);
+                } else {
+                    selectComputed(step, loadBase + *site->continuation + origin.offset, width,
+                                   write, ExecutableSelection::ContinuationBytes);
+                }
+            }
         }
     }
 
@@ -574,6 +985,10 @@ namespace forge::x86 {
         // A proven register value narrows the image selection. An invalid access still
         // goes through the runtime resolver if the guest executes the instruction.
         const auto rva = va - loadBase;
+        if (selectFunctionImport(rva, width, write)) {
+            return;
+        }
+
         const auto *section = source.sectionAtRva(rva);
 
         if (!section || (!section->writableData() && (write || !section->immutable()))) {
@@ -626,9 +1041,9 @@ namespace forge::x86 {
             }
         }
 
+        const auto *read = indirectRead ? indirectRead : formattedRead;
         for (const auto &section : source.module().sections) {
-            const auto *origin =
-                section.writableData() && indirectWrite ? indirectWrite : indirectRead;
+            const auto *origin = section.writableData() && indirectWrite ? indirectWrite : read;
 
             if (origin && (section.immutable() || section.writableData()) &&
                 section.permissions[2] != 'x' && section.virtualSize) {
@@ -641,7 +1056,7 @@ namespace forge::x86 {
     std::vector<ImageMemory::Span> ImageMemory::selectedSpans() {
         auto spans = std::move(direct);
 
-        if (indirectRead || indirectWrite) {
+        if (indirectRead || indirectWrite || formattedRead) {
             addIndirectSpans(spans);
         }
 
@@ -665,12 +1080,42 @@ namespace forge::x86 {
         ImagePlan plan;
         plan.loadBase = loadBase;
         plan.sizeOfImage = source.module().sizeOfImage;
-        uint64_t embedded = 0;
-        uint64_t immutableExtent = 0;
-        uint64_t writableExtent = 0;
+        if (!executableHeaders.empty()) {
+            // Whole-executable admission verified the first section starts at
+            // alignTo(SizeOfHeaders, SectionAlignment). v6 suffices for one page.
+            const auto &sections = source.module().sections;
+            const auto first = std::ranges::find_if(sections, &Section::virtualSize);
+            if (first != sections.end() && first->rva > FORGE_RT_GUEST_PAGE_SIZE) {
+                plan.queryHeaderSize = static_cast<uint32_t>(executableHeaders.size());
+            }
+        }
+        plan.dataImports = std::move(dataImports);
+        plan.functionImports = std::move(functionImports);
+        uint64_t embedded = executableHeaders.size();
+        uint64_t immutableExtent = executableHeaders.size();
+        // The loader needs a private cell for every supported data export, even
+        // when the guest never reads its IAT slot.
+        uint64_t writableExtent =
+            (plan.dataImports.size() + plan.functionImports.size()) * importSlotWidth;
+        if (writableExtent > writableLimit) {
+            throw InspectionError("import pointer slots exceed the writable image limit",
+                                  FailureCode::ImageMemory);
+        }
 
         const auto spans = selectedSpans();
-        plan.backings.reserve(spans.size());
+        plan.backings.reserve(spans.size() + !executableHeaders.empty());
+
+        if (!executableHeaders.empty()) {
+            if (immutableExtent > moduleLimit) {
+                throw InspectionError("PE header extent " + hex(immutableExtent) +
+                                          " exceeds module limit " + hex(moduleLimit),
+                                      FailureCode::ImageMemory);
+            }
+
+            const RvaRange headers{0, immutableExtent};
+            plan.backings.push_back(
+                {headers, false, false, {executableHeaders.str(), {}}, {headers}});
+        }
 
         for (const auto &span : spans) {
             const bool writable = span.section->writableData();
@@ -798,42 +1243,88 @@ namespace forge::x86 {
         auto &module = *entryThunk.getParent();
         IRBuilder<> ir(module.getContext());
         SmallVector<Constant *> storage;
-        SmallVector<Constant *> intervals;
+        SmallVector<forge_rt_region_template> rows;
 
         for (const auto &backing : backings) {
             if (backing.intervals.empty()) {
                 continue;
             }
 
-            auto *index = ir.getInt64(storage.size());
+            const auto index = storage.size();
             const auto size = backing.range.end - backing.range.begin;
             storage.push_back(processBacking(module, ir, size, backing.bytes, backing.writable));
             const auto permissions = FORGE_RT_READ | (backing.writable ? FORGE_RT_WRITE : 0U) |
                                      (backing.executable ? FORGE_RT_EXECUTE : 0U);
 
             for (auto interval : backing.intervals) {
-                intervals.push_back(ConstantStruct::getAnon(
-                    {ir.getInt64(loadBase + interval.begin),
-                     ir.getInt64(interval.end - interval.begin), index,
-                     ir.getInt64(interval.begin - backing.range.begin), ir.getInt32(permissions)}));
+                rows.push_back({loadBase + interval.begin, interval.end - interval.begin, index,
+                                interval.begin - backing.range.begin, permissions});
             }
+        }
+
+        const auto slots =
+            emitImportSlots(module, loadBase, dataImports, functionImports, storage, rows);
+
+        SmallVector<Constant *> intervals;
+        for (const auto &row : rows) {
+            intervals.push_back(ConstantStruct::getAnon(
+                {ir.getInt64(row.start), ir.getInt64(row.size), ir.getInt64(row.backing),
+                 ir.getInt64(row.offset), ir.getInt32(row.permissions)}));
         }
 
         auto *storageTable = artifactTable(module, storage, "image.backings");
         auto *regionTable = artifactTable(module, intervals, "image.ranges");
-        auto imports = processImports(module, group);
+        const auto required = group.requiredImports();
+        auto imports = processImports(module, required);
+        const bool query = required.contains({win64::virtualQuery.dll, win64::virtualQuery.name});
+        const bool dynamicProtection =
+            query || required.contains({win64::virtualProtect.dll, win64::virtualProtect.name});
+        auto version =
+            dynamicProtection ? FORGE_RT_PROTECTION_ARTIFACT_VERSION : FORGE_RT_PE_ARTIFACT_VERSION;
+        if (query && queryHeaderSize) {
+            version = FORGE_RT_QUERY_HEADER_ARTIFACT_VERSION;
+        }
+        const auto protection =
+            dynamicProtection ? protectionSections(group.image(), ir, query) : ProtectionMetadata{};
+        if (protection.refinesSection) {
+            version = FORGE_RT_LOADER_PAGES_ARTIFACT_VERSION;
+        }
+
         auto *descriptor = ConstantStruct::getAnon(
-            {ir.getInt32(FORGE_RT_ARTIFACT_VERSION), ir.getInt64(loadBase),
-             ir.getInt64(sizeOfImage), ir.getInt64(group.root()),
-             ir.getInt64(group.image().module().entryPoint), storageTable,
-             ir.getInt64(storage.size()), regionTable, ir.getInt64(intervals.size()),
+            {ir.getInt32(version), ir.getInt64(loadBase), ir.getInt64(sizeOfImage),
+             ir.getInt64(group.root()), ir.getInt64(group.image().module().entryPoint),
+             storageTable, ir.getInt64(storage.size()), regionTable, ir.getInt64(intervals.size()),
              artifactTable(module, imports, "image.imports"), ir.getInt64(imports.size()),
              &entryThunk});
 
+        auto *name = ir.CreateGlobalString(group.image().module().path.filename().string(),
+                                           "image.executable.name", 0, &module);
+        auto *named = ConstantStruct::getAnon({descriptor, name});
+        auto *crt =
+            ConstantStruct::getAnon({named, artifactTable(module, slots.data, "image.data.imports"),
+                                     ir.getInt64(slots.data.size())});
+        auto *functions = ConstantStruct::getAnon(
+            {crt, artifactTable(module, slots.functions, "image.function.imports"),
+             ir.getInt64(slots.functions.size())});
+        auto *pe = ConstantStruct::getAnon({functions, ir.getInt16(group.image().subsystem())});
+
+        if (dynamicProtection) {
+            pe = ConstantStruct::getAnon(
+                {pe, artifactTable(module, protection.sections, "image.section.protections"),
+                 ir.getInt64(protection.sections.size())});
+        }
+        if (version >= FORGE_RT_QUERY_HEADER_ARTIFACT_VERSION) {
+            pe = ConstantStruct::getAnon({pe, ir.getInt32(queryHeaderSize)});
+        }
+        if (version == FORGE_RT_LOADER_PAGES_ARTIFACT_VERSION) {
+            pe = ConstantStruct::getAnon(
+                {pe, artifactTable(module, protection.loaderPages, "image.loader.pages"),
+                 ir.getInt64(protection.loaderPages.size())});
+        }
+
         // Descriptor identity distinguishes artifacts during duplicate registration.
-        auto *artifact =
-            new GlobalVariable(module, descriptor->getType(), true, GlobalValue::PrivateLinkage,
-                               descriptor, "image.artifact");
+        auto *artifact = new GlobalVariable(module, pe->getType(), true,
+                                            GlobalValue::PrivateLinkage, pe, "image.artifact");
         auto *type = FunctionType::get(ir.getPtrTy(), false);
         auto *accessor =
             Function::Create(type, GlobalValue::ExternalLinkage, "forge_lifted_artifact", module);
@@ -841,7 +1332,7 @@ namespace forge::x86 {
         ir.SetInsertPoint(BasicBlock::Create(module.getContext(), "entry", accessor));
         ir.CreateRet(artifact);
 
-        if (intervals.empty()) {
+        if (dynamicProtection || intervals.empty()) {
             return nullptr;
         }
 
