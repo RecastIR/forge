@@ -102,6 +102,17 @@ namespace {
         returnToHost(execution);
     }
 
+    void queryOutsideWindowsAllocation(forge_rt_execution *execution) {
+        uint64_t result = UINT64_MAX;
+        forge_rt_memory_fault fault{};
+        const auto address = execution->regions[0].start;
+        REQUIRE(forge_rt_virtual_query(execution->instance, execution->thread, address,
+                                       FORGE_RT_STACK_BASE + 128, 48, &result,
+                                       &fault) == FORGE_RT_UNSUPPORTED_MEMORY_QUERY);
+        REQUIRE(result == UINT64_MAX);
+        returnToHost(execution);
+    }
+
     constexpr uint64_t sentinel = 0xa5a5a5a5a5a5a5a5;
 
     void mainArgsOutputs(forge_rt_execution *execution) {
@@ -374,6 +385,8 @@ int main() {
     checkAdmission(true);
     checkProtectionAllocation(failProtectionAllocation);
     checkProtectionAllocation(failQueryAllocation);
+    checkProtectionAllocation(queryOutsideWindowsAllocation, 0x1000);
+    checkProtectionAllocation(queryOutsideWindowsAllocation, UINT64_C(0x7ffffffee000));
     checkProtectionAllocation(mainArgsOutputs);
     constexpr auto aboveStack = FORGE_RT_STACK_BASE + FORGE_RT_STACK_SIZE;
     checkProtectionAllocation(startupOutputs<true>, aboveStack);

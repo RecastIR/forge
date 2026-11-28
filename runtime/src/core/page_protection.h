@@ -33,7 +33,7 @@ namespace forge::runtime {
 
     // A metadata query neither resolves a byte pointer nor grants access to the page.
     struct ImageRegion {
-        uint64_t base, allocation, size;
+        uint64_t base, allocation, allocationLast, size;
         PageAccess access;
         ImageState state;
     };

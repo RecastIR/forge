@@ -141,7 +141,7 @@ namespace forge::runtime {
             run = next;
         }
 
-        return ImageRegion{page, image->base, run->last - page + 1, access, run->state};
+        return ImageRegion{page, image->base, last, run->last - page + 1, access, run->state};
     }
 
     bool unavailableQueryOutput(std::span<const Reservation> reservations, uint64_t address) {

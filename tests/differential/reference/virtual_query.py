@@ -65,8 +65,17 @@ def contract(rows, image_size):
                     image_fields.append(offset - 8)
         query = row["query"]
         query = {"rva": query - base} if base <= query < base + image_size else {"va": query}
+        output = row["output"]
+        if base <= output < base + image_size:
+            destination = {"rva": output - base}
+        elif output:
+            # Stack and VirtualAlloc addresses vary. Their low three bits determine
+            # whether the Windows x64 alignment check precedes the writable probe.
+            destination = {"offset_mod_8": output % 8}
+        else:
+            destination = {"va": 0}
         normalized.append(dict(id=row["id"], error=row["error"], result=row["result"],
-                               query=query, length=row["length"], image_fields=image_fields,
+                               query=query, output=destination, length=row["length"], image_fields=image_fields,
                                bytes=window.hex()))
     return normalized
 

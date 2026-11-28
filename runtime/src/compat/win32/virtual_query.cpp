@@ -74,7 +74,8 @@ namespace {
             return fail(invalidParameter);
         }
         const auto region = queryImageRegion(owner.reservations, address, probe);
-        if (!region) {
+        // An embedder can reserve guest VAs that cannot hold a Windows user image.
+        if (!region || region->allocation < lowestUser || region->allocationLast > highestUser) {
             return FORGE_RT_UNSUPPORTED_MEMORY_QUERY;
         }
 
