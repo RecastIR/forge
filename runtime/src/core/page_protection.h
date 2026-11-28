@@ -94,19 +94,19 @@ namespace forge::runtime {
                                                    uint64_t address, uint64_t last,
                                                    ImageWrite &probe);
 
-    // Probe the first byte and each subsequent page start. Coalesce admissible
-    // runs using existing mapping and access extents. Return only staged effects,
-    // including the successful prefix on a later inaccessible page.
-    forge_rt_status probeGuestWritePages(const forge_rt_instance &instance, const Thread &active,
-                                         uint64_t address, uint64_t length, size_t resultSize,
-                                         ImageWrite &probe, forge_rt_memory_fault &fault);
-
     struct GuestWrite {
         uint64_t address;
         size_t size;
         const void *source; // A null source realizes the write probe without storing bytes.
         ImageWrite image{};
     };
+
+    // Probe the first byte and each subsequent page start. Coalesce admissible
+    // runs using existing mapping and access extents. Return only staged effects,
+    // including the successful prefix on a later inaccessible page.
+    forge_rt_status probeGuestWritePages(const forge_rt_instance &instance, const Thread &active,
+                                         const GuestWrite &result, uint64_t length,
+                                         ImageWrite &probe, forge_rt_memory_fault &fault);
 
     forge_rt_status checkGuestWrite(const forge_rt_instance &instance, const Thread &active,
                                     GuestWrite &write, forge_rt_memory_fault &fault);

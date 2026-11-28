@@ -388,8 +388,10 @@ namespace {
         CHECK(change.previous == PageAccess::ImageCopy);
         CHECK(protect(base + 2 * page) == ProtectionResult::Unsupported);
         state.recordWrite({base + 2 * page, base + 3 * page});
-        CHECK(queryImageRegion(reservations, base + 2 * page)->size == 2 * page);
-        CHECK(queryImageRegion(reservations, base + page)->size == page);
+        const auto privateRun = queryImageRegion(reservations, base + 2 * page);
+        const auto prefixRun = queryImageRegion(reservations, base + page);
+        CHECK(privateRun && privateRun->size == 2 * page);
+        CHECK(prefixRun && prefixRun->size == page);
 
         forge_rt_loader_pages_artifact extended{{artifact, 512}, runs, 1};
         auto &protection = extended.header.protection;

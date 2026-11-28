@@ -58,8 +58,8 @@ namespace {
         }
 
         forge_rt_memory_fault detail{};
-        const auto checked =
-            probeGuestWritePages(owner, thread, output, length, sizeof(QueryBytes), probe, detail);
+        GuestWrite write{output, sizeof(QueryBytes), nullptr};
+        const auto checked = probeGuestWritePages(owner, thread, write, length, probe, detail);
         if (checked != FORGE_RT_OK) {
             if (checked != FORGE_RT_GUEST_FAULT || detail.reason == FORGE_RT_FAULT_STACK) {
                 fault = detail;
@@ -81,7 +81,7 @@ namespace {
         }
 
         const auto bytes = imageInformation(*region);
-        GuestWrite write{output, bytes.size(), bytes.data()};
+        write.source = bytes.data();
         const auto ready = checkGuestWrite(owner, thread, write, detail);
         if (ready != FORGE_RT_OK) {
             if (ready == FORGE_RT_GUEST_FAULT && detail.reason != FORGE_RT_FAULT_STACK &&
