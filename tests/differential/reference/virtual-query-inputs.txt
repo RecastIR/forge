@@ -1,0 +1,4 @@
+executable-virtual-query-address.exe
+executable-virtual-query-transitions.exe
+executable-virtual-query.exe
+virtual-query-reference.exe

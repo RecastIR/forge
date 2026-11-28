@@ -68,6 +68,25 @@ def generate(output, mc, link, dlltool, clang):
         protect_def.write_text("LIBRARY KERNEL32.dll\nEXPORTS\nVirtualProtect\nVirtualAlloc\nVirtualFree\nVirtualQuery\nGetSystemInfo\n")
         run(dlltool, "-m", "i386:x86-64", "-d", protect_def, "-l", "memory.lib")
         memory_libraries = ["memory.lib", "KERNEL32.dll.lib"]
+        query = (sources / "executable-virtual-query.s").read_text()
+        image("executable-virtual-query.exe", query, link_flags=memory_libraries)
+        image("executable-virtual-query-transitions.exe", "transitions = 1\n" + query, link_flags=memory_libraries)
+        image("executable-virtual-query-address.exe", """.text
+.globl entry
+entry:
+  movq __imp_VirtualQuery(%rip), %rcx
+  testq %rcx, %rcx
+  je 1f
+  movl $42, %eax
+  retq
+1: xorl %eax, %eax
+  retq
+""", link_flags=memory_libraries)
+        run(clang, "--target=x86_64-pc-windows-msvc", "-O1", "-ffreestanding", "-fno-stack-protector",
+            "-c", sources / "virtual-query-reference.c", "-o", "query.obj")
+        run(link, "/nodefaultlib", "/timestamp:0", "/entry:entry", "/subsystem:console",
+            "/out:virtual-query-reference.exe", "query.obj", *memory_libraries)
+        (output / "virtual-query-reference.exe").write_bytes((work / "virtual-query-reference.exe").read_bytes())
         protect = (sources / "executable-virtual-protect.s").read_text()
         image("executable-virtual-protect.exe", protect, link_flags=memory_libraries)
         image("executable-virtual-protect-denied.exe", "deny_write = 1\n" + protect, link_flags=memory_libraries)

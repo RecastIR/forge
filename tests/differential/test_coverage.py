@@ -95,9 +95,10 @@ class CoverageTests(ArtifactSetup):
         needs[job] = {"result": "skipped", "outputs": {}}
         self.assertEqual(self.hosted(needs)["gate"], "passed")
         needs["macos-dev"]["outputs"]["capture_requested"] = "true"
+        needs["wine-query-capture"] = {"result": "success", "outputs": {"stages": '{"query": "success"}'}}
         del needs[job]
         self.assertEqual(self.hosted(needs)["gate"], "failed")
-        complete = {"termination": "success", "abort": "success"}
+        complete = dict.fromkeys(("termination", "abort", "query", "sdk"), "success")
         for outcome in ("skipped", "failure", "cancelled", "success"):
             with self.subTest(outcome=outcome):
                 needs[job] = {"result": outcome, "outputs": {"stages": json.dumps(complete)}}

@@ -328,7 +328,8 @@ def hosted_report(raw_needs, current_run, revision, **paths):
     if capture_requested not in ("true", "false"):
         errors.append("macos-dev: missing or invalid Windows capture decision")
     if capture_requested == "true":
-        check_stages("legacy-windows-capture", ("termination", "abort"))
+        check_stages("legacy-windows-capture", ("termination", "abort", "query", "sdk"))
+        check_stages("wine-query-capture", ("query",))
 
     # A gate-only rerun can consume the successful differential job's original attempt.
     # Bind its reports to that job output, the current workflow run, and the checked-out revision.

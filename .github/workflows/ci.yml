@@ -27,6 +27,7 @@ jobs:
       executable_inputs_sha256: ${{ steps.executables.outputs.sha256 }}
       capture_requested: ${{ steps.capture.outputs.requested }}
       termination_sha256: ${{ steps.termination.outputs.sha256 }}
+      query_sha256: ${{ steps.query.outputs.sha256 }}
       abort_sha256: ${{ steps.abort.outputs.sha256 }}
     steps:
       - uses: actions/checkout@v6
@@ -40,6 +41,10 @@ jobs:
         run: |
           if git diff --quiet "$BASE" HEAD -- .github/workflows/ci.yml .github/actions/package-reference-inputs.sh \
             tests/differential/reference/executable-inputs.txt \
+            'tests/fixtures/*virtual-query*' 'tests/differential/reference/virtual*query*' \
+            'runtime/src/core/page_protection.*' runtime/src/core/guest_memory.cpp runtime/src/core/process.cpp \
+            'runtime/src/compat/win32/virtual_*.cpp' runtime/include/forge/process.h runtime/include/forge/runtime.h \
+            compiler/src/lift/image_memory.cpp compiler/src/pe/pe.cpp tests/differential/coverage_report.py \
             'tests/fixtures/crt-abort*' tests/differential/reference/crt_abort.py 'tests/differential/reference/crt-abort*.json' \
             tests/differential/reference/amsg-exit/capture.c 'tests/fixtures/crt-termination*' tests/fixtures/executable-startup-info.s tests/fixtures/generate.py \
             tests/differential/reference/termination tests/differential/fixtures/startup/termination \
@@ -100,6 +105,20 @@ jobs:
           if-no-files-found: error
           overwrite: true
 
+      - name: Package VirtualQuery reference inputs
+        id: query
+        if: ${{ !cancelled() && steps.capture.outputs.requested == 'true' }}
+        run: >-
+          bash .github/actions/package-reference-inputs.sh
+          "$PWD/tests/differential/reference/virtual-query-inputs.txt" "$RUNNER_TEMP/query-inputs"
+      - uses: actions/upload-artifact@v4
+        if: ${{ !cancelled() && steps.query.outputs.sha256 != '' }}
+        with:
+          name: query-inputs
+          path: ${{ runner.temp }}/query-inputs
+          if-no-files-found: error
+          overwrite: true
+
   legacy-windows-capture:
     needs: macos-dev
     if: ${{ !cancelled() && needs.macos-dev.outputs.capture_requested == 'true' }}
@@ -107,7 +126,7 @@ jobs:
     timeout-minutes: 10
     outputs:
       stages: >-
-        {"termination": "${{ steps.termination.outcome }}", "abort": "${{ steps.abort.outcome }}"}
+        {"termination": "${{ steps.termination.outcome }}", "abort": "${{ steps.abort.outcome }}", "query": "${{ steps.query.outcome }}", "sdk": "${{ steps.sdk.outcome }}"}
     steps:
       - uses: actions/checkout@v6
         id: checkout
@@ -148,6 +167,68 @@ jobs:
         with:
           name: windows-crt-abort-observations
           path: abort/abort-observations
+          if-no-files-found: error
+          overwrite: true
+
+      - uses: actions/download-artifact@v4
+        id: query_inputs
+        if: ${{ !cancelled() && steps.checkout.outcome == 'success' }}
+        with:
+          name: query-inputs
+          path: query-inputs
+      - name: Verify the installed x64 Windows SDK layout
+        id: sdk
+        if: ${{ !cancelled() && steps.checkout.outcome == 'success' }}
+        shell: cmd
+        run: |
+          for /f "usebackq tokens=*" %%i in (`"%ProgramFiles(x86)%\Microsoft Visual Studio\Installer\vswhere.exe" -latest -property installationPath`) do call "%%i\VC\Auxiliary\Build\vcvars64.bat"
+          cl /nologo /std:c11 /c tests\differential\reference\virtual-query-sdk.c
+      - name: Measure VirtualQuery on Windows Server 2022
+        id: query
+        if: ${{ !cancelled() && steps.query_inputs.outcome == 'success' }}
+        env:
+          PE_MANIFEST_SHA256: ${{ needs.macos-dev.outputs.query_sha256 }}
+        run: python -B tests/differential/reference/virtual_query.py query-inputs query-observations
+      - uses: actions/upload-artifact@v4
+        if: ${{ !cancelled() && steps.query_inputs.outcome == 'success' }}
+        with:
+          name: windows-query-observations
+          path: query-observations
+          if-no-files-found: error
+          overwrite: true
+
+  wine-query-capture:
+    needs: macos-dev
+    if: ${{ !cancelled() && needs.macos-dev.outputs.capture_requested == 'true' }}
+    runs-on: ubuntu-24.04
+    outputs:
+      stages: >-
+        {"query": "${{ steps.query.outcome }}"}
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/download-artifact@v4
+        with:
+          name: query-inputs
+          path: query-inputs
+      - run: make provision-fixtures
+      - name: Measure VirtualQuery on pinned Linux amd64 Wine
+        id: query
+        env:
+          PE_MANIFEST_SHA256: ${{ needs.macos-dev.outputs.query_sha256 }}
+        run: |
+          test "$(uname -m)" = x86_64
+          image=$(python3 -B tests/differential/fixture_images.py --id reference)
+          install -d -m 1777 "$RUNNER_TEMP/query-observations"
+          docker run --init --rm --pull never --platform linux/amd64 --network none --cap-drop ALL \
+            --security-opt no-new-privileges -e FORGE_WINE=/usr/lib/wine/wine64 -e PE_MANIFEST_SHA256 \
+            -e FORGE_REFERENCE_IMAGE="$image" -e GITHUB_RUN_ID -v "$PWD/query-inputs:/input:ro" \
+            -v "$PWD/tests/differential/reference:/suite:ro" -v "$RUNNER_TEMP/query-observations:/observations" \
+            --entrypoint /bin/sh "$image" -ec '/usr/lib/wine/wineserver64 -p; "$FORGE_WINE" cmd /c ver >/dev/null; python3 -B /suite/virtual_query.py /input /observations'
+      - uses: actions/upload-artifact@v4
+        if: ${{ !cancelled() && steps.query.outcome != 'skipped' }}
+        with:
+          name: wine-query-observations
+          path: ${{ runner.temp }}/query-observations
           if-no-files-found: error
           overwrite: true
 
@@ -409,7 +490,7 @@ jobs:
 
   regression-gate:
     if: ${{ always() }}
-    needs: [macos-dev, macos-sanitize, macos-presets, windows-fixtures, windows-executable-reference, windows-integer-reference, legacy-windows-capture, differential]
+    needs: [macos-dev, macos-sanitize, macos-presets, windows-fixtures, windows-executable-reference, windows-integer-reference, legacy-windows-capture, wine-query-capture, differential]
     runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v6
