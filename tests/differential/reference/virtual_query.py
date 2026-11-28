@@ -28,6 +28,8 @@ def cases():
     yield TRANSITIONS, [], list(range(31, 38))
     for kind in ("headers", "gap"):
         yield f"executable-virtual-query-{kind}.exe", [], [41, 42]
+    yield "executable-virtual-query-short.exe", [], [61, 62, 63]
+    yield "executable-virtual-query-sparse.exe", [], list(range(51, 56))
     for index in range(33):
         markers = [100 + index]
         if 10 <= index <= 14 or 23 <= index <= 25 or index >= 27:

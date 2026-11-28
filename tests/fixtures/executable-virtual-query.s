@@ -1,6 +1,6 @@
 # Each completed indirect call emits its id, last error, full SIZE_T, image base,
 # query VA, supplied length, and the 48 output bytes bracketed by two sentinels.
-.macro query id, target, length=48, alias=0
+.macro query id, target, length=48, alias=0, destination=, capture=0
     movl $0x51a70000+\id, 48(%rsp)
     movl $73, %ecx
     callq *__imp_SetLastError(%rip)
@@ -12,7 +12,9 @@
     movq %rcx, 72(%rsp)
     movabsq $\length, %r8
     movq %r8, 80(%rsp)
-    .if \alias
+    .ifnb \destination
+        leaq \destination, %rdx
+    .elseif \alias
         leaq second+64(%rip), %rdx
     .else
         leaq 96(%rsp), %rdx
@@ -22,7 +24,14 @@
     movq %rax, 56(%rsp)
     callq *__imp_GetLastError(%rip)
     movl %eax, 52(%rsp)
-    .if \alias
+    .if \capture
+        # Sample the preceding sentinel and all 48 returned bytes. Leave the
+        # trailing capture sentinel on the stack so the next section has no byte row.
+        .irp offset,0,8,16,24,32,40,48
+            movq first+12288-56+\offset(%rip), %rax
+            movq %rax, 88+\offset(%rsp)
+        .endr
+    .elseif \alias
         .irp offset,0,8,16,24,32,40,48,56
             movq second+56+\offset(%rip), %rax
             movq %rax, 88+\offset(%rsp)
@@ -65,6 +74,25 @@ entry:
     leaq __ImageBase(%rip), %rax
     movq %rax, 64(%rsp)
     movl $39, 164(%rsp)
+.ifdef sparse_probe
+    query 51,entry,48,0,first+12288-48(%rip),1
+    query 52,second
+    query 53,entry,49,0,first+12288-48(%rip),1
+    query 54,second
+    query 55,relocated+4096
+.else
+.ifdef short_probe
+    query 61,entry,47,0,oversized(%rip)
+    # A short call may alias the spilled pointer. Its value must still select
+    # just immutable, even with an oversized unreferenced writable section.
+    leaq immutable(%rip), %rax
+    movq %rax, 168(%rsp)
+    query 62,entry,47,0,168(%rsp)
+    movq 168(%rsp), %rax
+    cmpl $73, (%rax)
+    jne .Lbad
+    query 63,entry,0x10000002f
+.else
 .ifdef header_probe
     query 41,__ImageBase
     query 42,__ImageBase+4096
@@ -105,6 +133,8 @@ entry:
     query 20,first+8192
 .endif
 .endif
+.endif
+.endif
     cmpl $39, 164(%rsp)
     jne .Lbad
     movl $42, %eax
@@ -126,3 +156,17 @@ zeros: .space 4096
 first: .fill 12288,1,0xa5
 .section .vqb,"dw"
 second: .fill 4096,1,0xa5
+
+.ifdef sparse_probe
+.section .vqbr,"dr"
+.fill 4096,1,0x38
+.section .vqc,"dw"
+relocated: .quad entry
+.fill 8184,1,0xa5
+.section .vqd,"dr"
+.fill 4096,1,0x38
+.endif
+.ifdef short_probe
+.bss
+oversized: .space 0x10001000
+.endif

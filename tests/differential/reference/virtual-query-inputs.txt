@@ -1,6 +1,8 @@
 executable-virtual-query-address.exe
 executable-virtual-query-gap.exe
 executable-virtual-query-headers.exe
+executable-virtual-query-short.exe
+executable-virtual-query-sparse.exe
 executable-virtual-query-transitions.exe
 executable-virtual-query.exe
 virtual-query-reference.exe

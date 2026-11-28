@@ -70,6 +70,9 @@ def generate(output, mc, link, dlltool, clang):
         memory_libraries = ["memory.lib", "KERNEL32.dll.lib"]
         query = (sources / "executable-virtual-query.s").read_text()
         image("executable-virtual-query.exe", query, link_flags=memory_libraries)
+        for name in ("short", "sparse"):
+            image(f"executable-virtual-query-{name}.exe", f"{name}_probe = 1\n" + query,
+                  link_flags=memory_libraries)
         for name, file_alignment in (("headers", 8192), ("gap", 512)):
             image(f"executable-virtual-query-{name}.exe", "header_probe = 1\n" + query,
                   link_flags=[*memory_libraries, "/align:8192", f"/filealign:{file_alignment}"])
