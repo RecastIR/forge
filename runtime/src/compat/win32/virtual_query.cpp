@@ -58,13 +58,14 @@ namespace {
         }
 
         forge_rt_memory_fault detail{};
-        const auto checked = probeGuestWritePages(owner, thread, output, length, probe, detail);
+        const auto checked =
+            probeGuestWritePages(owner, thread, output, length, sizeof(QueryBytes), probe, detail);
         if (checked != FORGE_RT_OK) {
             if (checked != FORGE_RT_GUEST_FAULT || detail.reason == FORGE_RT_FAULT_STACK) {
                 fault = detail;
                 return checked;
             }
-            if (unavailableQueryOutput(owner.reservations, detail.address)) {
+            if (unavailableQueryOutput(owner.reservations, thread, detail.address)) {
                 return FORGE_RT_UNSUPPORTED_MEMORY_QUERY;
             }
             return fail(inaccessible);
@@ -84,7 +85,7 @@ namespace {
         const auto ready = checkGuestWrite(owner, thread, write, detail);
         if (ready != FORGE_RT_OK) {
             if (ready == FORGE_RT_GUEST_FAULT && detail.reason != FORGE_RT_FAULT_STACK &&
-                unavailableQueryOutput(owner.reservations, detail.address)) {
+                unavailableQueryOutput(owner.reservations, thread, detail.address)) {
                 return FORGE_RT_UNSUPPORTED_MEMORY_QUERY;
             }
             fault = detail;

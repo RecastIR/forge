@@ -188,6 +188,33 @@ namespace {
         CHECK(query.read<uint32_t>(output + 36) == 4);
     }
 
+    void checkOmittedProbes(Query &query) {
+        constexpr auto omitted = base + 14 * page;
+        constexpr auto destination = omitted - 48;
+        CHECK(query.call(base, destination, 48) == FORGE_RT_OK && query.result == 48);
+        CHECK(query.call(omitted) == FORGE_RT_OK && query.read<uint32_t>(output + 36) == 8);
+
+        const auto saved = query.read<std::array<uint8_t, 48>>(destination);
+        CHECK(query.call(base, destination + 8, 48) == FORGE_RT_UNSUPPORTED_MEMORY_QUERY);
+        // The sealed byte row at the third page start still takes precedence.
+        CHECK(query.call(base, destination, 2 * page + 49) == FORGE_RT_UNSUPPORTED_MEMORY_QUERY);
+        CHECK((query.read<std::array<uint8_t, 48>>(destination) == saved));
+        CHECK(query.call(omitted) == FORGE_RT_OK && query.read<uint32_t>(output + 36) == 8);
+
+        CHECK(query.call(omitted, destination, 49) == FORGE_RT_OK && query.result == 48);
+        CHECK(query.read<uint32_t>(destination + 36) == 4);
+        CHECK(query.call(omitted) == FORGE_RT_OK && query.read<uint64_t>(output + 24) == page);
+        CHECK(query.write(omitted) == FORGE_RT_GUEST_FAULT);
+        uint8_t byte{};
+        CHECK(forge_rt_read_guest(query.active.instance, query.active.thread, query.token, omitted,
+                                  1, &byte, 1, &query.fault) == FORGE_RT_GUEST_FAULT);
+
+        // A bad target still realizes the entire successfully probed prefix.
+        CHECK(query.call(UINT64_MAX, destination, page + 49) == FORGE_RT_OK && query.result == 0);
+        CHECK(query.error() == 87);
+        CHECK(query.call(omitted) == FORGE_RT_OK && query.read<uint64_t>(output + 24) == 2 * page);
+    }
+
     void checkSynthetic(Query &query) {
         auto &active = query.active;
         uint64_t heap{}, command{};
@@ -242,16 +269,22 @@ namespace {
             CHECK(query.write(data + page) == FORGE_RT_OK);
             checkPublication(query);
         }
+        checkOmittedProbes(query);
         checkUncertainWrite(query);
         active->result = {FORGE_RT_RETURNED, FORGE_RT_OK, 42, {}, 0};
         CHECK(query.call(base, data) == FORGE_RT_INVALID_STATE);
     }
 
-    constexpr forge_rt_backing backing{4 * page + 8, nullptr, nullptr, 0};
+    constexpr forge_rt_backing backing{5 * page + 9, nullptr, nullptr, 0};
     constexpr forge_rt_region_template rows[]{
-        {base + 2 * page, 8, 0, 4 * page, FORGE_RT_READ}, {data, page - 16, 0, 0, rw},
-        {data + page - 16, 16, 0, page - 16, rw},         {data + page, page, 0, page, rw},
-        {data + 2 * page, page, 0, 2 * page, rw},         {base + 8 * page, page, 0, 3 * page, rw}};
+        {base + 2 * page, 8, 0, 4 * page, FORGE_RT_READ},
+        {data, page - 16, 0, 0, rw},
+        {data + page - 16, 16, 0, page - 16, rw},
+        {data + page, page, 0, page, rw},
+        {data + 2 * page, page, 0, 2 * page, rw},
+        {base + 8 * page, page, 0, 3 * page, rw},
+        {base + 13 * page, page, 0, 4 * page + 8, rw},
+        {base + 16 * page, 1, 0, 5 * page + 8, FORGE_RT_READ}};
     constexpr forge_rt_section_protection sections[]{
         {page, page, rx},
         {2 * page, page, FORGE_RT_READ},
@@ -261,12 +294,14 @@ namespace {
         {8 * page, page, rw | FORGE_RT_LOADER_MAY_WRITE},
         {9 * page, page, rx},
         {10 * page, page, rw},
-        {11 * page, page, FORGE_RT_READ}};
+        {11 * page, page, FORGE_RT_READ},
+        {13 * page, 4 * page, rw},
+        {17 * page, page, FORGE_RT_READ}};
     constexpr forge_rt_import getCommand{"kernel32.dll", "GetCommandLineA"};
     constexpr forge_rt_function_import addressOnly{2 * page, {"kernel32.dll", "VirtualQuery"}};
     constexpr forge_rt_artifact descriptor{FORGE_RT_PROTECTION_ARTIFACT_VERSION,
                                            base,
-                                           12 * page,
+                                           18 * page,
                                            page,
                                            page,
                                            &backing,
@@ -280,6 +315,45 @@ namespace {
         {{{{descriptor, "query.exe"}, nullptr, 0}, &addressOnly, 1}, 3},
         sections,
         std::size(sections)};
+
+    void legacyEntry(forge_rt_execution *active) {
+        Query query(*active);
+        CHECK(forge_rt_set_last_error(active->instance, active->thread, 73) == FORGE_RT_OK);
+        for (const auto destination : {data, output}) {
+            CHECK(query.call(base + page, destination) == FORGE_RT_UNSUPPORTED_MEMORY_QUERY);
+            CHECK(query.result == UINT64_MAX && query.error() == 73);
+        }
+        CHECK(query.call(base, data + 1, 47) == FORGE_RT_OK && query.result == 0);
+        CHECK(query.error() == 24);
+        CHECK(query.call(base, data + 1) == FORGE_RT_OK && query.error() == 998);
+        active->result = {FORGE_RT_RETURNED, FORGE_RT_OK, 42, {}, 0};
+    }
+
+    void checkLegacyImage() {
+        constexpr forge_rt_import service{"kernel32.dll", "VirtualQuery"};
+        const forge_rt_artifact prefix{FORGE_RT_PE_ARTIFACT_VERSION,
+                                       base,
+                                       4 * page,
+                                       page,
+                                       page,
+                                       nullptr,
+                                       0,
+                                       nullptr,
+                                       0,
+                                       &service,
+                                       1,
+                                       legacyEntry};
+        const forge_rt_pe_artifact legacy{{{{prefix, "legacy.exe"}, nullptr, 0}, nullptr, 0}, 3};
+        forge_rt_process *process{};
+        CHECK(forge_rt_process_create(FORGE_RT_ABI_VERSION, &process) == FORGE_RT_OK);
+        CHECK(forge_rt_process_register(process, &legacy.functions.crt.named.artifact) ==
+              FORGE_RT_OK);
+        forge_rt_entry_inputs inputs{};
+        forge_rt_process_result result{};
+        CHECK(forge_rt_process_run(process, &inputs, &result) == FORGE_RT_OK);
+        CHECK(result.kind == FORGE_RT_RETURNED && result.value == 42);
+        CHECK(forge_rt_process_destroy(process) == FORGE_RT_OK);
+    }
 
     void checkHeaderVersions() {
         forge_rt_section_protection text{2 * page, 2 * page, rx};
@@ -322,6 +396,7 @@ namespace {
 void testRuntimeMemoryQuery() {
     checkBoundaries();
     checkHeaderVersions();
+    checkLegacyImage();
     std::array<forge_rt_process *, 2> processes{};
     for (auto &process : processes) {
         CHECK(forge_rt_process_create(FORGE_RT_ABI_VERSION, &process) == FORGE_RT_OK);

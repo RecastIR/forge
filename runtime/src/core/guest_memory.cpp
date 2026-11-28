@@ -180,11 +180,7 @@ namespace {
                 }
 
                 if (write) {
-                    if (!write->owner) {
-                        write->owner = segment.protections;
-                        write->bytes.first = address;
-                    }
-                    write->bytes.last = bytes.last;
+                    write->include(segment.protections, bytes);
                 }
             }
 
@@ -288,10 +284,7 @@ namespace {
                 end = *denied - 1; // The starting byte passed preflight.
             }
 
-            if (!probe.owner) {
-                probe = {segment.protections, {address, address}};
-            }
-            probe.bytes.last = std::max(address, end & ~mask);
+            probe.include(segment.protections, {address, std::max(address, end & ~mask)});
         }
 
         return end | mask;
@@ -300,26 +293,38 @@ namespace {
 
 forge_rt_status forge::runtime::probeGuestWritePages(const forge_rt_instance &instance,
                                                      const Thread &active, uint64_t address,
-                                                     uint64_t length, ImageWrite &probe,
+                                                     uint64_t length, size_t resultSize,
+                                                     ImageWrite &probe,
                                                      forge_rt_memory_fault &fault) {
     if (!GuestRange::fromOffset({address}, 0, length)) {
         return report(fault, address, FORGE_RT_WRITE, FORGE_RT_FAULT_OVERFLOW);
     }
 
+    const uint64_t start = address;
     const uint64_t last = address + (length - 1);
     for (;;) {
         Cursor cursor(instance.reservations, address);
         const auto checked = preflight(cursor, active, address, 1, FORGE_RT_WRITE, fault, false);
-        if (checked != FORGE_RT_OK) {
-            return checked;
+        uint64_t end;
+        if (checked == FORGE_RT_OK) {
+            const auto segment = cursor.next(address, last - address + 1);
+            end = probedPageEnd(segment, address, probe);
+        } else {
+            if (checked != FORGE_RT_GUEST_FAULT || fault.reason != FORGE_RT_FAULT_UNMAPPED ||
+                address - start < resultSize) {
+                return checked;
+            }
+            const auto omitted =
+                probeOmittedImagePages(instance.reservations, address, last, probe);
+            if (!omitted) {
+                return checked;
+            }
+            end = *omitted;
         }
 
-        const auto segment = cursor.next(address, last - address + 1);
-        const auto end = probedPageEnd(segment, address, probe);
         if (end >= last) {
             return FORGE_RT_OK;
         }
-
         address = end + 1;
     }
 }

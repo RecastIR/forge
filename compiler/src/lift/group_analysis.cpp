@@ -493,13 +493,17 @@ namespace forge::x86 {
             const auto &binding = site.external()->binding;
             const bool change = binding.nativeSymbol == win64::virtualProtect.nativeSymbol;
             // Read the incoming arguments before invalidating spills the service may overwrite.
-            const auto target = facts.serviceValue(binding, 0, entryAddresses);
-            const auto sizes =
-                change ? facts.serviceValue(binding, 1, entryAddresses).project(entryAddresses)
-                       : AddressFact{};
             const unsigned outIndex = change ? 3 : 1;
-            const auto output = facts.serviceValue(binding, outIndex, entryAddresses);
             const auto outputSize = binding.arguments[outIndex].size;
+            const auto sizes =
+                facts.serviceValue(binding, change ? 1 : 2, entryAddresses).project(entryAddresses);
+            if (!change && sizes.known() && std::ranges::max(sizes.values()) < outputSize) {
+                return;
+            }
+
+            const auto target =
+                change ? facts.serviceValue(binding, 0, entryAddresses) : AddressFact{};
+            const auto output = facts.serviceValue(binding, outIndex, entryAddresses);
             invalidateServiceOutput(facts.spills, output, entryAddresses, outputSize);
             if (!collect) {
                 return;

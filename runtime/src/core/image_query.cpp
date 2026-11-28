@@ -7,7 +7,8 @@ namespace forge::runtime {
     namespace {
         constexpr uint64_t pageMask = FORGE_RT_GUEST_PAGE_SIZE - 1;
 
-        const Reservation *imageAt(std::span<const Reservation> reservations, uint64_t address) {
+        const Reservation *reservationAt(std::span<const Reservation> reservations,
+                                         uint64_t address) {
             const auto after =
                 std::ranges::upper_bound(reservations, address, {}, &Reservation::base);
             if (after == reservations.begin()) {
@@ -15,7 +16,7 @@ namespace forge::runtime {
             }
 
             const auto &range = *std::prev(after);
-            return range.protections && address - range.base < range.size ? &range : nullptr;
+            return address - range.base < range.size ? &range : nullptr;
         }
 
         // Intersect the run with the next change in a sorted, inclusive overlay.
@@ -117,8 +118,8 @@ namespace forge::runtime {
     std::optional<ImageRegion> queryImageRegion(std::span<const Reservation> reservations,
                                                 uint64_t address, const ImageWrite &probe) {
         const auto page = address & ~pageMask;
-        const auto *image = imageAt(reservations, page);
-        if (!image || ((image->base | image->size) & pageMask)) {
+        const auto *image = reservationAt(reservations, page);
+        if (!image || !image->protections || ((image->base | image->size) & pageMask)) {
             return {};
         }
 
@@ -144,10 +145,42 @@ namespace forge::runtime {
         return ImageRegion{page, image->base, last, run->last - page + 1, access, run->state};
     }
 
-    bool unavailableQueryOutput(std::span<const Reservation> reservations, uint64_t address) {
-        const auto *image = imageAt(reservations, address);
+    std::optional<uint64_t> probeOmittedImagePages(std::span<const Reservation> reservations,
+                                                   uint64_t address, uint64_t last,
+                                                   ImageWrite &probe) {
+        const auto *image = reservationAt(reservations, address);
+        if (!image || !image->protections || ((image->base | image->size) & pageMask)) {
+            return {};
+        }
+
+        const auto run = describe(*image, address, {});
+        if (!run ||
+            (run->access != PageAccess::ImageCopy && run->access != PageAccess::ReadWrite)) {
+            return {};
+        }
+
+        last = std::min(last, run->last);
+        const auto rows =
+            std::span(image->image->regions, static_cast<size_t>(image->image->count));
+        const auto next =
+            std::ranges::upper_bound(rows, address, {}, &forge_rt_image_region::start);
+        if (next != rows.end()) {
+            last = std::min(last, next->start - 1);
+        }
+
+        probe.include(image->protections, {address, last & ~pageMask});
+        return last | pageMask;
+    }
+
+    bool unavailableQueryOutput(std::span<const Reservation> reservations, const Thread &active,
+                                uint64_t address) {
+        const auto *image = reservationAt(reservations, address);
         if (!image) {
             return false;
+        }
+
+        if (!image->protections) {
+            return active.image && image->image == active.image;
         }
 
         const auto page = address & ~pageMask;

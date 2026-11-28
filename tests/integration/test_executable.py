@@ -2369,6 +2369,25 @@ class Console(Workspace):
                     self.assertTrue(all(row["image"] == base for row in rows))
                     self.assertEqual(query.contract(rows, query.image_size(pe)), expected["cases"][name])
 
+    def test_virtual_query_joined_lengths(self):
+        original = image("virtual-query-short").read_bytes()
+        # Replace the observation stores and length load with two paths that
+        # join at the output LEA. Both variants have exactly the original extent.
+        literal = bytes.fromhex("48894c244849b8") + struct.pack("<Q", 47) + bytes.fromhex("4c89442450")
+        self.assertEqual(original.count(literal), 2)
+        for low in (46, 47):
+            joined = (bytes.fromhex("85c090909041b8") + struct.pack("<I", low) + bytes.fromhex("740641b8")
+                      + struct.pack("<I", low + 1) + b"\x90")
+            self.assertEqual(len(joined), len(literal))
+            pe = self.dir / f"joined-{low}.exe"
+            pe.write_bytes(original.replace(literal, joined, 1))
+            lifted = run(FORGE, "lift", pe, "--executable", "--output", self.dir / "joined")
+            if low == 46:
+                self.assertEqual(lifted.returncode, 0, lifted.stderr)
+            else:
+                self.assertEqual(lifted.returncode, 1)
+                self.assertIn("exceeds writable virtual limit", lifted.stderr)
+
     def test_virtual_protect(self):
         pe = image("virtual-protect")
         self.compile(pe)

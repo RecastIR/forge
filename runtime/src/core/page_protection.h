@@ -62,6 +62,14 @@ namespace forge::runtime {
         PageProtections *owner = nullptr;
         PageInterval bytes{};
 
+        void include(PageProtections *state, PageInterval range) {
+            if (!owner) {
+                owner = state;
+                bytes.first = range.first;
+            }
+            bytes.last = range.last;
+        }
+
         void record() const {
             if (owner) {
                 owner->recordWrite(bytes);
@@ -72,14 +80,21 @@ namespace forge::runtime {
     std::optional<ImageRegion> queryImageRegion(std::span<const Reservation> reservations,
                                                 uint64_t address, const ImageWrite &probe = {});
 
-    bool unavailableQueryOutput(std::span<const Reservation> reservations, uint64_t address);
+    bool unavailableQueryOutput(std::span<const Reservation> reservations, const Thread &active,
+                                uint64_t address);
+
+    // A page-start probe beyond the result bytes may realize an omitted writable
+    // image page. The returned end is bounded by source state and the next published row.
+    std::optional<uint64_t> probeOmittedImagePages(std::span<const Reservation> reservations,
+                                                   uint64_t address, uint64_t last,
+                                                   ImageWrite &probe);
 
     // Probe the first byte and each subsequent page start. Coalesce admissible
     // runs using existing mapping and access extents. Return only staged effects,
     // including the successful prefix on a later inaccessible page.
     forge_rt_status probeGuestWritePages(const forge_rt_instance &instance, const Thread &active,
-                                         uint64_t address, uint64_t length, ImageWrite &probe,
-                                         forge_rt_memory_fault &fault);
+                                         uint64_t address, uint64_t length, size_t resultSize,
+                                         ImageWrite &probe, forge_rt_memory_fault &fault);
 
     struct GuestWrite {
         uint64_t address;
