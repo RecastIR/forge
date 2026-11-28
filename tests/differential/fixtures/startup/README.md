@@ -160,7 +160,7 @@ Five SDK-free console PEs use the fixture producer's existing x64 assembler and 
 
 All 16 original PEs have a writable `.CRT` section with `__xd_a` at RVA `0x9050` and `__xd_z` at `0x9058`. Both RIP-relative LEAs resolve to `0x9058`. The half-open initializer range contains zero slots. In primary Debug, the empty branch at `0x16d1` skips the loop. The qword load at `0x16d8` feeds the NULL guard and the call at `0x16e0`. The NULL path and a successful return rejoin at `0x16e2`, where RBX advances by eight. The backedge at `0x16e9` returns to the load. The older outer function sets `_CRT_MT` to 2 and calls `__mingw_TLScallback` for process attach. Thread attach traverses the range of no-argument functions. The newer MinGW implementation has a different outer function. [Linked CRT source](https://github.com/mingw-w64/mingw-w64/blob/v10.0.0/mingw-w64-crt/crt/tlssup.c) · [Later implementation](https://github.com/mingw-w64/mingw-w64/blob/9c44fc5d65f515470dbb6febac91c33c2b58edbc/mingw-w64-crt/crt/tlsdyn.c)
 
-All 16 inputs recover the `msvcrt.dll!fwrite`, `vfprintf` and terminal `abort` thunks in MinGW's error reporter. The abort call in each original PE has bytes `e8 28 0e 00 00`. Recovery next reaches an indirect call through the `KERNEL32.dll!VirtualQuery` IAT slot. Every comparison validates its reference and then fails recovery and translation with `LIFT_UNSUPPORTED_CONTROL_FLOW`. Native build, publication, artifact verification, execution and output comparison remain unrun for every row. The exit status and stdout in the table belong to the reference process. All reference stderr streams are empty.
+All 16 inputs recover the `msvcrt.dll!fwrite`, `vfprintf` and terminal `abort` thunks in MinGW's error reporter. The abort call in each original PE has bytes `e8 28 0e 00 00`. Recovery also resolves the indirect call through the `KERNEL32.dll!VirtualQuery` IAT slot. It next stops in `__mingw_setusermatherr` on `JMP_4 [e9dc080000]` with the diagnostic “tail jump requires an unwind-backed function entry”. The jump targets the linker thunk for `msvcrt.dll!__setusermatherr`. Every comparison validates its reference and then fails recovery and translation with `LIFT_UNSUPPORTED_CONTROL_FLOW`. Native build, publication, artifact verification, execution and output comparison remain unrun for every row. The exit status and stdout in the table belong to the reference process. All reference stderr streams are empty.
 
 The producer hashes, stored pointers for both pseudo-relocation list bounds, and the signed early-return branch were checked in each original PE. Both pointers hold the same VA in every case. Their common RVA is `0x48d0` for argv and puts, `0x4910` for argv_edges, and `0x48b0` for the other fixtures. On this startup path the relocator exits before a relocation write, `VirtualQuery`, protection change or restoration. Recovery still walks those call sites. In primary Debug, the load at `0x1bee` reads RSI from IAT slot `0x81b8` before the call at `0x1c1d`. [MinGW source](https://github.com/mingw-w64/mingw-w64/blob/v10.0.0/mingw-w64-crt/crt/pseudo-reloc.c)
 
@@ -183,11 +183,46 @@ The producer hashes, stored pointers for both pseudo-relocation list bounds, and
 | puts | Release | 0x1810 | 0x1873 | 0xe73 | 0x26a0 | 0x8240 | 0x192b / 0x81c8 | 0, `Hello from C!\r\n` |
 | return | Release | 0x1810 | 0x1873 | 0xe73 | 0x26a0 | 0x8238 | 0x192b / 0x81c0 | 42, empty |
 
+Native startup comparisons completed: **0/16**. Task 13.3 remains open and Task 13.4 remains gated.
+
+| Fixture | PE | Jump RVA | Thunk / IAT RVA | Reference | Recovery | Translation | Native build | Publication | Artifact | Execution | Comparison |
+| --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |
+| argc | Debug | 0x1dc7 | 0x26a8 / 0x81f8 | passed | failed | failed | not run | not run | not run | not run | not run |
+| argc_none | Debug | 0x1dc7 | 0x26a8 / 0x81f8 | passed | failed | failed | not run | not run | not run | not run | not run |
+| argv | Debug | 0x1e37 | 0x2718 / 0x8200 | passed | failed | failed | not run | not run | not run | not run | not run |
+| argv_edges | Debug | 0x1ee7 | 0x27c8 / 0x8200 | passed | failed | failed | not run | not run | not run | not run | not run |
+| cleanup | Debug | 0x1eb7 | 0x2798 / 0x8228 | passed | failed | failed | not run | not run | not run | not run | not run |
+| globals | Debug | 0x1de7 | 0x26c8 / 0x81f8 | passed | failed | failed | not run | not run | not run | not run | not run |
+| puts | Debug | 0x1dc7 | 0x26a8 / 0x8200 | passed | failed | failed | not run | not run | not run | not run | not run |
+| return | Debug | 0x1db7 | 0x2698 / 0x81f8 | passed | failed | failed | not run | not run | not run | not run | not run |
+| argc | Release | 0x1d97 | 0x2678 / 0x81f8 | passed | failed | failed | not run | not run | not run | not run | not run |
+| argc_none | Release | 0x1d97 | 0x2678 / 0x81f8 | passed | failed | failed | not run | not run | not run | not run | not run |
+| argv | Release | 0x1d97 | 0x2678 / 0x8200 | passed | failed | failed | not run | not run | not run | not run | not run |
+| argv_edges | Release | 0x1d97 | 0x2678 / 0x8200 | passed | failed | failed | not run | not run | not run | not run | not run |
+| cleanup | Release | 0x1e37 | 0x2718 / 0x8228 | passed | failed | failed | not run | not run | not run | not run | not run |
+| globals | Release | 0x1d97 | 0x2678 / 0x81f8 | passed | failed | failed | not run | not run | not run | not run | not run |
+| puts | Release | 0x1d97 | 0x2678 / 0x8200 | passed | failed | failed | not run | not run | not run | not run | not run |
+| return | Release | 0x1d97 | 0x2678 / 0x81f8 | passed | failed | failed | not run | not run | not run | not run | not run |
+
 The comparator's per-row `result.json` retains the complete structured diagnostic, including imports, call edges, unwind metadata, file offset, bytes and table evidence. The primary Debug constructor runner calls at RVA `0x15f0` and returns to `0x15f2`. The Release RVAs are `0x15c0` and `0x15c2`. The original constructor lists use a sentinel header in immutable `.text`, DIR64 entries for `register_frame_ctor` and, for cleanup, `setup`. [Regression assertions](../../test_native_differential.py)
 
 The SDK-free forward-call fixture changes the current slot after the load and later slots before their loads. Its single-entry initializer calls a guest helper that writes the first home slot and returns the low four bits of its entry RSP. The initializer resumes, checks for the expected value of eight and adds the marker from its home slot to the visit count. Exit 42 requires that count to be one. The fixture also checks callback order, a tail transfer, register and stack sentinels, last error and the outer attach reason. [Focused PE](../../../fixtures/executable-forward-call.s) · [Bounded call design](../../../../docs/program-architecture.md#bounded-indirect-calls-through-pointer-tables)
 
 Windows Server 2022, pinned Wine 8 and the standalone ARM64 translation returned 42 with empty stdout and stderr for PE SHA-256 `075cc462472df820b34a960c00f890d855c17411c670014bcf24f9402aa09452`. ARM64 produced the same result at a guest base offset by `0x30000000`. Two managed processes using the same artifact at base `0x10000000` each returned 42 in both the unoptimized and O2 runs. [Windows reference observation](https://github.com/RecastIR/forge/actions/runs/45879006669/job/140118342619) · [Rebased executable test](../../../integration/test_executable.py) · [Managed-process test](../../../integration/test_process.py)
+
+### Focused VirtualQuery probes
+
+Windows Server 2022 build 20348 and pinned Linux amd64 Wine 8 each ran 38 children and captured 81 marked calls using manifest SHA-256 `05640efcd5788da2698259dcdff8bb373b23299a569bd208e88753fbe1f885c0`. All children returned 42 with empty stderr. The source-level observer exercises failing pointers, free address space and buffers created with reference-only allocation APIs. Its shared measurement function calls through IAT RVA 0x2180 at RVA 0x14f9. Each assembly marker is written after a returning indirect call, immediate last-error capture and full-width result capture. The exit path checks the stack canary. The address-only control observes a bound function identity and returns 42. The native tests compare all 31 assembly call records and the address-only control against Windows at guest bases 0x140000000 and 0x180000000. [Assembly](../../../fixtures/executable-virtual-query.s) · [Reference C probe](../../../fixtures/virtual-query-reference.c) · [Runtime contract and raw evidence](../../../../docs/runtime-architecture.md#managed-windows-x64-virtualquery)
+
+| Producer PE | SHA-256 | VirtualQuery call sites / IAT RVA |
+| --- | --- | --- |
+| executable-virtual-query.exe | `2aa48f80e1b98b9691cfb39db36383778dc62b6674188d8932661a0aa1621377` | 20, 0x10a3 through 0x1fca / 0x3078 |
+| executable-virtual-query-transitions.exe | `c9f3242296b57a1be839f880915419059b4ee5cba8c7a2820e5357e2b6819791` | 0x10a3, 0x1191, 0x1257, 0x131d, 0x13ed, 0x14db, 0x15ab / 0x2088 |
+| executable-virtual-query-headers.exe | `253ed2f5ac7485432765dbe2824b3c96d7598936a972f1dc38ab99bc960018da` | 0x20a3, 0x2169 / 0x4078 |
+| executable-virtual-query-gap.exe | `8d39edb5a98a69854b68412702a506519070f0d256c1ee57970843ad0078bae2` | 0x20a3, 0x2169 / 0x4078 |
+| executable-virtual-query-address.exe | `36d3a6f1461388131579414a991e5ce7b99a624b318ad75c1a50d70bf34b30be` | 0 calls / 0x2038 |
+| virtual-query-reference.exe | `e77e21bf20083904a4005876d42afd215339adbb9cbc743b0378e44df587ac02` | 0x14f9 / 0x2180 |
+
 
 ### VirtualProtect reference comparisons
 
@@ -223,7 +258,7 @@ A successful scalar read requires both bytes to fit one readable mapping. Two re
 | Wine `_onexit` allocation exhaustion | Parity remains unverified. |
 | PE TLS initialization and callbacks | Separate loader task covering template copying, index publication and pre-entry callbacks. |
 | TLS storage, thread attach/detach and destructors | Deferred with TEB/TLS lifecycle support. |
-| Missing Windows and CRT services | Future compatibility tasks, including `VirtualQuery` (the common recovery blocker), `fprintf` (a separate variadic entry point) and `__setusermatherr`. Further narrow conversions, floating-point, locale and wide formatting are deferred. |
+| Missing Windows and CRT services | Future compatibility tasks, including `__setusermatherr` (the next tail-transfer target) and `fprintf` (a separate variadic entry point). Further narrow conversions, floating-point, locale and wide formatting are deferred. |
 | GUI CRT error reporting | Detect required GUI routing at `_amsg_exit`. The message-box backend is deferred. |
 | Guest exception delivery and SEH | Separate exception-delivery task. |
 | Scalar reads across adjacent readable mappings | Separate shared guest-memory task. |
@@ -231,7 +266,7 @@ A successful scalar read requires both bytes to fit one readable mapping. Two re
 | Guard pages and full copy-on-write memory | Deferred pending exception delivery and shared/private backing semantics. |
 | Nonempty pseudo-relocation lists | Add a future integrated execution case. The original sixteen all take the empty-list path. |
 | Immutable and executable page protection changes | Deferred. Retain the reviewed boundary, allocation/retry and access-order tests when extending coverage. Measure repeated checked-write walks before optimizing page tracking. |
-| VirtualQuery | Separate service consuming the original and effective page state. |
+| Broader Windows memory queries | General free, reserved, synthetic and uncertain loader-owned regions remain outside the bounded image query. Version 7 describes verified reserved padding after PE headers. |
 | General dynamic indirect calls | Future compiler research. Arbitrary register calls still require target and path evidence. |
 
 ### Conventional startup responsibilities

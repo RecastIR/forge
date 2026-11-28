@@ -62,8 +62,9 @@ jobs:
             runtime/include/forge/service_signature.h 'runtime/src/core/image_query.*' \
             'tests/fixtures/*virtual-query*' 'tests/differential/reference/virtual*query*' \
             'runtime/src/core/page_protection.*' runtime/src/core/guest_memory.cpp runtime/src/core/process.cpp \
-            'runtime/src/compat/win32/virtual_*.cpp' runtime/include/forge/process.h runtime/include/forge/runtime.h \
-            compiler/src/lift/image_memory.cpp compiler/src/pe/pe.cpp tests/differential/coverage_report.py; then
+            'runtime/src/compat/win32/virtual_*' runtime/include/forge/process.h runtime/include/forge/runtime.h \
+            'compiler/src/lift/image_memory.*' 'compiler/src/pe/image.*' compiler/src/pe/pe.cpp \
+            runtime/src/core/process_image.h runtime/src/startup.cpp tests/differential/coverage_report.py; then
             echo "query_requested=false" >> "$GITHUB_OUTPUT"
           else
             echo "query_requested=true" >> "$GITHUB_OUTPUT"

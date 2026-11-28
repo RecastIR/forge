@@ -1,12 +1,10 @@
 #include "../../core/instance.h"
-#include "../../core/page_protection.h"
+#include "virtual_memory.h"
 
 #include <bit>
 
 namespace {
-    constexpr uint64_t lowestUser = 0x10000, highestUser = UINT64_C(0x7ffffffeffff);
-    constexpr uint32_t noAccess = 1, readOnly = 2, readWrite = 4, writeCopy = 8;
-    constexpr uint32_t invalidParameter = 87, invalidAddress = 487, inaccessible = 998;
+    using namespace forge::runtime::win32;
     constexpr uint32_t guard = 0x100, noCache = 0x200, writeCombine = 0x400;
     constexpr uint32_t enclaveUnvalidated = 0x20000000, targetsNoUpdate = 0x40000000,
                        enclaveThreadControl = 0x80000000;
@@ -32,17 +30,6 @@ namespace {
         }
 
         return status;
-    }
-
-    uint32_t windowsProtection(forge::runtime::PageAccess access) {
-        switch (access) {
-        case forge::runtime::PageAccess::ReadOnly:
-            return readOnly;
-        case forge::runtime::PageAccess::ReadWrite:
-            return readWrite;
-        case forge::runtime::PageAccess::ImageCopy:
-            return writeCopy;
-        }
     }
 
     forge_rt_status changePages(forge_rt_instance &owner, forge::runtime::Thread &active,

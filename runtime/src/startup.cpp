@@ -54,6 +54,8 @@ namespace {
                 std::fputs("forge: unsupported legacy MSVCRT vfprintf format or limit\n", stderr);
             } else if (result.status == FORGE_RT_UNSUPPORTED_CRT_STREAM) {
                 std::fputs("forge: unsupported legacy MSVCRT stream operation\n", stderr);
+            } else if (result.status == FORGE_RT_UNSUPPORTED_MEMORY_QUERY) {
+                std::fputs("forge: unsupported guest memory query\n", stderr);
             } else if (result.status == FORGE_RT_UNSUPPORTED_PAGE_PROTECTION) {
                 std::fputs("forge: unsupported guest page protection change\n", stderr);
             } else if (result.status == FORGE_RT_UNSUPPORTED_STARTUP_TITLE) {
@@ -106,7 +108,7 @@ int main(int argc, char **argv, char **environment) {
     const auto *artifact = forge_lifted_artifact();
 
     if (!artifact || artifact->version < FORGE_RT_ARTIFACT_VERSION ||
-        artifact->version > FORGE_RT_PROTECTION_ARTIFACT_VERSION) {
+        artifact->version > FORGE_RT_QUERY_HEADER_ARTIFACT_VERSION) {
         return runtimeFailure("artifact", FORGE_RT_ABI_MISMATCH);
     }
 

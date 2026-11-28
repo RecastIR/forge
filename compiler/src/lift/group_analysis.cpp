@@ -490,12 +490,16 @@ namespace forge::x86 {
 
         void FunctionAnalyzer::traceProtectionArguments(const ResolvedCallSite &site,
                                                         AddressFacts &facts, bool collect) const {
-            const auto &binding = win64::virtualProtect;
+            const auto &binding = site.external()->binding;
+            const bool change = binding.nativeSymbol == win64::virtualProtect.nativeSymbol;
+            // Read the incoming arguments before invalidating spills the service may overwrite.
             const auto target = facts.serviceValue(binding, 0, entryAddresses);
             const auto sizes =
-                facts.serviceValue(binding, 1, entryAddresses).project(entryAddresses);
-            const auto output = facts.serviceValue(binding, 3, entryAddresses);
-            const auto outputSize = binding.arguments[3].size;
+                change ? facts.serviceValue(binding, 1, entryAddresses).project(entryAddresses)
+                       : AddressFact{};
+            const unsigned outIndex = change ? 3 : 1;
+            const auto output = facts.serviceValue(binding, outIndex, entryAddresses);
+            const auto outputSize = binding.arguments[outIndex].size;
             invalidateServiceOutput(facts.spills, output, entryAddresses, outputSize);
             if (!collect) {
                 return;
@@ -513,6 +517,13 @@ namespace forge::x86 {
                 }
             };
 
+            select(output,
+                   [&](uint64_t va) { imageMemory.protectionOutput(step, va, outputSize); });
+            if (!change) {
+                // VirtualQuery describes a VA, even when the program has no byte access there.
+                return;
+            }
+
             const auto selectTarget = [&](std::optional<uint64_t> size) {
                 if (size != 0) {
                     select(target,
@@ -527,9 +538,6 @@ namespace forge::x86 {
             } else {
                 selectTarget(std::nullopt);
             }
-
-            select(output,
-                   [&](uint64_t va) { imageMemory.protectionOutput(step, va, outputSize); });
         }
 
         std::optional<uint64_t> elementExtent(const AddressFact &widths,
@@ -555,7 +563,8 @@ namespace forge::x86 {
         void FunctionAnalyzer::traceServiceArguments(const ResolvedCallSite &site,
                                                      AddressFacts &facts, bool collect) const {
             const auto &binding = site.external()->binding;
-            if (binding.nativeSymbol == win64::virtualProtect.nativeSymbol) {
+            if (binding.nativeSymbol == win64::virtualProtect.nativeSymbol ||
+                binding.nativeSymbol == win64::virtualQuery.nativeSymbol) {
                 traceProtectionArguments(site, facts, collect);
                 return;
             }

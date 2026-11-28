@@ -80,6 +80,11 @@ def image_size(pe):
 def reference(backend, directory):
     """Derive comparable records from the retained independent child streams."""
     evidence = json.loads((HERE / f"virtual-query-{backend}.json").read_bytes())
+    names = (HERE / "virtual-query-inputs.txt").read_text().splitlines()
+    manifest = "".join(f"{evidence['inputs'][name]}  {name}\n" for name in names)
+    if (set(names) != set(evidence["inputs"])
+            or hashlib.sha256(manifest.encode()).hexdigest() != evidence["manifest"]):
+        raise ValueError(f"inconsistent {backend} producer manifest")
     expected = dict(inputs=evidence["inputs"], cases={})
     for name, args, markers in cases():
         key = " ".join([name, *args])
@@ -88,6 +93,8 @@ def reference(backend, directory):
             raise ValueError(f"incomplete {backend} reference for {key}")
         rows = decode(bytes.fromhex(child["stdout"]), markers)
         expected["cases"][key] = contract(rows, image_size(directory / name))
+    if expected["cases"].keys() != evidence["cases"].keys():
+        raise ValueError(f"inconsistent {backend} child inventory")
     return expected
 
 

@@ -53,6 +53,9 @@ namespace forge::runtime {
             std::ranges::upper_bound(original, rva, {}, &forge_rt_section_protection::rva);
         if (after == original.begin()) {
             // Headers precede the first section. They have a fixed read-only backing.
+            if (sizeOfHeaders && (rva >= sizeOfHeaders || row.size > sizeOfHeaders - rva)) {
+                return false;
+            }
             return row.permissions == FORGE_RT_READ &&
                    (original.empty() || row.size <= original.front().rva - rva);
         }

@@ -14,19 +14,28 @@ namespace forge::runtime {
         uint64_t first, last; // Inclusive guest VAs.
     };
 
-    enum class PageAccess : uint8_t { ReadOnly, ReadWrite, ImageCopy };
+    enum class PageAccess : uint8_t { ReadOnly, ReadWrite, ImageCopy, ExecuteRead, None };
+    enum class ImageState : uint8_t { Committed, Reserved };
 
     struct PageProtections {
         std::span<const forge_rt_section_protection> original;
         // Effective write restrictions and privately realized SEC_IMAGE pages are independent.
         std::vector<PageInterval> readOnly;
         std::vector<PageInterval> privatePages;
+        uint32_t sizeOfHeaders = 0; // No explicit header extent in v6.
 
         void recordWrite(PageInterval bytes);
         bool touchesPrivate(PageInterval bytes) const noexcept;
         bool isPrivate(uint64_t address) const noexcept;
         bool permitsMapping(uint64_t imageBase, const forge_rt_region_template &row) const noexcept;
         std::optional<uint64_t> deniedWrite(PageInterval range) const noexcept;
+    };
+
+    // A metadata query neither resolves a byte pointer nor grants access to the page.
+    struct ImageRegion {
+        uint64_t base, allocation, size;
+        PageAccess access;
+        ImageState state;
     };
 
     enum class ProtectionResult : uint8_t { Supported, Unmapped, CrossReservation, Unsupported };
@@ -59,6 +68,18 @@ namespace forge::runtime {
             }
         }
     };
+
+    std::optional<ImageRegion> queryImageRegion(std::span<const Reservation> reservations,
+                                                uint64_t address, const ImageWrite &probe = {});
+
+    bool unavailableQueryOutput(std::span<const Reservation> reservations, uint64_t address);
+
+    // Probe the first byte and each subsequent page start. Coalesce admissible
+    // runs using existing mapping and access extents. Return only staged effects,
+    // including the successful prefix on a later inaccessible page.
+    forge_rt_status probeGuestWritePages(const forge_rt_instance &instance, const Thread &active,
+                                         uint64_t address, uint64_t length, ImageWrite &probe,
+                                         forge_rt_memory_fault &fault);
 
     struct GuestWrite {
         uint64_t address;

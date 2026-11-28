@@ -136,13 +136,23 @@ class NativeDifferentialTests(unittest.TestCase):
         self.assertNotIn(hex(abort_site), [c["instruction_rva"] for c in ctx["unresolved_calls"]])
 
         query_site, query_slot = failure + 0x11b, int(protect_slot, 16) + 8
+        query = next(s for s in kernel["symbols"] if s["name"] == "VirtualQuery")
+        self.assertEqual((query["catalogued_service"], query["iat_slot_rva"]), (True, hex(query_slot)))
+        self.assertIn({"dll": "kernel32.dll", "name": "VirtualQuery"}, ctx["imports"])
+        self.assertEqual(data[query_site - 0xa00:query_site - 0xa00 + 6],
+                         b"\xff\x15" + struct.pack("<i", query_slot - query_site - 6))
+        self.assertNotIn(hex(query_site), [c["instruction_rva"] for c in ctx["unresolved_calls"]])
+
+        # __mingw_setusermatherr saves its argument then jumps to a linker thunk.
+        tail = query_site + 0x46c
         self.assertEqual((ctx["function_rva"], ctx["block_rva"], ctx["instruction_rva"], ctx["opcode"]),
-                         (hex(failure + 0x70), hex(failure + 0xdc), hex(query_site), "CALL64m"))
-        self.assertEqual((ctx["import_dll"], ctx["import_symbol"], ctx["iat_slot_rva"]),
-                         ("KERNEL32.dll", "VirtualQuery", hex(query_slot)))
-        self.assertEqual(ctx["bytes"], (b"\xff\x15" + struct.pack("<i", query_slot - query_site - 6)).hex())
-        offset = ctx["file_offset"]
-        self.assertEqual(data[offset:offset + len(bytes.fromhex(ctx["bytes"]))].hex(), ctx["bytes"])
+                         (hex(tail - 7), hex(tail - 7), hex(tail), "JMP_4"))
+        self.assertEqual((ctx["bytes"], ctx["file_offset"]), ("e9dc080000", tail - 0xa00))
+        self.assertEqual(data[tail - 0xa00:tail - 0xa00 + 5], bytes.fromhex(ctx["bytes"]))
+        thunk = tail + 5 + 0x8dc
+        symbol = next(s for s in crt["symbols"] if s["name"] == "__setusermatherr")
+        slot = int(symbol["iat_slot_rva"], 16)
+        self.assertEqual(data[thunk - 0xa00:thunk - 0xa00 + 6], b"\xff\x25" + struct.pack("<i", slot - thunk - 6))
         return report
 
     def test_other_conventional_startup_blockers(self):

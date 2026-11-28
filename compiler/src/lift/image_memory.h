@@ -56,6 +56,7 @@ namespace forge::x86 {
 
         uint64_t loadBase = 0;
         uint32_t sizeOfImage = 0;
+        uint32_t queryHeaderSize = 0;
         std::vector<Backing> backings;
         std::map<uint32_t, uint32_t> dataImports;
         std::map<uint32_t, const win64::ServiceBinding *> functionImports;

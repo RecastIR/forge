@@ -2150,7 +2150,21 @@ class Console(Workspace):
             for base in (0x140000000, 0x180000000):
                 with self.subTest(variant=variant, base=base):
                     if base == 0x140000000:
-                        self.compile(pe)
+                        context = self.compile(pe)["context"]
+                        called = {item["name"] for item in context["imports"]}
+                        self.assertEqual("VirtualProtect" in called, name == query.TRANSITIONS)
+                        self.assertEqual("VirtualQuery" in called, bool(markers))
+                        slot = next(s for dll in context["load_imports"] for s in dll["symbols"]
+                                    if s["name"] == "VirtualQuery")
+                        self.assertTrue(slot["catalogued_service"])
+                        # Each emitted record follows one distinctive FF 15 call in .text.
+                        data = pe.read_bytes()
+                        size, rva, _, start = Layout(data).sections[0]
+                        calls = [rva + i for i in range(size - 5)
+                                 if data[start + i:start + i + 2] == b"\xff\x15"
+                                 and rva + i + 6 + struct.unpack_from("<i", data, start + i + 2)[0]
+                                 == int(slot["iat_slot_rva"], 16)]
+                        self.assertEqual(len(calls), len(markers))
                         result = self.program()
                         stdout = result.stdout
                     else:
@@ -2330,6 +2344,28 @@ class Console(Workspace):
                 self.assertEqual((result.returncode, limited.read_bytes(), result.stderr),
                                  (42, b"#A", b"\r\r\nZ#"))
 
+    def test_virtual_query(self):
+        sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "differential/reference"))
+        import virtual_query as query
+        expected = query.reference("windows", FIXTURES)
+        for name, _, markers in query.cases():
+            if name == query.REFERENCE:
+                continue
+            pe = FIXTURES / name
+            self.assertEqual(query.digest(pe), expected["inputs"][name])
+            for base in (0x140000000, 0x180000000):
+                with self.subTest(pe=name, base=hex(base)):
+                    if base == 0x140000000:
+                        self.compile(pe)
+                    else:
+                        run(CONTRACT, "--guest-base", hex(base), pe, self.output,
+                            OPT, LLC, "/usr/bin/xcrun", *LINK, check=True)
+                    child = self.program()
+                    self.assertEqual((child.returncode, child.stderr), (42, b""))
+                    rows = query.decode(child.stdout, markers)
+                    self.assertTrue(all(row["image"] == base for row in rows))
+                    self.assertEqual(query.contract(rows, query.image_size(pe)), expected["cases"][name])
+
     def test_virtual_protect(self):
         pe = image("virtual-protect")
         self.compile(pe)
@@ -2340,7 +2376,7 @@ class Console(Workspace):
         self.compile(image("virtual-protect-errors"))
         errors = self.program()
         self.assertEqual((errors.returncode, errors.stdout, errors.stderr), (42, error_records("windows"), b""))
-        # The observer additionally imports native allocation and query APIs for reference setup.
+        # The observer additionally imports native allocation APIs for reference setup.
         observer = run(FORGE, "lift", FIXTURES / "virtual-protect-reference.exe", "--executable",
                        "--diagnostics-format", "json", "--output", self.dir / "observer")
         self.assertEqual(observer.returncode, 1)
@@ -2349,7 +2385,7 @@ class Console(Workspace):
                          ("entry", "ENTRY_INVALID_START", "0x1000"))
         imports = observation["context"]["load_imports"][0]["symbols"]
         self.assertEqual({sym["name"] for sym in imports if not sym["catalogued_service"]},
-                         {"GetSystemInfo", "VirtualAlloc", "VirtualFree", "VirtualQuery"})
+                         {"GetSystemInfo", "VirtualAlloc", "VirtualFree"})
         self.assertFalse((self.dir / "observer").exists())
         for name in ("virtual-protect-origin", "virtual-protect-fresh"):
             self.compile(image(name))

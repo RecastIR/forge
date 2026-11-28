@@ -3,6 +3,7 @@
 #include "forge/guest_range.h"
 
 #include <algorithm>
+#include <bit>
 #include <cstring>
 
 namespace forge::runtime {
@@ -31,6 +32,26 @@ namespace forge::runtime {
             }
 
             return true;
+        }
+
+        bool validHeaderExtent(const forge_rt_artifact &artifact,
+                               const forge_rt_query_header_artifact &extended) {
+            const auto sections =
+                tableRows(extended.protection.sections, extended.protection.sectionCount);
+            if (!extended.sizeOfHeaders || sections.empty() ||
+                extended.sizeOfHeaders > sections.front().rva) {
+                return false;
+            }
+
+            // Some supported SectionAlignment must put the first section exactly
+            // after the headers. A larger arbitrary hole has no proved Windows state.
+            uint64_t alignmentBits = artifact.base | artifact.size;
+            for (const auto &section : sections) {
+                alignmentBits |= section.rva;
+            }
+            const auto alignment = uint64_t{1} << std::countr_zero(alignmentBits);
+            return alignment >= FORGE_RT_GUEST_PAGE_SIZE &&
+                   sections.front().rva - extended.sizeOfHeaders < alignment;
         }
 
         forge_rt_process_result runtimeFailure(forge_rt_status status) {
@@ -79,7 +100,7 @@ namespace forge::runtime {
 
     forge_rt_status checkArtifact(const forge_rt_artifact &artifact) {
         if (artifact.version < FORGE_RT_ARTIFACT_VERSION ||
-            artifact.version > FORGE_RT_PROTECTION_ARTIFACT_VERSION) {
+            artifact.version > FORGE_RT_QUERY_HEADER_ARTIFACT_VERSION) {
             return FORGE_RT_ABI_MISMATCH;
         }
 
@@ -137,6 +158,12 @@ namespace forge::runtime {
             }
         }
 
+        if (artifact.version == FORGE_RT_QUERY_HEADER_ARTIFACT_VERSION &&
+            !validHeaderExtent(
+                artifact, *reinterpret_cast<const forge_rt_query_header_artifact *>(&artifact))) {
+            return FORGE_RT_INVALID_ARGUMENT;
+        }
+
         for (const auto &binding : tableRows(artifact.imports, artifact.importCount)) {
             if (!binding.dll || !*binding.dll || !binding.name || !*binding.name) {
                 return FORGE_RT_INVALID_ARGUMENT;
@@ -171,6 +198,10 @@ namespace forge::runtime {
             const auto &extended =
                 *reinterpret_cast<const forge_rt_protection_artifact *>(&artifact);
             protections.original = tableRows(extended.sections, extended.sectionCount);
+        }
+        if (artifact.version == FORGE_RT_QUERY_HEADER_ARTIFACT_VERSION) {
+            protections.sizeOfHeaders =
+                reinterpret_cast<const forge_rt_query_header_artifact *>(&artifact)->sizeOfHeaders;
         }
 
         backings.resize(static_cast<size_t>(artifact.backingCount));

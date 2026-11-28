@@ -274,7 +274,55 @@ namespace {
             return status;
         });
     }
+
+    uint64_t probedPageEnd(const Segment &segment, uint64_t address, ImageWrite &probe) {
+        constexpr uint64_t mask = FORGE_RT_GUEST_PAGE_SIZE - 1;
+        auto end = address + (segment.size - 1);
+        if (segment.stackOwner) {
+            // Stack marks are byte-specific. Check any further page start independently.
+            return address | mask;
+        }
+
+        if (segment.protections) {
+            if (const auto denied = segment.protections->deniedWrite({address, end})) {
+                end = *denied - 1; // The starting byte passed preflight.
+            }
+
+            if (!probe.owner) {
+                probe = {segment.protections, {address, address}};
+            }
+            probe.bytes.last = std::max(address, end & ~mask);
+        }
+
+        return end | mask;
+    }
 } // namespace
+
+forge_rt_status forge::runtime::probeGuestWritePages(const forge_rt_instance &instance,
+                                                     const Thread &active, uint64_t address,
+                                                     uint64_t length, ImageWrite &probe,
+                                                     forge_rt_memory_fault &fault) {
+    if (!GuestRange::fromOffset({address}, 0, length)) {
+        return report(fault, address, FORGE_RT_WRITE, FORGE_RT_FAULT_OVERFLOW);
+    }
+
+    const uint64_t last = address + (length - 1);
+    for (;;) {
+        Cursor cursor(instance.reservations, address);
+        const auto checked = preflight(cursor, active, address, 1, FORGE_RT_WRITE, fault, false);
+        if (checked != FORGE_RT_OK) {
+            return checked;
+        }
+
+        const auto segment = cursor.next(address, last - address + 1);
+        const auto end = probedPageEnd(segment, address, probe);
+        if (end >= last) {
+            return FORGE_RT_OK;
+        }
+
+        address = end + 1;
+    }
+}
 
 forge_rt_status forge::runtime::checkGuestWrite(const forge_rt_instance &instance,
                                                 const Thread &active, GuestWrite &write,

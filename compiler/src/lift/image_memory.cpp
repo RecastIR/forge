@@ -343,7 +343,8 @@ namespace forge::x86 {
                                             ir.getInt64(fragments.size())});
         }
 
-        SmallVector<Constant *> protectionSections(const ParsedImage &image, IRBuilder<> &ir) {
+        SmallVector<Constant *> protectionSections(const ParsedImage &image, IRBuilder<> &ir,
+                                                   ArrayRef<RvaRange> loaderWrites) {
             SmallVector<const Section *> ordered;
             for (const auto &section : image.module().sections) {
                 if (section.virtualSize) {
@@ -356,10 +357,11 @@ namespace forge::x86 {
             SmallVector<Constant *> records;
             for (const auto *section : ordered) {
                 const RvaRange extent{section->rva, uint64_t{section->rva} + section->virtualSize};
-                const uint32_t loader =
-                    relocations.firstOverlap(extent) ? FORGE_RT_LOADER_MAY_WRITE : 0;
+                const bool loader =
+                    relocations.firstOverlap(extent) || !rangesIn(loaderWrites, extent).empty();
                 const uint32_t flags =
-                    loader | (section->permissions[0] == 'r' ? FORGE_RT_READ : 0U) |
+                    (loader ? FORGE_RT_LOADER_MAY_WRITE : 0U) |
+                    (section->permissions[0] == 'r' ? FORGE_RT_READ : 0U) |
                     (section->permissions[1] == 'w' ? FORGE_RT_WRITE : 0U) |
                     (section->permissions[2] == 'x' ? FORGE_RT_EXECUTE : 0U) |
                     (section->shared || section->discardable || section->noncached
@@ -1045,6 +1047,15 @@ namespace forge::x86 {
         ImagePlan plan;
         plan.loadBase = loadBase;
         plan.sizeOfImage = source.module().sizeOfImage;
+        if (!executableHeaders.empty()) {
+            // Whole-executable admission verified the first section starts at
+            // alignTo(SizeOfHeaders, SectionAlignment). v6 suffices for one page.
+            const auto &sections = source.module().sections;
+            const auto first = std::ranges::find_if(sections, &Section::virtualSize);
+            if (first != sections.end() && first->rva > FORGE_RT_GUEST_PAGE_SIZE) {
+                plan.queryHeaderSize = static_cast<uint32_t>(executableHeaders.size());
+            }
+        }
         plan.dataImports = std::move(dataImports);
         plan.functionImports = std::move(functionImports);
         uint64_t embedded = executableHeaders.size();
@@ -1232,10 +1243,14 @@ namespace forge::x86 {
         auto *regionTable = artifactTable(module, intervals, "image.ranges");
         const auto required = group.requiredImports();
         auto imports = processImports(module, required);
+        const bool query = required.contains({win64::virtualQuery.dll, win64::virtualQuery.name});
         const bool dynamicProtection =
-            required.contains({win64::virtualProtect.dll, win64::virtualProtect.name});
-        const auto version =
+            query || required.contains({win64::virtualProtect.dll, win64::virtualProtect.name});
+        auto version =
             dynamicProtection ? FORGE_RT_PROTECTION_ARTIFACT_VERSION : FORGE_RT_PE_ARTIFACT_VERSION;
+        if (query && queryHeaderSize) {
+            version = FORGE_RT_QUERY_HEADER_ARTIFACT_VERSION;
+        }
         auto *descriptor = ConstantStruct::getAnon(
             {ir.getInt32(version), ir.getInt64(loadBase), ir.getInt64(sizeOfImage),
              ir.getInt64(group.root()), ir.getInt64(group.image().module().entryPoint),
@@ -1255,10 +1270,15 @@ namespace forge::x86 {
         auto *pe = ConstantStruct::getAnon({functions, ir.getInt16(group.image().subsystem())});
 
         if (dynamicProtection) {
-            const auto sections = protectionSections(group.image(), ir);
+            const auto writes =
+                query ? group.image().loaderWrittenRanges() : std::vector<RvaRange>{};
+            const auto sections = protectionSections(group.image(), ir, writes);
             pe = ConstantStruct::getAnon(
                 {pe, artifactTable(module, sections, "image.section.protections"),
                  ir.getInt64(sections.size())});
+        }
+        if (version == FORGE_RT_QUERY_HEADER_ARTIFACT_VERSION) {
+            pe = ConstantStruct::getAnon({pe, ir.getInt32(queryHeaderSize)});
         }
 
         // Descriptor identity distinguishes artifacts during duplicate registration.

@@ -3,6 +3,8 @@ add_library(forge_runtime STATIC
   src/core/registration.cpp
   src/core/guest_memory.cpp
   src/core/page_protection.cpp
+  src/core/image_query.cpp
+  src/compat/win32/virtual_query.cpp
   src/compat/win32/virtual_protect.cpp
   src/core/heap.cpp
   src/compat/process_state.cpp

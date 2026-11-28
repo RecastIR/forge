@@ -17,6 +17,7 @@ extern "C" {
 #define FORGE_RT_FUNCTION_IMPORT_ARTIFACT_VERSION UINT32_C(4)
 #define FORGE_RT_PE_ARTIFACT_VERSION UINT32_C(5)
 #define FORGE_RT_PROTECTION_ARTIFACT_VERSION UINT32_C(6)
+#define FORGE_RT_QUERY_HEADER_ARTIFACT_VERSION UINT32_C(7)
 #define FORGE_RT_GUEST_PAGE_SIZE UINT32_C(4096)
 #define FORGE_RT_FIXED_PROTECTION UINT32_C(8)
 #define FORGE_RT_LOADER_MAY_WRITE UINT32_C(16)
@@ -192,7 +193,7 @@ typedef struct forge_rt_pe_artifact {
 
 /* The original section extents and source R/W/X bits are independent of which
  * bytes are materialized. FIXED excludes shared, discardable and noncached data.
- * Only v6 generated entries consult effective protection on every mutable access. */
+ * Generated entries with v6 or later metadata consult effective protection on mutable access. */
 typedef struct forge_rt_section_protection {
     uint32_t rva, size, attributes;
 } forge_rt_section_protection;
@@ -202,6 +203,14 @@ typedef struct forge_rt_protection_artifact {
     const forge_rt_section_protection *sections;
     uint64_t sectionCount;
 } forge_rt_protection_artifact;
+
+/* Version 7 appends PE SizeOfHeaders for a validated image whose first section
+ * follows the aligned header area. Whole header pages and the intervening
+ * reserved alignment padding have different Windows query states. */
+typedef struct forge_rt_query_header_artifact {
+    forge_rt_protection_artifact protection;
+    uint32_t sizeOfHeaders;
+} forge_rt_query_header_artifact;
 
 /* Borrowed during registration. Arguments exclude argv[0]. A null executablePath defaults to
  * C:\\ plus the original PE basename in a v2 descriptor. Inputs to command-line services are

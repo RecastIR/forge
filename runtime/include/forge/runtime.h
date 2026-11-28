@@ -45,6 +45,7 @@ typedef uint32_t forge_rt_status;
 #define FORGE_RT_UNSUPPORTED_PAGE_PROTECTION (FORGE_RT_UNSUPPORTED_SERVICE_FLAG | UINT32_C(11))
 #define FORGE_RT_UNSUPPORTED_CRT_STREAM (FORGE_RT_UNSUPPORTED_SERVICE_FLAG | UINT32_C(12))
 #define FORGE_RT_UNSUPPORTED_CRT_FORMAT (FORGE_RT_UNSUPPORTED_SERVICE_FLAG | UINT32_C(13))
+#define FORGE_RT_UNSUPPORTED_MEMORY_QUERY (FORGE_RT_UNSUPPORTED_SERVICE_FLAG | UINT32_C(14))
 #define FORGE_RT_UNSUPPORTED_CALLBACK_ARGUMENT (FORGE_RT_UNSUPPORTED_SERVICE_FLAG | UINT32_C(6))
 
 #define FORGE_RT_READ UINT32_C(1)
@@ -164,6 +165,11 @@ forge_rt_status forge_rt_virtual_protect(forge_rt_instance *, forge_rt_thread_to
                                          uint64_t address, uint64_t size, uint32_t protection,
                                          uint64_t oldProtection, int32_t *result,
                                          forge_rt_memory_fault *fault) FORGE_RT_NOEXCEPT;
+
+/* The query VA is numeric. Only the bounded Win64 result is guest output. */
+forge_rt_status forge_rt_virtual_query(forge_rt_instance *, forge_rt_thread_token, uint64_t address,
+                                       uint64_t output, uint64_t length, uint64_t *result,
+                                       forge_rt_memory_fault *fault) FORGE_RT_NOEXCEPT;
 
 /* Windows x64 STARTUPINFO output in checked, writable guest memory (104 bytes).
  * Both variants require a managed invocation and preserve the guest thread's last error. */

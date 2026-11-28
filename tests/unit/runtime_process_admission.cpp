@@ -72,6 +72,36 @@ namespace {
     }
 
     constexpr uint64_t imageBase = 0x400000, page = FORGE_RT_GUEST_PAGE_SIZE;
+
+    void failQueryAllocation(forge_rt_execution *execution) {
+        auto *instance = execution->instance;
+        const auto thread = execution->thread;
+        const auto *bytes = static_cast<const uint8_t *>(execution->regions[0].bytes);
+        uint64_t result = UINT64_MAX;
+        forge_rt_memory_fault fault{};
+        REQUIRE(forge_rt_set_last_error(instance, thread, 73) == FORGE_RT_OK);
+
+        // A successful aliased result and an ordinary failing target both need
+        // to record the output probe before publishing bytes, RAX or last error.
+        const uint64_t targets[]{imageBase, UINT64_MAX};
+        for (const auto target : targets) {
+            rejectAllocations = true;
+            const auto status =
+                forge_rt_virtual_query(instance, thread, target, imageBase, 48, &result, &fault);
+            rejectAllocations = false;
+            REQUIRE(status == FORGE_RT_RESOURCE_EXHAUSTED && result == UINT64_MAX);
+            REQUIRE(std::all_of(bytes, bytes + 48, [](auto byte) { return byte == 0xa5; }));
+            uint32_t error{};
+            REQUIRE(forge_rt_get_last_error(instance, thread, &error) == FORGE_RT_OK &&
+                    error == 73);
+        }
+
+        REQUIRE(forge_rt_virtual_query(instance, thread, imageBase, imageBase, 48, &result,
+                                       &fault) == FORGE_RT_OK);
+        REQUIRE(result == 48 && bytes[36] == 4);
+        returnToHost(execution);
+    }
+
     constexpr uint64_t sentinel = 0xa5a5a5a5a5a5a5a5;
 
     void mainArgsOutputs(forge_rt_execution *execution) {
@@ -343,6 +373,7 @@ int main() {
     checkAdmission(false);
     checkAdmission(true);
     checkProtectionAllocation(failProtectionAllocation);
+    checkProtectionAllocation(failQueryAllocation);
     checkProtectionAllocation(mainArgsOutputs);
     constexpr auto aboveStack = FORGE_RT_STACK_BASE + FORGE_RT_STACK_SIZE;
     checkProtectionAllocation(startupOutputs<true>, aboveStack);
