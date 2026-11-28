@@ -343,8 +343,33 @@ namespace forge::x86 {
                                             ir.getInt64(fragments.size())});
         }
 
-        SmallVector<Constant *> protectionSections(const ParsedImage &image, IRBuilder<> &ir,
-                                                   ArrayRef<RvaRange> loaderWrites) {
+        struct ProtectionMetadata {
+            SmallVector<Constant *> sections, loaderPages;
+            bool refinesSection = false;
+        };
+
+        void appendLoaderPages(ProtectionMetadata &metadata, RvaRange section,
+                               ArrayRef<RvaRange> writes, IRBuilder<> &ir) {
+            constexpr uint64_t mask = FORGE_RT_GUEST_PAGE_SIZE - 1;
+            std::vector<RvaRange> pages;
+            for (const auto write : writes) {
+                const auto first = std::max(section.begin, write.begin) & ~mask;
+                const auto last = (std::min(section.end, write.end) - 1) | mask;
+                pages.push_back({first, last + 1});
+            }
+
+            const auto runs = mergeRanges(std::move(pages));
+            metadata.refinesSection |= runs.size() > 1 || runs.front().begin > section.begin ||
+                                       runs.back().end < section.end;
+            for (const auto run : runs) {
+                metadata.loaderPages.push_back(ConstantStruct::getAnon(
+                    {ir.getInt32(static_cast<uint32_t>(run.begin)),
+                     ir.getInt32(static_cast<uint32_t>((run.end - 1) & ~mask))}));
+            }
+        }
+
+        ProtectionMetadata protectionSections(const ParsedImage &image, IRBuilder<> &ir,
+                                              bool query) {
             SmallVector<const Section *> ordered;
             for (const auto &section : image.module().sections) {
                 if (section.virtualSize) {
@@ -354,24 +379,32 @@ namespace forge::x86 {
             std::ranges::sort(ordered, {}, &Section::rva);
 
             const RelocationIndex relocations(image.module().relocations);
-            SmallVector<Constant *> records;
+            auto writes = query ? image.loaderWrittenRanges() : std::vector<RvaRange>{};
+            const auto fixups = relocations.footprints();
+            writes.insert(writes.end(), fixups.begin(), fixups.end());
+            writes = mergeRanges(std::move(writes));
+            ProtectionMetadata metadata;
             for (const auto *section : ordered) {
                 const RvaRange extent{section->rva, uint64_t{section->rva} + section->virtualSize};
-                const bool loader =
-                    relocations.firstOverlap(extent) || !rangesIn(loaderWrites, extent).empty();
+                const auto affected = rangesIn(writes, extent);
                 const uint32_t flags =
-                    (loader ? FORGE_RT_LOADER_MAY_WRITE : 0U) |
+                    (affected.empty() ? 0U : FORGE_RT_LOADER_MAY_WRITE) |
                     (section->permissions[0] == 'r' ? FORGE_RT_READ : 0U) |
                     (section->permissions[1] == 'w' ? FORGE_RT_WRITE : 0U) |
                     (section->permissions[2] == 'x' ? FORGE_RT_EXECUTE : 0U) |
                     (section->shared || section->discardable || section->noncached
                          ? FORGE_RT_FIXED_PROTECTION
                          : 0U);
-                records.push_back(ConstantStruct::getAnon({ir.getInt32(section->rva),
-                                                           ir.getInt32(section->virtualSize),
-                                                           ir.getInt32(flags)}));
+                if (query &&
+                    flags == (FORGE_RT_READ | FORGE_RT_WRITE | FORGE_RT_LOADER_MAY_WRITE) &&
+                    section->rva % FORGE_RT_GUEST_PAGE_SIZE == 0) {
+                    appendLoaderPages(metadata, extent, affected, ir);
+                }
+                metadata.sections.push_back(ConstantStruct::getAnon(
+                    {ir.getInt32(section->rva), ir.getInt32(section->virtualSize),
+                     ir.getInt32(flags)}));
             }
-            return records;
+            return metadata;
         }
 
         SmallVector<Constant *>
@@ -1251,6 +1284,12 @@ namespace forge::x86 {
         if (query && queryHeaderSize) {
             version = FORGE_RT_QUERY_HEADER_ARTIFACT_VERSION;
         }
+        const auto protection =
+            dynamicProtection ? protectionSections(group.image(), ir, query) : ProtectionMetadata{};
+        if (protection.refinesSection) {
+            version = FORGE_RT_LOADER_PAGES_ARTIFACT_VERSION;
+        }
+
         auto *descriptor = ConstantStruct::getAnon(
             {ir.getInt32(version), ir.getInt64(loadBase), ir.getInt64(sizeOfImage),
              ir.getInt64(group.root()), ir.getInt64(group.image().module().entryPoint),
@@ -1270,15 +1309,17 @@ namespace forge::x86 {
         auto *pe = ConstantStruct::getAnon({functions, ir.getInt16(group.image().subsystem())});
 
         if (dynamicProtection) {
-            const auto writes =
-                query ? group.image().loaderWrittenRanges() : std::vector<RvaRange>{};
-            const auto sections = protectionSections(group.image(), ir, writes);
             pe = ConstantStruct::getAnon(
-                {pe, artifactTable(module, sections, "image.section.protections"),
-                 ir.getInt64(sections.size())});
+                {pe, artifactTable(module, protection.sections, "image.section.protections"),
+                 ir.getInt64(protection.sections.size())});
         }
-        if (version == FORGE_RT_QUERY_HEADER_ARTIFACT_VERSION) {
+        if (version >= FORGE_RT_QUERY_HEADER_ARTIFACT_VERSION) {
             pe = ConstantStruct::getAnon({pe, ir.getInt32(queryHeaderSize)});
+        }
+        if (version == FORGE_RT_LOADER_PAGES_ARTIFACT_VERSION) {
+            pe = ConstantStruct::getAnon(
+                {pe, artifactTable(module, protection.loaderPages, "image.loader.pages"),
+                 ir.getInt64(protection.loaderPages.size())});
         }
 
         // Descriptor identity distinguishes artifacts during duplicate registration.

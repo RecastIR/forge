@@ -54,6 +54,38 @@ namespace forge::runtime {
                    sections.front().rva - extended.sizeOfHeaders < alignment;
         }
 
+        bool validLoaderPages(const forge_rt_loader_pages_artifact &extended) {
+            if (!extended.pageRunCount || !validTable(extended.pages, extended.pageRunCount)) {
+                return false;
+            }
+
+            auto runs = tableRows(extended.pages, extended.pageRunCount);
+            const auto &source = extended.header.protection;
+            constexpr auto flags = FORGE_RT_READ | FORGE_RT_WRITE | FORGE_RT_LOADER_MAY_WRITE;
+            constexpr uint32_t mask = FORGE_RT_GUEST_PAGE_SIZE - 1;
+            for (const auto &section : tableRows(source.sections, source.sectionCount)) {
+                if (section.attributes != flags || (section.rva & mask)) {
+                    continue;
+                }
+
+                const uint64_t end = uint64_t{section.rva} + section.size;
+                if (runs.empty() || runs.front().firstRva >= end) {
+                    return false;
+                }
+                uint64_t next = section.rva;
+                while (!runs.empty() && runs.front().firstRva < end) {
+                    const auto run = runs.front();
+                    if (((run.firstRva | run.lastRva) & mask) || run.firstRva < next ||
+                        run.lastRva < run.firstRva || run.lastRva >= end) {
+                        return false;
+                    }
+                    next = uint64_t{run.lastRva} + FORGE_RT_GUEST_PAGE_SIZE;
+                    runs = runs.subspan(1);
+                }
+            }
+            return runs.empty();
+        }
+
         forge_rt_process_result runtimeFailure(forge_rt_status status) {
             return {FORGE_RT_RUNTIME_FAILURE, status, 0, {}, 0};
         }
@@ -100,7 +132,7 @@ namespace forge::runtime {
 
     forge_rt_status checkArtifact(const forge_rt_artifact &artifact) {
         if (artifact.version < FORGE_RT_ARTIFACT_VERSION ||
-            artifact.version > FORGE_RT_QUERY_HEADER_ARTIFACT_VERSION) {
+            artifact.version > FORGE_RT_LOADER_PAGES_ARTIFACT_VERSION) {
             return FORGE_RT_ABI_MISMATCH;
         }
 
@@ -158,9 +190,18 @@ namespace forge::runtime {
             }
         }
 
-        if (artifact.version == FORGE_RT_QUERY_HEADER_ARTIFACT_VERSION &&
-            !validHeaderExtent(
-                artifact, *reinterpret_cast<const forge_rt_query_header_artifact *>(&artifact))) {
+        if (artifact.version >= FORGE_RT_QUERY_HEADER_ARTIFACT_VERSION) {
+            const auto &header =
+                *reinterpret_cast<const forge_rt_query_header_artifact *>(&artifact);
+            if ((artifact.version == FORGE_RT_QUERY_HEADER_ARTIFACT_VERSION ||
+                 header.sizeOfHeaders) &&
+                !validHeaderExtent(artifact, header)) {
+                return FORGE_RT_INVALID_ARGUMENT;
+            }
+        }
+        if (artifact.version == FORGE_RT_LOADER_PAGES_ARTIFACT_VERSION &&
+            !validLoaderPages(
+                *reinterpret_cast<const forge_rt_loader_pages_artifact *>(&artifact))) {
             return FORGE_RT_INVALID_ARGUMENT;
         }
 
@@ -199,9 +240,15 @@ namespace forge::runtime {
                 *reinterpret_cast<const forge_rt_protection_artifact *>(&artifact);
             protections.original = tableRows(extended.sections, extended.sectionCount);
         }
-        if (artifact.version == FORGE_RT_QUERY_HEADER_ARTIFACT_VERSION) {
+        if (artifact.version >= FORGE_RT_QUERY_HEADER_ARTIFACT_VERSION) {
             protections.sizeOfHeaders =
                 reinterpret_cast<const forge_rt_query_header_artifact *>(&artifact)->sizeOfHeaders;
+        }
+
+        if (artifact.version == FORGE_RT_LOADER_PAGES_ARTIFACT_VERSION) {
+            const auto &extended =
+                *reinterpret_cast<const forge_rt_loader_pages_artifact *>(&artifact);
+            protections.loaderPages = tableRows(extended.pages, extended.pageRunCount);
         }
 
         backings.resize(static_cast<size_t>(artifact.backingCount));

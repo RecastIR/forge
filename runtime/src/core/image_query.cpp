@@ -108,8 +108,11 @@ namespace forge::runtime {
             if (overlayAt(state.privatePages, page, last)) {
                 return Run{last, PageAccess::ReadWrite};
             }
-            if (section.attributes & FORGE_RT_LOADER_MAY_WRITE) {
-                return Run{last, std::nullopt};
+            if (const auto loader = state.nextLoaderWrite(section, rva)) {
+                if (loader->first <= rva) {
+                    return Run{std::min(last, image.base + loader->last), std::nullopt};
+                }
+                last = std::min(last, image.base + loader->first - 1);
             }
             return Run{last, PageAccess::ImageCopy};
         }

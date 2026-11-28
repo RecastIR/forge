@@ -24,6 +24,11 @@ namespace forge::runtime {
         std::vector<PageInterval> privatePages;
         uint32_t sizeOfHeaders = 0; // No explicit header extent in v6.
 
+        std::span<const forge_rt_loader_pages> loaderPages{};
+
+        // Inclusive RVAs of the affected run containing or following rva in this section.
+        std::optional<PageInterval> nextLoaderWrite(const forge_rt_section_protection &section,
+                                                    uint64_t rva) const noexcept;
         void recordWrite(PageInterval bytes);
         bool touchesPrivate(PageInterval bytes) const noexcept;
         bool isPrivate(uint64_t address) const noexcept;

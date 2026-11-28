@@ -145,6 +145,8 @@ namespace forge {
         explicit RelocationIndex(llvm::ArrayRef<RelocationBlock> blocks);
         const Relocation *firstOverlap(RvaRange range) const;
 
+        llvm::ArrayRef<RvaRange> footprints() const { return ranges; }
+
       private:
         llvm::ArrayRef<RelocationBlock> blocks;
         std::vector<RvaRange> ranges;

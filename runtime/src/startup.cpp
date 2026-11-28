@@ -108,7 +108,7 @@ int main(int argc, char **argv, char **environment) {
     const auto *artifact = forge_lifted_artifact();
 
     if (!artifact || artifact->version < FORGE_RT_ARTIFACT_VERSION ||
-        artifact->version > FORGE_RT_QUERY_HEADER_ARTIFACT_VERSION) {
+        artifact->version > FORGE_RT_LOADER_PAGES_ARTIFACT_VERSION) {
         return runtimeFailure("artifact", FORGE_RT_ABI_MISMATCH);
     }
 

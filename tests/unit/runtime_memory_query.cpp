@@ -355,6 +355,70 @@ namespace {
         CHECK(forge_rt_process_destroy(process) == FORGE_RT_OK);
     }
 
+    void checkLoaderVersions() {
+        constexpr uint32_t flagged = rw | FORGE_RT_LOADER_MAY_WRITE;
+        constexpr forge_rt_section_protection source[]{{page, 4 * page, flagged},
+                                                       {5 * page, page, FORGE_RT_READ}};
+        PageProtections state{source, {}, {}};
+        std::array<uint8_t, 4 * page> bytes{};
+        uint64_t claim{};
+        const forge_rt_image_region row{base + page, bytes.size(), bytes.data(), rw, &claim};
+        const forge_rt_image pe{base, 6 * page, &row, 1};
+        const Reservation image{base, 6 * page, &pe, nullptr, &state};
+        const auto reservations = std::span(&image, 1);
+        // Both v6 and v7 retain whole-section uncertainty.
+        for (const auto headers : {0U, 512U}) {
+            state.sizeOfHeaders = headers;
+            CHECK(!queryImageRegion(reservations, base + 4 * page));
+        }
+
+        forge_rt_loader_pages runs[]{{2 * page, 3 * page}};
+        state.loaderPages = runs;
+        CHECK(!queryImageRegion(reservations, base + page)); // Forward boundary is unknown.
+        CHECK(!queryImageRegion(reservations, base + 3 * page));
+        const auto clean = queryImageRegion(reservations, base + 4 * page);
+        CHECK(clean && clean->size == page && clean->access == PageAccess::ImageCopy);
+        CHECK(state.permitsMapping(base, {base + page, 4 * page, 0, 0, rw}));
+        ProtectionUpdate change;
+        const auto protect = [&](uint64_t va) {
+            return queryProtection(reservations, va, {va, va + page - 1}, {output, output + 3},
+                                   change);
+        };
+        CHECK(protect(base + 4 * page) == ProtectionResult::Supported);
+        CHECK(change.previous == PageAccess::ImageCopy);
+        CHECK(protect(base + 2 * page) == ProtectionResult::Unsupported);
+        state.recordWrite({base + 2 * page, base + 3 * page});
+        CHECK(queryImageRegion(reservations, base + 2 * page)->size == 2 * page);
+        CHECK(queryImageRegion(reservations, base + page)->size == page);
+
+        forge_rt_loader_pages_artifact extended{{artifact, 512}, runs, 1};
+        auto &protection = extended.header.protection;
+        protection.sections = source;
+        protection.sectionCount = std::size(source);
+        auto &prefix = protection.pe.functions.crt.named.artifact;
+        prefix.version = FORGE_RT_LOADER_PAGES_ARTIFACT_VERSION;
+        CHECK(checkArtifact(prefix) == FORGE_RT_OK);
+        extended.header.sizeOfHeaders = 2 * page;
+        CHECK(checkArtifact(prefix) == FORGE_RT_INVALID_ARGUMENT);
+        extended.header.sizeOfHeaders = 0;
+        CHECK(checkArtifact(prefix) == FORGE_RT_OK);
+        for (const auto bad : {forge_rt_loader_pages{page + 1, 2 * page},
+                               {0, page},
+                               {3 * page, 2 * page},
+                               {page, 5 * page}}) {
+            runs[0] = bad;
+            CHECK(checkArtifact(prefix) == FORGE_RT_INVALID_ARGUMENT);
+        }
+        constexpr forge_rt_loader_pages duplicate[]{{page, 2 * page}, {2 * page, 3 * page}};
+        extended.pages = duplicate;
+        extended.pageRunCount = 2;
+        CHECK(checkArtifact(prefix) == FORGE_RT_INVALID_ARGUMENT);
+        extended.pages = nullptr;
+        CHECK(checkArtifact(prefix) == FORGE_RT_INVALID_ARGUMENT);
+        extended.pageRunCount = 0;
+        CHECK(checkArtifact(prefix) == FORGE_RT_INVALID_ARGUMENT);
+    }
+
     void checkHeaderVersions() {
         forge_rt_section_protection text{2 * page, 2 * page, rx};
         PageProtections state{std::span(&text, 1), {}, {}};
@@ -397,6 +461,7 @@ void testRuntimeMemoryQuery() {
     checkBoundaries();
     checkHeaderVersions();
     checkLegacyImage();
+    checkLoaderVersions();
     std::array<forge_rt_process *, 2> processes{};
     for (auto &process : processes) {
         CHECK(forge_rt_process_create(FORGE_RT_ABI_VERSION, &process) == FORGE_RT_OK);

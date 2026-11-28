@@ -4,6 +4,7 @@ import json
 import os
 from pathlib import Path
 import platform
+import re
 import shutil
 import struct
 import subprocess
@@ -2349,6 +2350,14 @@ class Console(Workspace):
                         ir = run(CONTRACT, pe, check=True).stdout
                         self.assertEqual(ir.count("call i32 @forge_rt_virtual_query("), len(markers))
                         self.assertEqual("@image.section.protections" in ir, bool(markers))
+                        if name == "executable-virtual-query-sparse.exe":
+                            self.assertIn("@image.loader.pages =", ir)
+                            page = base + expected["cases"][name][1]["query"]["rva"]
+                            table = next(line for line in ir.splitlines() if line.startswith("@image.ranges ="))
+                            spans = re.findall(r"\{ i64 (\d+), i64 (\d+),", table)
+                            self.assertTrue(spans)
+                            self.assertFalse(any(int(start) <= page < int(start) + int(size)
+                                                 for start, size in spans))
                         slot = next(s for dll in context["load_imports"] for s in dll["symbols"]
                                     if s["name"] == "VirtualQuery")
                         self.assertTrue(slot["catalogued_service"])
@@ -2368,6 +2377,22 @@ class Console(Workspace):
                     rows = query.decode(child.stdout, markers)
                     self.assertTrue(all(row["image"] == base for row in rows))
                     self.assertEqual(query.contract(rows, query.image_size(pe)), expected["cases"][name])
+
+    def test_virtual_query_relocation_footprint(self):
+        data = bytearray(image("virtual-query-sparse").read_bytes())
+        ((rva, offset),) = Layout(data).dir64_fields().items()
+        self.assertEqual(rva % 4096, 0)
+        for displacement in (4088, 4092):
+            struct.pack_into("<H", data, offset, 0xa000 | displacement)
+            pe = self.dir / f"relocation-{displacement}.exe"
+            pe.write_bytes(data)
+            self.compile(pe)
+            child = self.program()
+            if displacement == 4088:
+                self.assertEqual((child.returncode, len(child.stdout)), (42, 5 * 112))
+            else:
+                self.assertEqual((child.returncode, len(child.stdout)), (125, 4 * 112))
+                self.assertIn(b"unsupported guest memory query", child.stderr)
 
     def test_virtual_query_joined_lengths(self):
         original = image("virtual-query-short").read_bytes()

@@ -18,6 +18,7 @@ extern "C" {
 #define FORGE_RT_PE_ARTIFACT_VERSION UINT32_C(5)
 #define FORGE_RT_PROTECTION_ARTIFACT_VERSION UINT32_C(6)
 #define FORGE_RT_QUERY_HEADER_ARTIFACT_VERSION UINT32_C(7)
+#define FORGE_RT_LOADER_PAGES_ARTIFACT_VERSION UINT32_C(8)
 #define FORGE_RT_GUEST_PAGE_SIZE UINT32_C(4096)
 #define FORGE_RT_FIXED_PROTECTION UINT32_C(8)
 #define FORGE_RT_LOADER_MAY_WRITE UINT32_C(16)
@@ -211,6 +212,20 @@ typedef struct forge_rt_query_header_artifact {
     forge_rt_protection_artifact protection;
     uint32_t sizeOfHeaders;
 } forge_rt_query_header_artifact;
+
+/* Version 8 refines LOADER_MAY_WRITE for page-aligned ordinary R/W sections.
+ * Each such flagged section has one or more sorted disjoint runs of affected
+ * page starts (inclusive RVAs). Runs never cross original section boundaries.
+ * A zero SizeOfHeaders retains v6 header inference, otherwise v7 rules apply. */
+typedef struct forge_rt_loader_pages {
+    uint32_t firstRva, lastRva;
+} forge_rt_loader_pages;
+
+typedef struct forge_rt_loader_pages_artifact {
+    forge_rt_query_header_artifact header;
+    const forge_rt_loader_pages *pages;
+    uint64_t pageRunCount;
+} forge_rt_loader_pages_artifact;
 
 /* Borrowed during registration. Arguments exclude argv[0]. A null executablePath defaults to
  * C:\\ plus the original PE basename in a v2 descriptor. Inputs to command-line services are

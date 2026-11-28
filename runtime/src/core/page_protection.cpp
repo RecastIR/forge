@@ -5,6 +5,27 @@
 #include <algorithm>
 
 namespace forge::runtime {
+    std::optional<PageInterval>
+    PageProtections::nextLoaderWrite(const forge_rt_section_protection &section,
+                                     uint64_t rva) const noexcept {
+        if (!(section.attributes & FORGE_RT_LOADER_MAY_WRITE)) {
+            return {};
+        }
+
+        constexpr uint64_t mask = FORGE_RT_GUEST_PAGE_SIZE - 1;
+        const auto end = uint64_t{section.rva} + section.size;
+        if (loaderPages.empty() || (section.rva & mask)) {
+            return PageInterval{section.rva & ~mask, (end - 1) | mask};
+        }
+
+        const auto run =
+            std::ranges::lower_bound(loaderPages, rva & ~mask, {}, &forge_rt_loader_pages::lastRva);
+        if (run == loaderPages.end() || run->firstRva >= end) {
+            return {};
+        }
+        return PageInterval{run->firstRva, run->lastRva | mask};
+    }
+
     bool PageProtections::isPrivate(uint64_t address) const noexcept {
         const auto it = std::ranges::lower_bound(privatePages, address, {}, &PageInterval::last);
         return it != privatePages.end() && it->first <= address;
@@ -211,7 +232,9 @@ namespace forge::runtime {
                 const auto source = std::prev(
                     std::ranges::upper_bound(update.owner->original, pages.first - reservation.base,
                                              {}, &forge_rt_section_protection::rva));
-                if (source->attributes & FORGE_RT_LOADER_MAY_WRITE) {
+                const auto rva = pages.first - reservation.base;
+                const auto loader = update.owner->nextLoaderWrite(*source, rva);
+                if (loader && loader->first <= rva) {
                     return ProtectionResult::Unsupported;
                 }
                 update.previous = PageAccess::ImageCopy;
