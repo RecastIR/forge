@@ -98,10 +98,18 @@ int entry(void) {
     case 20: target = (Byte *)-1LL; length = 0x100000000ULL; break;
     case 21: target = (Byte *)0x7fffffff0000ULL; break;
     case 22: target = (Byte *)0x7ffffffeffffULL; break;
+    case 23: case 24: case 25:
+        if (!VirtualProtect(image + 4096, 4096, 2, &old)) return 97;
+        out = image + 4096 - 24;
+        window = out - 8;
+        if (test == 24) length = 47;
+        if (test == 25) target = (Byte *)-1LL;
+        break;
+    case 26: out = local + 9; window = out - 8; break;
     default: return 95;
     }
     if (!measure(100 + test, target, out, length, window)) return 98;
-    if (test >= 10 && test <= 14 &&
+    if (((test >= 10 && test <= 14) || (test >= 23 && test <= 25)) &&
         !measure(200 + test, image, local + 8, 48, local)) return 98;
     if (alloc && !VirtualFree(alloc, 0, 0x8000)) return 99;
     return 42;

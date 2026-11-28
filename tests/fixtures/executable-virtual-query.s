@@ -64,7 +64,7 @@ entry:
     movq %rax, %rbx
     leaq __ImageBase(%rip), %rax
     movq %rax, 64(%rsp)
-    movl $0x43212345, 164(%rsp)
+    movl $39, 164(%rsp)
 .ifdef transitions
     query 31,first
     protect 2
@@ -100,7 +100,7 @@ entry:
     query 19,first+4096
     query 20,first+8192
 .endif
-    cmpl $0x43212345, 164(%rsp)
+    cmpl $39, 164(%rsp)
     jne .Lbad
     movl $42, %eax
     jmp .Ldone

@@ -26,9 +26,9 @@ def cases():
     yield ADDRESS, [], []
     yield QUERY, [], list(range(1, 21))
     yield TRANSITIONS, [], list(range(31, 38))
-    for index in range(23):
+    for index in range(27):
         markers = [100 + index]
-        if 10 <= index <= 14:
+        if 10 <= index <= 14 or 23 <= index <= 25:
             markers.append(200 + index)
         yield REFERENCE, [f"{index:02}"], markers
 

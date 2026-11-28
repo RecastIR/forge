@@ -73,7 +73,9 @@ def generate(output, mc, link, dlltool, clang):
         image("executable-virtual-query-transitions.exe", "transitions = 1\n" + query, link_flags=memory_libraries)
         image("executable-virtual-query-address.exe", """.text
 .globl entry
+.seh_proc entry
 entry:
+  .seh_endprologue
   movq __imp_VirtualQuery(%rip), %rcx
   testq %rcx, %rcx
   je 1f
@@ -81,6 +83,7 @@ entry:
   retq
 1: xorl %eax, %eax
   retq
+.seh_endproc
 """, link_flags=memory_libraries)
         run(clang, "--target=x86_64-pc-windows-msvc", "-O1", "-ffreestanding", "-fno-stack-protector",
             "-c", sources / "virtual-query-reference.c", "-o", "query.obj")
